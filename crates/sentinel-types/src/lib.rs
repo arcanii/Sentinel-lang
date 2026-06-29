@@ -999,6 +999,13 @@ impl Type {
                 }
             }
             Type::Array(ae) => {
+                // ADR 0068: a nested-array element is interned (concrete) — it
+                // carries no TypeParam, so substitution is the identity. (Generic
+                // nested arrays `[[T]]` are deferred, D6; `ae.to_type()` would
+                // panic on `Array`, so short-circuit.)
+                if let ArrayElem::Array(_) = ae {
+                    return Type::Array(ae);
+                }
                 let inner = ae.to_type();
                 let new_inner = inner.substitute(subst, instances, refs);
                 // ADR 0053: secret-aware demote so `vec_to_array<T>() -> [T]` over
@@ -1260,6 +1267,34 @@ pub fn intern_array_elem(arrays: &mut Vec<ArrayElem>, elem: ArrayElem) -> ArrayI
     id
 }
 
+/// ADR 0068: demote an array-element [`Type`] to an [`ArrayElem`], interning a
+/// NESTED array (`[[T]]`'s element is itself a `Type::Array`) into `arrays`. The
+/// non-nested path is the flat / `secret SCALAR` demote ([`Type::to_array_elem_secret`]).
+/// `None` for a genuinely-unrepresentable element (`[?T]`, `[&T]`, `[secret [T]]`).
+/// Shared by `resolve_type_expr`'s `Array` arm and the array-literal type-check.
+fn array_elem_of(
+    elem_ty: Type,
+    secrets: &[SecretData],
+    arrays: &mut Vec<ArrayElem>,
+) -> Option<ArrayElem> {
+    if let Type::Array(inner_ae) = elem_ty {
+        return Some(ArrayElem::Array(intern_array_elem(arrays, inner_ae)));
+    }
+    elem_ty.to_array_elem_secret(secrets)
+}
+
+/// ADR 0068: promote an [`ArrayElem`] to its [`Type`] given the `arrays` interner
+/// slice — the free-function form of [`TypedProgram::array_elem_type`], for the
+/// type-check sites that hold the in-progress `arrays` vec rather than a finished
+/// [`TypedProgram`]. For a flat element this is `ae.to_type()`; for `Array(id)` it
+/// is the nested `[inner]` = `Type::Array(arrays[id])`.
+fn array_elem_type_in(ae: ArrayElem, arrays: &[ArrayElem]) -> Type {
+    match ae {
+        ArrayElem::Array(id) => Type::Array(arrays[id.0 as usize]),
+        flat => flat.to_type(),
+    }
+}
+
 /// Format a [`Type`] for display, looking up the struct name when
 /// the type is `Struct(StructId)`. Pass `None` when no program is
 /// available (e.g. error rendering in tests) — struct types render
@@ -1278,7 +1313,17 @@ pub fn type_display(ty: Type, program: Option<&TypedProgram>) -> String {
             None => format!("<struct#{}>", id.0),
         },
         Type::Nullable(inner) => format!("?{}", type_display(inner.to_type(), program)),
-        Type::Array(elem) => format!("[{}]", type_display(elem.to_type(), program)),
+        // ADR 0068: render `[[T]]` by resolving the nested element via the program's
+        // `arrays` interner when available (the full dump); without a program, fall
+        // back to an id-placeholder for a nested element (flat elements still render).
+        Type::Array(elem) => {
+            let inner = match (elem, program) {
+                (ArrayElem::Array(id), None) => return format!("[<arr#{}>]", id.0),
+                (ae, Some(p)) => p.array_elem_type(ae),
+                (ae, None) => ae.to_type(),
+            };
+            format!("[{}]", type_display(inner, program))
+        }
         Type::Vec(elem) => format!("Vec<{}>", type_display(elem.to_type(), program)),
         Type::TypeParam(id) => format!("<T#{}>", id.0),
         Type::GenericInstance(id) => {
@@ -1375,6 +1420,11 @@ impl std::fmt::Display for Type {
             Type::Ptr => write!(f, "ptr"),
             Type::Struct(id) => write!(f, "<struct#{}>", id.0),
             Type::Nullable(inner) => write!(f, "?{}", inner.to_type()),
+            // ADR 0068: a nested-array element can't be resolved without the
+            // `arrays` interner; the table-less `Display` renders an id-placeholder
+            // like the other interned types (`<ref#N>` etc.). `type_display(Some(p))`
+            // gives the full `[[T]]` render (used by the dumps + the differential).
+            Type::Array(ArrayElem::Array(id)) => write!(f, "[<arr#{}>]", id.0),
             Type::Array(elem) => write!(f, "[{}]", elem.to_type()),
             Type::Vec(elem) => write!(f, "Vec<{}>", elem.to_type()),
             Type::TypeParam(id) => write!(f, "<T#{}>", id.0),
@@ -1419,6 +1469,7 @@ fn resolve_type_expr(
     instances: &mut Vec<GenericInstanceData>,
     refs: &mut Vec<RefData>,
     secrets: &mut Vec<SecretData>,
+    arrays: &mut Vec<ArrayElem>,
     struct_type_param_counts: &HashMap<StructId, usize>,
 ) -> Result<Type, TypeError> {
     let empty: TypeParamScope = HashMap::new();
@@ -1431,6 +1482,7 @@ fn resolve_type_expr(
         instances,
         refs,
         secrets,
+        arrays,
         struct_type_param_counts,
     )
 }
@@ -1445,6 +1497,7 @@ fn resolve_type_expr_with_scope(
     instances: &mut Vec<GenericInstanceData>,
     refs: &mut Vec<RefData>,
     secrets: &mut Vec<SecretData>,
+    arrays: &mut Vec<ArrayElem>,
     struct_type_param_counts: &HashMap<StructId, usize>,
 ) -> Result<Type, TypeError> {
     match &te.kind {
@@ -1530,6 +1583,7 @@ fn resolve_type_expr_with_scope(
                 instances,
                 refs,
                 secrets,
+                arrays,
                 struct_type_param_counts,
             )?;
             match inner_ty.to_nullable_inner() {
@@ -1541,10 +1595,10 @@ fn resolve_type_expr_with_scope(
             }
         }
         TypeExprKind::Array(inner) => {
-            // Recursively resolve the inner; reject `[[T]]` per
-            // ADR 0015 D6 (multi-dim arrays are deferred) and
-            // `[&T]` per ADR 0017 D1 (refs in arrays need named
-            // regions for soundness, deferred to a later ADR).
+            // Recursively resolve the inner; reject `[&T]` per ADR 0017 D1
+            // (refs in arrays need named regions for soundness, deferred).
+            // ADR 0068: `[[T]]` is now admitted — the depth-1 rule (ADR 0015 D6)
+            // is lifted via the `arrays` interner.
             let inner_ty = resolve_type_expr_with_scope(
                 inner,
                 struct_table,
@@ -1554,6 +1608,7 @@ fn resolve_type_expr_with_scope(
                 instances,
                 refs,
                 secrets,
+                arrays,
                 struct_type_param_counts,
             )?;
             if inner_ty.is_ref() {
@@ -1561,9 +1616,18 @@ fn resolve_type_expr_with_scope(
                     span: to_source_span(&te.span),
                 });
             }
+            // ADR 0068: a nested array `[[T]]` — the element is itself an array.
+            // Demote the inner array's element to an `ArrayElem`, intern it, and
+            // wrap as `ArrayElem::Array(id)`. (`[secret [T]]` stays rejected: a
+            // `Type::Secret` inner doesn't match `Type::Array` here, and its
+            // `to_array_elem_secret` demote rejects a non-scalar secret leaf.)
+            if let Type::Array(inner_ae) = inner_ty {
+                let id = intern_array_elem(arrays, inner_ae);
+                return Ok(Type::Array(ArrayElem::Array(id)));
+            }
             // ADR 0047: admit `[secret SCALAR]` (e.g. `[secret u8]`) in addition
-            // to the flat subset; the guarded demote keeps `[secret [T]]`
-            // rejected as NestedArray.
+            // to the flat subset. The guarded demote keeps `[secret [T]]` / `[?T]`
+            // rejected as NestedArray (those inners have no `ArrayElem`).
             match inner_ty.to_array_elem_secret(secrets) {
                 Some(ae) => Ok(Type::Array(ae)),
                 None => Err(TypeError::NestedArray {
@@ -1584,6 +1648,7 @@ fn resolve_type_expr_with_scope(
                 instances,
                 refs,
                 secrets,
+                arrays,
                 struct_type_param_counts,
             )?;
             if inner_ty.is_ref() {
@@ -1637,6 +1702,7 @@ fn resolve_type_expr_with_scope(
                         instances,
                         refs,
                         secrets,
+                        arrays,
                         struct_type_param_counts,
                     )?;
                     // ADR 0052: admit `Vec<secret SCALAR>` (e.g. `Vec<secret u8>`)
@@ -1676,6 +1742,7 @@ fn resolve_type_expr_with_scope(
                         instances,
                         refs,
                         secrets,
+                        arrays,
                         struct_type_param_counts,
                     )?;
                     if elem_ty != Type::I64 {
@@ -1726,6 +1793,7 @@ fn resolve_type_expr_with_scope(
                             instances,
                             refs,
                             secrets,
+                            arrays,
                             struct_type_param_counts,
                         )?);
                     }
@@ -1749,6 +1817,7 @@ fn resolve_type_expr_with_scope(
                 instances,
                 refs,
                 secrets,
+                arrays,
                 struct_type_param_counts,
             )?;
             // ADR 0058: `secret f64` is rejected — float ops are not
@@ -1929,10 +1998,7 @@ impl TypedProgram {
     /// This is the canonical "element type of an array" accessor for codegen /
     /// type-check sites that may see a nested element.
     pub fn array_elem_type(&self, ae: ArrayElem) -> Type {
-        match ae {
-            ArrayElem::Array(id) => Type::Array(self.array_elem(id)),
-            flat => flat.to_type(),
-        }
+        array_elem_type_in(ae, &self.arrays)
     }
 
     /// Look up the [`ClassData`] for a class type per ADR 0022 D1
@@ -4035,11 +4101,10 @@ pub fn check_module(
     // ADR 0066 M1.2: the channel-type interner. M1.2 minimum interns a single
     // `Channel<i64>` while building the channel-builtin signatures below.
     let mut channels: Vec<ChannelData> = Vec::new();
-    // ADR 0068: the nested-array element interner — will be populated when a
-    // `[[T]]` type annotation / literal is resolved (the resolution-wiring slice).
-    // Empty for now (the representation lands first; `resolve_type_expr` still
-    // rejects `[[T]]` until the interner is threaded through the check pipeline).
-    let arrays: Vec<ArrayElem> = Vec::new();
+    // ADR 0068: the nested-array element interner — populated when a `[[T]]` type
+    // annotation / literal is resolved (threaded through resolve_type_expr +
+    // the check pipeline, like `secrets`/`refs`).
+    let mut arrays: Vec<ArrayElem> = Vec::new();
 
     // Pass 0.5 / ADR 0032 (3/N): resolve enum variant payload types.
     // Each payload `TypeExpr` is resolved against the name tables (so
@@ -4062,6 +4127,7 @@ pub fn check_module(
                     &mut generic_instances,
                     &mut refs,
                     &mut secrets,
+                    &mut arrays,
                     &struct_type_param_counts,
                 )?);
             }
@@ -4113,6 +4179,7 @@ pub fn check_module(
                 &mut generic_instances,
                 &mut refs,
                 &mut secrets,
+                &mut arrays,
                 &struct_type_param_counts,
             )?;
             // C2 / ADR 0017 D7 / D12: refs can't live in struct
@@ -4166,6 +4233,7 @@ pub fn check_module(
                     &mut generic_instances,
                     &mut refs,
                     &mut secrets,
+                    &mut arrays,
                     &struct_type_param_counts,
                 )?;
                 typed_params.push(TypedParam {
@@ -4189,6 +4257,7 @@ pub fn check_module(
                     &mut generic_instances,
                     &mut refs,
                     &mut secrets,
+                    &mut arrays,
                     &struct_type_param_counts,
                 )?,
                 None => Type::I64,
@@ -4538,6 +4607,7 @@ pub fn check_module(
                 &mut generic_instances,
                 &mut refs,
                 &mut secrets,
+                &mut arrays,
                 &struct_type_param_counts,
             )?);
         }
@@ -4550,6 +4620,7 @@ pub fn check_module(
             &mut generic_instances,
             &mut refs,
             &mut secrets,
+            &mut arrays,
             &struct_type_param_counts,
         )?;
         // C3 / ADR 0019 D1 (C3.2): sorted + dedup the effect-row
@@ -4612,6 +4683,7 @@ pub fn check_module(
                     &mut generic_instances,
                     &mut refs,
                     &mut secrets,
+                    &mut arrays,
                     &struct_type_param_counts,
                 )?);
             }
@@ -4624,6 +4696,7 @@ pub fn check_module(
                 &mut generic_instances,
                 &mut refs,
                 &mut secrets,
+                &mut arrays,
                 &struct_type_param_counts,
             )?;
             // ADR 0037 (2/N): re-resolve the extern's effect-row NAMES to
@@ -4680,6 +4753,7 @@ pub fn check_module(
                 &mut generic_instances,
                 &mut refs,
                 &mut secrets,
+                &mut arrays,
                 &struct_type_param_counts,
             )?;
             if !is_ffi_safe(ty) {
@@ -4698,6 +4772,7 @@ pub fn check_module(
             &mut generic_instances,
             &mut refs,
             &mut secrets,
+            &mut arrays,
             &struct_type_param_counts,
         )?;
         if !is_ffi_safe(return_type) {
@@ -4786,6 +4861,7 @@ pub fn check_module(
                 &mut generic_instances,
                 &mut refs,
                 &mut secrets,
+                &mut arrays,
                 &struct_type_param_counts,
             )?;
             fields.push(TypedClassField {
@@ -4809,6 +4885,7 @@ pub fn check_module(
                     &mut generic_instances,
                     &mut refs,
                     &mut secrets,
+                    &mut arrays,
                     &struct_type_param_counts,
                 )?;
                 params.push(TypedParam {
@@ -4843,6 +4920,7 @@ pub fn check_module(
                     &mut generic_instances,
                     &mut refs,
                     &mut secrets,
+                    &mut arrays,
                     &struct_type_param_counts,
                 )?;
                 params.push(TypedParam {
@@ -4862,6 +4940,7 @@ pub fn check_module(
                 &mut generic_instances,
                 &mut refs,
                 &mut secrets,
+                &mut arrays,
                 &struct_type_param_counts,
             )?;
             let mut effect_row: Vec<EffectId> = m.effect_row.clone();
@@ -4915,6 +4994,7 @@ pub fn check_module(
                     &mut generic_instances,
                     &mut refs,
                     &mut secrets,
+                    &mut arrays,
                     &struct_type_param_counts,
                 )?;
                 // Trait method sigs have no VarIds for their
@@ -4938,6 +5018,7 @@ pub fn check_module(
                 &mut generic_instances,
                 &mut refs,
                 &mut secrets,
+                &mut arrays,
                 &struct_type_param_counts,
             )?;
             let mut effect_row: Vec<EffectId> = m.effect_row.clone();
@@ -4988,6 +5069,7 @@ pub fn check_module(
                     &mut generic_instances,
                     &mut refs,
                     &mut secrets,
+                    &mut arrays,
                     &struct_type_param_counts,
                 )?;
                 params.push(TypedParam {
@@ -5007,6 +5089,7 @@ pub fn check_module(
                 &mut generic_instances,
                 &mut refs,
                 &mut secrets,
+                &mut arrays,
                 &struct_type_param_counts,
             )?;
             let mut effect_row: Vec<EffectId> = m.effect_row.clone();
@@ -5097,6 +5180,7 @@ pub fn check_module(
             &mut generic_instances,
             &mut refs,
             &mut secrets,
+            &mut arrays,
             &struct_type_param_counts,
             &typed_effect_decls,
             &typed_trait_decls,
@@ -5146,6 +5230,7 @@ pub fn check_module(
                 &mut generic_instances,
                 &mut refs,
                 &mut secrets,
+                &mut arrays,
                 &struct_type_param_counts,
                 &typed_effect_decls,
                 &typed_trait_decls,
@@ -5237,6 +5322,7 @@ pub fn check_module(
                 &mut generic_instances,
                 &mut refs,
                 &mut secrets,
+                &mut arrays,
                 &struct_type_param_counts,
                 &typed_effect_decls,
                 &typed_trait_decls,
@@ -5321,6 +5407,7 @@ pub fn check_module(
                 &mut generic_instances,
                 &mut refs,
                 &mut secrets,
+                &mut arrays,
                 &struct_type_param_counts,
                 &typed_effect_decls,
                 &typed_trait_decls,
@@ -5364,14 +5451,13 @@ pub fn check_module(
         generic_instances,
         refs,
         secrets,
+        arrays,
         effect_decls: typed_effect_decls,
         konts,
         tasks,
         // ADR 0066 M1.2: populated when the channel builtins are typed
         // (their `Channel<i64>` return/param interns here). Empty until then.
         channels,
-        // ADR 0068: nested-array element interner (populated by `[[T]]` resolution).
-        arrays,
         class_decls: typed_class_decls,
         trait_decls: typed_trait_decls,
         impl_decls: typed_impl_decls,
@@ -5574,6 +5660,7 @@ fn check_fn(
     instances: &mut Vec<GenericInstanceData>,
     refs: &mut Vec<RefData>,
     secrets: &mut Vec<SecretData>,
+    arrays: &mut Vec<ArrayElem>,
     struct_type_param_counts: &HashMap<StructId, usize>,
     effect_decls: &[TypedEffectDecl],
     trait_decls: &[TraitData],
@@ -5641,6 +5728,7 @@ fn check_fn(
         instances,
         refs,
         secrets,
+        arrays,
         struct_type_param_counts,
         effect_decls,
         trait_decls,
@@ -5803,6 +5891,7 @@ fn check_block(
     instances: &mut Vec<GenericInstanceData>,
     refs: &mut Vec<RefData>,
     secrets: &mut Vec<SecretData>,
+    arrays: &mut Vec<ArrayElem>,
     struct_type_param_counts: &HashMap<StructId, usize>,
     effect_decls: &[TypedEffectDecl],
     trait_decls: &[TraitData],
@@ -5822,6 +5911,7 @@ fn check_block(
             instances,
             refs,
             secrets,
+            arrays,
             struct_type_param_counts,
             effect_decls,
             trait_decls,
@@ -5843,6 +5933,7 @@ fn check_block(
         instances,
         refs,
         secrets,
+        arrays,
         struct_type_param_counts,
         effect_decls,
         trait_decls,
@@ -5914,6 +6005,7 @@ fn check_stmt(
     instances: &mut Vec<GenericInstanceData>,
     refs: &mut Vec<RefData>,
     secrets: &mut Vec<SecretData>,
+    arrays: &mut Vec<ArrayElem>,
     struct_type_param_counts: &HashMap<StructId, usize>,
     effect_decls: &[TypedEffectDecl],
     trait_decls: &[TraitData],
@@ -5939,6 +6031,7 @@ fn check_stmt(
                         instances,
                         refs,
                         secrets,
+                        arrays,
                         struct_type_param_counts,
                     )?)
                 }
@@ -5955,6 +6048,7 @@ fn check_stmt(
                 instances,
                 refs,
                 secrets,
+                arrays,
                 struct_type_param_counts,
                 effect_decls,
                 trait_decls,
@@ -6005,6 +6099,7 @@ fn check_stmt(
                 instances,
                 refs,
                 secrets,
+                arrays,
                 struct_type_param_counts,
                 effect_decls,
                 trait_decls,
@@ -6023,6 +6118,7 @@ fn check_stmt(
                 instances,
                 refs,
                 secrets,
+                arrays,
                 struct_type_param_counts,
                 effect_decls,
                 trait_decls,
@@ -6037,7 +6133,7 @@ fn check_stmt(
                     span: to_source_span(&value.span),
                 });
             }
-            check_assign_lvalue(&target_typed, env, refs)?;
+            check_assign_lvalue(&target_typed, env, refs, arrays)?;
             TypedStmtKind::Assign {
                 target: target_typed,
                 value: value_typed,
@@ -6060,6 +6156,7 @@ fn check_stmt(
                 instances,
                 refs,
                 secrets,
+                arrays,
                 struct_type_param_counts,
                 effect_decls,
                 trait_decls,
@@ -6099,6 +6196,7 @@ fn check_stmt(
                 instances,
                 refs,
                 secrets,
+                arrays,
                 struct_type_param_counts,
                 effect_decls,
                 trait_decls,
@@ -6147,6 +6245,7 @@ fn check_stmt(
             instances,
             refs,
             secrets,
+            arrays,
             struct_type_param_counts,
             effect_decls,
             trait_decls,
@@ -6181,13 +6280,14 @@ fn check_assign_lvalue(
     target: &TypedExpr,
     env: &VarTypeEnv,
     refs: &[RefData],
+    arrays: &[ArrayElem],
 ) -> Result<(), TypeError> {
     if !is_lvalue(target) {
         return Err(TypeError::AssignToRvalue {
             span: to_source_span(&target.span),
         });
     }
-    check_mutable_lvalue(target, env, refs)
+    check_mutable_lvalue(target, env, refs, arrays)
 }
 
 /// Validate that the operand of `&mut expr` is a mutable lvalue.
@@ -6256,6 +6356,7 @@ fn check_mutable_lvalue(
     target: &TypedExpr,
     env: &VarTypeEnv,
     refs: &[RefData],
+    arrays: &[ArrayElem],
 ) -> Result<(), TypeError> {
     match &target.kind {
         TypedExprKind::Var(id) => {
@@ -6294,7 +6395,7 @@ fn check_mutable_lvalue(
             }
         }
         TypedExprKind::FieldAccess { target: inner_target, .. } => {
-            check_mutable_lvalue(inner_target, env, refs)
+            check_mutable_lvalue(inner_target, env, refs, arrays)
         }
         // ADR 0050: `a[i] = v;`. The base collection must be a mutable
         // lvalue (recurse, exactly like field-assign), and the element
@@ -6304,7 +6405,7 @@ fn check_mutable_lvalue(
         // by `IndexNotInt` when the target was type-checked, so a secret
         // index is rejected for writes exactly as for reads.
         TypedExprKind::Index { target: inner_target, elem_ty, .. } => {
-            check_mutable_lvalue(inner_target, env, refs)?;
+            check_mutable_lvalue(inner_target, env, refs, arrays)?;
             match elem_ty {
                 ArrayElem::Struct(_)
                 | ArrayElem::TypeParam(_)
@@ -6323,9 +6424,15 @@ fn check_mutable_lvalue(
                 // overwrite deferred). Unreachable until the resolution-wiring
                 // slice produces `ArrayElem::Array` (the precise element type
                 // for the diagnostic needs the `arrays` interner, threaded then).
-                ArrayElem::Array(_) => {
-                    unreachable!("ArrayElem::Array pre-resolution-wiring (ADR 0068)")
-                }
+                // ADR 0068: a nested-array element (`a[i] = v` on a `[[T]]`) is
+                // non-Copy (the inner `[T]` owns a heap buffer), like a Struct
+                // element — index-assignment is rejected (drop-on-overwrite
+                // deferred). The inner element type comes from the `arrays`
+                // interner for the diagnostic.
+                ArrayElem::Array(id) => Err(TypeError::IndexAssignNonCopyElem {
+                    elem_ty: Type::Array(arrays[id.0 as usize]),
+                    span: to_source_span(&target.span),
+                }),
             }
         }
         _ => Err(TypeError::AssignToRvalue {
@@ -6477,6 +6584,11 @@ fn try_substitute(
             inner.to_nullable_inner().map(Type::Nullable)
         }
         Type::Array(ae) => {
+            // ADR 0068: a nested-array element is interned/concrete — no TypeParam
+            // to substitute (generic-nested deferred, D6). Pass through unchanged.
+            if let ArrayElem::Array(_) = ae {
+                return Some(Type::Array(ae));
+            }
             let inner = try_substitute(ae.to_type(), subst, instances, refs)?;
             // ADR 0053: secret-aware demote (the substitution round-trip).
             inner.to_array_elem_subst().map(Type::Array)
@@ -6529,6 +6641,10 @@ fn contains_type_param(
     match ty {
         Type::TypeParam(_) => true,
         Type::Nullable(ni) => contains_type_param(ni.to_type(), instances, refs),
+        // ADR 0068: a nested-array element is interned/concrete (generic-nested
+        // `[[T]]` deferred, D6), so it carries no TypeParam — and `ae.to_type()`
+        // would panic on `Array`.
+        Type::Array(ArrayElem::Array(_)) => false,
         Type::Array(ae) => contains_type_param(ae.to_type(), instances, refs),
         // Phase D.3 / ADR 0034: a Vec mentions a TypeParam iff its
         // element does (mirrors the Array arm).
@@ -6613,7 +6729,20 @@ fn unify_one(
             unify_one(p.to_type(), a.to_type(), subst, instances, refs)
         }
         (Type::Array(p), Type::Array(a)) => {
-            unify_one(p.to_type(), a.to_type(), subst, instances, refs)
+            // ADR 0068: a nested-array element is interned + structurally dedup'd,
+            // so two nested arrays unify iff they are the SAME `ArrayId` (and
+            // `ArrayElem::to_type()` can't resolve `Array(_)` without the interner).
+            // Generic-nested binding (`[[T]]` vs `[[u8]]`) is deferred (D6). For
+            // flat elements, recurse so a TypeParam binds (`[T]` vs `[u8]`).
+            if matches!(p, ArrayElem::Array(_)) || matches!(a, ArrayElem::Array(_)) {
+                if p == a {
+                    Ok(())
+                } else {
+                    Err(UnifyFailure::Mismatch(param, arg))
+                }
+            } else {
+                unify_one(p.to_type(), a.to_type(), subst, instances, refs)
+            }
         }
         // Phase D.3 / ADR 0034: unify a Vec's element so e.g.
         // `vec_new<T>() -> Vec<T>` binds T from the expected `Vec<i64>`,
@@ -6693,6 +6822,7 @@ fn check_call(
     instances: &mut Vec<GenericInstanceData>,
     refs: &mut Vec<RefData>,
     secrets: &mut Vec<SecretData>,
+    arrays: &mut Vec<ArrayElem>,
     struct_type_param_counts: &HashMap<StructId, usize>,
     effect_decls: &[TypedEffectDecl],
     trait_decls: &[TraitData],
@@ -6729,6 +6859,7 @@ fn check_call(
             instances,
             refs,
             secrets,
+            arrays,
             struct_type_param_counts,
             effect_decls,
             trait_decls,
@@ -6737,7 +6868,8 @@ fn check_call(
             tasks,
         )?;
         let elem = match typed.ty {
-            Type::Array(ae) => ae.to_type(),
+            // ADR 0068: resolve a nested-array element via the `arrays` interner.
+            Type::Array(ae) => array_elem_type_in(ae, arrays),
             Type::Vec(ve) => ve.to_type(),
             other => {
                 return Err(TypeError::Mismatch {
@@ -6822,6 +6954,7 @@ fn check_call(
                 instances,
                 refs,
                 secrets,
+                arrays,
                 struct_type_param_counts,
                 effect_decls,
                 trait_decls,
@@ -6937,6 +7070,7 @@ fn check_expr(
     instances: &mut Vec<GenericInstanceData>,
     refs: &mut Vec<RefData>,
     secrets: &mut Vec<SecretData>,
+    arrays: &mut Vec<ArrayElem>,
     struct_type_param_counts: &HashMap<StructId, usize>,
     effect_decls: &[TypedEffectDecl],
     trait_decls: &[TraitData],
@@ -7010,6 +7144,7 @@ fn check_expr(
                         instances,
                         refs,
                         secrets,
+                        arrays,
                         struct_type_param_counts,
                         effect_decls,
                         trait_decls,
@@ -7055,6 +7190,7 @@ fn check_expr(
                         instances,
                         refs,
                         secrets,
+                        arrays,
                         struct_type_param_counts,
                         effect_decls,
                         trait_decls,
@@ -7103,6 +7239,7 @@ fn check_expr(
                         instances,
                         refs,
                         secrets,
+                        arrays,
                         struct_type_param_counts,
                         effect_decls,
                         trait_decls,
@@ -7166,6 +7303,7 @@ fn check_expr(
                         instances,
                         refs,
                         secrets,
+                        arrays,
                         struct_type_param_counts,
                         effect_decls,
                         trait_decls,
@@ -7200,6 +7338,7 @@ fn check_expr(
                         instances,
                         refs,
                         secrets,
+                        arrays,
                         struct_type_param_counts,
                         effect_decls,
                         trait_decls,
@@ -7245,6 +7384,7 @@ fn check_expr(
                         instances,
                         refs,
                         secrets,
+                        arrays,
                         struct_type_param_counts,
                         effect_decls,
                         trait_decls,
@@ -7264,8 +7404,8 @@ fn check_expr(
             }
         }
         ResolvedExprKind::Binary(op, lhs, rhs) => {
-            let l = check_expr(lhs, None, env, signatures, structs, class_decls, enums, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
-            let r = check_expr(rhs, None, env, signatures, structs, class_decls, enums, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
+            let l = check_expr(lhs, None, env, signatures, structs, class_decls, enums, instances, refs, secrets, arrays, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
+            let r = check_expr(rhs, None, env, signatures, structs, class_decls, enums, instances, refs, secrets, arrays, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
             // C3 / ADR 0019 D5 + D7 (C3.1b): operator-secret-
             // preserving. Strip one layer of `secret` from both
             // sides, run the usual int-type check on the inners,
@@ -7412,10 +7552,10 @@ fn check_expr(
                 // The non-null side determines the expected ?T type.
                 // First, synthesize the non-null side.
                 let (non_null_side, non_null_expr, null_span) = if lhs_is_null {
-                    let r = check_expr(rhs, None, env, signatures, structs, class_decls, enums, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
+                    let r = check_expr(rhs, None, env, signatures, structs, class_decls, enums, instances, refs, secrets, arrays, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
                     (r.ty, r, lhs.span.clone())
                 } else {
-                    let l = check_expr(lhs, None, env, signatures, structs, class_decls, enums, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
+                    let l = check_expr(lhs, None, env, signatures, structs, class_decls, enums, instances, refs, secrets, arrays, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
                     (l.ty, l, rhs.span.clone())
                 };
                 // Non-null side must be Nullable for null-comparison.
@@ -7442,8 +7582,8 @@ fn check_expr(
                     ty: Type::Bool,
                 });
             }
-            let l = check_expr(lhs, None, env, signatures, structs, class_decls, enums, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
-            let r = check_expr(rhs, None, env, signatures, structs, class_decls, enums, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
+            let l = check_expr(lhs, None, env, signatures, structs, class_decls, enums, instances, refs, secrets, arrays, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
+            let r = check_expr(rhs, None, env, signatures, structs, class_decls, enums, instances, refs, secrets, arrays, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
             // C3 / ADR 0019 D5 (C3.1b): operator-secret-preserving
             // for comparisons. `secret T == secret T -> secret bool`
             // per Phase B ADR 0008 D4. Strip wrappers to check inner
@@ -7495,8 +7635,8 @@ fn check_expr(
             )
         }
         ResolvedExprKind::Logic(op, lhs, rhs) => {
-            let l = check_expr(lhs, None, env, signatures, structs, class_decls, enums, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
-            let r = check_expr(rhs, None, env, signatures, structs, class_decls, enums, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
+            let l = check_expr(lhs, None, env, signatures, structs, class_decls, enums, instances, refs, secrets, arrays, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
+            let r = check_expr(rhs, None, env, signatures, structs, class_decls, enums, instances, refs, secrets, arrays, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
             // C3 / ADR 0019 D5 (C3.1b): operator-secret-preserving
             // for logicals. Both operands must be the same bool-
             // shape (`bool` or `secret bool`); result preserves
@@ -7539,12 +7679,12 @@ fn check_expr(
             )
         }
         ResolvedExprKind::Block(b) => {
-            let typed_block = check_block(b, expected, env, signatures, structs, class_decls, enums, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
+            let typed_block = check_block(b, expected, env, signatures, structs, class_decls, enums, instances, refs, secrets, arrays, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
             let ty = typed_block.ty;
             (TypedExprKind::Block(Box::new(typed_block)), ty)
         }
         ResolvedExprKind::If { cond, then_branch, else_branch } => {
-            let cond_t = check_expr(cond, None, env, signatures, structs, class_decls, enums, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
+            let cond_t = check_expr(cond, None, env, signatures, structs, class_decls, enums, instances, refs, secrets, arrays, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
             // C3 / ADR 0019 D7 (C3.1) — SecretBranch: an
             // `if` condition with type `secret bool` would
             // leak via timing. Reject before the generic
@@ -7567,8 +7707,8 @@ fn check_expr(
             }
             // ADR 0014 D5: push the expected type down into both
             // branches so `null` in either branch can resolve.
-            let then_t = check_block(then_branch, expected, env, signatures, structs, class_decls, enums, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
-            let else_t = check_block(else_branch, expected, env, signatures, structs, class_decls, enums, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
+            let then_t = check_block(then_branch, expected, env, signatures, structs, class_decls, enums, instances, refs, secrets, arrays, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
+            let else_t = check_block(else_branch, expected, env, signatures, structs, class_decls, enums, instances, refs, secrets, arrays, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
             // ADR 0065: a branch that always diverges (an early `return`)
             // yields no value, so it does not constrain the join — the `if`'s
             // type is the OTHER branch's. If both diverge, the `if` diverges
@@ -7613,6 +7753,7 @@ fn check_expr(
             instances,
             refs,
             secrets,
+            arrays,
             struct_type_param_counts,
             effect_decls,
             trait_decls,
@@ -7693,6 +7834,7 @@ fn check_expr(
                     instances,
                     refs,
                     secrets,
+                    arrays,
                     struct_type_param_counts,
                     effect_decls,
                     trait_decls,
@@ -7754,7 +7896,8 @@ fn check_expr(
             // expected element type (from `[T]` context) if present.
             // If no expected, infer T from the first element.
             let expected_elem: Option<Type> = match expected {
-                Some(Type::Array(elem)) => Some(elem.to_type()),
+                // ADR 0068: resolve a nested expected element via the `arrays` interner.
+                Some(Type::Array(elem)) => Some(array_elem_type_in(elem, arrays)),
                 _ => None,
             };
             if elems.is_empty() {
@@ -7767,7 +7910,7 @@ fn check_expr(
                         });
                     }
                 };
-                let ae = elem_ty.to_array_elem_secret(secrets).ok_or_else(|| {
+                let ae = array_elem_of(elem_ty, secrets, arrays).ok_or_else(|| {
                     TypeError::NestedArray {
                         span: to_source_span(&expr.span),
                     }
@@ -7783,7 +7926,7 @@ fn check_expr(
                 // Type-check elements. First element synthesizes T
                 // if no expected; subsequent elements get T as
                 // expected (so widening / null work inside `[T]`).
-                let first = check_expr(&elems[0], expected_elem, env, signatures, structs, class_decls, enums, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
+                let first = check_expr(&elems[0], expected_elem, env, signatures, structs, class_decls, enums, instances, refs, secrets, arrays, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
                 let elem_ty = first.ty;
                 let mut typed = Vec::with_capacity(elems.len());
                 typed.push(first);
@@ -7799,6 +7942,7 @@ fn check_expr(
                         instances,
                         refs,
                         secrets,
+                        arrays,
                         struct_type_param_counts,
                         effect_decls,
                         trait_decls,
@@ -7815,7 +7959,7 @@ fn check_expr(
                     }
                     typed.push(t);
                 }
-                let ae = elem_ty.to_array_elem_secret(secrets).ok_or_else(|| {
+                let ae = array_elem_of(elem_ty, secrets, arrays).ok_or_else(|| {
                     TypeError::NestedArray {
                         span: to_source_span(&expr.span),
                     }
@@ -7830,7 +7974,7 @@ fn check_expr(
             }
         }
         ResolvedExprKind::Index { target, index } => {
-            let target_t = check_expr(target, None, env, signatures, structs, class_decls, enums, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
+            let target_t = check_expr(target, None, env, signatures, structs, class_decls, enums, instances, refs, secrets, arrays, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
             let elem_ty = match target_t.ty {
                 Type::Array(ae) => ae,
                 // Phase D.3 (2/N) / ADR 0034 D5: `v[i]` on a `Vec<T>`
@@ -7857,7 +8001,7 @@ fn check_expr(
             // Synthesize the index without pushdown so a non-int
             // index surfaces as the more-specific `IndexNotInt`
             // rather than a generic `Mismatch`.
-            let index_t = check_expr(index, None, env, signatures, structs, class_decls, enums, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
+            let index_t = check_expr(index, None, env, signatures, structs, class_decls, enums, instances, refs, secrets, arrays, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
             if index_t.ty != Type::I64 {
                 return Err(TypeError::IndexNotInt {
                     got: index_t.ty,
@@ -7870,7 +8014,8 @@ fn check_expr(
                     index: Box::new(index_t),
                     elem_ty,
                 },
-                elem_ty.to_type(),
+                // ADR 0068: a nested-array index yields the inner array `[T]`.
+                array_elem_type_in(elem_ty, arrays),
             )
         }
         ResolvedExprKind::FieldAccess { target, field, field_span } => {
@@ -7885,6 +8030,7 @@ fn check_expr(
                 instances,
                 refs,
                 secrets,
+                arrays,
                 struct_type_param_counts,
                 effect_decls,
                 trait_decls,
@@ -7987,6 +8133,7 @@ fn check_expr(
                 instances,
                 refs,
                 secrets,
+                arrays,
                 struct_type_param_counts,
                 effect_decls,
                 trait_decls,
@@ -8031,6 +8178,7 @@ fn check_expr(
                 instances,
                 refs,
                 secrets,
+                arrays,
                 struct_type_param_counts,
                 effect_decls,
                 trait_decls,
@@ -8067,6 +8215,7 @@ fn check_expr(
                 instances,
                 refs,
                 secrets,
+                arrays,
                 struct_type_param_counts,
                 effect_decls,
                 trait_decls,
@@ -8136,6 +8285,7 @@ fn check_expr(
             instances,
             refs,
             secrets,
+            arrays,
             struct_type_param_counts,
             effect_decls,
             trait_decls,
@@ -8167,6 +8317,7 @@ fn check_expr(
             instances,
             refs,
             secrets,
+            arrays,
             struct_type_param_counts,
             effect_decls,
             trait_decls,
@@ -8186,6 +8337,7 @@ fn check_expr(
             instances,
             refs,
             secrets,
+            arrays,
             struct_type_param_counts,
             effect_decls,
             trait_decls,
@@ -8207,6 +8359,7 @@ fn check_expr(
                 instances,
                 refs,
                 secrets,
+                arrays,
                 struct_type_param_counts,
                 effect_decls,
                 trait_decls,
@@ -8229,6 +8382,7 @@ fn check_expr(
                 instances,
                 refs,
                 secrets,
+                arrays,
                 struct_type_param_counts,
                 effect_decls,
                 trait_decls,
@@ -8260,6 +8414,7 @@ fn check_expr(
             instances,
             refs,
             secrets,
+            arrays,
             struct_type_param_counts,
             effect_decls,
             trait_decls,
@@ -8271,7 +8426,7 @@ fn check_expr(
         // its body's tail (like a plain block). The concurrency
         // contract (auto-await on exit) is a codegen concern.
         ResolvedExprKind::Scope { mode, body } => {
-            let typed_block = check_block(body, expected, env, signatures, structs, class_decls, enums, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
+            let typed_block = check_block(body, expected, env, signatures, structs, class_decls, enums, instances, refs, secrets, arrays, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
             let ty = typed_block.ty;
             (
                 TypedExprKind::Scope { mode: *mode, body: Box::new(typed_block) },
@@ -8291,7 +8446,7 @@ fn check_expr(
                     span: to_source_span(&call_expr.span),
                 });
             }
-            let typed_call = check_expr(call_expr, None, env, signatures, structs, class_decls, enums, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
+            let typed_call = check_expr(call_expr, None, env, signatures, structs, class_decls, enums, instances, refs, secrets, arrays, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
             if !is_spawn_word_scalar(typed_call.ty) {
                 return Err(TypeError::SpawnTypeUnsupported {
                     got: typed_call.ty,
@@ -8319,7 +8474,7 @@ fn check_expr(
         // C4.4 / ADR 0024 D3: `task.await` — receiver must be a
         // `Task<T>`; the result type is the interned result_ty.
         ResolvedExprKind::Await { task_expr } => {
-            let typed_task = check_expr(task_expr, None, env, signatures, structs, class_decls, enums, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
+            let typed_task = check_expr(task_expr, None, env, signatures, structs, class_decls, enums, instances, refs, secrets, arrays, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
             let task_id = match typed_task.ty {
                 Type::Task(tid) => tid,
                 other => {
@@ -8356,6 +8511,7 @@ fn check_expr(
             instances,
             refs,
             secrets,
+            arrays,
             struct_type_param_counts,
             effect_decls,
             trait_decls,
@@ -8376,6 +8532,7 @@ fn check_expr(
             instances,
             refs,
             secrets,
+            arrays,
             struct_type_param_counts,
             effect_decls,
             trait_decls,
@@ -8427,6 +8584,7 @@ fn check_handle_expr(
     instances: &mut Vec<GenericInstanceData>,
     refs: &mut Vec<RefData>,
     secrets: &mut Vec<SecretData>,
+    arrays: &mut Vec<ArrayElem>,
     struct_type_param_counts: &HashMap<StructId, usize>,
     effect_decls: &[TypedEffectDecl],
     trait_decls: &[TraitData],
@@ -8451,6 +8609,7 @@ fn check_handle_expr(
         instances,
         refs,
         secrets,
+        arrays,
         struct_type_param_counts,
         effect_decls,
         trait_decls,
@@ -8478,6 +8637,7 @@ fn check_handle_expr(
             instances,
             refs,
             secrets,
+            arrays,
             struct_type_param_counts,
             effect_decls,
             trait_decls,
@@ -8563,6 +8723,7 @@ fn check_handle_expr(
             instances,
             refs,
             secrets,
+            arrays,
             struct_type_param_counts,
             effect_decls,
             trait_decls,
@@ -8638,6 +8799,7 @@ fn check_perform_expr(
     instances: &mut Vec<GenericInstanceData>,
     refs: &mut Vec<RefData>,
     secrets: &mut Vec<SecretData>,
+    arrays: &mut Vec<ArrayElem>,
     struct_type_param_counts: &HashMap<StructId, usize>,
     effect_decls: &[TypedEffectDecl],
     trait_decls: &[TraitData],
@@ -8669,6 +8831,7 @@ fn check_perform_expr(
             instances,
             refs,
             secrets,
+            arrays,
             struct_type_param_counts,
             effect_decls,
             trait_decls,
@@ -8716,6 +8879,7 @@ fn check_resume_kont_expr(
     instances: &mut Vec<GenericInstanceData>,
     refs: &mut Vec<RefData>,
     secrets: &mut Vec<SecretData>,
+    arrays: &mut Vec<ArrayElem>,
     struct_type_param_counts: &HashMap<StructId, usize>,
     effect_decls: &[TypedEffectDecl],
     trait_decls: &[TraitData],
@@ -8767,6 +8931,7 @@ fn check_resume_kont_expr(
         instances,
         refs,
         secrets,
+        arrays,
         struct_type_param_counts,
         effect_decls,
         trait_decls,
@@ -8813,6 +8978,7 @@ fn check_method_call_expr(
     instances: &mut Vec<GenericInstanceData>,
     refs: &mut Vec<RefData>,
     secrets: &mut Vec<SecretData>,
+    arrays: &mut Vec<ArrayElem>,
     struct_type_param_counts: &HashMap<StructId, usize>,
     effect_decls: &[TypedEffectDecl],
     trait_decls: &[TraitData],
@@ -8831,6 +8997,7 @@ fn check_method_call_expr(
         instances,
         refs,
         secrets,
+        arrays,
         struct_type_param_counts,
         effect_decls,
         trait_decls,
@@ -8888,6 +9055,7 @@ fn check_method_call_expr(
                     instances,
                     refs,
                     secrets,
+                    arrays,
                     struct_type_param_counts,
                     effect_decls,
                     trait_decls,
@@ -8969,6 +9137,7 @@ fn check_method_call_expr(
                     instances,
                     refs,
                     secrets,
+                    arrays,
                     struct_type_param_counts,
                     effect_decls,
                     trait_decls,
@@ -9018,6 +9187,7 @@ fn check_class_init_expr(
     instances: &mut Vec<GenericInstanceData>,
     refs: &mut Vec<RefData>,
     secrets: &mut Vec<SecretData>,
+    arrays: &mut Vec<ArrayElem>,
     struct_type_param_counts: &HashMap<StructId, usize>,
     effect_decls: &[TypedEffectDecl],
     trait_decls: &[TraitData],
@@ -9052,6 +9222,7 @@ fn check_class_init_expr(
             instances,
             refs,
             secrets,
+            arrays,
             struct_type_param_counts,
             effect_decls,
             trait_decls,
@@ -9100,6 +9271,7 @@ fn check_enum_construct_expr(
     instances: &mut Vec<GenericInstanceData>,
     refs: &mut Vec<RefData>,
     secrets: &mut Vec<SecretData>,
+    arrays: &mut Vec<ArrayElem>,
     struct_type_param_counts: &HashMap<StructId, usize>,
     effect_decls: &[TypedEffectDecl],
     trait_decls: &[TraitData],
@@ -9145,6 +9317,7 @@ fn check_enum_construct_expr(
             instances,
             refs,
             secrets,
+            arrays,
             struct_type_param_counts,
             effect_decls,
             trait_decls,
@@ -9191,6 +9364,7 @@ fn check_match_expr(
     instances: &mut Vec<GenericInstanceData>,
     refs: &mut Vec<RefData>,
     secrets: &mut Vec<SecretData>,
+    arrays: &mut Vec<ArrayElem>,
     struct_type_param_counts: &HashMap<StructId, usize>,
     effect_decls: &[TypedEffectDecl],
     trait_decls: &[TraitData],
@@ -9212,6 +9386,7 @@ fn check_match_expr(
         instances,
         refs,
         secrets,
+        arrays,
         struct_type_param_counts,
         effect_decls,
         trait_decls,
@@ -9334,6 +9509,7 @@ fn check_match_expr(
             instances,
             refs,
             secrets,
+            arrays,
             struct_type_param_counts,
             effect_decls,
             trait_decls,
@@ -9445,6 +9621,7 @@ fn check_qualified_call_expr(
     instances: &mut Vec<GenericInstanceData>,
     refs: &mut Vec<RefData>,
     secrets: &mut Vec<SecretData>,
+    arrays: &mut Vec<ArrayElem>,
     struct_type_param_counts: &HashMap<StructId, usize>,
     effect_decls: &[TypedEffectDecl],
     trait_decls: &[TraitData],
@@ -9479,6 +9656,7 @@ fn check_qualified_call_expr(
         instances,
         refs,
         secrets,
+        arrays,
         struct_type_param_counts,
         effect_decls,
         trait_decls,
@@ -9517,6 +9695,7 @@ fn check_qualified_call_expr(
             instances,
             refs,
             secrets,
+            arrays,
             struct_type_param_counts,
             effect_decls,
             trait_decls,
@@ -11171,9 +11350,12 @@ fn main() -> i64 {
     }
 
     #[test]
-    fn nested_array_type_errors() {
-        let err = check_err("fn f(x: [[i64]]) -> i64 { 0 }\nfn main() -> i64 { 0 }");
-        assert!(matches!(err, TypeError::NestedArray { .. }), "got {err:?}");
+    fn nested_array_typechecks() {
+        // ADR 0068: `[[T]]` is representable now — the depth-1 array rule (ADR 0015
+        // D6) is lifted via the `arrays` interner. `[[i64]]` resolves to
+        // `Array(Array(id))` with the inner element `i64` interned into `arrays`.
+        let p = check_ok("fn f(x: [[i64]]) -> i64 { len(x) }\nfn main() -> i64 { 0 }");
+        assert_eq!(p.arrays, vec![ArrayElem::I64], "the inner `[i64]` element is interned");
     }
 
     #[test]

@@ -1,0 +1,28 @@
+// ADR 0068: nested arrays `[[u8]]` — the depth-1 array rule (ADR 0015 D6) lifted
+// via the `ArrayElem::Array(ArrayId)` interner (keeping `Type: Copy`). A `[[u8]]`
+// is a list of byte-strings (e.g. process argv). This is the first differential
+// fixture exercising:
+//   * a `[[u8]]` literal (`["abc", "de", "f"]` — each element a `[u8]` string),
+//   * a `[[u8]]` function PARAMETER (moved in, dropped at the callee's exit —
+//     single-free of the outer buffer, the existing element-leak limitation),
+//   * the OUTER `len` (number of rows), and
+//   * INNER indexing `rows[i]` (yielding a `[u8]`) + its `len`.
+//
+// total_len = len("abc") + len("de") + len("f") = 3 + 2 + 1 = 6. 6 + 36 = 42.
+// Exit 42.
+
+fn total_len(rows: [[u8]]) -> i64 {
+    let mut i: i64 = 0;
+    let mut acc: i64 = 0;
+    let n: i64 = len(rows);
+    while i < n {
+        acc = acc + len(rows[i]);
+        i = i + 1;
+    }
+    acc
+}
+
+fn main() -> i64 {
+    let grid: [[u8]] = ["abc", "de", "f"];
+    total_len(grid) + 36
+}

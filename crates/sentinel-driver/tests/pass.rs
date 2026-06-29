@@ -1127,6 +1127,15 @@ fn pass_c66_channel_worker() {
 }
 
 #[test]
+fn pass_c68_nested_array() {
+    // ADR 0068: nested arrays `[[u8]]` — a `[[u8]]` literal + param + outer `len`
+    // + inner indexing `rows[i]` (a `[u8]`) + its `len`. 3+2+1 + 36 = 42.
+    let r = build_and_run("c68_nested_array.sentinel");
+    assert_eq!(r.exit, 42);
+    assert_eq!(r.stdout, "");
+}
+
+#[test]
 fn pass_c66_nullable_u8() {
     // ADR 0066 M1.2b: `?T` generalized over scalars — `?u8` (null, an implicit
     // u8→?u8 widen, is_some, unwrap_or, a ?u8 param). 30 + 12 = 42.

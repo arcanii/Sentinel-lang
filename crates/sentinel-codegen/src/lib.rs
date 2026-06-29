@@ -2635,7 +2635,7 @@ fn mangle_type_dedup(ty: Type, program: &TypedProgram, origins: &NamedTypeOrigin
                 None => name,
             }
         }
-        Type::Array(elem) => format!("arr_{}", mangle_type_dedup(elem.to_type(), program, origins)),
+        Type::Array(elem) => format!("arr_{}", mangle_type_dedup(program.array_elem_type(elem), program, origins)),
         Type::Vec(elem) => format!("vec_{}", mangle_type_dedup(elem.to_type(), program, origins)),
         Type::Nullable(inner) => {
             format!("opt_{}", mangle_type_dedup(inner.to_type(), program, origins))
@@ -2686,7 +2686,7 @@ fn mangle_type(ty: Type, program: &TypedProgram) -> String {
             .map(|s| s.name.clone())
             .unwrap_or_else(|| format!("struct{}", id.0)),
         Type::Nullable(inner) => format!("opt_{}", mangle_type(inner.to_type(), program)),
-        Type::Array(elem) => format!("arr_{}", mangle_type(elem.to_type(), program)),
+        Type::Array(elem) => format!("arr_{}", mangle_type(program.array_elem_type(elem), program)),
         Type::Vec(elem) => format!("vec_{}", mangle_type(elem.to_type(), program)),
         Type::Ref(id) => {
             // C2 / ADR 0017 D11: render `&T` as `ref_T`, `&mut T`
@@ -5414,7 +5414,7 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
         let n = elements.len() as u64;
         let len_val = i64_type.const_int(n, false);
 
-        let elem_llvm_ty = self.llvm_basic_type(elem_ty.to_type());
+        let elem_llvm_ty = self.llvm_basic_type(program.array_elem_type(elem_ty));
         // Compute total size = n * sizeof(elem).
         // size_of() for primitive types returns Some(IntValue); for
         // structs it also returns Some. We use the build_int_mul
@@ -6293,7 +6293,7 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
         // factored so index-assignment (`a[i] = v;`, ADR 0050) reuses
         // the identical address computation and stores instead.
         let elem_ptr = self.lower_index_elem_ptr(target, index, elem_ty, program)?;
-        let elem_llvm_ty = self.llvm_basic_type(elem_ty.to_type());
+        let elem_llvm_ty = self.llvm_basic_type(program.array_elem_type(elem_ty));
         let elem_val = self
             .builder
             .build_load(elem_llvm_ty, elem_ptr, "idx_load")
@@ -6370,7 +6370,7 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
 
         // OK branch: GEP to the element address.
         self.builder.position_at_end(ok_bb);
-        let elem_llvm_ty = self.llvm_basic_type(elem_ty.to_type());
+        let elem_llvm_ty = self.llvm_basic_type(program.array_elem_type(elem_ty));
         let elem_ptr = unsafe {
             self.builder
                 .build_gep(elem_llvm_ty, data_ptr, &[idx], "idx_gep")

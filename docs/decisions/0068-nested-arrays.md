@@ -90,10 +90,18 @@ is a separate, lower-demand follow-up.
 - **Index.** `a[i]` on `[[u8]]` yields a `[u8]` (the inner array struct), loaded
   from the GEP — the read path is the existing one with the element type widened
   to an aggregate.
-- **Drop.** A `[[u8]]` owns its inner `[u8]`s, which own their byte buffers. Drop
-  recurses: free each element's buffer, then the outer buffer. `needs_drop` for
-  `Type::Array(ArrayElem::Array(_))` is true; the per-element drop walks the inner
-  array. (Scalar-element arrays keep their single-`free` drop.)
+- **Drop (single-free, consistent with existing arrays).** Dropping a `[[u8]]`
+  frees the OUTER buffer (the array of `{i64,ptr}` element structs) with a single
+  `sentinel_free` — it does **not** recurse to free the inner `[u8]` buffers.
+  This matches the EXISTING array/`Vec` drop, which already does a single buffer
+  free and does **not** recurse into element heap (an element-owning `[Struct]` /
+  `Vec<Struct>` already leaks its element heap — an accepted limitation noted in
+  the codegen). So nested arrays leaking inner buffers is *consistent* with the
+  current semantics, not a new regression; adding per-element recursive drop only
+  for nested arrays would be inconsistent. Per-element recursive drop (for all
+  element-owning arrays/Vecs alike) is a separate, future cleanup. Programs run
+  correctly (no double-free / UB); the indexed-element read path (`a[i]` consumed
+  by e.g. `len`) frees that element's buffer via the callee's param drop.
 
 ### D4. Constant-time + secrets — unchanged.
 

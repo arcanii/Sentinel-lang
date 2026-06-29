@@ -1818,7 +1818,7 @@ impl Emit<'_> {
             // (`getelementptr T, null, n` then `ptrtoint`), correct for any element
             // type incl. structs, without replicating layout/padding.
             TypedExprKind::ArrayLit { elem_ty, elements } => {
-                let ety = self.lty(elem_ty.to_type())?;
+                let ety = self.lty(self.program.array_elem_type(*elem_ty))?;
                 let mut ops = Vec::with_capacity(elements.len());
                 for el in elements {
                     ops.push(self.lower_expr(el)?);
@@ -1839,7 +1839,7 @@ impl Emit<'_> {
             TypedExprKind::Index { target, index, elem_ty } => {
                 let arr = self.lower_expr(target)?;
                 let idx = self.lower_expr(index)?;
-                let ety = self.lty(elem_ty.to_type())?;
+                let ety = self.lty(self.program.array_elem_type(*elem_ty))?;
                 // `[T]` is `{i64,ptr}` (data field 1); `Vec<T>` is `{i64,i64,ptr}`
                 // (data field 2 — capacity sits between). `len` is field 0 for both.
                 let aggty = self.lty(target.ty)?;
@@ -2301,7 +2301,7 @@ impl Emit<'_> {
             TypedExprKind::Index { target, index, elem_ty } => {
                 let arr = self.lower_expr(target)?;
                 let idx = self.lower_expr(index)?;
-                let ety = self.lty(elem_ty.to_type())?;
+                let ety = self.lty(self.program.array_elem_type(*elem_ty))?;
                 let aggty = self.lty(target.ty)?;
                 let data_field = if matches!(target.ty, Type::Vec(_)) { 2 } else { 1 };
                 let len = self.fresh();
@@ -3236,7 +3236,7 @@ fn mangle_type(ty: Type, program: &TypedProgram) -> String {
         Type::U8 => "u8".into(),
         Type::Struct(id) => mangle_struct_name(program, id),
         Type::Nullable(inner) => format!("opt_{}", mangle_type(inner.to_type(), program)),
-        Type::Array(elem) => format!("arr_{}", mangle_type(elem.to_type(), program)),
+        Type::Array(elem) => format!("arr_{}", mangle_type(program.array_elem_type(elem), program)),
         Type::Vec(elem) => format!("vec_{}", mangle_type(elem.to_type(), program)),
         Type::Ref(id) => {
             let d = &program.refs[id.0 as usize];
