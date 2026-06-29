@@ -445,14 +445,25 @@ Two findings surfaced: (1) a scg merge bug — a multi-file-module entry with NO
 on a `part` decl (tag 65), not just `use`, matching snc's discovery. (2) The
 entry-root output-name collision (`-o merge` clashing with the `merge/` parts dir)
 recurs whenever a multi-file root is built standalone — the test harnesses use a
-distinct output name. `dump_texpr` (a single ~2.8k-line fn) and `cg_effects`'s
-handler-runtime are the irreducible remainders (file-splitting alone can't divide a
-single function — that needs code refactoring, out of scope).
+distinct output name.
 
-**Optional follow-ups (not required):** refactor `dump_texpr` / `cg_effects` into
-sub-functions for finer files; the byte-identical decl sweep (`module X;` on every
-remaining selfhost/`std` library file) + the mandatory-enforcement flip; `--separate`
-over multi-file modules.
+**A second round (maintainer request) split the two largest files further:**
+- **`types` root** (3375) → 1668 by extracting the declaration type-checking + emit
+  into `types/decl_{fn,class,synth}.sentinel` (540 / 764 / 413); the root now holds
+  the `TyCtx` struct + name comparison + the `run` dispatch + `dump_moves`.
+- **`types/borrow`** (2842) → 1331 + `types/borrow_arms.sentinel` 1526 by **breaking
+  up the `dump_texpr` giant** — a *behavior-preserving refactor* extracting its 7
+  largest match-arm bodies (Binary/Unary/If/Call/Field/Method/Handle) into per-arm
+  `dump_te_*` helper fns, verified byte-identical by the differential. (Sentinel
+  `match` has no binding catch-all `other =>`, only `_`, so the arms are extracted
+  individually rather than split via a re-dispatch; unused params are tolerated so
+  each helper takes the uniform `out, <payload>, exp, src, c, gb`.) This is the
+  technique for the remaining single-function giants.
+
+**Optional follow-ups (not required):** the same arm-extraction on `cg_effects` (the
+handler-runtime, still 2655) and on `run` (the ~900-line dispatcher in the `types`
+root); the byte-identical decl sweep (`module X;` on every remaining selfhost/`std`
+library file) + the mandatory-enforcement flip; `--separate` over multi-file modules.
 
 ## Revisit
 
