@@ -49,7 +49,10 @@ fn build_sentinel_merge(tmp: &Path) -> PathBuf {
         .expect("stage parser.sentinel");
     let entry = tmp.join("merge.sentinel");
     std::fs::copy(root.join("selfhost/merge.sentinel"), &entry).expect("stage merge.sentinel");
-    let bin = tmp.join("merge");
+    // ADR 0067: merge is a multi-file module — stage its `merge/` parts dir.
+    stage_parts_for(&root, "merge", tmp, "merge");
+    // The output name must not collide with the `merge/` parts dir (entry-root rule).
+    let bin = tmp.join("merge_bin");
     let out = Command::new(env!("CARGO_BIN_EXE_snc"))
         .arg("build")
         .arg(&entry)

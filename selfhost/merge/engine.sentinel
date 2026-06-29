@@ -1,0 +1,480 @@
+module merge;
+
+// --- the rename map: record this module's top-level names + use imports -------
+
+fn is_main(src: &[u8], ns: i64, ne: i64) -> bool {
+    ne - ns == 4
+        && (*src)[ns] == 'm'
+        && (*src)[ns + 1] == 'a'
+        && (*src)[ns + 2] == 'i'
+        && (*src)[ns + 3] == 'n'
+}
+
+// Record `name` (src[ns..ne]) → `<module-prefix>$name` (the prefix is queue entry `scan`).
+fn record_own(c: &mut MergeCtx, scan: i64, src: &[u8], ns: i64, ne: i64) -> i64 {
+    let ss: i64 = len((*c).rnsrc);
+    let mut i: i64 = ns;
+    while i < ne {
+        push(&mut (*c).rnsrc, (*src)[i]);
+        i = i + 1;
+    }
+    let se: i64 = len((*c).rnsrc);
+    push(&mut (*c).rss, ss);
+    push(&mut (*c).rse, se);
+    let qs: i64 = len((*c).rnq);
+    let pa: i64 = (*c).qxs[scan];
+    let pz: i64 = (*c).qxe[scan];
+    let mut j: i64 = pa;
+    while j < pz {
+        push(&mut (*c).rnq, (*c).qpfx[j]);
+        j = j + 1;
+    }
+    push(&mut (*c).rnq, '$');
+    let mut m: i64 = ns;
+    while m < ne {
+        push(&mut (*c).rnq, (*src)[m]);
+        m = m + 1;
+    }
+    let qe: i64 = len((*c).rnq);
+    push(&mut (*c).rqs, qs);
+    push(&mut (*c).rqe, qe);
+    0
+}
+
+// `use a::b::Item;` at `i` (tag 58) → record `Item` → `a$b$Item`. Returns the index after
+// the `;`. The source name is the LAST segment; the qualified name is ALL segments joined
+// by `$`.
+fn record_use(c: &mut MergeCtx, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], i: i64) -> i64 {
+    let mut ss: Vec<i64> = vec_new();
+    let mut se: Vec<i64> = vec_new();
+    let mut p: i64 = i + 1;
+    push(&mut ss, (*s)[p]);
+    push(&mut se, (*e)[p]);
+    p = p + 1;
+    while (*k)[p] == 30 {
+        p = p + 1;
+        push(&mut ss, (*s)[p]);
+        push(&mut se, (*e)[p]);
+        p = p + 1;
+    }
+    let after: i64 = p + 1;
+    let nseg: i64 = len(ss);
+    // source name = the item (last segment)
+    let isrc: i64 = ss[nseg - 1];
+    let iend: i64 = se[nseg - 1];
+    let rs: i64 = len((*c).rnsrc);
+    let mut a: i64 = isrc;
+    while a < iend {
+        push(&mut (*c).rnsrc, (*src)[a]);
+        a = a + 1;
+    }
+    let re: i64 = len((*c).rnsrc);
+    push(&mut (*c).rss, rs);
+    push(&mut (*c).rse, re);
+    // qualified = all segments joined by `$`
+    let qs: i64 = len((*c).rnq);
+    let mut g: i64 = 0;
+    while g < nseg {
+        if g > 0 {
+            push(&mut (*c).rnq, '$');
+            0
+        } else {
+            0
+        };
+        let a2: i64 = ss[g];
+        let z2: i64 = se[g];
+        let mut b2: i64 = a2;
+        while b2 < z2 {
+            push(&mut (*c).rnq, (*src)[b2]);
+            b2 = b2 + 1;
+        }
+        g = g + 1;
+    }
+    let qe: i64 = len((*c).rnq);
+    push(&mut (*c).rqs, qs);
+    push(&mut (*c).rqe, qe);
+    after
+}
+
+fn skip_to_item_end(k: &Vec<i64>, start: i64) -> i64 {
+    let n: i64 = len((*k));
+    let mut i: i64 = start;
+    while i < n && (*k)[i] != 6 {
+        i = i + 1;
+    }
+    let mut depth: i64 = 0;
+    let mut done: bool = false;
+    while i < n && !done {
+        let t: i64 = (*k)[i];
+        if t == 6 {
+            depth = depth + 1;
+            0
+        } else if t == 7 {
+            depth = depth - 1;
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+        if depth == 0 {
+            done = true;
+            0
+        } else {
+            0
+        };
+    }
+    i
+}
+
+// Scan this module's top-level decls, recording each name in the rename map. The entry's
+// (scan == 0) `main` keeps its symbol (not recorded → emitted verbatim).
+fn build_rename(c: &mut MergeCtx, scan: i64, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8]) -> i64 {
+    let ntok: i64 = len((*k));
+    let mut i: i64 = 0;
+    while i < ntok {
+        let mut j: i64 = i;
+        if (*k)[j] == 59 {
+            j = j + 1;
+            0
+        } else {
+            0
+        };
+        let lead: i64 = (*k)[j];
+        if lead == 58 {
+            i = record_use(c, k, s, e, src, j);
+            0
+        } else if lead == 3 {
+            let ns: i64 = (*s)[j + 1];
+            let ne: i64 = (*e)[j + 1];
+            if scan == 0 && is_main(src, ns, ne) {
+                0
+            } else {
+                record_own(c, scan, src, ns, ne);
+                0
+            };
+            i = skip_to_item_end(k, j);
+            0
+        } else if lead == 52 || lead == 53 {
+            record_own(c, scan, src, (*s)[j + 1], (*e)[j + 1]);
+            i = skip_to_item_end(k, j);
+            0
+        } else {
+            i = i + 1;
+            0
+        };
+    }
+    0
+}
+
+// --- discovery: enqueue this module's use-targets (BFS) -----------------------
+
+fn qpfx_eq(c: &mut MergeCtx, m: i64, px: &Vec<u8>) -> bool {
+    let a: i64 = (*c).qxs[m];
+    let z: i64 = (*c).qxe[m];
+    let la: i64 = z - a;
+    let lb: i64 = len((*px));
+    if la != lb {
+        false
+    } else {
+        let mut i: i64 = 0;
+        let mut ok: bool = true;
+        while i < la {
+            if (*c).qpfx[a + i] != (*px)[i] {
+                ok = false;
+                0
+            } else {
+                0
+            };
+            i = i + 1;
+        }
+        ok
+    }
+}
+
+// Enqueue module (file path `fp`, prefix `px`) if its prefix is not already queued.
+fn enqueue_if_new(c: &mut MergeCtx, fp: &Vec<u8>, px: &Vec<u8>) -> i64 {
+    let nmod: i64 = len((*c).qps);
+    let mut m: i64 = 0;
+    let mut seen: bool = false;
+    while m < nmod {
+        if !seen {
+            if qpfx_eq(c, m, px) {
+                seen = true;
+                0
+            } else {
+                0
+            };
+            0
+        } else {
+            0
+        };
+        m = m + 1;
+    }
+    if seen {
+        0
+    } else {
+        let ps: i64 = len((*c).qpath);
+        let lf: i64 = len((*fp));
+        let mut a: i64 = 0;
+        while a < lf {
+            push(&mut (*c).qpath, (*fp)[a]);
+            a = a + 1;
+        }
+        let pe: i64 = len((*c).qpath);
+        push(&mut (*c).qps, ps);
+        push(&mut (*c).qpe, pe);
+        let xs: i64 = len((*c).qpfx);
+        let lx: i64 = len((*px));
+        let mut b: i64 = 0;
+        while b < lx {
+            push(&mut (*c).qpfx, (*px)[b]);
+            b = b + 1;
+        }
+        let xe: i64 = len((*c).qpfx);
+        push(&mut (*c).qxs, xs);
+        push(&mut (*c).qxe, xe);
+        0
+    }
+}
+
+// `use a::b::Item;` at `i` → discover module `a::b` (file `a/b.sentinel`, prefix `a$b`).
+// Returns the index after the `;`.
+fn enqueue_one_use(c: &mut MergeCtx, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], i: i64) -> i64 {
+    let mut ss: Vec<i64> = vec_new();
+    let mut se: Vec<i64> = vec_new();
+    let mut p: i64 = i + 1;
+    push(&mut ss, (*s)[p]);
+    push(&mut se, (*e)[p]);
+    p = p + 1;
+    while (*k)[p] == 30 {
+        p = p + 1;
+        push(&mut ss, (*s)[p]);
+        push(&mut se, (*e)[p]);
+        p = p + 1;
+    }
+    let after: i64 = p + 1;
+    let nseg: i64 = len(ss);
+    let mods: i64 = nseg - 1;
+    let mut fp: Vec<u8> = vec_new();
+    let mut px: Vec<u8> = vec_new();
+    let mut g: i64 = 0;
+    while g < mods {
+        if g > 0 {
+            push(&mut fp, '/');
+            push(&mut px, '$');
+            0
+        } else {
+            0
+        };
+        let a: i64 = ss[g];
+        let z: i64 = se[g];
+        let mut b: i64 = a;
+        while b < z {
+            push(&mut fp, (*src)[b]);
+            push(&mut px, (*src)[b]);
+            b = b + 1;
+        }
+        g = g + 1;
+    }
+    append_str(&mut fp, ".sentinel");
+    enqueue_if_new(c, &fp, &px);
+    after
+}
+
+fn enqueue_uses(c: &mut MergeCtx, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8]) -> i64 {
+    let ntok: i64 = len((*k));
+    let mut i: i64 = 0;
+    while i < ntok {
+        if (*k)[i] == 58 {
+            i = enqueue_one_use(c, k, s, e, src, i);
+            0
+        } else {
+            i = i + 1;
+            0
+        };
+    }
+    0
+}
+
+// --- queue helpers -----------------------------------------------------------
+
+fn mc_count(c: &MergeCtx) -> i64 {
+    len((*c).qps)
+}
+
+fn mc_module_path(c: &MergeCtx, scan: i64) -> [u8] {
+    let a: i64 = (*c).qps[scan];
+    let z: i64 = (*c).qpe[scan];
+    let mut t: Vec<u8> = vec_new();
+    let mut i: i64 = a;
+    while i < z {
+        push(&mut t, (*c).qpath[i]);
+        i = i + 1;
+    }
+    vec_to_array(t)
+}
+
+fn mc_reset_rename(c: &mut MergeCtx) -> i64 {
+    while len((*c).rnsrc) > 0 {
+        pop(&mut (*c).rnsrc);
+    }
+    while len((*c).rss) > 0 {
+        pop(&mut (*c).rss);
+    }
+    while len((*c).rse) > 0 {
+        pop(&mut (*c).rse);
+    }
+    while len((*c).rnq) > 0 {
+        pop(&mut (*c).rnq);
+    }
+    while len((*c).rqs) > 0 {
+        pop(&mut (*c).rqs);
+    }
+    while len((*c).rqe) > 0 {
+        pop(&mut (*c).rqe);
+    }
+    0
+}
+
+// ADR 0067: if module file `mpath` (root source `root`) declares `part`s, append
+// each part file's source so the module is processed as ONE combined token stream
+// (the multi-file-module concat). The emission order — the root's items, then each
+// part's in part-declaration order — matches the Rust merge byte-for-byte (its
+// per-module union rename + root-then-parts unit order). `mpath` ends in
+// ".sentinel" (9 bytes); a `part name;` reads `<stem>/name.sentinel`. The
+// `module`/`part` directives are dropped later by emit_item, so a module with no
+// parts returns its root unchanged (byte-identical to the pre-ADR-0067 path).
+fn append_module_parts(root: [u8], mpath: [u8]) -> [u8] {
+    let rn: i64 = len(root);
+    let mut k: Vec<i64> = vec_new();
+    let mut s: Vec<i64> = vec_new();
+    let mut e: Vec<i64> = vec_new();
+    tokenize(&root, rn, &mut k, &mut s, &mut e);
+    let ntok: i64 = len(k);
+    let mut comb: Vec<u8> = vec_new();
+    append_slice(&mut comb, &root, 0, rn);
+    let stem_end: i64 = len(mpath) - 9;
+    let mut i: i64 = 0;
+    while i < ntok {
+        if k[i] == 65 {
+            let mut pp: Vec<u8> = vec_new();
+            append_slice(&mut pp, &mpath, 0, stem_end);
+            push(&mut pp, '/');
+            append_slice(&mut pp, &root, s[i + 1], e[i + 1]);
+            append_str(&mut pp, ".sentinel");
+            let ppath: [u8] = vec_to_array(pp);
+            let psrc: [u8] = read_file(ppath);
+            push(&mut comb, i64_to_u8(10));
+            append_slice(&mut comb, &psrc, 0, len(psrc));
+            i = i + 2;
+            0
+        } else {
+            i = i + 1;
+            0
+        };
+    }
+    vec_to_array(comb)
+}
+
+// Enqueue the entry module: path `p`, prefix `x` (the entry stem).
+fn enqueue_entry(c: &mut MergeCtx, p: [u8], x: [u8]) -> i64 {
+    let ps: i64 = len((*c).qpath);
+    let lp: i64 = len(p);
+    let mut i: i64 = 0;
+    while i < lp {
+        push(&mut (*c).qpath, p[i]);
+        i = i + 1;
+    }
+    let pe: i64 = len((*c).qpath);
+    push(&mut (*c).qps, ps);
+    push(&mut (*c).qpe, pe);
+    let xs: i64 = len((*c).qpfx);
+    let lx: i64 = len(x);
+    let mut j: i64 = 0;
+    while j < lx {
+        push(&mut (*c).qpfx, x[j]);
+        j = j + 1;
+    }
+    let xe: i64 = len((*c).qpfx);
+    push(&mut (*c).qxs, xs);
+    push(&mut (*c).qxe, xe);
+    0
+}
+
+fn has_use(k: &Vec<i64>) -> bool {
+    let ntok: i64 = len((*k));
+    let mut i: i64 = 0;
+    let mut found: bool = false;
+    while i < ntok {
+        if (*k)[i] == 58 {
+            found = true;
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    found
+}
+
+// --- driver: BFS discover + per-module rename + emit --------------------------
+
+// Discover (BFS over `use` edges) + merge the multi-module program rooted at
+// `./input.sentinel` into one `$`-qualified source, returned as `[u8]`. Reusable by
+// `codegen.sentinel` (so `scg` discovers + merges + emits in ONE binary) and by the
+// standalone `main` below.
+pub fn merge_source() -> [u8] {
+    let mut c: MergeCtx = MergeCtx {
+        qpath: vec_new(),
+        qps: vec_new(),
+        qpe: vec_new(),
+        qpfx: vec_new(),
+        qxs: vec_new(),
+        qxe: vec_new(),
+        rnsrc: vec_new(),
+        rss: vec_new(),
+        rse: vec_new(),
+        rnq: vec_new(),
+        rqs: vec_new(),
+        rqe: vec_new(),
+    };
+    enqueue_entry(&mut c, "input.sentinel", "input");
+    let mut merged: Vec<u8> = vec_new();
+    let mut merge_mode: bool = false;
+    let mut scan: i64 = 0;
+    while scan < mc_count(&c) {
+        let mpath: [u8] = mc_module_path(&c, scan);
+        let mpath2: [u8] = mc_module_path(&c, scan);
+        let root_src: [u8] = read_file(mpath);
+        // ADR 0067: fold in any `part` files so a multi-file module is one stream.
+        let msrc: [u8] = append_module_parts(root_src, mpath2);
+        let mn: i64 = len(msrc);
+        let mut k: Vec<i64> = vec_new();
+        let mut s: Vec<i64> = vec_new();
+        let mut e: Vec<i64> = vec_new();
+        tokenize(&msrc, mn, &mut k, &mut s, &mut e);
+        if scan == 0 {
+            merge_mode = has_use(&k);
+            0
+        } else {
+            0
+        };
+        mc_reset_rename(&mut c);
+        if merge_mode {
+            build_rename(&mut c, scan, &k, &s, &e, &msrc);
+            enqueue_uses(&mut c, &k, &s, &e, &msrc);
+            0
+        } else {
+            0
+        };
+        emit_module(&mut merged, &c, &k, &s, &e, &msrc);
+        scan = scan + 1;
+    }
+    vec_to_array(merged)
+}
+
+fn main() -> i64 {
+    let arr: [u8] = merge_source();
+    print_bytes(arr);
+    0
+}

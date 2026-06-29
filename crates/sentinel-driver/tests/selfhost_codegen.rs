@@ -29,15 +29,20 @@ fn workspace_root() -> PathBuf {
         .expect("canonicalize workspace root")
 }
 
-/// ADR 0067: `types` is a multi-file module — stage every file in its `types/`
-/// parts dir alongside the staged `types.sentinel` so discovery finds the parts.
-fn stage_types_parts(root: &Path, dst: &Path) {
-    let pd = dst.join("types");
-    std::fs::create_dir_all(&pd).expect("create types/ parts dir");
-    for ent in std::fs::read_dir(root.join("selfhost/types")).expect("read types/ parts") {
+/// ADR 0067: stage every file in a multi-file module's `<module>/` parts dir
+/// alongside the staged `<module>.sentinel` so discovery finds the parts. A no-op
+/// if the module has no parts dir.
+fn stage_module_parts(root: &Path, dst: &Path, module: &str) {
+    let src = root.join("selfhost").join(module);
+    if !src.is_dir() {
+        return;
+    }
+    let pd = dst.join(module);
+    std::fs::create_dir_all(&pd).expect("create parts dir");
+    for ent in std::fs::read_dir(&src).expect("read parts dir") {
         let p = ent.expect("dir entry").path();
         if p.extension().and_then(|x| x.to_str()) == Some("sentinel") {
-            std::fs::copy(&p, pd.join(p.file_name().unwrap())).expect("stage a types part");
+            std::fs::copy(&p, pd.join(p.file_name().unwrap())).expect("stage a part");
         }
     }
 }
@@ -50,10 +55,11 @@ fn build_sentinel_codegen(tmp: &Path) -> PathBuf {
         .expect("stage parser.sentinel");
     std::fs::copy(root.join("selfhost/types.sentinel"), tmp.join("types.sentinel"))
         .expect("stage types.sentinel");
-    stage_types_parts(&root, tmp);
+    stage_module_parts(&root, tmp, "types");
     // (8g) path (a): codegen.sentinel now `use`s merge.sentinel (self-hosted discover+merge).
     std::fs::copy(root.join("selfhost/merge.sentinel"), tmp.join("merge.sentinel"))
         .expect("stage merge.sentinel");
+    stage_module_parts(&root, tmp, "merge");
     let entry = tmp.join("codegen.sentinel");
     std::fs::copy(root.join("selfhost/codegen.sentinel"), &entry).expect("stage codegen.sentinel");
     let bin = tmp.join("scg");
@@ -563,7 +569,8 @@ fn sentinel_codegen_self_merges_the_compiler_and_reaches_fixed_point() {
     }
     // ADR 0067: `types` is multi-file — stage its `types/` parts dir (staged as
     // `types`, so its parts resolve under `run/types/`).
-    stage_types_parts(&root, &run);
+    stage_module_parts(&root, &run, "types");
+    stage_module_parts(&root, &run, "merge");
 
     // The Rust oracle: `snc llvm` on the entry (discovers + merge_modules + dumps).
     let oracle = Command::new(env!("CARGO_BIN_EXE_snc"))
