@@ -1,0 +1,31 @@
+// ADR 0066 M1.1: generic `Task<T>` in the self-host differential — a spawn over a
+// `bool` argument and a `bool` result. This brings the non-i64 word-scalar path into
+// every differential corpus (types/resolve/mir/borrow/effects/codegen), exercising:
+//   * the per-spawn wrapper loading the arg with its real type (`load i1`);
+//   * ENCODING the result into the Task's i64 slot (`zext i1 ... to i64`);
+//   * `.await` DECODING it back (`trunc i64 ... to i1`).
+// The i64 path stays byte-identical to C4.4 (encode/decode is a no-op there), so the
+// rest of the corpus is unchanged; `snc llvm` == `scg` byte-for-byte here too.
+//
+// Trace: spawn flip(false) runs on a worker thread → true; `.await` decodes true; the
+// scope discharges Async so main stays effect-free; `if r { 42 }` → 42. Exit 42.
+
+fn flip(b: bool) -> bool ! { Async } {
+    if b {
+        false
+    } else {
+        true
+    }
+}
+
+fn main() -> i64 {
+    let r: bool = scope concurrent {
+        let t = spawn flip(false);
+        t.await
+    };
+    if r {
+        42
+    } else {
+        0
+    }
+}

@@ -289,38 +289,70 @@ fn collect_spawn_targets_expr(expr: &TypedExpr, acc: &mut Vec<FnId>) {
 }
 
 /// Bar B / concurrency — synthesize `void @__spawn_wrapper_<id>(ptr %arg0, ptr %arg1)`
-/// (`%arg0` = the Task, `%arg1` = the packed args): unpack `n` i64 args (8-byte slots),
-/// call the target, store the result into `task` (offset 0), set `task->done` (i32 @ 8),
-/// return void. Mirrors inkwell's pre-walk wrapper synthesis. Args are i64 at the C4.4
-/// minimum (the `Task<i64>` result restriction).
-fn dump_spawn_wrapper(program: &TypedProgram, fn_id: FnId, out: &mut String) {
+/// (`%arg0` = the Task, `%arg1` = the packed args): unpack `n` args (8-byte slots), call
+/// the target, store the result into `task` (offset 0), set `task->done` (i32 @ 8), return
+/// void. Mirrors inkwell's pre-walk wrapper synthesis. ADR 0066 M1.1: each arg is loaded
+/// with its real type and the result is ENCODED into the i64 result slot (zext narrow int /
+/// bitcast f64 / ptrtoint ptr); the `i64` case is a no-op, byte-identical to C4.4.
+fn dump_spawn_wrapper(program: &TypedProgram, fn_id: FnId, out: &mut String) -> Result<(), String> {
     let target = program.fns.iter().find(|f| f.id == fn_id);
     let (name, n) = match target {
         Some(f) => (f.name.clone(), f.params.len()),
-        None => return,
+        None => return Ok(()),
     };
+    let sig = program.signature(fn_id);
     writeln!(out, "define void @__spawn_wrapper_{}(ptr %arg0, ptr %arg1) {{", fn_id.0).unwrap();
     out.push_str("entry:\n");
     let mut next: u32 = 0;
     let mut call_args: Vec<String> = Vec::with_capacity(n);
-    for i in 0..n {
+    for (i, &pty) in sig.param_types.iter().enumerate() {
+        let aty = llvm_ty(pty, program)?;
         let off = i * 8;
         let gp = next;
         next += 1;
         writeln!(out, "  %v{gp} = getelementptr i8, ptr %arg1, i64 {off}").unwrap();
         let ld = next;
         next += 1;
-        writeln!(out, "  %v{ld} = load i64, ptr %v{gp}").unwrap();
-        call_args.push(format!("i64 %v{ld}"));
+        writeln!(out, "  %v{ld} = load {aty}, ptr %v{gp}").unwrap();
+        call_args.push(format!("{aty} %v{ld}"));
     }
+    let rty = llvm_ty(sig.return_type, program)?;
     let call_reg = next;
     next += 1;
-    writeln!(out, "  %v{call_reg} = call i64 @{name}({})", call_args.join(", ")).unwrap();
-    writeln!(out, "  store i64 %v{call_reg}, ptr %arg0").unwrap();
+    writeln!(out, "  %v{call_reg} = call {rty} @{name}({})", call_args.join(", ")).unwrap();
+    // ADR 0066 M1.1: encode the result into the Task's i64 result slot.
+    let enc = match sig.return_type.strip_secret(&program.secrets).0 {
+        Type::I64 => call_reg,
+        Type::I32 | Type::U8 | Type::Bool => {
+            let e = next;
+            next += 1;
+            writeln!(out, "  %v{e} = zext {rty} %v{call_reg} to i64").unwrap();
+            e
+        }
+        Type::F64 => {
+            let e = next;
+            next += 1;
+            writeln!(out, "  %v{e} = bitcast double %v{call_reg} to i64").unwrap();
+            e
+        }
+        Type::Ptr | Type::Task(_) => {
+            let e = next;
+            next += 1;
+            writeln!(out, "  %v{e} = ptrtoint ptr %v{call_reg} to i64").unwrap();
+            e
+        }
+        other => {
+            return Err(format!(
+                "spawn result type not yet ported (ADR 0066 M1.1 word-scalar): {other:?}"
+            ));
+        }
+    };
+    writeln!(out, "  store i64 %v{enc}, ptr %arg0").unwrap();
     let done_gp = next;
     writeln!(out, "  %v{done_gp} = getelementptr i8, ptr %arg0, i64 8").unwrap();
     writeln!(out, "  store i32 1, ptr %v{done_gp}").unwrap();
     out.push_str("  ret void\n}\n");
+    Ok(())
 }
 
 /// Emit the canonical `.ll` for `program`, or `Err(why)` if it uses a
@@ -486,7 +518,7 @@ pub fn dump(program: &TypedProgram, drop_plan: &DropPlan) -> Result<String, Stri
     spawn_targets.sort_by_key(|f| f.0);
     spawn_targets.dedup();
     for fn_id in spawn_targets {
-        dump_spawn_wrapper(program, fn_id, &mut fns_buf);
+        dump_spawn_wrapper(program, fn_id, &mut fns_buf)?;
         fns_buf.push('\n');
     }
     // Runtime-symbol declarations (8c-2+): only the symbols actually used, in a
@@ -1982,10 +2014,12 @@ impl Emit<'_> {
                 self.used.alloc = true;
                 for (i, arg) in args.iter().enumerate() {
                     let v = self.lower_expr(arg)?;
+                    // ADR 0066 M1.1: store the arg with its real type (was i64).
+                    let aty = self.lty(arg.ty)?;
                     let off = i * 8;
                     let gp = self.fresh();
                     writeln!(self.body, "  %v{gp} = getelementptr i8, ptr %v{st}, i64 {off}").unwrap();
-                    writeln!(self.body, "  store i64 {v}, ptr %v{gp}").unwrap();
+                    writeln!(self.body, "  store {aty} {v}, ptr %v{gp}").unwrap();
                 }
                 let task = self.fresh();
                 writeln!(
@@ -2001,13 +2035,35 @@ impl Emit<'_> {
                 }
                 Ok(format!("%v{task}"))
             }
-            // Bar B / concurrency — `task.await`: join the task + read its i64 result.
+            // Bar B / concurrency — `task.await`: join the task + read its i64 result,
+            // then DECODE it back to the Task's result type (ADR 0066 M1.1 — the inverse
+            // of the wrapper's encode; i64 is a no-op, byte-identical to C4.4).
             TypedExprKind::Await { task_expr, .. } => {
                 let t = self.lower_expr(task_expr)?;
                 let r = self.fresh();
                 writeln!(self.body, "  %v{r} = call i64 @sentinel_task_await(ptr {t})").unwrap();
                 self.used.task_await = true;
-                Ok(format!("%v{r}"))
+                let conv = match expr.ty {
+                    Type::I64 => None,
+                    Type::I32 => Some(("trunc", "i32")),
+                    Type::U8 => Some(("trunc", "i8")),
+                    Type::Bool => Some(("trunc", "i1")),
+                    Type::F64 => Some(("bitcast", "double")),
+                    Type::Ptr | Type::Task(_) => Some(("inttoptr", "ptr")),
+                    other => {
+                        return Err(format!(
+                            "await result type not yet ported (ADR 0066 M1.1 word-scalar): {other:?}"
+                        ));
+                    }
+                };
+                match conv {
+                    None => Ok(format!("%v{r}")),
+                    Some((op, to)) => {
+                        let d = self.fresh();
+                        writeln!(self.body, "  %v{d} = {op} i64 %v{r} to {to}").unwrap();
+                        Ok(format!("%v{d}"))
+                    }
+                }
             }
         }
     }

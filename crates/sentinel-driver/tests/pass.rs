@@ -1097,6 +1097,16 @@ fn pass_c44_go_no_go() {
     assert_eq!(r.stdout, "");
 }
 
+#[test]
+fn pass_c66_task_bool() {
+    // ADR 0066 M1.1: a generic `Task<bool>` spawn over a `bool` arg — the
+    // wrapper loads `i1`, encodes the result (`zext i1`), `.await` decodes
+    // (`trunc to i1`). flip(false) → true → 42. In every differential corpus.
+    let r = build_and_run("c66_task_bool.sentinel");
+    assert_eq!(r.exit, 42);
+    assert_eq!(r.stdout, "");
+}
+
 // ----- C4.5 / ADR 0021 D13: full-surface phase-go close-out -----
 
 #[test]

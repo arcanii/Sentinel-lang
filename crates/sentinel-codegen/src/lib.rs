@@ -7199,7 +7199,7 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                         .builder
                         .build_bit_cast(raw, self.context.f64_type(), "await_dec")
                         .map_err(|e| CodegenError::Builder(e.to_string()))?,
-                    Type::Ptr | Type::Task(_) | Type::Class(_) => self
+                    Type::Ptr | Type::Task(_) => self
                         .builder
                         .build_int_to_ptr(
                             raw,

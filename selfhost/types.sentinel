@@ -5171,7 +5171,33 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
                 cgo_operand(c, tk, tv);
                 cgo_str(c, ")\n");
                 (*c).cg_used_taskawait = true;
-                cg_reg(c, r);
+                // ADR 0066 M1.1: decode the i64 result slot to the Task's result type
+                // (inverse of the wrapper encode). i64 (0) is a no-op = byte-identical to C4.4.
+                // One `cg_dst` for the non-i64 cases (selfhost `let` is not block-scoped).
+                let dr: i64 = strip_secret(c, awr);
+                if dr == 0 {
+                    cg_reg(c, r)
+                } else {
+                    let dd: i64 = cg_dst(c);
+                    if dr == 1 {
+                        cgo_str(c, "trunc i64 %v");
+                        cgo_int(c, r);
+                        cgo_str(c, " to i32\n")
+                    } else if dr == 2 {
+                        cgo_str(c, "trunc i64 %v");
+                        cgo_int(c, r);
+                        cgo_str(c, " to i1\n")
+                    } else if dr == 3 {
+                        cgo_str(c, "trunc i64 %v");
+                        cgo_int(c, r);
+                        cgo_str(c, " to i8\n")
+                    } else {
+                        cgo_str(c, "inttoptr i64 %v");
+                        cgo_int(c, r);
+                        cgo_str(c, " to ptr\n")
+                    };
+                    cg_reg(c, dd)
+                };
                 0
             } else {
                 0
@@ -10598,6 +10624,7 @@ fn cg_emit_spawn(c: &mut TyCtx, fid: i64, snap: i64, src: &[u8]) -> i64 {
     while i < n {
         let ak: i64 = (*c).cgak[snap + i];
         let av: i64 = (*c).cgav[snap + i];
+        let at: i64 = (*c).cgat[snap + i];
         let off: i64 = i * 8;
         let gp: i64 = cg_dst(c);
         cgo_str(c, "getelementptr i8, ptr %v");
@@ -10605,7 +10632,10 @@ fn cg_emit_spawn(c: &mut TyCtx, fid: i64, snap: i64, src: &[u8]) -> i64 {
         cgo_str(c, ", i64 ");
         cgo_int(c, off);
         cg_putc(c, '\n');
-        cgo_str(c, "  store i64 ");
+        // ADR 0066 M1.1: store the arg with its real type (was i64).
+        cgo_str(c, "  store ");
+        cgo_ty(c, at);
+        cg_putc(c, ' ');
         cgo_operand(c, ak, av);
         cgo_str(c, ", ptr %v");
         cgo_int(c, gp);
@@ -10660,23 +10690,35 @@ fn cg_emit_spawn_wrapper(c: &mut TyCtx, fid: i64, src: &[u8]) -> i64 {
     cgo_str(c, "define void @__spawn_wrapper_");
     cgo_int(c, fid);
     cgo_str(c, "(ptr %arg0, ptr %arg1) {\nentry:\n");
+    // ADR 0066 M1.1: load each arg with its real param type + encode the result into
+    // the Task's i64 slot (mirrors the oracle's dump_spawn_wrapper). i64 args/result are
+    // byte-identical to C4.4.
+    let ps: i64 = (*c).ufps[fid - 21];
+    let reth: i64 = strip_secret(c, (*c).ufret[fid - 21]);
     let mut loads: Vec<i64> = vec_new();
+    let mut ptys: Vec<i64> = vec_new();
     let mut i: i64 = 0;
     while i < np {
+        let pty: i64 = (*c).ufpp[ps + i];
         let off: i64 = i * 8;
         let gp: i64 = cg_dst(c);
         cgo_str(c, "getelementptr i8, ptr %arg1, i64 ");
         cgo_int(c, off);
         cg_putc(c, '\n');
         let ld: i64 = cg_dst(c);
-        cgo_str(c, "load i64, ptr %v");
+        cgo_str(c, "load ");
+        cgo_ty(c, pty);
+        cgo_str(c, ", ptr %v");
         cgo_int(c, gp);
         cg_putc(c, '\n');
         push(&mut loads, ld);
+        push(&mut ptys, pty);
         i = i + 1;
     }
     let cr: i64 = cg_dst(c);
-    cgo_str(c, "call i64 @");
+    cgo_str(c, "call ");
+    cgo_ty(c, reth);
+    cgo_str(c, " @");
     cgo_slice(c, src, ns, ne);
     cg_putc(c, '(');
     let mut j: i64 = 0;
@@ -10686,13 +10728,38 @@ fn cg_emit_spawn_wrapper(c: &mut TyCtx, fid: i64, src: &[u8]) -> i64 {
         } else {
             0
         };
-        cgo_str(c, "i64 %v");
+        cgo_ty(c, ptys[j]);
+        cg_putc(c, ' ');
+        cgo_str(c, "%v");
         cgo_int(c, loads[j]);
         j = j + 1;
     }
     cgo_str(c, ")\n");
+    let enc: i64 = if reth == 0 {
+        cr
+    } else {
+        let ee: i64 = cg_dst(c);
+        if reth == 1 {
+            cgo_str(c, "zext i32 %v");
+            cgo_int(c, cr);
+            cgo_str(c, " to i64\n")
+        } else if reth == 2 {
+            cgo_str(c, "zext i1 %v");
+            cgo_int(c, cr);
+            cgo_str(c, " to i64\n")
+        } else if reth == 3 {
+            cgo_str(c, "zext i8 %v");
+            cgo_int(c, cr);
+            cgo_str(c, " to i64\n")
+        } else {
+            cgo_str(c, "ptrtoint ptr %v");
+            cgo_int(c, cr);
+            cgo_str(c, " to i64\n")
+        };
+        ee
+    };
     cgo_str(c, "  store i64 %v");
-    cgo_int(c, cr);
+    cgo_int(c, enc);
     cgo_str(c, ", ptr %arg0\n");
     let dg: i64 = cg_dst(c);
     cgo_str(c, "getelementptr i8, ptr %arg0, i64 8\n");
@@ -10701,6 +10768,7 @@ fn cg_emit_spawn_wrapper(c: &mut TyCtx, fid: i64, src: &[u8]) -> i64 {
     cg_putc(c, '\n');
     cgo_str(c, "  ret void\n}\n\n");
     let _lx: i64 = len(loads);
+    let _ly: i64 = len(ptys);
     0
 }
 

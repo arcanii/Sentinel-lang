@@ -1104,26 +1104,22 @@ pub fn intern_kont(konts: &mut Vec<KontData>, arg_ty: Type, ret_ty: Type) -> Kon
 /// wrapper can pack into an 8-byte arg slot and encode into the Task's
 /// `i64` result slot? These are the single-LLVM-value types ≤ 8 bytes:
 /// the scalars `i64`/`i32`/`u8`/`bool`/`f64`/`ptr` and the pointer-lowered
-/// `Task`/class handles. Codegen encodes the result to/from `i64`
-/// (zext/trunc for narrow ints, bitcast for `f64`, ptrtoint/inttoptr for
-/// pointers), so the runtime `SentinelTask.result` slot stays `i64` and
-/// existing `Task<i64>` IR is byte-identical (the i64 case is a no-op).
+/// `Task` handle. Codegen encodes the result to/from `i64` (zext/trunc for
+/// narrow ints, bitcast for `f64`, ptrtoint/inttoptr for pointers), so the
+/// runtime `SentinelTask.result` slot stays `i64` and existing `Task<i64>`
+/// IR is byte-identical (the i64 case is a no-op).
 ///
-/// Deferred (a clean `SpawnTypeUnsupported` diagnostic): `u128` (16 bytes)
-/// and the aggregates `struct`/`enum`/`Vec`/`[T]`/`?T`, which need a wider
-/// slot plus a boxed result (a D6 follow-on); and `secret`, where a secret
-/// crossing a thread boundary lands with channels (ADR 0066 D8 / M1.2).
+/// `Class` is intentionally NOT word-scalar: a class instance is a named
+/// aggregate VALUE (`%Class.N`), not a pointer, so it doesn't fit the
+/// 8-byte slot. Deferred with a clean `SpawnTypeUnsupported` diagnostic:
+/// `u128` (16 bytes) and the aggregates `struct`/`class`/`enum`/`Vec`/
+/// `[T]`/`?T`, which need a wider slot plus a boxed result (a D6 follow-on);
+/// and `secret`, where a secret crossing a thread boundary lands with
+/// channels (ADR 0066 D8 / M1.2).
 pub fn is_spawn_word_scalar(ty: Type) -> bool {
     matches!(
         ty,
-        Type::I64
-            | Type::I32
-            | Type::U8
-            | Type::Bool
-            | Type::F64
-            | Type::Ptr
-            | Type::Task(_)
-            | Type::Class(_)
+        Type::I64 | Type::I32 | Type::U8 | Type::Bool | Type::F64 | Type::Ptr | Type::Task(_)
     )
 }
 

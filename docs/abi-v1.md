@@ -118,6 +118,18 @@ offset 8. ADR 0020 D7.
 `owned` occupies the former `_pad` slot at offset 12 (ADR 0024 D9) — the
 32-byte layout is unchanged from C4.4.
 
+**ADR 0066 M1.1 — generic `Task<T>` result encoding.** The `result` slot stays
+`i64` and `sentinel_task_await` still returns `i64`, but for a `Task<T>` whose
+`T` is a non-`i64` **word-sized scalar** (`i32`/`u8`/`bool`/`f64`/`ptr`/`Task`)
+the slot carries the value **encoded** as an `i64`, not `T` directly: the
+per-spawn wrapper writes `zext` (narrow int) / `bitcast` (`f64`) / `ptrtoint`
+(pointer) of the result before signalling `done`, and `.await` applies the
+inverse (`trunc` / `bitcast` / `inttoptr`) after reading it back. The struct
+layout and the symbol signatures are therefore **unchanged** (no ABI break); the
+encode/decode is entirely codegen-side, and `Task<i64>` is the identity case
+(byte-identical IR to C4.4). Aggregate / `u128` / `secret` results are not yet
+supported (rejected at type-check — ADR 0066 D6 / D8).
+
 ### `SentinelScopeCtx` — size **8**, align **8**
 
 | field | type | offset |
