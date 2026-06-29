@@ -51,7 +51,7 @@ reference as you work through the milestones.
 
 ---
 
-### ▶ RESUME HERE (2026-06-30 — ▶ ADR 0066 CONCURRENCY RESUMED (maintainer's call (b)): M1.2b `Channel<T>` reaches TYPE-ANNOTATION position → a channel-typed fn PARAM → the cross-thread producer/consumer WORKER, fully self-hosted. Added the `resolve_type_expr` "Channel" arm in BOTH compilers (Rust `sentinel-types`; selfhost `types/interner.sentinel` `type_of_typeexpr`) — `Channel<i64>` only at the minimum (`ChannelElementNotSupported` rejects a non-`i64` element, `tests/ui/c66_channel_element_unsupported`). New differential fixture `tests/pass/c66_channel_worker` (spawn `produce(ch)` with a Channel arg + main drains as consumer → exit 42). Fixed a latent spawn-lowering divergence (a copy-var spawn arg's `load` must precede the args-struct alloc) by aligning ALL THREE emitters (inkwell + `snc llvm` + selfhost cg) on collect-then-store; taught the selfhost borrow checker `Channel` is Copy. NO new runtime symbols / ABI change. Full self-host differential (9 stages) GREEN, both fixed points byte-identical, Windows four-check green. ▶ NEXT is the maintainer's call — (b-cont) M1.2b GENERIC ELEMENTS `Channel<bool>`/`<u8>`/`<f64>` (needs generic channel builtins; `recv -> ?T` gated on `T` having a `NullableInner`, which `u8`/`f64`/`ptr` lack) → M1.3 worker-pool library + examples → M2 processes; (a) the ADR-0067 TAILS (`run`'s coupled pass-pipeline + `cg_emit_call`; the `module X;` decl sweep + mandatory-enforcement flip; `--separate` over multi-file modules); or (c) a deferred ADR-needed backlog item (§11.6 `return value;` terminator, §11.7 cross-module `pub class`, BACKLOG2 §10.9 module-system guide doc).)
+### ▶ RESUME HERE (2026-06-30 — ▶ ADR 0066 CONCURRENCY RESUMED (maintainer's call (b)): M1.2b `Channel<T>` reaches TYPE-ANNOTATION position → a channel-typed fn PARAM → the cross-thread producer/consumer WORKER, fully self-hosted. Added the `resolve_type_expr` "Channel" arm in BOTH compilers (Rust `sentinel-types`; selfhost `types/interner.sentinel` `type_of_typeexpr`) — `Channel<i64>` only at the minimum (`ChannelElementNotSupported` rejects a non-`i64` element, `tests/ui/c66_channel_element_unsupported`). New differential fixture `tests/pass/c66_channel_worker` (spawn `produce(ch)` with a Channel arg + main drains as consumer → exit 42). Fixed a latent spawn-lowering divergence (a copy-var spawn arg's `load` must precede the args-struct alloc) by aligning ALL THREE emitters (inkwell + `snc llvm` + selfhost cg) on collect-then-store; taught the selfhost borrow checker `Channel` is Copy. NO new runtime symbols / ABI change. **THEN M1.3 (worker pattern) EXAMPLES landed:** `examples/lang/worker_pool.sentinel` (a two-worker fan-out/fan-in pool — workers spawned with their channel endpoints, a work-stealing shared queue + a results fan-in channel; squares 1/4/5 → 42, built BOTH `--separate` and merged) + `tests/pass/c66_channel_pipeline` (a `relay(src,dst)` worker = the corpus's FIRST 2-arg spawn, pinning the multi-arg packed-args lowering byte-identical). Full self-host differential (9 stages) GREEN, both fixed points byte-identical, Windows four-check green. ▶ NEXT is the maintainer's call — (b-cont) M1.2b GENERIC ELEMENTS `Channel<bool>`/`<u8>`/`<f64>` (needs generic channel builtins; `recv -> ?T` gated on `T` having a `NullableInner`, which `u8`/`f64`/`ptr` lack) + a *reusable* worker-pool LIBRARY (blocked on those generics + first-class fns for the worker body) → M2 processes; (a) the ADR-0067 TAILS (`run`'s coupled pass-pipeline + `cg_emit_call`; the `module X;` decl sweep + mandatory-enforcement flip; `--separate` over multi-file modules); or (c) a deferred ADR-needed backlog item (§11.6 `return value;` terminator, §11.7 cross-module `pub class`, BACKLOG2 §10.9 module-system guide doc).)
 
 > **▶ DONE (2026-06-30) — ADR 0066 M1.2b: `Channel<T>` type annotation + channel-typed fn param +
 > cross-thread worker (self-hosted).** Un-paused the concurrency track. M1.2 interned `Channel<i64>`
@@ -72,12 +72,24 @@ reference as you work through the milestones.
 >   byte-identical for ANY arg count (not just constants). Also: selfhost `is_move_type` learned kind
 >   13 (Channel) is Copy, matching Rust `is_copy_type`.
 > - **Fixtures:** `tests/pass/c66_channel_worker` (differential; spawn-with-channel-arg + cross-thread
->   drain → 42) + `tests/ui/c66_channel_element_unsupported` (the non-`i64` rejection).
+>   drain → 42) + `tests/ui/c66_channel_element_unsupported` (the non-`i64` rejection). Both new
+>   `tests/pass` fixtures are exit-validated in `pass.rs` too (they were auto-discovered by the
+>   differential but `pass.rs` registers fixtures EXPLICITLY — easy to forget).
 > - **NOT oracle-moving for the ABI:** no new runtime symbols, no `abi-v1` change (the channel runtime
 >   is unchanged from M1.2). Constant-time + the lexical borrow checker UNCHANGED.
-> - **NEXT (M1.2b cont., when resumed):** generic word-scalar channel ELEMENTS — `channel_new<T>` /
+> - **M1.3 (worker pattern) — EXAMPLES landed (same session):** `examples/lang/worker_pool.sentinel`
+>   (a two-worker fan-out/fan-in pool: workers spawned with their `Channel<i64>` endpoints, a shared
+>   work-stealing queue (mpsc receiver behind a mutex) + a results fan-in channel; squares 1/4/5 → 42,
+>   built BOTH `--separate` and merged, registered in `examples.rs`) + `tests/pass/c66_channel_pipeline`
+>   (a `relay(src, dst)` worker — the corpus's FIRST 2-argument spawn, pinning the multi-arg
+>   packed-args lowering byte-identical after the collect-then-store alignment). NOT oracle-moving (no
+>   compiler change — pure library/fixture). The *reusable* worker-pool LIBRARY is deferred (it needs
+>   generic `Channel<T>` AND a first-class-function/closure mechanism for the worker body — Sentinel
+>   has neither yet), so M1.3 ships as the demonstrator examples.
+> - **NEXT (when resumed):** M1.2b cont. — generic word-scalar channel ELEMENTS — `channel_new<T>` /
 >   `send<T>` / `recv<T> -> ?T` / `channel_close<T>`, which need `?T` for `u8`/`f64`/`ptr` (a
->   `NullableInner` extension) before `recv` can be generic. Then M1.3 (worker-pool library) / M2.
+>   `NullableInner` extension) before `recv` can be generic; then the reusable pool library, then M2
+>   (processes).
 
 > **▶ DONE (2026-06-30) — SELF-HOST MODULARIZATION via MULTI-FILE MODULES (ADR 0067
 > ACCEPTED-WITH-AMENDMENTS).** The maintainer's "maintainability is biting now" focus (BACKLOG §11.8)

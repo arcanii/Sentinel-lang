@@ -1116,6 +1116,26 @@ fn pass_c66_task_bool() {
     assert_eq!(r.stdout, "");
 }
 
+#[test]
+fn pass_c66_channel_worker() {
+    // ADR 0066 M1.2b: a `Channel<i64>` parameter (the resolve_type_expr arm) +
+    // a cross-thread `spawn produce(ch)` with a Channel ARG; `main` drains as the
+    // consumer until the worker closes the channel. 10 + 32 = 42. Differential.
+    let r = build_and_run("c66_channel_worker.sentinel");
+    assert_eq!(r.exit, 42);
+    assert_eq!(r.stdout, "");
+}
+
+#[test]
+fn pass_c66_channel_pipeline() {
+    // ADR 0066 M1.2b/M1.3: a TWO-channel-arg spawn `relay(src, dst)` — the
+    // corpus's first 2-arg spawn, pinning the multi-arg packed-args lowering
+    // (GEP offsets 0 + 8, collect-then-store). relay forwards src→dst. 20+22=42.
+    let r = build_and_run("c66_channel_pipeline.sentinel");
+    assert_eq!(r.exit, 42);
+    assert_eq!(r.stdout, "");
+}
+
 // ----- C4.5 / ADR 0021 D13: full-surface phase-go close-out -----
 
 #[test]

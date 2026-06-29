@@ -1,0 +1,66 @@
+// ADR 0066 M1.3: the worker-pool pattern — long-lived worker tasks within a
+// `scope`, wired together by channels (ADR 0066 D1/D2). This is the payoff of
+// M1.2b's channel-typed fn parameter: each worker is spawned with its channel
+// endpoints as arguments, so the workers and `main` share the queues.
+//
+// `main` spawns TWO workers, dispatches three work items into a shared `work`
+// channel, then closes it; each worker loops `recv(work)` -> square -> `send(
+// results, …)` until the work channel is closed (a `null` `?i64` = EOF). The
+// mpsc receiver is shared behind a mutex, so two workers consuming one channel
+// is a work-stealing queue (each `recv` pulls a distinct item, D2); the squared
+// results fan IN to a single `results` channel (mpsc is multi-producer). `main`
+// collects exactly three results and sums them; the scope auto-awaits both
+// workers at exit (the explicit `.await`s here just fold in their `0` results).
+//
+// Channels are Copy (D2), so `main` keeps its own copies of both handles for
+// dispatch/collection while each spawned worker gets a copy of the same two
+// underlying channels.
+//
+// Work: square 1, 4, 5 -> 1, 16, 25 (in whatever order the two workers pick
+// them up — addition is commutative, so the sum is deterministic). 1+16+25 = 42.
+// Exit 42.
+
+fn worker(work: Channel<i64>, results: Channel<i64>) -> i64 ! { Async } {
+    let mut running: bool = true;
+    while running {
+        let item = recv(work);
+        if is_some(item) {
+            let x: i64 = unwrap_or(item, 0);
+            send(results, x * x);
+            0
+        } else {
+            running = false;
+            0
+        };
+    }
+    0
+}
+
+fn main() -> i64 {
+    let work = channel_new();
+    let results = channel_new();
+    let total: i64 = scope concurrent {
+        let w0 = spawn worker(work, results);
+        let w1 = spawn worker(work, results);
+
+        // Dispatch the work, then close so the workers see EOF and finish.
+        send(work, 1);
+        send(work, 4);
+        send(work, 5);
+        channel_close(work);
+
+        // Fan-in: collect exactly the three results.
+        let mut sum: i64 = 0;
+        let mut got: i64 = 0;
+        while got < 3 {
+            let r = recv(results);
+            sum = sum + unwrap_or(r, 0);
+            got = got + 1;
+        }
+
+        let a: i64 = w0.await;
+        let b: i64 = w1.await;
+        sum + a + b
+    };
+    total
+}

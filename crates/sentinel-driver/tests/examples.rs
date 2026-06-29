@@ -462,6 +462,11 @@ const EXAMPLES: &[(&str, i32)] = &[
     // ?i64 some-or-null) over a Channel<i64> queue. snc-only (the selfhost
     // mirror lands in M1.2 Phase B). 10 + 32 = 42.
     ("examples/lang/channel.sentinel", 42),
+    // ADR 0066 M1.3: the worker-pool pattern — two long-lived workers spawned
+    // with their `Channel<i64>` endpoints (the M1.2b channel-typed param), a
+    // shared work queue (work-stealing via the mutex'd mpsc receiver) + a
+    // results fan-in channel. Squares 1/4/5 across the pool. 1+16+25 = 42.
+    ("examples/lang/worker_pool.sentinel", 42),
     // ADR 0037 / BACKLOG §10.9: the worked MULTI-FILE example — a program using
     // a `pub class` (`Rect`) defined in another file, the library module
     // `std::math::rect`. The class crosses the module / separate-compilation
@@ -732,6 +737,11 @@ fn lang_task_generic() {
 #[test]
 fn lang_channel() {
     check_example("examples/lang/channel.sentinel", "channel", 42);
+}
+
+#[test]
+fn lang_worker_pool() {
+    check_example("examples/lang/worker_pool.sentinel", "worker_pool", 42);
 }
 
 #[test]

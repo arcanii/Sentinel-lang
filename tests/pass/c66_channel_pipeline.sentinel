@@ -1,0 +1,51 @@
+// ADR 0066 M1.2b/M1.3: a `spawn` with TWO channel arguments — a relay stage
+// `spawn relay(src, dst)`. This is the differential corpus's first 2-argument
+// spawn, so it pins the multi-arg packed-args lowering (GEP offsets 0 AND 8 +
+// the collect-then-store order) byte-identical across `snc llvm` and `scg`
+// after the M1.2b spawn-lowering alignment (eval every arg -> alloc -> store).
+//
+// `main` feeds `src` two values then closes it; the relay worker forwards each
+// `src` value to `dst` until `src` is closed (a `null` `?i64` = EOF), then
+// closes `dst` so `main`'s drain terminates. 20 + 22 = 42. Exit 42.
+
+fn relay(src: Channel<i64>, dst: Channel<i64>) -> i64 ! { Async } {
+    let mut running: bool = true;
+    while running {
+        let m = recv(src);
+        if is_some(m) {
+            send(dst, unwrap_or(m, 0));
+            0
+        } else {
+            running = false;
+            0
+        };
+    }
+    channel_close(dst);
+    0
+}
+
+fn main() -> i64 {
+    let src = channel_new();
+    let dst = channel_new();
+    let total: i64 = scope concurrent {
+        let r = spawn relay(src, dst);
+        send(src, 20);
+        send(src, 22);
+        channel_close(src);
+        let mut sum: i64 = 0;
+        let mut draining: bool = true;
+        while draining {
+            let v = recv(dst);
+            if is_some(v) {
+                sum = sum + unwrap_or(v, 0);
+                0
+            } else {
+                draining = false;
+                0
+            };
+        }
+        let x: i64 = r.await;
+        sum + x
+    };
+    total
+}

@@ -36,10 +36,18 @@ checker also learned `Channel` is **Copy** (`is_move_type` kind 13 → not moved
 `is_copy_type`. **No new runtime symbols / ABI change** (the `sentinel_channel_*` set + the channel
 runtime are unchanged from M1.2). Constant-time + the lexical borrow checker UNCHANGED. Full
 self-host differential (all 9 stages) GREEN, both bootstrap fixed points byte-identical; Windows
-four-check green. **Generic word-scalar/aggregate channel ELEMENTS (`Channel<bool>`/`<u8>`/…) are the
-next sub-step** (they need generic channel builtins; `recv -> ?T` is gated on `T` having a
-`NullableInner`, which `u8`/`f64`/`ptr` lack). See ADR 0066 D3/D4 + HANDOVER §0 + the
-`threading-multiprocessing-planned` memory.
+four-check green. **And M1.3 (the worker pattern) — examples:** `examples/lang/worker_pool.sentinel`
+is the canonical fan-out/fan-in worker pool — two long-lived workers spawned with their channel
+endpoints (the M1.2b param), a shared work-stealing queue (mpsc receiver behind a mutex) + a results
+fan-in channel, squaring 1/4/5 → 42, built BOTH `--separate` and merged; plus
+`tests/pass/c66_channel_pipeline` (a `relay(src, dst)` worker — the corpus's **first 2-argument
+spawn**, pinning the multi-arg packed-args lowering byte-identical after the M1.2b collect-then-store
+alignment). Both new fixtures are exit-validated in `pass.rs` + byte-identical across all 9
+differential stages. **Next sub-steps:** generic word-scalar/aggregate channel ELEMENTS
+(`Channel<bool>`/`<u8>`/… — need generic channel builtins; `recv -> ?T` is gated on `T` having a
+`NullableInner`, which `u8`/`f64`/`ptr` lack), and a *reusable* worker-pool LIBRARY (blocked on those
+generics + some form of first-class function for the worker body), then M2 (processes). See ADR 0066
+D1/D3/D4 + HANDOVER §0 + the `threading-multiprocessing-planned` memory.
 
 **Latest (2026-06-30) — SELF-HOST MODULARIZATION via MULTI-FILE MODULES (ADR 0067
 ACCEPTED-WITH-AMENDMENTS); `selfhost/types.sentinel` split 13,718 → 3,371 lines.** The

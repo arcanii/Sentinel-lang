@@ -11,9 +11,13 @@ arm in both compilers, `Channel<i64>` minimum), so a fn can take a channel
 endpoint as a parameter (D4's worker pattern), with the cross-thread
 producer/consumer fixture `tests/pass/c66_channel_worker` (2026-06-30; no new
 runtime symbols / ABI change — front-end only, plus a behavior-preserving
-spawn-arg-lowering alignment across all three emitters). **Next:** M1.2b generic
+spawn-arg-lowering alignment across all three emitters); and **M1.3** (the worker
+pattern, D1) as EXAMPLES — `examples/lang/worker_pool.sentinel` (a two-worker
+fan-out/fan-in pool, built both `--separate` and merged) + the 2-channel-arg
+`tests/pass/c66_channel_pipeline` relay fixture. **Next:** M1.2b generic
 word-scalar channel *elements* (gated on `recv -> ?T` needing a `NullableInner`
-for `u8`/`f64`/`ptr`), then M1.3 (worker-pool library) / M2 (processes).
+for `u8`/`f64`/`ptr`) + a *reusable* worker-pool library (also needs first-class
+functions for the worker body), then M2 (processes).
 This ADR lays out the complete threading + multi-processing vision with
 pinned D-points for each piece, **implemented incrementally** across
 sub-phases. It is the umbrella over the near-term maintainer ask (flagged
