@@ -24,6 +24,19 @@ fn workspace_root() -> PathBuf {
         .expect("canonicalize workspace root")
 }
 
+/// ADR 0067: `types` is a multi-file module — stage every file in its `types/`
+/// parts dir alongside the staged `types.sentinel` so discovery finds the parts.
+fn stage_types_parts(root: &Path, dst: &Path) {
+    let pd = dst.join("types");
+    std::fs::create_dir_all(&pd).expect("create types/ parts dir");
+    for ent in std::fs::read_dir(root.join("selfhost/types")).expect("read types/ parts") {
+        let p = ent.expect("dir entry").path();
+        if p.extension().and_then(|x| x.to_str()) == Some("sentinel") {
+            std::fs::copy(&p, pd.join(p.file_name().unwrap())).expect("stage a types part");
+        }
+    }
+}
+
 /// Stage `parser.sentinel` + `types.sentinel` + `mir.sentinel` into `tmp` (so the
 /// `use parser::…` / `use types::…` edges resolve) and compile the entry
 /// `mir.sentinel`.
@@ -33,6 +46,7 @@ fn build_sentinel_mir_lowerer(tmp: &Path) -> PathBuf {
         .expect("stage parser.sentinel");
     std::fs::copy(root.join("selfhost/types.sentinel"), tmp.join("types.sentinel"))
         .expect("stage types.sentinel");
+    stage_types_parts(&root, tmp);
     let entry = tmp.join("mir.sentinel");
     std::fs::copy(root.join("selfhost/mir.sentinel"), &entry).expect("stage mir.sentinel");
     let bin = tmp.join("smir");
@@ -210,6 +224,7 @@ fn build_sentinel_ctverifier(tmp: &Path) -> PathBuf {
         .expect("stage parser.sentinel");
     std::fs::copy(root.join("selfhost/types.sentinel"), tmp.join("types.sentinel"))
         .expect("stage types.sentinel");
+    stage_types_parts(&root, tmp);
     let entry = tmp.join("ctverify.sentinel");
     std::fs::copy(root.join("selfhost/ctverify.sentinel"), &entry).expect("stage ctverify.sentinel");
     let bin = tmp.join("sctv");

@@ -22,6 +22,25 @@ fn workspace_root() -> PathBuf {
         .expect("canonicalize workspace root")
 }
 
+/// ADR 0067: if `src_module` is a multi-file module (`selfhost/<src_module>/`
+/// exists), stage its parts into `work/<staged_stem>/`. The parts dir name
+/// follows the STAGED root's stem — the entry is staged as `input.sentinel`, so
+/// its parts go under `input/`; a dep staged as `<dep>.sentinel` uses `<dep>/`.
+fn stage_parts_for(root: &Path, src_module: &str, work: &Path, staged_stem: &str) {
+    let src_dir = root.join("selfhost").join(src_module);
+    if !src_dir.is_dir() {
+        return;
+    }
+    let pd = work.join(staged_stem);
+    std::fs::create_dir_all(&pd).expect("create parts dir");
+    for ent in std::fs::read_dir(&src_dir).expect("read parts dir") {
+        let p = ent.expect("dir entry").path();
+        if p.extension().and_then(|x| x.to_str()) == Some("sentinel") {
+            std::fs::copy(&p, pd.join(p.file_name().unwrap())).expect("stage a part");
+        }
+    }
+}
+
 /// Stage `parser.sentinel` + `merge.sentinel` into `tmp` (so `use parser::…` resolves)
 /// and compile the un-parser binary.
 fn build_sentinel_merge(tmp: &Path) -> PathBuf {
@@ -143,12 +162,15 @@ fn sentinel_merge_matches_oracle_on_multi_module_stages() {
             work.join("input.sentinel"),
         )
         .expect("stage entry as input.sentinel");
+        // ADR 0067: the entry is staged as `input`, so its parts go under `input/`.
+        stage_parts_for(&root, entry, &work, "input");
         for dep in *deps {
             std::fs::copy(
                 root.join("selfhost").join(format!("{dep}.sentinel")),
                 work.join(format!("{dep}.sentinel")),
             )
             .expect("stage dependency");
+            stage_parts_for(&root, dep, &work, dep);
         }
 
         // The Rust oracle: `snc llvm` on the entry (discovers + `merge_modules` + dumps).

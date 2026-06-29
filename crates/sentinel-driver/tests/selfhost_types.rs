@@ -32,6 +32,19 @@ fn workspace_root() -> PathBuf {
         .expect("canonicalize workspace root")
 }
 
+/// ADR 0067: `types` is a multi-file module — stage every file in its `types/`
+/// parts dir alongside the staged `types.sentinel` so discovery finds the parts.
+fn stage_types_parts(root: &Path, dst: &Path) {
+    let pd = dst.join("types");
+    std::fs::create_dir_all(&pd).expect("create types/ parts dir");
+    for ent in std::fs::read_dir(root.join("selfhost/types")).expect("read types/ parts") {
+        let p = ent.expect("dir entry").path();
+        if p.extension().and_then(|x| x.to_str()) == Some("sentinel") {
+            std::fs::copy(&p, pd.join(p.file_name().unwrap())).expect("stage a types part");
+        }
+    }
+}
+
 /// Stage `parser.sentinel` + `types.sentinel` into `tmp` (so `use parser::…`
 /// resolves to the sibling file) and compile the entry `types.sentinel`.
 fn build_sentinel_typer(tmp: &Path) -> PathBuf {
@@ -40,6 +53,7 @@ fn build_sentinel_typer(tmp: &Path) -> PathBuf {
         .expect("stage parser.sentinel");
     let entry = tmp.join("types.sentinel");
     std::fs::copy(root.join("selfhost/types.sentinel"), &entry).expect("stage types.sentinel");
+    stage_types_parts(&root, tmp);
     let bin = tmp.join("stypes");
     let out = Command::new(env!("CARGO_BIN_EXE_snc"))
         .arg("build")
