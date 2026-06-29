@@ -4,6 +4,16 @@ Status: **ACCEPTED (roadmap)** — the roadmap shape + D-points were approved
 by the maintainer 2026-06-29; **each sub-phase (M1.1, M1.2, …) is separately
 ratified as it lands** per the both-bootstrap-fixed-points rhythm.
 Implementation began at **M1.1** (generic `Task<T>` + typed spawn args).
+**Landed + self-hosted so far:** M1.1 (generic `Task<T>`); M1.2 (`Channel<i64>`
++ the 4 channel builtins + 4 `sentinel_channel_*` runtime symbols); **M1.2b** —
+`Channel<T>` reaches type-annotation position (the `resolve_type_expr` "Channel"
+arm in both compilers, `Channel<i64>` minimum), so a fn can take a channel
+endpoint as a parameter (D4's worker pattern), with the cross-thread
+producer/consumer fixture `tests/pass/c66_channel_worker` (2026-06-30; no new
+runtime symbols / ABI change — front-end only, plus a behavior-preserving
+spawn-arg-lowering alignment across all three emitters). **Next:** M1.2b generic
+word-scalar channel *elements* (gated on `recv -> ?T` needing a `NullableInner`
+for `u8`/`f64`/`ptr`), then M1.3 (worker-pool library) / M2 (processes).
 This ADR lays out the complete threading + multi-processing vision with
 pinned D-points for each piece, **implemented incrementally** across
 sub-phases. It is the umbrella over the near-term maintainer ask (flagged

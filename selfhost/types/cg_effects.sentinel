@@ -176,8 +176,11 @@ fn cg_record_spawn(c: &mut TyCtx, fid: i64) -> i64 {
 // in cgak/cgav from `snap`) into a heap buffer (one i64 slot each, ≥8 bytes), call
 // `sentinel_task_spawn(@__spawn_wrapper_<fid>, args, size)`, and (inside a scope)
 // register the Task with `cg_scope`. Result operand = the Task ptr. Records `fid` for
-// wrapper synthesis. Mirrors the oracle's Spawn lowering (args are immediates in the
-// corpus, so collect-then-store is byte-identical to the oracle's inline lower-then-store).
+// wrapper synthesis. Mirrors the oracle's Spawn lowering: ADR 0066 M1.2b made BOTH snc
+// emitters (inkwell + `snc llvm`) collect-then-store too — evaluate every arg, THEN
+// alloc the packed-args buffer, THEN store — so a non-immediate spawn arg (e.g. a
+// copy-var `Channel` endpoint, whose eval emits a `load` before the alloc) is
+// byte-identical across all three emitters, for any number of args.
 fn cg_emit_spawn(c: &mut TyCtx, fid: i64, snap: i64, src: &[u8]) -> i64 {
     let _s: &[u8] = src;
     let n: i64 = len((*c).cgak) - snap;

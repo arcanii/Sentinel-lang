@@ -2042,13 +2042,23 @@ impl Emit<'_> {
                 };
                 let n = args.len();
                 let size = n.max(1) * 8;
-                let st = self.fresh();
-                writeln!(self.body, "  %v{st} = call ptr @sentinel_alloc(i64 {size})").unwrap();
-                self.used.alloc = true;
-                for (i, arg) in args.iter().enumerate() {
+                // ADR 0066 M1.2b: evaluate ALL args BEFORE allocating the packed-
+                // args struct, then GEP+store — matching the selfhost cg's
+                // collect-then-store order (and inkwell's). A non-constant arg
+                // (e.g. a copy-var `Channel` endpoint, whose eval emits a `load`)
+                // must precede the alloc to stay byte-identical with `scg`; a
+                // constant arg emits no instruction, so this is unchanged there.
+                let mut lowered: Vec<(String, String)> = Vec::with_capacity(n);
+                for arg in args.iter() {
                     let v = self.lower_expr(arg)?;
                     // ADR 0066 M1.1: store the arg with its real type (was i64).
                     let aty = self.lty(arg.ty)?;
+                    lowered.push((aty, v));
+                }
+                let st = self.fresh();
+                writeln!(self.body, "  %v{st} = call ptr @sentinel_alloc(i64 {size})").unwrap();
+                self.used.alloc = true;
+                for (i, (aty, v)) in lowered.into_iter().enumerate() {
                     let off = i * 8;
                     let gp = self.fresh();
                     writeln!(self.body, "  %v{gp} = getelementptr i8, ptr %v{st}, i64 {off}").unwrap();

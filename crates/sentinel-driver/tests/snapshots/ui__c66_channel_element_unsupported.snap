@@ -1,0 +1,14 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c66_channel_element_unsupported.sentinel\")"
+---
+sentinel::types::channel_element_not_supported
+
+  × `Channel<T>` element type is not supported yet
+   ╭─[tests/ui/c66_channel_element_unsupported.sentinel:5:15]
+ 4 │ // follow-on. Here a `Channel<bool>` parameter surfaces ChannelElementNotSupported.
+ 5 │ fn worker(ch: Channel<bool>) -> i64 {
+   ·               ──────┬──────
+   ·                     ╰── 
+ 6 │     0
+   ╰────

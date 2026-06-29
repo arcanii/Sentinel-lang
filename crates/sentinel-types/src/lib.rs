@@ -1591,6 +1591,40 @@ fn resolve_type_expr_with_scope(
                         }),
                     }
                 }
+                // ADR 0066 M1.2b: `Channel<T>` in type position — so a fn can
+                // take a channel endpoint as a parameter (the cross-thread
+                // producer/consumer shape, D4). At the M1.2b minimum the element
+                // type is `i64`, resolving to the singleton `Channel<i64>`
+                // interned at `ChanId(0)` during channel-builtin signature setup
+                // (no per-annotation interning — "no threading"). Generic
+                // word-scalar/aggregate elements are a follow-on.
+                "Channel" => {
+                    if args.len() != 1 {
+                        return Err(TypeError::TypeArgCountMismatch {
+                            type_name: "Channel".to_string(),
+                            expected: 1,
+                            found: args.len(),
+                            span: to_source_span(&te.span),
+                        });
+                    }
+                    let elem_ty = resolve_type_expr_with_scope(
+                        &args[0],
+                        struct_table,
+                        class_table,
+                        enum_table,
+                        type_param_scope,
+                        instances,
+                        refs,
+                        secrets,
+                        struct_type_param_counts,
+                    )?;
+                    if elem_ty != Type::I64 {
+                        return Err(TypeError::ChannelElementNotSupported {
+                            span: to_source_span(&te.span),
+                        });
+                    }
+                    Ok(Type::Channel(ChanId(0)))
+                }
                 other => {
                     let struct_id = match struct_table.get(other) {
                         Some(&id) => id,
@@ -3066,6 +3100,21 @@ pub enum TypeError {
     )]
     VecElementNotSupported {
         #[label("unsupported Vec element type here")]
+        span: miette::SourceSpan,
+    },
+
+    /// ADR 0066 M1.2b: a `Channel<T>` type annotation's element type must
+    /// be `i64` at the M1.2b minimum (the singleton `Channel<i64>` the
+    /// channel builtins are typed against). Generic word-scalar/aggregate
+    /// element types are a follow-on (they need generic channel builtins,
+    /// gated on `recv -> ?T` requiring a nullable-inner for `T`).
+    #[error("`Channel<T>` element type is not supported yet")]
+    #[diagnostic(
+        code(sentinel::types::channel_element_not_supported),
+        help("at the M1.2b minimum a channel carries `i64` (write `Channel<i64>`); other element types are a follow-on")
+    )]
+    ChannelElementNotSupported {
+        #[label("unsupported Channel element type here")]
         span: miette::SourceSpan,
     },
 
@@ -9492,6 +9541,11 @@ fn type_error_to_diagnostic(err: &TypeError) -> Diagnostic {
         TypeError::VecElementNotSupported { span } => (
             "sentinel::types::vec_element_not_supported",
             "`Vec<T>` element type is not supported at the D.3 MVP".to_string(),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        TypeError::ChannelElementNotSupported { span } => (
+            "sentinel::types::channel_element_not_supported",
+            "`Channel<T>` element type is not supported yet".to_string(),
             span.offset()..(span.offset() + span.len()),
         ),
         TypeError::GenericMain { span } => (

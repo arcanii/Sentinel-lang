@@ -51,7 +51,33 @@ reference as you work through the milestones.
 
 ---
 
-### ▶ RESUME HERE (2026-06-30 — ▶ ADR 0067 SELF-HOST MODULARIZATION is COMPLETE: multi-file modules in BOTH compilers + a full file-split of the self-host. `selfhost/types.sentinel` 13,718 → a 1,464-line root over ~14 `types/` parts; `parser`/`resolve`/`merge` each split into a root + parts; `cg_effects` split 3-way; `dump_texpr` (the ~2.7k-line giant) broken up via arm-extraction; `run`'s `TyCtx` ctor extracted. The self-host is now **31 files, none over ~1600 lines**; both bootstrap fixed points byte-identical throughout; Windows four-check green. ▶ NEXT is the maintainer's call — (a) ADR-0067 TAILS: `run`'s coupled pass-pipeline + `cg_emit_call`; the byte-identical `module X;` decl sweep across the remaining selfhost/`std` files + the mandatory-enforcement flip; `--separate` over multi-file modules; (b) RESUME the PAUSED ADR 0066 concurrency (M1.2b generic `Channel<T>` → M1.3 worker → M2 processes); or (c) a deferred ADR-needed backlog item (§11.6 `return value;` terminator, §11.7 cross-module `pub class`, BACKLOG2 §10.9 module-system guide doc).)
+### ▶ RESUME HERE (2026-06-30 — ▶ ADR 0066 CONCURRENCY RESUMED (maintainer's call (b)): M1.2b `Channel<T>` reaches TYPE-ANNOTATION position → a channel-typed fn PARAM → the cross-thread producer/consumer WORKER, fully self-hosted. Added the `resolve_type_expr` "Channel" arm in BOTH compilers (Rust `sentinel-types`; selfhost `types/interner.sentinel` `type_of_typeexpr`) — `Channel<i64>` only at the minimum (`ChannelElementNotSupported` rejects a non-`i64` element, `tests/ui/c66_channel_element_unsupported`). New differential fixture `tests/pass/c66_channel_worker` (spawn `produce(ch)` with a Channel arg + main drains as consumer → exit 42). Fixed a latent spawn-lowering divergence (a copy-var spawn arg's `load` must precede the args-struct alloc) by aligning ALL THREE emitters (inkwell + `snc llvm` + selfhost cg) on collect-then-store; taught the selfhost borrow checker `Channel` is Copy. NO new runtime symbols / ABI change. Full self-host differential (9 stages) GREEN, both fixed points byte-identical, Windows four-check green. ▶ NEXT is the maintainer's call — (b-cont) M1.2b GENERIC ELEMENTS `Channel<bool>`/`<u8>`/`<f64>` (needs generic channel builtins; `recv -> ?T` gated on `T` having a `NullableInner`, which `u8`/`f64`/`ptr` lack) → M1.3 worker-pool library + examples → M2 processes; (a) the ADR-0067 TAILS (`run`'s coupled pass-pipeline + `cg_emit_call`; the `module X;` decl sweep + mandatory-enforcement flip; `--separate` over multi-file modules); or (c) a deferred ADR-needed backlog item (§11.6 `return value;` terminator, §11.7 cross-module `pub class`, BACKLOG2 §10.9 module-system guide doc).)
+
+> **▶ DONE (2026-06-30) — ADR 0066 M1.2b: `Channel<T>` type annotation + channel-typed fn param +
+> cross-thread worker (self-hosted).** Un-paused the concurrency track. M1.2 interned `Channel<i64>`
+> only as `channel_new`'s result; M1.2b makes `Channel<i64>` writable in TYPE position so a function
+> can take a channel endpoint as a parameter (ADR 0066 D4 — the worker pattern).
+>
+> - **Mechanism (both compilers):** a `"Channel"` arm in `resolve_type_expr` — Rust `sentinel-types`
+>   (`resolve_type_expr_with_scope`, returns the `ChanId(0)` singleton `Channel<i64>`, "no threading")
+>   + selfhost `types/interner.sentinel` (`type_of_typeexpr` `TGeneric`, returns `mk_channel(c, 0)`).
+>   Non-`i64` element → the new `TypeError::ChannelElementNotSupported` (Rust-only; the differential
+>   skips the rejected ui fixture). Channel was already Copy / `is_spawn_word_scalar` / `ptr`-lowered /
+>   await-decoded from M1.2 — the annotation arm was the only missing front-end piece.
+> - **The latent spawn-lowering bug this surfaced + fixed:** `c66_task_bool` spawns with a *constant*
+>   arg (no eval instruction), so the order of "alloc args-struct" vs "evaluate args" never mattered.
+>   A `Channel` endpoint arg is a copy-var whose eval emits a `load` — exposing that the selfhost cg
+>   collects (evaluates) args BEFORE the alloc, while inkwell + `snc llvm` alloc'd FIRST. Aligned all
+>   three on **collect-then-store** (eval every arg → alloc → store-all): behavior-preserving, and now
+>   byte-identical for ANY arg count (not just constants). Also: selfhost `is_move_type` learned kind
+>   13 (Channel) is Copy, matching Rust `is_copy_type`.
+> - **Fixtures:** `tests/pass/c66_channel_worker` (differential; spawn-with-channel-arg + cross-thread
+>   drain → 42) + `tests/ui/c66_channel_element_unsupported` (the non-`i64` rejection).
+> - **NOT oracle-moving for the ABI:** no new runtime symbols, no `abi-v1` change (the channel runtime
+>   is unchanged from M1.2). Constant-time + the lexical borrow checker UNCHANGED.
+> - **NEXT (M1.2b cont., when resumed):** generic word-scalar channel ELEMENTS — `channel_new<T>` /
+>   `send<T>` / `recv<T> -> ?T` / `channel_close<T>`, which need `?T` for `u8`/`f64`/`ptr` (a
+>   `NullableInner` extension) before `recv` can be generic. Then M1.3 (worker-pool library) / M2.
 
 > **▶ DONE (2026-06-30) — SELF-HOST MODULARIZATION via MULTI-FILE MODULES (ADR 0067
 > ACCEPTED-WITH-AMENDMENTS).** The maintainer's "maintainability is biting now" focus (BACKLOG §11.8)
@@ -118,10 +144,11 @@ reference as you work through the milestones.
 > ?i64` (some/null; the runtime returns the i64 STATUS, codegen does `icmp eq 0` for the valid bit).
 > Fully self-hosted: both text emitters byte-identical, full differential green, `tests/pass/c66_channel`
 > in every corpus. Demos `examples/lang/{task_generic,channel}.sentinel`. **M1.2 minimum = `Channel<i64>`
-> only** (concrete builtins; generic `Channel<T>` is M1.2b). **Concurrency next when resumed:** M1.2b
-> (generic `Channel<T>` — a `resolve_type_expr` "Channel" arm + word-scalar elements → unblocks a
-> channel-typed fn param → the cross-thread producer/consumer demo), M1.3 (worker pattern, lib +
-> examples), or M2 (processes). See the `threading-multiprocessing-planned` auto-memory.
+> only** (concrete builtins; generic `Channel<T>` is M1.2b). **M1.2b — the `Channel<i64>` type
+> annotation + channel-typed fn param + cross-thread worker — is now DONE (see the M1.2b block under
+> ▶ RESUME HERE).** Concurrency next: M1.2b generic ELEMENTS (`Channel<bool>`/`<u8>`/…, gated on `?T`),
+> then M1.3 (worker-pool library + examples), or M2 (processes). See the
+> `threading-multiprocessing-planned` auto-memory.
 >
 > **▶ BACKLOG — deferred, ADR-needed (maintainer-confirmed 2026-06-29):** **BACKLOG.md §11.6** — make
 > `return value;` parse as a fn terminator (a CONFIRMED gap: only `return 42` WITHOUT a semicolon, or a

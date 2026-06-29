@@ -3,9 +3,9 @@ module types;
 // --- (6/N) borrow-check move analysis (ADR 0043 A1) -------------------------
 
 // True iff a value of type `h` is MOVED on a consuming use (non-Copy). Copy =
-// scalars + Ref (kind 2) + Task (kind 12); Secret (3) / Nullable (4) follow their
-// inner; Array (1) / Struct (6) / Enum (7) / Class (8) / TypeParam (9) /
-// GenericInstance (10) / Vec (11) = Move.
+// scalars + Ref (kind 2) + Task (kind 12) + Channel (kind 13); Secret (3) /
+// Nullable (4) follow their inner; Array (1) / Struct (6) / Enum (7) / Class (8) /
+// TypeParam (9) / GenericInstance (10) / Vec (11) = Move.
 fn is_move_type(c: &mut TyCtx, h: i64) -> bool {
     if h < tbase() {
         false
@@ -15,6 +15,11 @@ fn is_move_type(c: &mut TyCtx, h: i64) -> bool {
         if k == 2 {
             false
         } else if k == 12 {
+            false
+        } else if k == 13 {
+            // (ADR 0066 M1.2) a Channel handle is Copy (pointer-like, shared
+            // producer↔consumer by copying — it is the values that move on
+            // `send`, not the handle). Mirrors the Rust is_copy_type.
             false
         } else if k == 3 {
             is_move_type(c, (*c).ta[idx])

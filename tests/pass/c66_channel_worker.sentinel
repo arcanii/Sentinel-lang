@@ -1,0 +1,49 @@
+// ADR 0066 M1.2b: generic `Channel<T>` reaches TYPE-ANNOTATION position, so a
+// function can take a channel endpoint as a parameter — the cross-thread
+// producer/consumer worker pattern (ADR 0066 D2/D4). This is the first fixture
+// in the differential corpus to:
+//
+//   * write `Channel<i64>` in type position (the `resolve_type_expr` "Channel"
+//     arm, mirrored in both compilers), and
+//   * pass a `Channel<i64>` as a `spawn` argument (the M1.1 word-scalar arg
+//     path over a `ptr`-lowered handle), sharing ONE channel producer↔consumer
+//     across two real OS-thread tasks.
+//
+// The handle is Copy (ADR 0066 D2), so `main` keeps its copy of `ch` for the
+// consumer side while the spawned `produce` worker gets its own copy of the
+// same underlying channel.
+//
+// Trace: the worker sends 10 then 32 then closes the channel; the consumer
+// (`main`, concurrently) drains via `recv` — 10, 32, then `null` once the
+// producer's `channel_close` signals EOF — summing 42. `worker.await` then
+// confirms the producer finished (result 0). The scope discharges the Async
+// effect so `main` stays effect-free. 42 + 0 = 42. Exit 42.
+
+fn produce(ch: Channel<i64>) -> i64 ! { Async } {
+    send(ch, 10);
+    send(ch, 32);
+    channel_close(ch);
+    0
+}
+
+fn main() -> i64 {
+    let ch = channel_new();
+    let total: i64 = scope concurrent {
+        let worker = spawn produce(ch);
+        let mut sum: i64 = 0;
+        let mut draining: bool = true;
+        while draining {
+            let m = recv(ch);
+            if is_some(m) {
+                sum = sum + unwrap_or(m, 0);
+                0
+            } else {
+                draining = false;
+                0
+            };
+        }
+        let done: i64 = worker.await;
+        sum + done
+    };
+    total
+}

@@ -7286,9 +7286,19 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                 // n*8 bytes (i64 slots); at least 8 so alloc(0) is
                 // never requested for a zero-arg target.
                 let size_v = i64_ty.const_int((n.max(1) * 8) as u64, false);
+                // ADR 0066 M1.2b: evaluate ALL args BEFORE allocating the
+                // packed-args struct, then store. This matches the selfhost
+                // cg's collect-then-store order (and the `snc llvm` oracle's),
+                // so a non-constant spawn arg (e.g. a copy-var `Channel`
+                // endpoint, whose eval emits a `load`) lowers byte-identically
+                // across all three emitters. A constant arg emits no eval
+                // instruction, so this is unchanged from the prior order there.
+                let mut lowered = Vec::with_capacity(n);
+                for arg in call_args_exprs.iter() {
+                    lowered.push(self.lower_expr(arg, program)?);
+                }
                 let args_storage = self.alloc_call(size_v)?;
-                for (i, arg) in call_args_exprs.iter().enumerate() {
-                    let v = self.lower_expr(arg, program)?;
+                for (i, v) in lowered.into_iter().enumerate() {
                     let off = i64_ty.const_int((i * 8) as u64, false);
                     let slot = unsafe {
                         self.builder

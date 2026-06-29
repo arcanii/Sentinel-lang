@@ -1155,7 +1155,15 @@ fn type_of_typeexpr(c: &mut TyCtx, t: TypeE, gb: &mut Vec<u8>) -> i64 {
             // which may itself be a type-param). Any other generic (no such type)
             // keeps the placeholder (dispose + i64) — it only occurs in rejected fixtures.
             let is_vec: bool = name_eq_lit(&gn, "Vec");
+            // (ADR 0066 M1.2b) `Channel<T>` in type position → the kind-13
+            // Channel type (mirrors the Rust resolve_type_expr "Channel" arm),
+            // so a fn can take a channel endpoint as a parameter. At the M1.2b
+            // minimum the element is `i64` (handle 0) — the singleton
+            // `Channel<i64>` the channel builtins are typed against.
+            let is_channel: bool = name_eq_lit(&gn, "Channel");
             let gsid: i64 = if is_vec {
+                0 - 1
+            } else if is_channel {
                 0 - 1
             } else {
                 struct_lookup(c, &gn)
@@ -1170,6 +1178,12 @@ fn type_of_typeexpr(c: &mut TyCtx, t: TypeE, gb: &mut Vec<u8>) -> i64 {
                     0
                 };
                 mk_vec(c, velem)
+            } else if is_channel {
+                // resolve (and free) the type args like `Vec`; the element
+                // type is `i64` at the M1.2b minimum, so the handle is 0.
+                let mut cav: Vec<i64> = vec_new();
+                collect_tyargs(c, ga, gb, &mut cav);
+                mk_channel(c, 0)
             } else if gsid >= 0 {
                 let mut gav: Vec<i64> = vec_new();
                 collect_tyargs(c, ga, gb, &mut gav);

@@ -14,6 +14,33 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
+**Latest (2026-06-30) — ADR 0066 concurrency RESUMED: M1.2b `Channel<T>` reaches TYPE-ANNOTATION
+position → a channel-typed fn param → the cross-thread producer/consumer worker, self-hosted.** The
+maintainer un-paused the threading track. M1.2 had `Channel<i64>` only as the *result* of
+`channel_new` (no way to write `Channel<i64>` in a type); M1.2b adds the **`resolve_type_expr`
+"Channel" arm** in BOTH compilers (Rust `snc` `sentinel-types`; self-hosted `scg`
+`selfhost/types/interner.sentinel` `type_of_typeexpr`), so a function can take a **channel endpoint
+as a parameter** — the worker pattern of ADR 0066 D4. At the M1.2b minimum the element is `i64`
+(resolving to the singleton `Channel<i64>` interned at `ChanId(0)`; a non-`i64` element is rejected
+with the new `ChannelElementNotSupported` diagnostic — `tests/ui/c66_channel_element_unsupported`).
+The differential fixture **`tests/pass/c66_channel_worker`** is the first to pass a `Channel<i64>`
+as a `spawn` argument: `main` spawns a `produce` worker with a COPY of the handle (Channel is Copy,
+D2) and DRAINS the channel itself as the consumer until the worker's `channel_close` signals EOF
+(`null` `?i64`) — two real OS-thread tasks over one channel, exit 42. Surfaced + fixed a **latent
+spawn-lowering divergence**: a spawn arg that emits an instruction (a copy-var `load`, e.g. a
+Channel endpoint — never exercised before, since `c66_task_bool` spawns with a *constant*) revealed
+that the selfhost cg evaluates args BEFORE the args-struct alloc while both snc emitters
+(inkwell + `snc llvm`) alloc'd first; aligned ALL THREE on **collect-then-store** (eval every arg →
+alloc → store), a behavior-preserving reorder byte-identical for any arg count. The selfhost borrow
+checker also learned `Channel` is **Copy** (`is_move_type` kind 13 → not moved), matching the Rust
+`is_copy_type`. **No new runtime symbols / ABI change** (the `sentinel_channel_*` set + the channel
+runtime are unchanged from M1.2). Constant-time + the lexical borrow checker UNCHANGED. Full
+self-host differential (all 9 stages) GREEN, both bootstrap fixed points byte-identical; Windows
+four-check green. **Generic word-scalar/aggregate channel ELEMENTS (`Channel<bool>`/`<u8>`/…) are the
+next sub-step** (they need generic channel builtins; `recv -> ?T` is gated on `T` having a
+`NullableInner`, which `u8`/`f64`/`ptr` lack). See ADR 0066 D3/D4 + HANDOVER §0 + the
+`threading-multiprocessing-planned` memory.
+
 **Latest (2026-06-30) — SELF-HOST MODULARIZATION via MULTI-FILE MODULES (ADR 0067
 ACCEPTED-WITH-AMENDMENTS); `selfhost/types.sentinel` split 13,718 → 3,371 lines.** The
 maintainability focus (BACKLOG §11.8, "maintainability is biting now") is DONE. ADR 0067
