@@ -425,10 +425,34 @@ exempt from the decl-vs-location check, and parts are checked against the root's
 declared (effective) identity — needed because `selfhost_merge` stages `types` as
 the standalone entry `input.sentinel`.
 
-**Optional follow-ups (not required for D9):** split the decl-emit code out of the
-root for further cohesion; the byte-identical decl sweep (`module X;` on every
-selfhost/`std` library file) + the mandatory-enforcement flip; `--separate` over
-multi-file modules.
+**Further modularization (maintainer request, 2026-06-30 — DONE).** With the
+mechanism proven, the same multi-file-module split was applied to the other large
+self-host files, full differential green at every step:
+
+- **`parser`** (2821) → root 816 (AST enums + lexer helpers + `tokenize`) +
+  `parser/parse.sentinel` 814 (recursive-descent parser) + `parser/dump.sentinel`
+  1195 (AST→S-expr dumpers + `main`).
+- **`resolve`** (2456) → root 706 (RCtx + name comparison + scope binding) +
+  `resolve/dump.sentinel` 601 + `resolve/decls.sentinel` 1157.
+- **`merge`** (1896) → root 328 (`MergeCtx` + low-level emitters) +
+  `merge/emit.sentinel` 1096 (the un-parser) + `merge/engine.sentinel` 480
+  (rename/discovery/driver).
+- **`types/cg`** (4322) → `cg` 1334 + `cg_class` 337 + `cg_effects` 2655;
+  **`types/borrow`** (3516) → `borrow` 2842 + `borrow_stmts` 676.
+
+Two findings surfaced: (1) a scg merge bug — a multi-file-module entry with NO
+`use` (e.g. `parser` built standalone) must still QUALIFY; `merge_mode` now triggers
+on a `part` decl (tag 65), not just `use`, matching snc's discovery. (2) The
+entry-root output-name collision (`-o merge` clashing with the `merge/` parts dir)
+recurs whenever a multi-file root is built standalone — the test harnesses use a
+distinct output name. `dump_texpr` (a single ~2.8k-line fn) and `cg_effects`'s
+handler-runtime are the irreducible remainders (file-splitting alone can't divide a
+single function — that needs code refactoring, out of scope).
+
+**Optional follow-ups (not required):** refactor `dump_texpr` / `cg_effects` into
+sub-functions for finer files; the byte-identical decl sweep (`module X;` on every
+remaining selfhost/`std` library file) + the mandatory-enforcement flip; `--separate`
+over multi-file modules.
 
 ## Revisit
 

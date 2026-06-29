@@ -33,9 +33,14 @@ borrow-move analysis + cg text emitter + MIR dump — was **split one part per c
 (`types/{interner,infer,borrow,cg,mir}.sentinel`), the FULL self-host differential green and
 **BOTH bootstrap fixed points byte-identical at every step**. Constant-time + borrow checker
 UNCHANGED (a front-end / discovery / merge concern; no new `secret` sink). Windows four-check
-green. Optional follow-ups: the `module X;` decl sweep across the other selfhost/`std` files +
-the mandatory-enforcement flip; `--separate` over multi-file modules. The ADR 0066 concurrency
-track stays PAUSED. See ADR 0067 + HANDOVER §0.
+green. **The same split was then applied to the other large self-host files** (maintainer
+request): `parser` → parser + parser/{parse,dump}; `resolve` → resolve + resolve/{dump,decls};
+`merge` → merge + merge/{emit,engine}; and `types/cg` → cg/cg_class/cg_effects + `types/borrow`
+→ borrow/borrow_stmts. (A scg merge bug surfaced + was fixed: a no-`use` multi-file entry must
+still qualify — `merge_mode` now triggers on a `part`, matching snc.) Optional follow-ups: the
+`module X;` decl sweep across the remaining selfhost/`std` files + the mandatory-enforcement
+flip; refactoring the two irreducible giants (`dump_texpr`, `cg_effects`); `--separate` over
+multi-file modules. The ADR 0066 concurrency track stays PAUSED. See ADR 0067 + HANDOVER §0.
 
 **Latest (2026-06-30) — ADR 0066 THREADING + MULTI-PROCESSING roadmap ACCEPTED; M1.1 (generic
 `Task<T>`) + M1.2 (channels) DONE and fully self-hosted.** ADR 0066 (`docs/decisions/

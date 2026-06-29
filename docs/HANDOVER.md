@@ -72,10 +72,17 @@ reference as you work through the milestones.
 >   + **`append_module_parts`** (concatenates a module's parts onto its root → per-module rename + part
 >   discovery fall out for free; emission order matches the Rust union rename byte-for-byte).
 > - **Commits:** `27070f827` (D9.1 Rust) · `363eaa5db` (D9.3a parse/dump/skip) · `7531c343e` (D9.3b concat)
->   · `fc5773a434`/`cc5b1420b5`/`798722f3ae`/`5b5ec67037` (D9.4 the four split cuts, one part per commit).
+>   · `fc5773a434`/`cc5b1420b5`/`798722f3ae`/`5b5ec67037` (D9.4 the four types split cuts).
+> - **THEN further modularization (maintainer request, same day):** `parser` → parser +
+>   parser/{parse,dump}; `resolve` → resolve + resolve/{dump,decls}; `merge` → merge +
+>   merge/{emit,engine}; `types/cg` → cg/cg_class/cg_effects; `types/borrow` → borrow/borrow_stmts
+>   (`dafdb943a6`/`f7b4b060f3`/`c090eb7247`/`4a92ed2`). A scg merge bug was fixed along the way: a
+>   no-`use` multi-file entry must still qualify (`merge_mode` triggers on a `part`, matching snc).
+>   Full differential 24/24 green throughout.
 > - **Optional follow-ups (NOT required — ADR 0067 *Revisit*):** the byte-identical `module X;` decl
->   sweep across the other selfhost/`std` library files + the mandatory-enforcement flip; further
->   splitting the decl-emit code out of the root; `--separate` over multi-file modules.
+>   sweep across the remaining selfhost/`std` library files + the mandatory-enforcement flip;
+>   refactoring `dump_texpr` / `cg_effects` (single giant fns) into sub-functions for finer files;
+>   `--separate` over multi-file modules.
 > - Constant-time `secret` + the lexical borrow checker UNCHANGED (a front-end/discovery/merge concern).
 >
 > **— Concurrency track (ADR 0066): M1.1 + M1.2 DONE & self-hosted; rest PAUSED (resumable next) —**
