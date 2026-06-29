@@ -635,6 +635,13 @@ Low urgency relative to the threading / concurrency track.
 
 ### 11.8 Multi-File Modules + Explicit Module Declarations (self-host modularization)
 
+> ✅ **DONE (2026-06-30, ADR 0067 ACCEPTED-WITH-AMENDMENTS).** Multi-file modules
+> implemented in both compilers; `selfhost/types.sentinel` split **13,718 → 3,371
+> lines** + 5 parts (`types/{interner,infer,borrow,cg,mir}.sentinel`), both bootstrap
+> fixed points byte-identical. Realized as directory = module + a `part` manifest
+> (read by path — no new builtin), module-wide private, entry exempt from the decl
+> check. The original problem statement is kept below for the record.
+
 `selfhost/types.sentinel` is **13.7k lines — 62% of the self-host, ~5× the next
 file** — holding the type interner, generic-fn inference, borrow-move analysis,
 the codegen (`cg`) text emitter, AND the MIR dump in one file. Every

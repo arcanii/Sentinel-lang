@@ -51,30 +51,34 @@ reference as you work through the milestones.
 
 ---
 
-### ▶ RESUME HERE (2026-06-30 — ▶ NEXT FOCUS: SELF-HOST MODULARIZATION via MULTI-FILE MODULES (ADR-first). The maintainer flagged "maintainability is biting now" (2026-06-29): `selfhost/types.sentinel` is 13.7k lines. ADR 0066 threading is ACCEPTED with M1.1 (generic `Task<T>`) + M1.2 (channels) DONE and fully self-hosted — both bootstrap fixed points byte-identical; the rest of that roadmap is PAUSED. Captured in BACKLOG.md §11.8.)
+### ▶ RESUME HERE (2026-06-30 — ▶ SELF-HOST MODULARIZATION (ADR 0067) is DONE: multi-file modules implemented in BOTH compilers + `selfhost/types.sentinel` split 13.7k → 3.4k lines. The next pick is the maintainer's call: optional ADR-0067 follow-ups (the `module X;` decl sweep + mandatory-enforcement flip; further decl-emit splitting; `--separate` over multi-file modules), or RESUME the PAUSED ADR 0066 concurrency track (M1.2b generic `Channel<T>` → M1.3 worker pattern → M2 processes). Both bootstrap fixed points byte-identical; Windows four-check green.)
 
-> **▶ NEXT FOCUS — SELF-HOST MODULARIZATION via MULTI-FILE MODULES (ADR-first).** Captured with the
-> full review as **BACKLOG.md §11.8**. `selfhost/types.sentinel` is **13,718 lines (62% of the
-> self-host, ~5× the next file)** — it holds the type interner, generic-fn inference, borrow-move
-> analysis, the codegen (`cg`) text emitter, AND the MIR dump in one file; every oracle-moving change
-> touches it in many scattered places (M1.2's base-shift bug hid in a threshold buried there). The
-> maintainer wants it split. **The blocker is the module model:** ADR 0037 is **one file = one module**
-> (name implicit from the path, per-item `use` — the self-host already uses this across lexer/parser/
-> resolve/effects/merge/types). Splitting under that model is ugly: only **2 of 313 fns are `pub`**, so
-> it forces pub-ifying ~hundreds of helpers + fragmenting the `types::` namespace importers depend on.
-> **The enabler is EXPLICIT MODULE DECLARATIONS + MULTI-FILE MODULES** — N files declare the same module
-> name → one logical module; internals stay module-private, the public API (`pub fn run`) + the `types::`
-> namespace stay unchanged (the Rust `mod` / C++-namespace model). **DESIGN ADR-FIRST** (propose in
-> `docs/decisions/`). **The HARD part:** this is a bootstrap RESTRUCTURING, not just a feature — both
-> fixed points must stay byte-identical after the split (FnId numbering, `__spawn_wrapper_<id>`, mangling
-> must not shift, or shift identically on the Rust + selfhost sides). Sequence: ADR → implement
-> multi-file modules → re-bless → split `types.sentinel` file-by-file with the full differential GREEN at
-> each step. Classes are NOT the issue (types.sentinel uses none — §11.7; `TyCtx` is a struct, crosses
-> fine). Mind the standing invariants: the **constant-time `secret`** guarantee, the **lexical borrow
-> checker**, and the **both-bootstrap-fixed-points** rhythm. This block + the standalone seed prompt are
-> the kickoff brief.
+> **▶ DONE (2026-06-30) — SELF-HOST MODULARIZATION via MULTI-FILE MODULES (ADR 0067
+> ACCEPTED-WITH-AMENDMENTS).** The maintainer's "maintainability is biting now" focus (BACKLOG §11.8)
+> is complete. **Multi-file modules** (several files declare the same `module X;` → one logical module;
+> internals module-private across the files; public API + `types::` namespace unchanged — the Rust `mod`
+> / C++-namespace model) are implemented in BOTH `snc` and `scg`, and the 13,718-line
+> `selfhost/types.sentinel` monolith is split into a **3,371-line root + 5 parts**
+> (`types/{interner,infer,borrow,cg,mir}.sentinel`), the full self-host differential GREEN and both
+> bootstrap fixed points byte-identical at every step.
 >
-> **— Concurrency track (ADR 0066): M1.1 + M1.2 DONE & self-hosted; rest PAUSED —**
+> - **Model (all 4 D-points maintainer-confirmed 2026-06-29):** directory = module + a **`part` manifest**
+>   (root `a/b.sentinel` lists `part name;` → `a/b/<name>.sentinel`, read BY PATH — no directory-listing
+>   builtin, so no new runtime symbol / FnId-base shift); **module-wide private** (two levels, `pub`
+>   unchanged = cross-module export); the build ENTRY is exempt from the decl-vs-location check.
+> - **Mechanism (both compilers):** `snc` — `module`/`part` tokens + parse + directory/parts discovery
+>   (`read_module_with_parts`, with the entry-exemption) + module-scoped union rename in `merge_modules`.
+>   `scg` — `selfhost/parser.sentinel` parse/dump (tags 64/65) + `selfhost/merge.sentinel` skip-directives
+>   + **`append_module_parts`** (concatenates a module's parts onto its root → per-module rename + part
+>   discovery fall out for free; emission order matches the Rust union rename byte-for-byte).
+> - **Commits:** `27070f827` (D9.1 Rust) · `363eaa5db` (D9.3a parse/dump/skip) · `7531c343e` (D9.3b concat)
+>   · `fc5773a434`/`cc5b1420b5`/`798722f3ae`/`5b5ec67037` (D9.4 the four split cuts, one part per commit).
+> - **Optional follow-ups (NOT required — ADR 0067 *Revisit*):** the byte-identical `module X;` decl
+>   sweep across the other selfhost/`std` library files + the mandatory-enforcement flip; further
+>   splitting the decl-emit code out of the root; `--separate` over multi-file modules.
+> - Constant-time `secret` + the lexical borrow checker UNCHANGED (a front-end/discovery/merge concern).
+>
+> **— Concurrency track (ADR 0066): M1.1 + M1.2 DONE & self-hosted; rest PAUSED (resumable next) —**
 
 > **▶ ADR 0066 (threading + multi-processing) is ACCEPTED (roadmap; `f658d0778`).** Spine = channels
 > + ownership-transfer (fits the lexical borrow checker; no `Arc`). Secret fence (D8) is a BOUNDARY

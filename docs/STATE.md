@@ -14,6 +14,29 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
+**Latest (2026-06-30) — SELF-HOST MODULARIZATION via MULTI-FILE MODULES (ADR 0067
+ACCEPTED-WITH-AMENDMENTS); `selfhost/types.sentinel` split 13,718 → 3,371 lines.** The
+maintainability focus (BACKLOG §11.8, "maintainability is biting now") is DONE. ADR 0067
+adds **multi-file modules** — several files declare the same `module X;` to form one
+logical module (the Rust `mod` / C++-namespace model): internal helpers stay
+module-private across the module's files, and the public API + the `types::` namespace
+importers use are unchanged. Realized as **directory = module + a `part` manifest** (a root
+`a/b.sentinel` lists `part name;` → `a/b/<name>.sentinel`, read by path — NO directory-listing
+builtin, so NO new runtime symbol / FnId-base shift). Module-wide private (two levels, `pub`
+unchanged = cross-module export). The build ENTRY is exempt from the decl-vs-location check
+(its identity is its file stem). Implemented in BOTH compilers (Rust `snc`: token + parse +
+directory/parts discovery + module-scoped union rename in `merge_modules`; self-hosted `scg`:
+`parser.sentinel` parse/dump + `merge.sentinel` skip-directives + **`append_module_parts`
+concatenation** that makes per-module rename + part discovery fall out for free). Then
+`types.sentinel` — 62% of the self-host, holding the interner + generic-fn inference +
+borrow-move analysis + cg text emitter + MIR dump — was **split one part per commit**
+(`types/{interner,infer,borrow,cg,mir}.sentinel`), the FULL self-host differential green and
+**BOTH bootstrap fixed points byte-identical at every step**. Constant-time + borrow checker
+UNCHANGED (a front-end / discovery / merge concern; no new `secret` sink). Windows four-check
+green. Optional follow-ups: the `module X;` decl sweep across the other selfhost/`std` files +
+the mandatory-enforcement flip; `--separate` over multi-file modules. The ADR 0066 concurrency
+track stays PAUSED. See ADR 0067 + HANDOVER §0.
+
 **Latest (2026-06-30) — ADR 0066 THREADING + MULTI-PROCESSING roadmap ACCEPTED; M1.1 (generic
 `Task<T>`) + M1.2 (channels) DONE and fully self-hosted.** ADR 0066 (`docs/decisions/
 0066-threading-and-multiprocessing.md`) pins the concurrency roadmap: a **channels +

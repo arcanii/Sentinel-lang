@@ -27,7 +27,10 @@ module types;
 part interner;
 part infer;
 part borrow;
+part borrow_stmts;
 part cg;
+part cg_class;
+part cg_effects;
 part mir;
 
 use parser::Expr;

@@ -1,18 +1,17 @@
 # ADR 0067: Multi-file modules + explicit module declarations (self-host modularization)
 
-Status: **PROPOSED** — the four model D-points (D2 surface, D3 multi-file
-mechanism, D4 visibility, D6 byte-identical bar) were **confirmed with the
-maintainer 2026-06-29**; two implementation sub-points are **flagged for
-ratification at implementation** (the entry-exemption scope of "mandatory
-declarations", D2; parts-manifest vs a `read_dir` builtin, D3). This is an
-**oracle-moving** change (the discovery + merge layer in BOTH compilers), so it
-follows the both-bootstrap-fixed-points rhythm: Rust `snc` + fixtures → re-bless
-the parse/ast/resolve differential → mirror into `selfhost/` → both fixed points
-byte-identical (snc == scg) → ACCEPTED-WITH-AMENDMENTS as the split lands.
-**D9 steps 1–3 are IMPLEMENTED — the multi-file-module mechanism is fully
-self-hosted in BOTH compilers, both bootstrap fixed points byte-identical** — see
-the *Implementation status* section. The remaining work is step 4 (the actual
-`types.sentinel` split), now mechanical.
+Status: **ACCEPTED-WITH-AMENDMENTS** — the four model D-points (D2 surface, D3
+multi-file mechanism, D4 visibility, D6 byte-identical bar) were **confirmed with
+the maintainer 2026-06-29**, and the two flagged sub-points were resolved as
+implemented (the entry-exemption scope, D2; the parts-manifest over a `read_dir`
+builtin, D3). **D9 is functionally COMPLETE (steps 1–4):** multi-file modules are
+implemented in BOTH compilers, and the motivating `selfhost/types.sentinel` monolith
+(13,718 lines) is split into a 3,371-line root + five focused parts (interner /
+infer / borrow / cg / mir) — the full self-host differential green, BOTH bootstrap
+fixed points byte-identical at every step. See the *Implementation status* section.
+This was an **oracle-moving** change handled per the both-bootstrap-fixed-points
+rhythm. Optional follow-ups remain (the decl sweep + mandatory-enforcement flip;
+further decl-emit splitting).
 
 Date: 2026-06-29
 
@@ -403,12 +402,33 @@ full differential green (24 tests; both fixed points byte-identical):
   multi-file-module merge test (`sentinel_merge_handles_multi_file_module`, scg's
   concat-merge byte-identical to the Rust oracle).
 
-**Remaining — step 4 (now mechanical):** split `selfhost/types.sentinel` into a root
-(`module types;` + the `part` manifest) + `types/{interner,infer,borrow,cg,mir}.sentinel`
-parts, one part per commit, with the full differential green at each step (the
-`selfhost_*` harnesses that stage `types.sentinel` must also stage the `types/`
-parts dir). The byte-identical decl sweep + mandatory-enforcement flip can ride
-alongside.
+**D9 step 4 — the `types.sentinel` split — DONE** (commits `fc5773a434` →
+`5b5ec67037`, one part per commit, full differential green at each step):
+
+| File | lines | what |
+|------|------:|------|
+| `types.sentinel` (root) | 3371 | header + `TyCtx` + name-comparison + fn-header/class/trait/effect decl scan+emit + `pub fn run` dispatch + `pub fn dump_moves` + the `part` manifest |
+| `types/interner.sentinel` | 1379 | the type interner + all interning tables |
+| `types/infer.sentinel` | 578 | typed dump + generic-fn inference + widening |
+| `types/borrow.sentinel` | 3516 | the (6/N) borrow-check move analysis |
+| `types/cg.sentinel` | 4322 | the cg text emitter (raw / per-instruction / class-method / handler) |
+| `types/mir.sentinel` | 568 | the per-fn MIR dump + the differential `main` |
+
+Down from the 13,718-line monolith — a 4× reduction in the largest self-host file
+(BACKLOG §11.8 resolved). Cut tail-first where possible (byte-identical to
+pre-split); the borrow/infer/interner middle cuts reorder the merged stream but snc
+and scg reorder identically (loose bar), so both fixed points stay byte-identical
+and the behavior differential is unaffected. The harnesses stage the `types/` dir
+via a `read_dir` loop, so the cuts needed no per-part harness changes. The one snc
+change was the entry-exemption in `read_module_with_parts` (D2): the build entry is
+exempt from the decl-vs-location check, and parts are checked against the root's
+declared (effective) identity — needed because `selfhost_merge` stages `types` as
+the standalone entry `input.sentinel`.
+
+**Optional follow-ups (not required for D9):** split the decl-emit code out of the
+root for further cohesion; the byte-identical decl sweep (`module X;` on every
+selfhost/`std` library file) + the mandatory-enforcement flip; `--separate` over
+multi-file modules.
 
 ## Revisit
 
