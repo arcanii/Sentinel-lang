@@ -51,79 +51,72 @@ reference as you work through the milestones.
 
 ---
 
-### ▶ RESUME HERE (2026-06-29 — ▶ NEXT FOCUS: THREADING + MULTI-PROCESSING (ADR-first; the near-term maintainer ask). ADR 0065 early-`return` is in good shape and PAUSED: the effect-free path is complete + self-hosted (byte-identical, both fixed points green), the two typing limitations are CLOSED, the D6 kont-leak is fixed, and the control-flow-handle-body common cases (if/match tail-perform) now lower correctly — what's left of 0065 is the snc-only frame-reification + text-emitter mirror + macOS, all documented below.)
+### ▶ RESUME HERE (2026-06-30 — ▶ NEXT FOCUS: SELF-HOST MODULARIZATION via MULTI-FILE MODULES (ADR-first). The maintainer flagged "maintainability is biting now" (2026-06-29): `selfhost/types.sentinel` is 13.7k lines. ADR 0066 threading is ACCEPTED with M1.1 (generic `Task<T>`) + M1.2 (channels) DONE and fully self-hosted — both bootstrap fixed points byte-identical; the rest of that roadmap is PAUSED. Captured in BACKLOG.md §11.8.)
 
-> **▶ NEXT FOCUS — THREADING + MULTI-PROCESSING (ADR-first, cross-platform from the start).** The
-> maintainer's near-term ask (see the `threading-multiprocessing-planned` auto-memory, flagged
-> 2026-06-27). Sentinel ALREADY has **structured concurrency (ADR 0024)**: the surface `scope
-> concurrent { spawn f(); … }` + `.await`, the **`Async` effect** (discharged by the scope so `main`
-> stays effect-free), and a runtime task model in `crates/sentinel-runtime/src/lib.rs`
-> (`sentinel_task_spawn` already uses a real `std::thread` OS thread — so basic threading is
-> cross-platform via Rust std; `SentinelTask`/`SentinelScopeCtx`, ADR 0024 D9 ownership). The NEW ask
-> is the richer surface the maintainer wants — likely shared state + synchronization across threads
-> (mutex/channels — interacting with the lexical borrow checker AND the `secret`/constant-time model),
-> a thread/worker abstraction beyond the structured-scope, and genuinely-new **MULTI-PROCESSING**
-> (process spawn + IPC — the cross-process/actor model was deferred post-1.0 in SENTINEL_DESIGN2 §6 /
-> BACKLOG; this revisits it). **Design ADR-FIRST** (propose in `docs/decisions/`, get the shape right
-> before code), **cross-platform from the start** (the OS layer is currently POSIX-coupled — sockets
-> are `#[cfg(unix)]`, ADR 0060 / the `build-environment-windows` memory; do NOT add another
-> Unix-only subsystem). Mind the load-bearing invariants: the **constant-time `secret`** guarantee
-> (no secret may cross a thread/process boundary in a way that leaks; FFI/ABI secret fences exist),
-> the **one-shot continuations** + deep-handler effect runtime, the **lexical borrow checker** (shared
-> mutable state is exactly what it forbids — a channel/ownership-transfer model fits better than
-> shared `&mut`), and the **both-bootstrap-fixed-points** rhythm for anything oracle-moving. This block doubles as the
-> kickoff brief; the maintainer also has a standalone seed prompt to open the new session.
+> **▶ NEXT FOCUS — SELF-HOST MODULARIZATION via MULTI-FILE MODULES (ADR-first).** Captured with the
+> full review as **BACKLOG.md §11.8**. `selfhost/types.sentinel` is **13,718 lines (62% of the
+> self-host, ~5× the next file)** — it holds the type interner, generic-fn inference, borrow-move
+> analysis, the codegen (`cg`) text emitter, AND the MIR dump in one file; every oracle-moving change
+> touches it in many scattered places (M1.2's base-shift bug hid in a threshold buried there). The
+> maintainer wants it split. **The blocker is the module model:** ADR 0037 is **one file = one module**
+> (name implicit from the path, per-item `use` — the self-host already uses this across lexer/parser/
+> resolve/effects/merge/types). Splitting under that model is ugly: only **2 of 313 fns are `pub`**, so
+> it forces pub-ifying ~hundreds of helpers + fragmenting the `types::` namespace importers depend on.
+> **The enabler is EXPLICIT MODULE DECLARATIONS + MULTI-FILE MODULES** — N files declare the same module
+> name → one logical module; internals stay module-private, the public API (`pub fn run`) + the `types::`
+> namespace stay unchanged (the Rust `mod` / C++-namespace model). **DESIGN ADR-FIRST** (propose in
+> `docs/decisions/`). **The HARD part:** this is a bootstrap RESTRUCTURING, not just a feature — both
+> fixed points must stay byte-identical after the split (FnId numbering, `__spawn_wrapper_<id>`, mangling
+> must not shift, or shift identically on the Rust + selfhost sides). Sequence: ADR → implement
+> multi-file modules → re-bless → split `types.sentinel` file-by-file with the full differential GREEN at
+> each step. Classes are NOT the issue (types.sentinel uses none — §11.7; `TyCtx` is a struct, crosses
+> fine). Mind the standing invariants: the **constant-time `secret`** guarantee, the **lexical borrow
+> checker**, and the **both-bootstrap-fixed-points** rhythm. This block + the standalone seed prompt are
+> the kickoff brief.
 >
-> **— ADR 0065 status (PAUSED, for reference) —**
+> **— Concurrency track (ADR 0066): M1.1 + M1.2 DONE & self-hosted; rest PAUSED —**
 
-> **▶ ADR 0065 effect-free path is DONE and self-hosted** (commits `3bc85e95`, `6114dc5f`). The
-> **real `return` control-flow text-IR** is byte-identical in BOTH text emitters — the `snc llvm`
-> oracle (`crates/sentinel-driver/src/llvm_dump.rs`, was a stub) and the self-hosted `scg` (the
-> `cg` mode of `dump_texpr` in `selfhost/types.sentinel`, was carrying just the operand): eval
-> inner → drop every live binding to the fn floor (`emit_loop_exit_drops(0)` / `cg_drop_range(c,0)`)
-> → `ret` w/ the epilogue ABI (main i64→i32; effecting → `sentinel_kont_pure`; ordinary) → park a
-> dead block. Selfhost MIR mirrors the Rust `Return → Opaque([inner])`. Two single-file fixtures —
-> `tests/pass/c65_return.sentinel` (return in an `if` + a heap binding live across the return +
-> statement-position) and `tests/pass/c65_return_match.sentinel` (return in a `match` arm) — bring
-> `return` INTO every differential corpus; `snc llvm` == `scg` byte-for-byte, **both bootstrap
-> fixed points hold** (verified on Windows under vcvars). The two deferred typing limitations are
-> **CLOSED** in `sentinel-types`: the **coerce-skip** (a divergent node returns early from
-> `check_expr` before `coerce_to_expected`, so `return e` is valid in ANY expected context) and the
-> **match-arm divergence** (the result-type join skips a diverging arm). Mismatched-divergent
-> demonstrators are `examples/lang/early_return*.sentinel` (snc-only). The selfhost typer needs NO
-> `expr_diverges` mirror — it is a pure dumper (never rejects), and the only difference is the node
-> type for a *mismatched*-divergent join (snc-only).
+> **▶ ADR 0066 (threading + multi-processing) is ACCEPTED (roadmap; `f658d0778`).** Spine = channels
+> + ownership-transfer (fits the lexical borrow checker; no `Arc`). Secret fence (D8) is a BOUNDARY
+> property: NO fence in-process (the verified receiver still runs `secret_leak`), FENCE cross-process
+> (generalizes the FFI fence); D8a adds a `SealedChannel<secret T>` AEAD escape over the verified-CT
+> `aead`/`x25519` stdlib. Mutex deferred + gated (D5/D5a: runtime deadlock detection → typed error).
+> Roadmap: M1.1 → M1.2 → M1.3 → M1.4 (Mutex); M2.1 process spawn → M2.2 IPC → M2.3/M2.4; M3 actors.
 >
-> **▶ STAGE 3 (`return` crossing a `handle`, D6) — the LEAK is FIXED; what's left is snc-only
-> faithfulness + an orthogonal gap.** Assessment (2026-06-29): the FUNCTIONAL behaviour already
-> worked — a `return` from a handler ARM (instead of resuming `k`) or from a handle BODY produces
-> the CORRECT value today (verified exit 42 on both paths). The only D6 gap was a kont **LEAK** (the
-> abandoned continuation `ret`s without being freed). **FIXED** (commit on `main`): a new runtime
-> `sentinel_kont_free(kont)` in `crates/sentinel-runtime/src/lib.rs` (frees the kont + walks
-> `frames_head` freeing each captured block/frame, inverse of `kont_push`; 2 unit tests), and the
-> inkwell `Return` arm (`crates/sentinel-codegen/src/lib.rs`) frees each active handle region's
-> in-flight kont (innermost first via `handle_stack`) before the `ret` — the one-free invariant.
-> Demonstrator `examples/lang/early_return_handle.sentinel` (exit 42, leak-free, no double-free; the
-> 23 effecting pass tests unaffected; full differential + both fixed points still green).
-> **Deferred (snc-only — the demonstrator is in examples/, OUT of the differential):** the **text-IR
-> mirror** of `kont_free` (the `snc llvm` oracle + the selfhost `cg` mode still omit it — invisible
-> to the exit code; `scg` compiles handle-free sources so its bootstrap is unaffected), and the
-> **selfhost MIR collapse** (snc MIR collapses a `handle` to opaques without lowering the arm's
-> `return`; the selfhost MIR lowers it → a MIR-differential divergence, why the fixture is examples/
-> not tests/pass). **Orthogonal gap — stage 3a, now being LIFTED:** a handle body that performs
-> through control flow used to silently miscompile (`handle if c { perform … } else { perform … }
-> with { … }` returned 0 not 42, no `return` involved); first made a clean rejection, now the COMMON
-> CASE is SUPPORTED in the inkwell back end — a `perform` in TAIL position of an `if`/`else` branch
-> OR a `match` arm (incl. nested `if`s + a pure sibling) is normalized to a continuation
-> (`lower_body_as_kont`/`lower_if_as_kont`/`lower_match_as_kont`/`lower_block_as_kont`: the result
-> slot becomes a `ptr`, each leaf a `Kont*`). Demonstrator `examples/lang/handle_control_flow.sentinel`
-> (snc-only, exit 42, if + match). STILL REJECTED (`CodegenError::HandleBodyNotDirectPerform`, pinned
-> by `tests/ui/c65_handle_perform_in_control_flow`): a NON-tail perform (`perform Op() + 1`) and a
-> `let`-bound perform inside the body — each needs per-eval-site frame reification. DEFERRED
-> (snc-only): the `snc llvm` oracle + selfhost still reject ALL control-flow performs (not 3a-aware) —
-> the text-emitter mirror is the follow-up; that is why the demonstrator is examples/ not tests/pass.
-> No over-rejection (c36b's literal nested `handle` + the 23 effecting tests still compile). Also
-> pending: the final macOS cross-platform confirmation; then ADR 0065 ACCEPTED.
+> **▶ M1.1 — generic `Task<T>` (DONE, self-hosted; `48c38c6e5`, `23c78300c`).** Lifted the ADR 0024
+> `Task<i64>`-only restriction to any **word-sized scalar** (i64/i32/u8/bool/f64/ptr/Task/Channel) for
+> spawn args + result: the per-spawn wrapper loads each arg with its real type and ENCODES the result
+> into the Task's i64 slot (zext/bitcast/ptrtoint), `.await` DECODES it — runtime/ABI unchanged, the
+> i64 case byte-identical. Both text emitters byte-identical; `tests/pass/c66_task_bool` in every corpus.
+>
+> **▶ M1.2 — channels (DONE, self-hosted; latest `8894f5f87`).** `Type::Channel(ChanId)` (a **Copy**
+> handle, like Task) + the builtins `channel_new`/`send`/`recv`/`channel_close` at **FnId 21..=24** —
+> which SHIFTED the user-fn base 21→25 in BOTH compilers (the `__spawn_wrapper_<id>` symbol embeds the
+> FnId, so it had to be lockstep; watch the THRESHOLD comparisons `fid >= N` / `fid < N`, not just the
+> `fid - N` index forms — a missed one crashed scg until M1.2 Phase B). 4 `sentinel_channel_*` runtime
+> symbols over cross-platform `std::sync::mpsc` (abi-v1 §3/§5; `SentinelChannel` is opaque). `recv ->
+> ?i64` (some/null; the runtime returns the i64 STATUS, codegen does `icmp eq 0` for the valid bit).
+> Fully self-hosted: both text emitters byte-identical, full differential green, `tests/pass/c66_channel`
+> in every corpus. Demos `examples/lang/{task_generic,channel}.sentinel`. **M1.2 minimum = `Channel<i64>`
+> only** (concrete builtins; generic `Channel<T>` is M1.2b). **Concurrency next when resumed:** M1.2b
+> (generic `Channel<T>` — a `resolve_type_expr` "Channel" arm + word-scalar elements → unblocks a
+> channel-typed fn param → the cross-thread producer/consumer demo), M1.3 (worker pattern, lib +
+> examples), or M2 (processes). See the `threading-multiprocessing-planned` auto-memory.
+>
+> **▶ BACKLOG — deferred, ADR-needed (maintainer-confirmed 2026-06-29):** **BACKLOG.md §11.6** — make
+> `return value;` parse as a fn terminator (a CONFIRMED gap: only `return 42` WITHOUT a semicolon, or a
+> bare tail value, works today — `{ return 42; }` errors "blocks must end with an expression") + the
+> larger deprecation of the implicit "hanging" tail return; **§11.7** — cross-module `pub class`
+> (`pub class` is rejected → classes are module-local; the cross-module "type with behaviour" is a
+> `pub struct` + `pub fn`s); **§11.8** — multi-file modules (THE NEXT FOCUS, above); **BACKLOG2 §10.9** —
+> a module-system guide doc (the worked multi-file example is DONE: `examples/modules/rect_demo.sentinel`
+> uses a `pub struct` + `pub fn`s from the library module `std::math::geometry`).
+>
+> **▶ ADR 0065 (early `return`) — PAUSED.** The effect-free path is complete + self-hosted (both fixed
+> points byte-identical); `return` is in every differential corpus (`tests/pass/c65_return*`). What's
+> left is snc-only faithfulness (the text-emitter mirror of `sentinel_kont_free` + the selfhost MIR
+> collapse for a `return` crossing a `handle`) + the macOS confirmation; then ADR 0065 ACCEPTED. Full
+> detail in the git history / `tests/ui/c65_handle_perform_in_control_flow`.
 
 All on `main`, **NEVER pushed**. Verified on **Windows only** (see the macOS caveat);
 the dev box is `x86_64-pc-windows-msvc` with a from-source LLVM 18.1.8 at `G:\llvm-18`

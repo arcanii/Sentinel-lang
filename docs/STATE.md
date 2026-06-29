@@ -5,7 +5,7 @@ HANDOVER.md, STATE.md is the source of truth. New contributors (or
 new chat sessions) should be able to read this file and understand
 the current state of the workspace without re-reading every commit.
 
-## Current State (2026-06-29)
+## Current State (2026-06-30)
 
 > **Phase C closed at Sentinel 1.0 (2026-05-30); Phase D self-hosts; the
 > per-unit separate-compilation back end is functionally complete.**
@@ -13,6 +13,26 @@ the current state of the workspace without re-reading every commit.
 > archived to [`HISTORY.md`](HISTORY.md) (P3.2 cleanup). Sections A/B/C below
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
+
+**Latest (2026-06-30) — ADR 0066 THREADING + MULTI-PROCESSING roadmap ACCEPTED; M1.1 (generic
+`Task<T>`) + M1.2 (channels) DONE and fully self-hosted.** ADR 0066 (`docs/decisions/
+0066-threading-and-multiprocessing.md`) pins the concurrency roadmap: a **channels +
+ownership-transfer** spine (fits the lexical borrow checker; no `Arc`), the **secret fence as a
+BOUNDARY property** (D8 — no fence in-process since the verified receiver still runs `secret_leak`;
+fence cross-process, generalizing the FFI fence; D8a's `SealedChannel<secret T>` AEAD escape), and
+**Mutex deferred + gated** (D5/D5a: runtime deadlock detection → a typed error). **M1.1** lifted the
+ADR 0024 `Task<i64>`-only restriction to any **word-sized scalar** spawn arg/result (the per-spawn
+wrapper loads typed args + encodes the result into the Task's i64 slot; `.await` decodes — no ABI
+change). **M1.2** added `Type::Channel(ChanId)` (a **Copy** handle) + the builtins
+`channel_new`/`send`/`recv`/`channel_close` (FnId 21..=24 — the user-fn base SHIFTED 21→25 in BOTH
+compilers) + 4 `sentinel_channel_*` runtime symbols over cross-platform `std::sync::mpsc` (abi-v1
+§3/§5); `recv -> ?i64`. **Both fully self-hosted** — both text emitters byte-identical, full
+self-host differential green, `tests/pass/c66_{task_bool,channel}` in every corpus. M1.2 minimum is
+`Channel<i64>` only (generic `Channel<T>` is M1.2b). **Constant-time UNCHANGED.** Windows four-check
+green. **NEXT FOCUS pivoted (maintainer 2026-06-29, "maintainability is biting now"): SELF-HOST
+MODULARIZATION** — `selfhost/types.sentinel` is 13.7k lines; split it via multi-file modules,
+ADR-first (BACKLOG.md §11.8). The rest of ADR 0066 (M1.2b/M1.3/M1.4/M2) is PAUSED. See HANDOVER §0 +
+the `threading-multiprocessing-planned` auto-memory.
 
 **Latest (2026-06-29) — early `return`: the effect-free path is COMPLETE and self-hosted (ADR
 0065 stage-4 codegen + typing acceptance).** The **real `return` control-flow text-IR** now lands
