@@ -14,7 +14,26 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
-**Latest (2026-06-30) — own command-line argument reflection (`arg_count` / `arg`), an ADR 0066 M2.4
+**Latest (2026-06-30) — GENERIC word-scalar in-process channels (ADR 0066 M1.2b-cont).** `Channel<T>`
+generalizes from `Channel<i64>` to any **word-scalar element** {i64,i32,u8,bool,f64,ptr} — the in-process
+twin of the M2.3b process-channel generalization. The element is **encoded into / decoded from** the
+channel's i64 slot (the M1.1 spawn encode: zext a narrow int / bitcast `f64` / ptrtoint `ptr`), so the
+runtime stays i64-based — **no new symbol, no FnId change**. The word-scalar `Channel<T>` types are
+**pre-interned at fixed ChanIds 0..=5** at signature setup (so a `Channel<T>` annotation maps to a stable
+ChanId without threading the `channels` interner through the checker), and the 4 channel builtins are
+**special-cased in `check_call`** (the M2.3b pattern): `channel_new()` is context-typed (element from the
+expected type), `send` encodes the element, `recv -> ?T` decodes it (element read from the channel's
+ChanId), `channel_close` accepts any `Channel`. **The `i64` case is byte-identical to M1.2** (no encode/
+decode, no type_args) — the differential corpus is unchanged and all 6 selfhost differentials stay
+byte-identical with **NO scg change** (the snc-side pattern, like M2.3b; generic elements are an
+`examples/` demonstrator). Demonstrator `examples/lang/channel_generic.sentinel` (`Channel<u8>` queue
+summing 30+12 + a `Channel<bool>` round-trip → 42). The `c66_channel_element_unsupported` ui fixture now
+rejects a NON-word-scalar element (`Channel<u128>`, which doesn't fit the i64 slot). Constant-time + the
+lexical borrow checker UNCHANGED; four-check green. (The *reusable* worker-pool LIBRARY remains blocked on
+a first-class-function / closure mechanism — Sentinel has none — so M1.3 stays the demonstrator examples.)
+See HANDOVER §0 + the `threading-multiprocessing-planned` memory.
+
+**Earlier (2026-06-30) — own command-line argument reflection (`arg_count` / `arg`), an ADR 0066 M2.4
 follow-on.** Two builtins — **`arg_count() -> i64`** + **`arg(i: i64) -> [u8]`** — let a program (e.g. a
 spawned child) read its own invocation, symmetric to `process_spawn(path, args)` passing argv to the
 child. Runtime symbols `sentinel_arg_count` / `sentinel_arg` over `std::env::args` (which reads the OS

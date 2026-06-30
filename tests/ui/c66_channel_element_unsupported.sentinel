@@ -1,8 +1,9 @@
-// ADR 0066 M1.2b: a `Channel<T>` type annotation whose element is not `i64` is
-// rejected at the M1.2b minimum — channels carry `i64` (the singleton the channel
-// builtins are typed against); generic word-scalar/aggregate element types are a
-// follow-on. Here a `Channel<bool>` parameter surfaces ChannelElementNotSupported.
-fn worker(ch: Channel<bool>) -> i64 {
+// ADR 0066 M1.2b-cont: a `Channel<T>` now carries any WORD-SCALAR element
+// {i64,i32,u8,bool,f64,ptr} (the element encoded/decoded through the i64 slot). A
+// NON-word-scalar element is still rejected — here `u128` (16 bytes, it doesn't fit
+// the i64 channel slot, and is not a spawn-word-scalar) surfaces
+// ChannelElementNotSupported.
+fn worker(ch: Channel<u128>) -> i64 {
     0
 }
 

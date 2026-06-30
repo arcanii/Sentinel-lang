@@ -3171,10 +3171,32 @@ impl Emit<'_> {
             return Ok(format!("%v{v}"));
         }
         if id == SEND_FN_ID {
+            // ADR 0066 M1.2b-cont: ENCODE the word-scalar element into the i64 slot
+            // (the M1.1 encode); the `i64` case is byte-identical to M1.2.
             let ch = self.lower_expr(&args[0])?;
             let val = self.lower_expr(&args[1])?;
+            let enc = match args[1].ty {
+                Type::I64 => val,
+                Type::I32 | Type::U8 | Type::Bool => {
+                    let ety = self.lty(args[1].ty)?;
+                    let e = self.fresh();
+                    writeln!(self.body, "  %v{e} = zext {ety} {val} to i64").unwrap();
+                    format!("%v{e}")
+                }
+                Type::F64 => {
+                    let e = self.fresh();
+                    writeln!(self.body, "  %v{e} = bitcast double {val} to i64").unwrap();
+                    format!("%v{e}")
+                }
+                Type::Ptr => {
+                    let e = self.fresh();
+                    writeln!(self.body, "  %v{e} = ptrtoint ptr {val} to i64").unwrap();
+                    format!("%v{e}")
+                }
+                other => return Err(format!("channel send element not ported (word-scalar): {other:?}")),
+            };
             let v = self.fresh();
-            writeln!(self.body, "  %v{v} = call i64 @sentinel_channel_send(ptr {ch}, i64 {val})").unwrap();
+            writeln!(self.body, "  %v{v} = call i64 @sentinel_channel_send(ptr {ch}, i64 {enc})").unwrap();
             self.used.channel_send = true;
             return Ok(format!("%v{v}"));
         }
@@ -3186,8 +3208,11 @@ impl Emit<'_> {
             return Ok(format!("%v{v}"));
         }
         if id == RECV_FN_ID {
-            // recv(ch) -> ?i64: write the value to a stack out-slot, then build the
-            // `{ i1 valid, i64 value }` from the i64 status (valid = status == 0).
+            // recv(ch) -> ?T: write the i64 slot, DECODE it into the element T (M1.2b-
+            // cont; `i64` byte-identical to M1.2), then build `{ i1 valid, T value }`
+            // (valid = status == 0). Element from `type_args[0]` (`i64` if absent).
+            let elem = type_args.first().copied().unwrap_or(Type::I64);
+            let ety = self.lty(elem)?;
             let ch = self.lower_expr(&args[0])?;
             let out = self.alloca("i64");
             let status = self.fresh();
@@ -3195,12 +3220,31 @@ impl Emit<'_> {
             self.used.channel_recv = true;
             let valid = self.fresh();
             writeln!(self.body, "  %v{valid} = icmp eq i64 %v{status}, 0").unwrap();
-            let value = self.fresh();
-            writeln!(self.body, "  %v{value} = load i64, ptr %v{out}").unwrap();
+            let raw = self.fresh();
+            writeln!(self.body, "  %v{raw} = load i64, ptr %v{out}").unwrap();
+            let value = match elem {
+                Type::I64 => format!("%v{raw}"),
+                Type::I32 | Type::U8 | Type::Bool => {
+                    let d = self.fresh();
+                    writeln!(self.body, "  %v{d} = trunc i64 %v{raw} to {ety}").unwrap();
+                    format!("%v{d}")
+                }
+                Type::F64 => {
+                    let d = self.fresh();
+                    writeln!(self.body, "  %v{d} = bitcast i64 %v{raw} to double").unwrap();
+                    format!("%v{d}")
+                }
+                Type::Ptr => {
+                    let d = self.fresh();
+                    writeln!(self.body, "  %v{d} = inttoptr i64 %v{raw} to ptr").unwrap();
+                    format!("%v{d}")
+                }
+                other => return Err(format!("channel recv element not ported (word-scalar): {other:?}")),
+            };
             let a0 = self.fresh();
-            writeln!(self.body, "  %v{a0} = insertvalue {{ i1, i64 }} undef, i1 %v{valid}, 0").unwrap();
+            writeln!(self.body, "  %v{a0} = insertvalue {{ i1, {ety} }} undef, i1 %v{valid}, 0").unwrap();
             let a1 = self.fresh();
-            writeln!(self.body, "  %v{a1} = insertvalue {{ i1, i64 }} %v{a0}, i64 %v{value}, 1").unwrap();
+            writeln!(self.body, "  %v{a1} = insertvalue {{ i1, {ety} }} %v{a0}, {ety} {value}, 1").unwrap();
             return Ok(format!("%v{a1}"));
         }
         // ADR 0066 M2.1: the subprocess builtins. process_spawn decomposes the

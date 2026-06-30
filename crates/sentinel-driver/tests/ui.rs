@@ -109,8 +109,9 @@ ui_snapshot!(c44_await_on_non_task, "c44_await_on_non_task.sentinel");
 // ADR 0066 M1.1: word-sized scalar spawn results are now accepted; an
 // aggregate (here `u128`) is the deferred case that's still rejected.
 ui_snapshot!(c66_spawn_aggregate_unsupported, "c66_spawn_aggregate_unsupported.sentinel");
-// ADR 0066 M1.2b: a `Channel<T>` annotation with a non-`i64` element is rejected
-// (channels carry `i64` at the M1.2b minimum; generic elements are a follow-on).
+// ADR 0066 M1.2b-cont: a `Channel<T>` carries any word-scalar element now; a
+// NON-word-scalar element (here `u128`, which doesn't fit the i64 channel slot) is
+// still rejected with ChannelElementNotSupported.
 ui_snapshot!(c66_channel_element_unsupported, "c66_channel_element_unsupported.sentinel");
 // ADR 0066 M2.2 / D8: the cross-process secret fence — a `[secret u8]` payload
 // cannot cross the public `[u8]` byte-pipe boundary (`process_write`), so the

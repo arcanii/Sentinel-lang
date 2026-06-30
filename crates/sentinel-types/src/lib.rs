@@ -29,8 +29,8 @@ use sentinel_base::{Diagnostic, SentinelDb, Severity, SourceFile};
 use sentinel_resolve::{
     ClassId, EffectId, EnumId, FnId, ImplId, ImplTarget, ResolvedBlock, ResolvedExpr,
     ResolvedExprKind, ResolvedFnDef, ResolvedPattern, ResolvedProgram, ResolvedStmt,
-    ResolvedStmtKind, StructId, TraitId, TypeParamId, VarId, LEN_FN_ID, PROCESS_RECV_FN_ID,
-    PROCESS_SEND_FN_ID,
+    ResolvedStmtKind, StructId, TraitId, TypeParamId, VarId, CHANNEL_CLOSE_FN_ID, CHANNEL_NEW_FN_ID,
+    LEN_FN_ID, PROCESS_RECV_FN_ID, PROCESS_SEND_FN_ID, RECV_FN_ID, SEND_FN_ID,
 };
 use sentinel_ast::SelfKind;
 
@@ -1275,6 +1275,39 @@ pub fn is_process_channel_elem(ty: Type) -> bool {
     is_spawn_word_scalar(ty) && ty.to_nullable_inner().is_some()
 }
 
+/// ADR 0066 M1.2b-cont: the word-scalar in-process channel element types are
+/// pre-interned at FIXED [`ChanId`]s 0..=5 during channel-builtin signature setup,
+/// so a `Channel<T>` annotation maps to a stable `ChanId` WITHOUT threading the
+/// `channels` interner through the checker (the snag the generic-channel design
+/// avoids). Returns the fixed `ChanId` index for a word-scalar `elem`, or `None`
+/// for a non-channel element. The set matches [`is_process_channel_elem`].
+pub fn channel_chanid_for(elem: Type) -> Option<u32> {
+    match elem {
+        Type::I64 => Some(0),
+        Type::I32 => Some(1),
+        Type::U8 => Some(2),
+        Type::Bool => Some(3),
+        Type::F64 => Some(4),
+        Type::Ptr => Some(5),
+        _ => None,
+    }
+}
+
+/// The inverse of [`channel_chanid_for`]: the element type of a pre-interned channel
+/// `ChanId`. Lets `send`/`recv`/`channel_close` read a channel arg's element from its
+/// `Type::Channel(id)` alone (no `channels`-table access in the checker). `i64` for
+/// an unknown id (only the M1.2 singleton existed before; defensive).
+pub fn channel_elem_for(id: ChanId) -> Type {
+    match id.0 {
+        1 => Type::I32,
+        2 => Type::U8,
+        3 => Type::Bool,
+        4 => Type::F64,
+        5 => Type::Ptr,
+        _ => Type::I64,
+    }
+}
+
 /// Intern a `result_ty` into `tasks`, returning its [`TaskId`] per
 /// ADR 0024 D4 (C4.4), generalised by ADR 0066 M1.1 to any word-sized
 /// scalar `result_ty` (see [`is_spawn_word_scalar`]). Linear search,
@@ -1803,12 +1836,16 @@ fn resolve_type_expr_with_scope(
                         arrays,
                         struct_type_param_counts,
                     )?;
-                    if elem_ty != Type::I64 {
-                        return Err(TypeError::ChannelElementNotSupported {
+                    // ADR 0066 M1.2b-cont: any word-scalar element {i64,i32,u8,bool,
+                    // f64,ptr} resolves to its pre-interned ChanId (i64 → the M1.2
+                    // singleton ChanId(0), byte-identical). A non-word-scalar (e.g.
+                    // `secret`, `u128`, an aggregate) is still rejected.
+                    match channel_chanid_for(elem_ty) {
+                        Some(cid) => Ok(Type::Channel(ChanId(cid))),
+                        None => Err(TypeError::ChannelElementNotSupported {
                             span: to_source_span(&te.span),
-                        });
+                        }),
                     }
-                    Ok(Type::Channel(ChanId(0)))
                 }
                 // ADR 0066 M2.4a / ADR 0069: `SealedChannel<secret i64>` in type
                 // position — so the stdlib `seal`/`open` framing fns can take a
@@ -4659,7 +4696,19 @@ pub fn check_module(
     // returns `?i64` (`null` = closed+drained, ADR 0066 D4). Codegen lowers
     // each to its `sentinel_channel_*` runtime symbol.
     {
+        // ADR 0066 M1.2b-cont: pre-intern the word-scalar channel element types at
+        // FIXED ChanIds 0..=5 (i64, i32, u8, bool, f64, ptr — matching
+        // `channel_chanid_for`), so a generic `Channel<T>` annotation resolves to a
+        // stable ChanId without threading the `channels` interner. The concrete sigs
+        // below stay `Channel<i64>` (the default); `check_call` special-cases the 4
+        // builtins for the generic element. The extra ChanIds are snc-internal (the
+        // i64-only differential corpus never references them — byte-identical).
         let chan_i64 = Type::Channel(intern_channel(&mut channels, Type::I64));
+        intern_channel(&mut channels, Type::I32);
+        intern_channel(&mut channels, Type::U8);
+        intern_channel(&mut channels, Type::Bool);
+        intern_channel(&mut channels, Type::F64);
+        intern_channel(&mut channels, Type::Ptr);
         let opt_i64 = Type::Nullable(NullableInner::I64);
         let channel_sigs: &[(usize, &[Type], Type)] = &[
             (21, &[], chan_i64),                       // channel_new() -> Channel<i64>
@@ -7169,6 +7218,133 @@ fn check_call(
                 type_args,
             },
             ret,
+        ));
+    }
+
+    // ADR 0066 M1.2b-cont: the in-process channel builtins generalized over a
+    // word-scalar element T (the cross-thread twins of `process_send`/`recv` — same
+    // encode/decode, but in-memory mpsc, not a pipe). `Channel<T>` carries its element
+    // (unlike `Process`), pre-interned at a fixed `ChanId` (`channel_chanid_for`); the
+    // element is read back from the channel arg's `ChanId` (`channel_elem_for`) with no
+    // `channels`-table threading. The `i64` case is byte-identical to M1.2 (no encode/
+    // decode, no `type_args`); generic elements are snc-side demonstrators in
+    // `examples/` (scg mirror deferred, like M2.3b).
+    if id == CHANNEL_NEW_FN_ID {
+        // `channel_new() -> Channel<T>`: T from the expected type (default `Channel<i64>`,
+        // the M1.2 ChanId(0)). The element is element-agnostic in codegen (a runtime ptr).
+        let chan_ty = match expected_return {
+            Some(Type::Channel(cid)) => Type::Channel(cid),
+            _ => Type::Channel(ChanId(0)),
+        };
+        return Ok((
+            TypedExprKind::Call {
+                id,
+                callee_span: callee_span.clone(),
+                args: vec![],
+                type_args: vec![],
+            },
+            chan_ty,
+        ));
+    }
+    if id == SEND_FN_ID {
+        let ch_typed = check_expr(
+            &args[0], None, env, signatures, structs, class_decls, enums, instances, refs,
+            secrets, arrays, struct_type_param_counts, effect_decls, trait_decls, impl_decls,
+            konts, tasks,
+        )?;
+        let elem = match ch_typed.ty {
+            Type::Channel(cid) => channel_elem_for(cid),
+            _ => {
+                return Err(TypeError::CallArgMismatch {
+                    callee: "send".to_string(),
+                    arg_index: 0,
+                    expected: Type::Channel(ChanId(0)),
+                    got: ch_typed.ty,
+                    span: to_source_span(&args[0].span),
+                })
+            }
+        };
+        let v_typed = check_expr(
+            &args[1], Some(elem), env, signatures, structs, class_decls, enums, instances, refs,
+            secrets, arrays, struct_type_param_counts, effect_decls, trait_decls, impl_decls,
+            konts, tasks,
+        )?;
+        if v_typed.ty != elem {
+            return Err(TypeError::CallArgMismatch {
+                callee: "send".to_string(),
+                arg_index: 1,
+                expected: elem,
+                got: v_typed.ty,
+                span: to_source_span(&args[1].span),
+            });
+        }
+        // Codegen encodes the element to the i64 slot by LLVM value kind (no `type_args`);
+        // the `i64` case emits no encode, byte-identical to M1.2.
+        return Ok((
+            TypedExprKind::Call {
+                id,
+                callee_span: callee_span.clone(),
+                args: vec![ch_typed, v_typed],
+                type_args: vec![],
+            },
+            Type::I64,
+        ));
+    }
+    if id == RECV_FN_ID {
+        let ch_typed = check_expr(
+            &args[0], None, env, signatures, structs, class_decls, enums, instances, refs,
+            secrets, arrays, struct_type_param_counts, effect_decls, trait_decls, impl_decls,
+            konts, tasks,
+        )?;
+        let elem = match ch_typed.ty {
+            Type::Channel(cid) => channel_elem_for(cid),
+            _ => {
+                return Err(TypeError::CallArgMismatch {
+                    callee: "recv".to_string(),
+                    arg_index: 0,
+                    expected: Type::Channel(ChanId(0)),
+                    got: ch_typed.ty,
+                    span: to_source_span(&args[0].span),
+                })
+            }
+        };
+        let ret = Type::Nullable(
+            elem.to_nullable_inner().expect("a channel elem has a NullableInner"),
+        );
+        let type_args = if elem == Type::I64 { vec![] } else { vec![elem] };
+        return Ok((
+            TypedExprKind::Call {
+                id,
+                callee_span: callee_span.clone(),
+                args: vec![ch_typed],
+                type_args,
+            },
+            ret,
+        ));
+    }
+    if id == CHANNEL_CLOSE_FN_ID {
+        let ch_typed = check_expr(
+            &args[0], None, env, signatures, structs, class_decls, enums, instances, refs,
+            secrets, arrays, struct_type_param_counts, effect_decls, trait_decls, impl_decls,
+            konts, tasks,
+        )?;
+        if !matches!(ch_typed.ty, Type::Channel(_)) {
+            return Err(TypeError::CallArgMismatch {
+                callee: "channel_close".to_string(),
+                arg_index: 0,
+                expected: Type::Channel(ChanId(0)),
+                got: ch_typed.ty,
+                span: to_source_span(&args[0].span),
+            });
+        }
+        return Ok((
+            TypedExprKind::Call {
+                id,
+                callee_span: callee_span.clone(),
+                args: vec![ch_typed],
+                type_args: vec![],
+            },
+            Type::I64,
         ));
     }
 

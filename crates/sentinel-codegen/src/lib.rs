@@ -5995,21 +5995,50 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
             .expect("sentinel_channel_new returns ptr"))
     }
 
-    /// ADR 0066 M1.2: `send(ch, v) -> i64` — move `v` (an i64 at the minimum)
-    /// into the channel; the i64 status is the expression value.
+    /// ADR 0066 M1.2 / M1.2b-cont: `send(ch, v: T) -> i64` — ENCODE the word-scalar
+    /// element `v` into the i64 channel slot (the M1.1 spawn encode: zext a narrow
+    /// int / bitcast an `f64` / ptrtoint a `ptr`; `i64` = no-op, byte-identical to
+    /// M1.2), then move it; the i64 status is the expression value. The in-process
+    /// twin of `lower_process_send`.
     fn lower_channel_send(
         &mut self,
         ch: &TypedExpr,
         value: &TypedExpr,
         program: &TypedProgram,
     ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+        let i64_ty = self.context.i64_type();
         let ch_v = self.lower_expr(ch, program)?.into_pointer_value();
-        let val_v = self.lower_expr(value, program)?.into_int_value();
+        let raw = self.lower_expr(value, program)?;
+        let encoded: IntValue = match raw {
+            BasicValueEnum::IntValue(iv) => {
+                if iv.get_type().get_bit_width() == 64 {
+                    iv
+                } else {
+                    self.builder
+                        .build_int_z_extend(iv, i64_ty, "csend_enc")
+                        .map_err(|e| CodegenError::Builder(e.to_string()))?
+                }
+            }
+            BasicValueEnum::FloatValue(fv) => self
+                .builder
+                .build_bit_cast(fv, i64_ty, "csend_enc")
+                .map_err(|e| CodegenError::Builder(e.to_string()))?
+                .into_int_value(),
+            BasicValueEnum::PointerValue(pv) => self
+                .builder
+                .build_ptr_to_int(pv, i64_ty, "csend_enc")
+                .map_err(|e| CodegenError::Builder(e.to_string()))?,
+            other => {
+                return Err(CodegenError::Builder(format!(
+                    "channel send element unsupported (word-scalar only): {other:?}"
+                )));
+            }
+        };
         let call = self
             .builder
             .build_call(
                 self.channel_send_fn,
-                &[ch_v.into(), val_v.into()],
+                &[ch_v.into(), encoded.into()],
                 "channel_send",
             )
             .map_err(|e| CodegenError::Builder(e.to_string()))?;
@@ -6019,13 +6048,16 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
             .expect("sentinel_channel_send returns i64"))
     }
 
-    /// ADR 0066 M1.2: `recv(ch) -> ?i64` — call `sentinel_channel_recv(ch, out)`
-    /// which writes the value to a stack `out` slot and returns a status
-    /// (0 = some / 1 = closed), then BUILD the `?i64` (`{ i1 valid, i64 value }`,
-    /// ADR 0066 D4): `valid = (status == 0)`, `value = *out`.
+    /// ADR 0066 M1.2 / M1.2b-cont: `recv(ch) -> ?T` — call `sentinel_channel_recv(ch,
+    /// out)` (writes the i64 slot, returns 0 some / 1 closed), DECODE the i64 into the
+    /// element `T` (the inverse of the M1.1 encode: trunc a narrow int / bitcast an
+    /// `f64` / inttoptr a `ptr`; `i64` = no-op, byte-identical to M1.2), then BUILD the
+    /// `?T` (`{ i1 valid, T value }`, `valid = status == 0`). `elem` is `type_args[0]`
+    /// from `check_call` (`i64` if absent). The in-process twin of `lower_process_recv`.
     fn lower_channel_recv(
         &mut self,
         ch: &TypedExpr,
+        elem: Type,
         program: &TypedProgram,
     ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
         let i64_ty = self.context.i64_type();
@@ -6050,14 +6082,43 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
             .builder
             .build_int_compare(IntPredicate::EQ, status, i64_ty.const_zero(), "recv_valid")
             .map_err(|e| CodegenError::Builder(e.to_string()))?;
-        let value = self
+        let raw = self
             .builder
             .build_load(i64_ty, out_slot, "recv_val")
-            .map_err(|e| CodegenError::Builder(e.to_string()))?;
-        // `?i64` is `{ i1, i64 }` (the inline-payload nullable, ADR 0014 D2).
+            .map_err(|e| CodegenError::Builder(e.to_string()))?
+            .into_int_value();
+        // Decode the i64 slot into the element type `T`.
+        let elem_llvm = self.llvm_basic_type(elem);
+        let value: BasicValueEnum = match elem_llvm {
+            BasicTypeEnum::IntType(it) => {
+                if it.get_bit_width() == 64 {
+                    raw.into()
+                } else {
+                    self.builder
+                        .build_int_truncate(raw, it, "recv_dec")
+                        .map_err(|e| CodegenError::Builder(e.to_string()))?
+                        .into()
+                }
+            }
+            BasicTypeEnum::FloatType(ft) => self
+                .builder
+                .build_bit_cast(raw, ft, "recv_dec")
+                .map_err(|e| CodegenError::Builder(e.to_string()))?,
+            BasicTypeEnum::PointerType(pt) => self
+                .builder
+                .build_int_to_ptr(raw, pt, "recv_dec")
+                .map_err(|e| CodegenError::Builder(e.to_string()))?
+                .into(),
+            other => {
+                return Err(CodegenError::Builder(format!(
+                    "channel recv element unsupported (word-scalar only): {other:?}"
+                )));
+            }
+        };
+        // `?T` is `{ i1, <T> }` (the inline-payload nullable, ADR 0014 D2).
         let opt_ty = self
             .context
-            .struct_type(&[self.context.bool_type().into(), i64_ty.into()], false);
+            .struct_type(&[self.context.bool_type().into(), elem_llvm], false);
         let agg = opt_ty.get_undef();
         let with_valid = self
             .builder
@@ -7400,7 +7461,8 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                     return self.lower_channel_send(&args[0], &args[1], program);
                 }
                 if *id == RECV_FN_ID {
-                    return self.lower_channel_recv(&args[0], program);
+                    let elem = type_args.first().copied().unwrap_or(Type::I64);
+                    return self.lower_channel_recv(&args[0], elem, program);
                 }
                 if *id == CHANNEL_CLOSE_FN_ID {
                     return self.lower_channel_close(&args[0], program);

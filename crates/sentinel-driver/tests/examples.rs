@@ -462,6 +462,11 @@ const EXAMPLES: &[(&str, i32)] = &[
     // ?i64 some-or-null) over a Channel<i64> queue. snc-only (the selfhost
     // mirror lands in M1.2 Phase B). 10 + 32 = 42.
     ("examples/lang/channel.sentinel", 42),
+    // ADR 0066 M1.2b-cont: GENERIC word-scalar channels — Channel<u8> / Channel<bool>
+    // (the element encoded/decoded through the i64 slot; the i64 case stays byte-
+    // identical to M1.2). snc-only (the scg mirror is deferred, like M2.3b). A
+    // Channel<u8> queue summing 30+12 + a Channel<bool> round-trip → 42.
+    ("examples/lang/channel_generic.sentinel", 42),
     // ADR 0066 M1.3: the worker-pool pattern — two long-lived workers spawned
     // with their `Channel<i64>` endpoints (the M1.2b channel-typed param), a
     // shared work queue (work-stealing via the mutex'd mpsc receiver) + a
@@ -772,6 +777,13 @@ fn lang_channel() {
 #[test]
 fn lang_worker_pool() {
     check_example("examples/lang/worker_pool.sentinel", "worker_pool", 42);
+}
+
+#[test]
+fn lang_channel_generic() {
+    // ADR 0066 M1.2b-cont: generic word-scalar channels (Channel<u8> / Channel<bool>);
+    // the element is encoded/decoded through the i64 slot. 30+12 + a bool round-trip = 42.
+    check_example("examples/lang/channel_generic.sentinel", "channel_generic", 42);
 }
 
 #[test]

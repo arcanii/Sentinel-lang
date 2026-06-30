@@ -5,10 +5,10 @@ expression: "reject_stderr(\"c66_channel_element_unsupported.sentinel\")"
 sentinel::types::channel_element_not_supported
 
   × `Channel<T>` element type is not supported yet
-   ╭─[tests/ui/c66_channel_element_unsupported.sentinel:5:15]
- 4 │ // follow-on. Here a `Channel<bool>` parameter surfaces ChannelElementNotSupported.
- 5 │ fn worker(ch: Channel<bool>) -> i64 {
+   ╭─[tests/ui/c66_channel_element_unsupported.sentinel:6:15]
+ 5 │ // ChannelElementNotSupported.
+ 6 │ fn worker(ch: Channel<u128>) -> i64 {
    ·               ──────┬──────
    ·                     ╰── 
- 6 │     0
+ 7 │     0
    ╰────

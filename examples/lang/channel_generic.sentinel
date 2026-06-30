@@ -1,0 +1,45 @@
+// ADR 0066 M1.2b-cont: GENERIC word-scalar in-process channels — `Channel<u8>` /
+// `Channel<bool>` (not just `Channel<i64>`). The element is encoded into / decoded
+// from the channel's i64 slot (the M1.1 spawn encode: zext a narrow int; the runtime
+// stays i64-based — no new symbol). `channel_new()` is context-typed (the element
+// comes from the `let` annotation); `send`/`recv` read the element from the channel's
+// type; `recv -> ?T`. The `i64` case is byte-identical to M1.2; these generic
+// elements are an snc-side demonstrator (the scg mirror is deferred, like M2.3b), so
+// this lives in examples/, out of the self-host differential corpus.
+//
+// A Channel<u8> message queue (bytes summing to 42) + a Channel<bool> round-trip.
+// Exit 42.
+
+fn main() -> i64 {
+    // A Channel<u8>: send two bytes, close, drain summing them.
+    let cu: Channel<u8> = channel_new();
+    send(cu, 30 as u8);
+    send(cu, 12 as u8);
+    channel_close(cu);
+    let mut sum: i64 = 0;
+    let mut draining: bool = true;
+    while draining {
+        let m: ?u8 = recv(cu);
+        if is_some(m) {
+            sum = sum + u8_to_i64(unwrap_or(m, 0 as u8));
+            0
+        } else {
+            draining = false;
+            0
+        };
+    }
+
+    // A Channel<bool>: send `true`, recv it back — proves a bool element round-trips.
+    let cb: Channel<bool> = channel_new();
+    send(cb, true);
+    channel_close(cb);
+    let rb: ?bool = recv(cb);
+    let okb: bool = unwrap_or(rb, false);
+
+    // 30 + 12 = 42, gated on the bool round-trip.
+    if okb {
+        sum
+    } else {
+        0
+    }
+}
