@@ -112,6 +112,59 @@ pub fn open(key64: &[secret u8], seqnr: i64, frame: &[u8]) -> OpenResult {
     OpenResult { ok: ok, v: v }
 }
 
+// The result of `open_bytes`: a PUBLIC authenticity verdict `ok` + the recovered
+// `secret` message bytes (`msg`, valid only when ok == 1; empty on a forgery).
+pub struct OpenBytesResult { ok: i64, msg: [secret u8] }
+
+// seal_bytes (ADR 0066 M2.4c / ADR 0069 D5): AEAD-encrypt a variable-length SECRET
+// message into a FIXED-WIDTH sealed frame. The plaintext is always padded to
+// `4 + maxlen` bytes — a 4-byte little-endian length prefix + the message + zero
+// padding — so the wire ciphertext length is CONSTANT for a given `maxlen` and never
+// leaks the real message length (the D5 padding policy). `msg` must be at most
+// `maxlen` bytes. Reuses the verified-CT ssh record cipher (no new primitive, D2);
+// the secret plaintext is never declassified — only the ciphertext + tag.
+pub fn seal_bytes(key64: &[secret u8], seqnr: i64, msg: &[secret u8], maxlen: i64) -> [u8] {
+    let mlen: i64 = len(*msg);
+    // padded plaintext = len(4 LE) || msg || zeros, to a total of 4 + maxlen.
+    let mut pt: Vec<secret u8> = vec_new();
+    let mut k: i64 = 0;
+    while k < 4 { push(&mut pt, i64_to_u8((mlen >> (8 * k)) & 255)); k = k + 1; }
+    let mut i: i64 = 0;
+    while i < mlen { push(&mut pt, (*msg)[i]); i = i + 1; }
+    let mut p: i64 = mlen;
+    while p < maxlen { push(&mut pt, i64_to_u8(0)); p = p + 1; }
+    let padded: [secret u8] = vec_to_array(pt);
+    let record: [secret u8] = ssh_seal(key64, seqnr, &padded);
+    declassify_record(&record, len(record))
+}
+
+// open_bytes: authenticate + AEAD-decrypt a fixed-width sealed `frame` back to the
+// variable-length SECRET message. The 4-byte length prefix is declassified (the
+// VERIFIED receiver learns its own message's length — the WIRE was constant-length,
+// so this is no wire leak, only the legitimate recipient's knowledge); the message
+// BYTES re-emerge `secret`. On a forged tag (ok == 0) the message is empty (the
+// length is never trusted, so a garbage prefix can't drive an out-of-bounds read).
+pub fn open_bytes(key64: &[secret u8], seqnr: i64, frame: &[u8]) -> OpenBytesResult {
+    let record: [secret u8] = widen_record(frame);
+    let ok: i64 = ssh_open_verify(key64, seqnr, &record);
+    let padded: [secret u8] = ssh_open_payload(key64, seqnr, &record);
+    let maxlen: i64 = len(padded) - 4;
+    let raw: i64 = u8_to_i64(declassify(padded[0]))
+        | (u8_to_i64(declassify(padded[1])) << 8)
+        | (u8_to_i64(declassify(padded[2])) << 16)
+        | (u8_to_i64(declassify(padded[3])) << 24);
+    // Trust the length ONLY when the tag verified AND it fits — else read nothing.
+    let mlen: i64 = if ok == 1 {
+        if raw > maxlen { 0 } else { raw }
+    } else {
+        0
+    };
+    let mut out: Vec<secret u8> = vec_new();
+    let mut i: i64 = 0;
+    while i < mlen { push(&mut out, padded[4 + i]); i = i + 1; }
+    OpenBytesResult { ok: ok, msg: vec_to_array(out) }
+}
+
 // Pack 8 PUBLIC little-endian bytes of `frame` starting at `off` into one i64
 // (the pipe carries public i64 frames via `process_send`).
 fn pack8(frame: &[u8], off: i64) -> i64 {

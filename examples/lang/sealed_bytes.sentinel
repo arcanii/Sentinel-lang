@@ -1,0 +1,77 @@
+// ADR 0066 M2.4c / ADR 0069 D5: variable-length SECRET messages over a SealedChannel,
+// with fixed-width padding (no length leak). M2.4a/b sealed a single `secret i64`;
+// `seal_bytes`/`open_bytes` seal an arbitrary `[secret u8]` message — the real shape
+// of a privsep request/response. The plaintext is always padded to `4 + maxlen`
+// bytes (a length prefix + the message + zeros), so the wire ciphertext length is
+// CONSTANT for a given `maxlen` and never reveals the real message length (ADR 0069
+// D5). Reuses the verified-CT ssh record cipher — no new primitive.
+//
+// Verified in-process: a variable-length secret message round-trips (re-emerges
+// secret + authenticated), and two DIFFERENT-length messages under the same `maxlen`
+// frame to the SAME length (the no-leak property). snc-side demonstrator (the scg
+// mirror of the sealed stdlib is deferred), so it lives in examples/.
+use std::security::sealed::seal_bytes;
+use std::security::sealed::open_bytes;
+use std::security::sealed::OpenBytesResult;
+
+fn demo_key() -> [secret u8] {
+    let mut v: Vec<secret u8> = vec_new();
+    let mut i: i64 = 0;
+    while i < 64 {
+        push(&mut v, i64_to_u8((i * 7 + 13) & 255));
+        i = i + 1;
+    }
+    vec_to_array(v)
+}
+
+// Build a 3-byte secret message from public values (i64_to_u8 yields `secret u8`).
+fn msg3(a: i64, b: i64, c: i64) -> [secret u8] {
+    let mut v: Vec<secret u8> = vec_new();
+    push(&mut v, i64_to_u8(a));
+    push(&mut v, i64_to_u8(b));
+    push(&mut v, i64_to_u8(c));
+    vec_to_array(v)
+}
+
+// Build an `n`-byte all-ones secret message (for the length-invariance check).
+fn ones(n: i64) -> [secret u8] {
+    let mut v: Vec<secret u8> = vec_new();
+    let mut i: i64 = 0;
+    while i < n { push(&mut v, i64_to_u8(1)); i = i + 1; }
+    vec_to_array(v)
+}
+
+fn main() -> i64 {
+    let key: [secret u8] = demo_key();
+
+    // (1) Round-trip a variable-length secret message (3 bytes summing to 42).
+    let msg: [secret u8] = msg3(10, 15, 17);
+    let frame: [u8] = seal_bytes(&key, 0, &msg, 32);
+    let r: OpenBytesResult = open_bytes(&key, 0, &frame);
+    let mut sum: secret i64 = 0;
+    let n: i64 = len(r.msg);
+    let mut i: i64 = 0;
+    while i < n {
+        sum = sum + (r.msg[i] as i64);
+        i = i + 1;
+    }
+
+    // (2) No-length-leak: a 1-byte and a 7-byte message under the SAME maxlen frame
+    //     to the SAME ciphertext length.
+    let o1: [secret u8] = ones(1);
+    let o7: [secret u8] = ones(7);
+    let f1: [u8] = seal_bytes(&key, 1, &o1, 32);
+    let f7: [u8] = seal_bytes(&key, 2, &o7, 32);
+    let same_len: bool = len(f1) == len(f7);
+
+    // Exit 42 iff the message authenticated AND the length-invariance holds.
+    if r.ok == 1 {
+        if same_len {
+            declassify(sum)
+        } else {
+            0
+        }
+    } else {
+        0
+    }
+}

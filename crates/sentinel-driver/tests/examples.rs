@@ -490,6 +490,13 @@ const EXAMPLES: &[(&str, i32)] = &[
     // (no new primitive). The real-pipe transport is deferred (needs a self-stdin
     // builtin). snc-only. 5+15+20 + keyc_match + authed = 42.
     ("examples/lang/sealed_session.sentinel", 42),
+    // ADR 0066 M2.4c / ADR 0069 D5: variable-length SECRET messages over a
+    // SealedChannel with fixed-width padding — seal_bytes/open_bytes seal an arbitrary
+    // [secret u8] message; the wire ciphertext length is constant for a given maxlen
+    // (no length leak). Verified in-process: a variable-length message re-emerges
+    // secret + authenticated (3 bytes summing to 42), and two different-length
+    // messages frame to the same length. snc-only. 42.
+    ("examples/lang/sealed_bytes.sentinel", 42),
     // ADR 0037 / BACKLOG §10.9: the worked MULTI-FILE example — a program using
     // a `pub class` (`Rect`) defined in another file, the library module
     // `std::math::rect`. The class crosses the module / separate-compilation
@@ -783,6 +790,15 @@ fn lang_sealed_session() {
     // host authenticated via ed25519 sig + pinned host key, a 3-message stream re-
     // emerges secret). 5+15+20 + keyc_match + authed = 42. Built --separate and merged.
     check_example("examples/lang/sealed_session.sentinel", "sealed_session", 42);
+}
+
+#[test]
+fn lang_sealed_bytes() {
+    // ADR 0066 M2.4c / ADR 0069 D5: variable-length SECRET messages with fixed-width
+    // padding — seal_bytes/open_bytes over a [secret u8] message; a 3-byte message
+    // (sum 42) re-emerges secret + authenticated, and two different-length messages
+    // frame to the same length (no length leak). Built --separate and merged.
+    check_example("examples/lang/sealed_bytes.sentinel", "sealed_bytes", 42);
 }
 
 #[test]
