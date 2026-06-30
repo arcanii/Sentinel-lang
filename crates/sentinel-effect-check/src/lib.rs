@@ -139,6 +139,16 @@ pub fn effect_check(program: &TypedProgram) -> (EffectCheckedProgram, Vec<Effect
         .position(|d| d.name == "Async")
         .map(|i| EffectId(i as u32));
 
+    // ADR 0066 M2.1 / D7: the built-in `Subprocess` capability effect bubbles to
+    // `main` (a program that spawns processes is honestly subprocess-using), so —
+    // unlike every other effect — it is EXEMPT from the Pass-3 main-effect-free
+    // check. `process_spawn`'s signature row carries it; it propagates normally.
+    let subprocess_id: Option<EffectId> = program
+        .effect_decls
+        .iter()
+        .position(|d| d.name == "Subprocess")
+        .map(|i| EffectId(i as u32));
+
     // Initialize: annotated fns get their annotation as the
     // initial row; unannotated fns start with empty rows that
     // grow during the fixed-point iteration. Runtime builtins
@@ -206,7 +216,9 @@ pub fn effect_check(program: &TypedProgram) -> (EffectCheckedProgram, Vec<Effect
     // (the guarded find is identical to `program.main()` when present).
     if let Some(main) = program.fns.iter().find(|f| program.signature(f.id).is_main) {
         if let Some(main_row) = effective.get(&main.id) {
-            if let Some(&first) = main_row.iter().next() {
+            // ADR 0066 M2.1 / D7: `Subprocess` is allowed at `main` (it bubbles);
+            // every other effect must be handled before `main`.
+            if let Some(&first) = main_row.iter().find(|&&e| Some(e) != subprocess_id) {
                 let effect_name = effect_name(first, program);
                 errors.push(EffectError::UnhandledEffect {
                     effect_name,

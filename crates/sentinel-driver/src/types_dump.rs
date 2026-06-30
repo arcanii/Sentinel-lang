@@ -62,10 +62,15 @@ pub fn dump(program: &TypedProgram) -> String {
     // The built-in `Async` effect (synthetic `0..0` span, id = user-effect
     // count) has no source position — emit it deterministically last, as
     // `resolve_dump` does. A user effect named `Async` is rejected upstream.
+    // ADR 0066 M2.1: `Subprocess` is likewise a synthetic built-in — pull it out
+    // too and emit it last (after `Async`), matching the Sentinel stage.
     let mut async_effect: Option<&TypedEffectDecl> = None;
+    let mut subprocess_effect: Option<&TypedEffectDecl> = None;
     for ef in &program.effect_decls {
         if ef.name == "Async" {
             async_effect = Some(ef);
+        } else if ef.name == "Subprocess" {
+            subprocess_effect = Some(ef);
         } else {
             items.push((ef.span.start, Item::Effect(ef)));
         }
@@ -99,6 +104,13 @@ pub fn dump(program: &TypedProgram) -> String {
         }
     }
     if let Some(ef) = async_effect {
+        if !first {
+            out.push('\n');
+        }
+        first = false;
+        dump_effect(ef, program, &mut out);
+    }
+    if let Some(ef) = subprocess_effect {
         if !first {
             out.push('\n');
         }

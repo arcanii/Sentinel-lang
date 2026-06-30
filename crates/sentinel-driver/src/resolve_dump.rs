@@ -53,10 +53,16 @@ pub fn dump(program: &ResolvedProgram) -> String {
     // from the source-order user decls. The Sentinel stage appends it likewise
     // (it never appears in the source). A user effect literally named `Async`
     // is rejected by resolve, so the name uniquely tags the built-in.
+    // ADR 0066 M2.1: `Subprocess` is likewise auto-registered with a synthetic
+    // `0..0` span — pull it out too and emit it deterministically last (after
+    // `Async`), matching the Sentinel stage (which appends both built-ins).
     let mut async_effect: Option<&ResolvedEffectDecl> = None;
+    let mut subprocess_effect: Option<&ResolvedEffectDecl> = None;
     for ef in &program.effects {
         if ef.name == "Async" {
             async_effect = Some(ef);
+        } else if ef.name == "Subprocess" {
+            subprocess_effect = Some(ef);
         } else {
             items.push((ef.span.start, Item::Effect(ef)));
         }
@@ -90,6 +96,13 @@ pub fn dump(program: &ResolvedProgram) -> String {
         }
     }
     if let Some(ef) = async_effect {
+        if !first {
+            out.push('\n');
+        }
+        first = false;
+        dump_effect(ef, &mut out);
+    }
+    if let Some(ef) = subprocess_effect {
         if !first {
             out.push('\n');
         }

@@ -38,16 +38,18 @@ fn resolve_dump(name: &str, contents: &str) -> String {
 #[test]
 fn resolve_dump_params_var_call() {
     // Params bind VarIds (#0, #1); a free call resolves to the callee's FnId
-    // (user fns start at #21, after the 21 builtins); `main` is #22. The
-    // built-in `Async` effect is emitted last.
+    // (user fns start at #27, after the 27 builtins — 0..13 + sockets 14..20 +
+    // channels 21..24 + subprocess 25..26); `main` is #28. The built-in `Async`
+    // then `Subprocess` (ADR 0066 M2.1) effects are emitted last.
     assert_eq!(
         resolve_dump(
             "fns",
             "fn add(a: i64, b: i64) -> i64 { a + b }\nfn main() -> i64 { add(1, 2) }\n"
         ),
-        "(fn #21 add ((param #0 a i64) (param #1 b i64)) i64 (block (binop + (var #0) (var #1))))\n\
-         (fn #22 main () i64 (block (call #21 (int 1) (int 2))))\n\
-         (effect #0 Async)\n"
+        "(fn #27 add ((param #0 a i64) (param #1 b i64)) i64 (block (binop + (var #0) (var #1))))\n\
+         (fn #28 main () i64 (block (call #27 (int 1) (int 2))))\n\
+         (effect #0 Async)\n\
+         (effect #1 Subprocess)\n"
     );
 }
 
@@ -56,8 +58,9 @@ fn resolve_dump_let_bindings() {
     // `let` bindings take the next VarId; a later reference resolves to it.
     assert_eq!(
         resolve_dump("lets", "fn main() -> i64 { let x: i64 = 5; let y = x + 1; y }\n"),
-        "(fn #21 main () i64 (block (let #0 i64 (int 5)) (let #1 _ (binop + (var #0) (int 1))) (var #1)))\n\
-         (effect #0 Async)\n"
+        "(fn #27 main () i64 (block (let #0 i64 (int 5)) (let #1 _ (binop + (var #0) (int 1))) (var #1)))\n\
+         (effect #0 Async)\n\
+         (effect #1 Subprocess)\n"
     );
 }
 
@@ -66,7 +69,7 @@ fn resolve_dump_builtin_call() {
     // A call to a runtime builtin resolves to its reserved FnId (`print` = #0).
     assert_eq!(
         resolve_dump("builtin", "fn main() -> i64 { print(42) }\n"),
-        "(fn #21 main () i64 (block (call #0 (int 42))))\n(effect #0 Async)\n"
+        "(fn #27 main () i64 (block (call #0 (int 42))))\n(effect #0 Async)\n(effect #1 Subprocess)\n"
     );
 }
 
@@ -80,7 +83,8 @@ fn resolve_dump_struct_lit_and_field() {
             "struct Box { v: i64 }\nfn main() -> i64 { let b = Box { v: 42 }; b.v }\n"
         ),
         "(struct #0 Box (field v i64))\n\
-         (fn #21 main () i64 (block (let #0 _ (struct-lit #0 Box (field v (int 42)))) (field (var #0) v)))\n\
-         (effect #0 Async)\n"
+         (fn #27 main () i64 (block (let #0 _ (struct-lit #0 Box (field v (int 42)))) (field (var #0) v)))\n\
+         (effect #0 Async)\n\
+         (effect #1 Subprocess)\n"
     );
 }

@@ -270,7 +270,12 @@ fn eff_row_is_kont(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], at: i64
     let mut kont: bool = false;
     while (*k)[i] != 7 {       // up to `}`
         if (*k)[i] != 29 {     // an effect-name ident (not a `,` separator)
+            let sp: [u8] = "Subprocess";
             if cg_is_async(src, (*s)[i], (*e)[i]) {
+                0
+            } else if name_eq_src(src, (*s)[i], (*e)[i], &sp) {
+                // (ADR 0066 M2.1) `Subprocess`, like `Async`, is a capability
+                // effect (process runtime), NOT perform-based — so NO Kont* ABI.
                 0
             } else {
                 kont = true;

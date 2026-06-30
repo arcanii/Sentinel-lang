@@ -4597,11 +4597,21 @@ pub fn check_module(
     {
         let bytes_ty = Type::Array(ArrayElem::U8);
         let argv_ty = Type::Array(ArrayElem::Array(intern_array_elem(&mut arrays, ArrayElem::U8)));
-        let process_sigs: &[(usize, &[Type], Type)] = &[
-            (25, &[bytes_ty, argv_ty], Type::Process), // process_spawn([u8], [[u8]]) -> Process
-            (26, &[Type::Process], Type::I64),         // process_wait(Process) -> i64
+        // ADR 0066 M2.1 / D7: `process_spawn` carries the built-in `Subprocess`
+        // capability effect (auto-registered in resolve, after `Async`); it
+        // propagates to callers + bubbles to `main`. `process_wait` is effect-free
+        // (it queries an already-acquired handle).
+        let subprocess_eid: EffectId = EffectId(
+            typed_effect_decls
+                .iter()
+                .position(|d| d.name == "Subprocess")
+                .expect("Subprocess auto-registered in resolve") as u32,
+        );
+        let process_sigs: &[(usize, &[Type], Type, &[EffectId])] = &[
+            (25, &[bytes_ty, argv_ty], Type::Process, &[subprocess_eid]), // process_spawn
+            (26, &[Type::Process], Type::I64, &[]),                       // process_wait
         ];
-        for (idx, params, ret) in process_sigs {
+        for (idx, params, ret, eff) in process_sigs {
             let sig = &program.fn_signatures[*idx];
             typed_signatures.push(TypedFnSignature {
                 id: sig.id,
@@ -4610,7 +4620,7 @@ pub fn check_module(
                 type_params: vec![],
                 param_types: params.to_vec(),
                 return_type: *ret,
-                effect_row: vec![],
+                effect_row: eff.to_vec(),
                 is_main: false,
                 is_runtime: true,
                 extern_origin: None,
@@ -12114,13 +12124,15 @@ fn main() -> i64 {
     #[test]
     fn c32_effect_decl_type_checks_with_no_ops() {
         let p = check_ok("effect Io { } fn main() -> i64 { 0 }");
-        // C4.4 / ADR 0024 D5: the built-in `Async` effect is
-        // auto-registered after user effects (Io at 0, Async at 1).
-        assert_eq!(p.effect_decls.len(), 2);
+        // C4.4 / ADR 0024 D5 + ADR 0066 M2.1: the built-in `Async` then
+        // `Subprocess` effects are auto-registered after user effects (Io at 0,
+        // Async at 1, Subprocess at 2).
+        assert_eq!(p.effect_decls.len(), 3);
         assert!(p.effect_decls[0].ops.is_empty());
         assert_eq!(p.effect_decls[0].name, "Io");
         assert_eq!(p.effect_decls[1].name, "Async");
         assert!(p.effect_decls[1].ops.is_empty());
+        assert_eq!(p.effect_decls[2].name, "Subprocess");
     }
 
     #[test]

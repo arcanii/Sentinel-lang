@@ -1,21 +1,29 @@
-// ADR 0066 M2.1: subprocess spawn — `process_spawn(path: [u8], args: [[u8]]) ->
-// Process` + `process_wait(Process) -> i64`. This differential fixture exercises
-// the lowering of both builtins (decompose the `[u8]` path + `[[u8]]` argv into
-// (ptr, len) pairs; the `Process` handle is an opaque `ptr`) in BOTH compilers.
+// ADR 0066 M2.1: subprocess spawn + the `Subprocess` capability effect (D7).
+// `process_spawn(path: [u8], args: [[u8]]) -> Process` + `process_wait(Process)
+// -> i64`, over `std::process::Command`. `process_spawn` carries the built-in
+// `Subprocess` effect, so `spawner` (which calls it) DECLARES `! { Subprocess }`
+// (the capability is visible in the type); the effect then BUBBLES to `main`
+// (unlike `Async`, which a `scope` discharges) — `main` may carry `Subprocess`.
 //
-// The real spawn is GUARDED behind a runtime-false flag so the exit code is
-// platform-independent (42 on every host) — a genuine cross-platform spawn needs
-// per-OS path/args (ADR 0062 `process_<os>.sentinel`), out of scope here. The IR
-// for `process_spawn`/`process_wait` is still emitted (both branches lower), so
-// the self-host differential covers it; the real spawn behaviour is covered by
-// the `sentinel_process_*` runtime unit tests. Exit 42.
+// This fixture exercises: the two builtins' lowering (decompose the `[u8]` path +
+// `[[u8]]` argv; `Process` = ptr), the `! { Subprocess }` annotation (Pass-2:
+// inferred ⊆ declared), and the bubble-to-`main`. The real spawn is GUARDED
+// behind a runtime-false flag for cross-platform determinism (a genuine
+// cross-platform spawn needs per-OS path/args, ADR 0062); the process IR + the
+// effect rows still emit (both branches lower), so the self-host differential
+// covers them, and the `sentinel_process_*` runtime unit tests cover the real
+// spawn. Exit 42.
+
+fn spawner(argv: [[u8]]) -> i64 ! { Subprocess } {
+    let p = process_spawn("cmd", argv);
+    process_wait(p)
+}
 
 fn main() -> i64 {
     let probe: bool = false;
     if probe {
         let argv: [[u8]] = ["/c", "exit 7"];
-        let p = process_spawn("cmd", argv);
-        process_wait(p)
+        spawner(argv)
     } else {
         42
     }

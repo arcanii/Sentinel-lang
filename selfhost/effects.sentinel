@@ -114,6 +114,11 @@ fn src_eq_lit(src: &[u8], st: i64, en: i64, lit: [u8]) -> bool {
     }
 }
 
+// (ADR 0066 M2.1) compare a whole `[u8]` name `q` against a string LITERAL.
+fn name_is(q: &[u8], lit: [u8]) -> bool {
+    src_eq_lit(q, 0, len(*q), lit)
+}
+
 // Compare two `src` slices (for the annotation re-scan, where the queried effect
 // name is itself a src slice).
 fn same_src(src: &[u8], s1: i64, e1: i64, s2: i64, e2: i64) -> bool {
@@ -218,6 +223,9 @@ fn effect_lookup_slice(c: &mut ECtx, src: &[u8], st: i64, en: i64) -> i64 {
     if found == 0 - 1 {
         if src_eq_lit(src, st, en, "Async") {
             len((*c).efs)
+        } else if src_eq_lit(src, st, en, "Subprocess") {
+            // (ADR 0066 M2.1) the built-in `Subprocess` effect — EffectId after Async.
+            len((*c).efs) + 1
         } else {
             0 - 1
         }
@@ -302,6 +310,17 @@ fn walk_eff(e: Expr, disch: i64, own: &mut i64, c: &mut ECtx, gb: &mut Vec<u8>, 
         },
         Expr::Call(nm, args) => {
             let callee: i64 = fn_lookup(c, src, &nm);
+            // (ADR 0066 M2.1) a `process_spawn` call contributes the built-in
+            // `Subprocess` effect (EffectId = aid + 1) to the caller's own row,
+            // exactly as `spawn` contributes `Async` — it is a builtin (not a user
+            // fn), so it has no call edge; it bubbles (nothing discharges it).
+            if name_is(&nm, "process_spawn") {
+                let ndp: i64 = disch ^ (0 - 1);
+                *own = *own | (bitof(aid + 1) & ndp);
+                0
+            } else {
+                0
+            };
             sink_name(gb, nm);
             if callee >= 0 {
                 push(&mut (*c).ecaller, fidx);
@@ -618,13 +637,17 @@ fn dump_rows(out: &mut Vec<u8>, rows: &Vec<i64>, c: &mut ECtx, src: &[u8]) -> i6
         append_slice(out, src, (*c).ufs[i], (*c).ufe[i]);
         let row: i64 = (*rows)[i];
         let mut eid: i64 = 0;
-        while eid <= neff {
+        // (ADR 0066 M2.1) iterate one past `Async` (= neff) for the built-in
+        // `Subprocess` (= neff + 1); EffectId order matches the Rust BTreeSet dump.
+        while eid <= neff + 1 {
             if (row & bitof(eid)) != 0 {
                 push(out, ' ');
                 if eid < neff {
                     append_slice(out, src, (*c).efs[eid], (*c).efe[eid])
-                } else {
+                } else if eid == neff {
                     append_str(out, "Async")
+                } else {
+                    append_str(out, "Subprocess")
                 };
                 0
             } else {

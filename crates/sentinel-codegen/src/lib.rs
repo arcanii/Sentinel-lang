@@ -8276,7 +8276,11 @@ fn uses_kont_abi(sig: &TypedFnSignature, program: &TypedProgram) -> bool {
         program
             .effect_decls
             .get(eid.0 as usize)
-            .map(|d| d.name != "Async")
+            // ADR 0024 / 0066 M2.1: `Async` and `Subprocess` are built-in
+            // CAPABILITY effects, not perform-based — they use the task / process
+            // runtime, not the kont handler runtime — so they do NOT trigger the
+            // Kont* ABI (a fn carrying only these returns its value directly).
+            .map(|d| d.name != "Async" && d.name != "Subprocess")
             .unwrap_or(true)
     })
 }

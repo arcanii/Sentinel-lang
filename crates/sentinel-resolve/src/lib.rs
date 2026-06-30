@@ -2244,6 +2244,28 @@ pub fn resolve_module(
         ops: Vec::new(),
         span: 0..0,
     });
+    // ADR 0066 M2.1 / D7: auto-register the built-in `Subprocess` capability
+    // effect (after `Async`, so user + Async EffectIds stay stable). `process_spawn`
+    // carries it; a fn that (transitively) spawns a process declares
+    // `! { Subprocess }`, and — unlike `Async` (discharged by `scope`) — it BUBBLES
+    // to `main` (a program that spawns processes is honestly subprocess-using).
+    // No ops (the marker drives the capability discipline). A user effect named
+    // `Subprocess` collides with the reserved built-in.
+    if let Some(ed) = program.effects.iter().find(|e| e.name == "Subprocess") {
+        return Err(ResolveError::RedefinedEffect {
+            name: "Subprocess".to_string(),
+            span: to_source_span(&ed.name_span),
+        });
+    }
+    let subprocess_id = EffectId(resolved_effects.len() as u32);
+    effect_table.insert("Subprocess".to_string(), subprocess_id);
+    resolved_effects.push(ResolvedEffectDecl {
+        id: subprocess_id,
+        name: "Subprocess".to_string(),
+        name_span: 0..0,
+        ops: Vec::new(),
+        span: 0..0,
+    });
 
     // Pass 0: collect struct declarations. Indexed by source order
     // (each struct's StructId matches its index in resolved_structs).
@@ -6141,10 +6163,12 @@ mod tests {
         let p = resolve_ok(
             "effect Io { log(msg: i64) -> i64; }\nfn main() -> i64 { 0 }",
         );
-        // C4.4 / ADR 0024 D5: the built-in `Async` effect is
-        // auto-registered after user effects, so the table holds
-        // `Io` (id 0) + `Async` (id 1).
-        assert_eq!(p.effects.len(), 2);
+        // C4.4 / ADR 0024 D5 + ADR 0066 M2.1: the built-in `Async` then
+        // `Subprocess` effects are auto-registered after user effects, so the
+        // table holds `Io` (id 0) + `Async` (id 1) + `Subprocess` (id 2).
+        assert_eq!(p.effects.len(), 3);
+        assert_eq!(p.effects[1].name, "Async");
+        assert_eq!(p.effects[2].name, "Subprocess");
         assert_eq!(p.effects[0].name, "Io");
         assert_eq!(p.effects[0].id, EffectId(0));
         assert_eq!(p.effects[0].ops.len(), 1);

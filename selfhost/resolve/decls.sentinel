@@ -1141,11 +1141,16 @@ fn main() -> i64 {
         si = si + 1;
     }
 
-    // The built-in `Async` effect (id = the user-effect count) dumps LAST.
+    // The built-in `Async` then `Subprocess` (ADR 0066 M2.1) effects (ids = the
+    // user-effect count, +1) dump LAST.
     push(&mut out, '\n');
     append_str(&mut out, "(effect #");
     append_int(&mut out, ecount);
     append_str(&mut out, " Async)");
+    push(&mut out, '\n');
+    append_str(&mut out, "(effect #");
+    append_int(&mut out, ecount + 1);
+    append_str(&mut out, " Subprocess)");
     push(&mut out, '\n');
 
     let arr: [u8] = vec_to_array(out);
