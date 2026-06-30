@@ -164,7 +164,7 @@ byte-identical → mark the sub-phase ACCEPTED).
 | **2 — multi-processing** | M2.1 | **✅ done** — **Process spawn** — `Process` handle over `std::process::Command`; `Subprocess` capability effect | yes (new `Type` + effect + runtime symbols) |
 | | M2.2 | **✅ done** — **Byte-pipe IPC** — child stdin/stdout as byte streams; the cross-process **secret fence** (D8) | yes (runtime symbols + fence rule) |
 | | M2.3 | **✅ done** — Typed framed channels over pipes — `process_send(p,i64)->i64` / `process_recv(p)->?i64` (8-byte LE frame, i64-minimum, the M1.2 channel ABI over a pipe) | yes (serialization + fence) |
-| | M2.4 | **`SealedChannel<secret T>`** — the AEAD-encrypted secret-cross-process path (D8a), built on the verified-constant-time `aead`/`x25519` stdlib | yes (its own ADR — Sentinel↔Sentinel only) |
+| | M2.4 | **`SealedChannel<secret T>`** — the AEAD-encrypted secret-cross-process path (D8a), built on the verified-constant-time `aead`/`x25519` stdlib — **its own [ADR 0069](0069-sealed-channel.md) (PROPOSED, design PINNED 2026-06-30)** | yes (ADR 0069 — Sentinel↔Sentinel only) |
 | **3 — actors** | M3.x | Typed-mailbox actors (SENTINEL_DESIGN2 §8.2) as sugar over channels; same syntax in-process + cross-process | yes (large; its own ADR) |
 | **far future** | — | `@shared` shared-memory segments + robust futexes (SENTINEL_DESIGN2 §6), broker-backed, Unix-first | yes (its own ADR) |
 
