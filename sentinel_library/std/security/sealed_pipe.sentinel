@@ -1,0 +1,126 @@
+// std::security::sealed_pipe — the SealedChannel handshake + record transport over
+// a REAL process pipe (ADR 0066 M2.4b, the real-transport completion of M2.4a/b).
+//
+// M2.4b verified the KEX crypto in-process; this drives it over an actual parent <->
+// child pipe. The PARENT (initiator/client) holds the child's `Process` handle and
+// frames bytes with `process_send`/`process_recv`; the spawned CHILD (responder/
+// server) frames bytes on its OWN stdin/stdout with the M2.4b `stdin_recv`/
+// `stdout_send` builtins (the missing child-side half). Both run the same
+// transport-free `std::security::sealed_kex` core (x25519 KEX + ed25519 host-key
+// auth + ssh_kdf directional keys) — NO new cryptographic primitive.
+//
+// A handshake / record byte-string crosses as a sequence of public 8-byte i64
+// frames (Q_C = 32 B = 4 frames, the response = 128 B = 16 frames, a sealed
+// `secret i64` record = 40 B = 5 frames — fixed-width, ADR 0069 D5). The PUBLIC
+// ciphertext + the wire-public KEX values are all that touch the pipe; a `secret`
+// re-emerges only after `open` on the verified receiver.
+use std::security::sealed_kex::sealed_kex_client_msg;
+use std::security::sealed_kex::sealed_kex_server;
+use std::security::sealed_kex::sealed_kex_client_finish;
+use std::security::sealed_kex::SealedSession;
+use std::security::sealed_kex::SealedServerKex;
+
+// Pack 8 public little-endian bytes of `b` at `off` into one i64 frame.
+fn pack8(b: &[u8], off: i64) -> i64 {
+    let mut w: i64 = 0;
+    let mut k: i64 = 0;
+    while k < 8 {
+        w = w | (u8_to_i64((*b)[off + k]) << (8 * k));
+        k = k + 1;
+    }
+    w
+}
+
+// Append the 8 little-endian bytes of a public i64 frame `w` onto `out`.
+fn unpack8(out: &mut Vec<u8>, w: i64) -> i64 {
+    let mut k: i64 = 0;
+    while k < 8 {
+        push(out, i64_to_u8((w >> (8 * k)) & 255));
+        k = k + 1;
+    }
+    0
+}
+
+// ---- PARENT side: frame public bytes over the child's `Process` pipe. The
+// SealedChannel wraps the Process (sealed_process recovers it); we send/recv public
+// framing here — a `secret` can only cross via the sealed records below. ----
+fn parent_send_bytes(sc: SealedChannel<secret i64>, b: &[u8]) -> i64 {
+    let p = sealed_process(sc);
+    let n: i64 = len(*b);
+    let mut off: i64 = 0;
+    while off < n {
+        process_send(p, pack8(b, off));
+        off = off + 8;
+    }
+    0
+}
+
+fn parent_recv_bytes(sc: SealedChannel<secret i64>, nbytes: i64) -> [u8] {
+    let p = sealed_process(sc);
+    let mut out: Vec<u8> = vec_new();
+    let mut got: i64 = 0;
+    while got < nbytes {
+        unpack8(&mut out, unwrap_or(process_recv(p), 0));
+        got = got + 8;
+    }
+    vec_to_array(out)
+}
+
+// ---- CHILD side: frame public bytes over THIS process's own stdin/stdout. ----
+fn child_send_bytes(b: &[u8]) -> i64 {
+    let n: i64 = len(*b);
+    let mut off: i64 = 0;
+    while off < n {
+        stdout_send(pack8(b, off));
+        off = off + 8;
+    }
+    0
+}
+
+fn child_recv_bytes(nbytes: i64) -> [u8] {
+    let mut out: Vec<u8> = vec_new();
+    let mut got: i64 = 0;
+    while got < nbytes {
+        unpack8(&mut out, unwrap_or(stdin_recv(), 0));
+        got = got + 8;
+    }
+    vec_to_array(out)
+}
+
+// The PARENT (initiator/client) runs the authenticated x25519 handshake over the
+// child's pipe: send Q_C, receive the 128-byte response, verify + pin the host key,
+// and return the established session (`authed` = 1 iff the host authenticated). The
+// returned `keyc` is then used (with `std::security::sealed::seal`) to send sealed
+// records to the child.
+pub fn sealed_pipe_client(sc: SealedChannel<secret i64>, client_eph: &[secret u8],
+                          expected_host: &[secret u8], cookie_c: &[secret u8],
+                          cookie_s: &[secret u8], banner: &[secret u8]) -> SealedSession {
+    let qc: [u8] = sealed_kex_client_msg(client_eph);
+    parent_send_bytes(sc, &qc);
+    let resp: [u8] = parent_recv_bytes(sc, 128);
+    sealed_kex_client_finish(client_eph, &resp, expected_host, cookie_c, cookie_s, banner)
+}
+
+// The CHILD (responder/server) runs its handshake half over its own stdin/stdout:
+// receive Q_C, derive the shared secret + sign the exchange hash, send the 128-byte
+// response, and return the established session. The child IS the host, so it
+// authenticates the parent's pin by presenting its real host key.
+pub fn sealed_pipe_server(server_eph: &[secret u8], host_seed: &[secret u8],
+                          cookie_c: &[secret u8], cookie_s: &[secret u8],
+                          banner: &[secret u8]) -> SealedSession {
+    let qc: [u8] = child_recv_bytes(32);
+    let srv: SealedServerKex = sealed_kex_server(server_eph, host_seed, &qc, cookie_c, cookie_s, banner);
+    child_send_bytes(&srv.resp);
+    SealedSession { keyc: srv.keyc, keyd: srv.keyd, session_id: srv.session_id, authed: 1 }
+}
+
+// Send a 40-byte sealed record (a sealed `secret i64`, ADR 0069 D5 fixed-width) from
+// the PARENT to the child over the pipe.
+pub fn sealed_pipe_send_record(sc: SealedChannel<secret i64>, frame: &[u8]) -> i64 {
+    parent_send_bytes(sc, frame)
+}
+
+// Receive a 40-byte sealed record on the CHILD side from its own stdin.
+pub fn sealed_pipe_recv_record() -> [u8] {
+    child_recv_bytes(40)
+}

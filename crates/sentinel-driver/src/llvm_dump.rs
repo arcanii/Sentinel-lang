@@ -46,6 +46,7 @@ use sentinel_resolve::{
     CHANNEL_CLOSE_FN_ID, CHANNEL_NEW_FN_ID, POP_FN_ID, PRINT_BYTES_FN_ID, PRINT_FN_ID,
     PROCESS_READ_FN_ID, PROCESS_RECV_FN_ID, PROCESS_SEND_FN_ID, PROCESS_SPAWN_FN_ID,
     PROCESS_WAIT_FN_ID, PROCESS_WRITE_FN_ID, PUSH_FN_ID, SEALED_CHANNEL_FN_ID, SEALED_PROCESS_FN_ID,
+    STDIN_RECV_FN_ID, STDOUT_SEND_FN_ID,
     READ_FILE_FN_ID, RECV_FN_ID, SEND_FN_ID, STR_EQ_FN_ID, U8_TO_I64_FN_ID, UNWRAP_OR_FN_ID,
     VEC_NEW_FN_ID, VEC_TO_ARRAY_FN_ID, WRITE_FILE_FN_ID,
 };
@@ -64,11 +65,12 @@ const TARGET_TRIPLE: &str = "arm64-apple-darwin";
 // ADR 0056 added the socket builtins (14..=20); ADR 0066 M1.2 added the
 // channel builtins (21..=24); ADR 0066 M2.1 added subprocess spawn/wait
 // (25..=26); M2.2 added subprocess write/read (27..=28); M2.3 added subprocess
-// send/recv (29..=30); M2.4a added the SealedChannel bridge builtins (31..=32),
-// shifting the user-fn base to 33. A call to a builtin FnId not caught by a
-// special lowering arm above returns Err (the fixture is skipped); the channel
-// + subprocess + sealed-bridge builtins ARE specially lowered.
-const FIRST_USER_FN: u32 = 33;
+// send/recv (29..=30); M2.4a added the SealedChannel bridge builtins (31..=32);
+// M2.4b added the self-stdin/stdout framed builtins (33..=34), shifting the
+// user-fn base to 35. A call to a builtin FnId not caught by a special lowering
+// arm above returns Err (the fixture is skipped); the channel + subprocess +
+// sealed-bridge + self-stdin/stdout builtins ARE specially lowered.
+const FIRST_USER_FN: u32 = 35;
 
 /// Bar B / effects (ADR 0020): the reserved kont op_id for a PURE_RETURN wrap
 /// (`u32::MAX`) — the handle dispatch + `k(v)` pure-check compare against it.
@@ -146,6 +148,10 @@ struct RuntimeSyms {
     /// `sentinel_process_send(ptr, i64) -> i64`, `_recv(ptr, ptr) -> i64`.
     process_send: bool,
     process_recv: bool,
+    /// ADR 0066 M2.4b: the child-side self-stdin/stdout framed symbols.
+    /// `sentinel_stdin_recv(ptr) -> i64`, `sentinel_stdout_send(i64) -> i64`.
+    stdin_recv: bool,
+    stdout_send: bool,
 }
 
 impl RuntimeSyms {
@@ -180,6 +186,8 @@ impl RuntimeSyms {
         self.process_read |= other.process_read;
         self.process_send |= other.process_send;
         self.process_recv |= other.process_recv;
+        self.stdin_recv |= other.stdin_recv;
+        self.stdout_send |= other.stdout_send;
     }
 
     /// Emit the `declare`s for the used symbols, in the fixed canonical order,
@@ -279,6 +287,13 @@ impl RuntimeSyms {
         if self.process_recv {
             writeln!(out, "declare i64 @sentinel_process_recv(ptr, ptr)").unwrap();
         }
+        // ADR 0066 M2.4b: the child-side self-stdin/stdout framed runtime group.
+        if self.stdin_recv {
+            writeln!(out, "declare i64 @sentinel_stdin_recv(ptr)").unwrap();
+        }
+        if self.stdout_send {
+            writeln!(out, "declare i64 @sentinel_stdout_send(i64)").unwrap();
+        }
         if self.memcpy {
             writeln!(out, "declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)").unwrap();
         }
@@ -311,6 +326,8 @@ impl RuntimeSyms {
             || self.process_read
             || self.process_send
             || self.process_recv
+            || self.stdin_recv
+            || self.stdout_send
             || self.memcpy
     }
 }
@@ -3325,6 +3342,30 @@ impl Emit<'_> {
         // the same opaque ptr (bridge (iii)), so re-typing is a value-level no-op.
         if id == SEALED_CHANNEL_FN_ID || id == SEALED_PROCESS_FN_ID {
             return self.lower_expr(&args[0]);
+        }
+        // ADR 0066 M2.4b: the child-side self-stdin/stdout framed builtins (i64-only
+        // twins of process_send/recv — no `Process` arg, no element encode/decode).
+        if id == STDOUT_SEND_FN_ID {
+            let v = self.lower_expr(&args[0])?;
+            let r = self.fresh();
+            writeln!(self.body, "  %v{r} = call i64 @sentinel_stdout_send(i64 {v})").unwrap();
+            self.used.stdout_send = true;
+            return Ok(format!("%v{r}"));
+        }
+        if id == STDIN_RECV_FN_ID {
+            let out = self.alloca("i64");
+            let status = self.fresh();
+            writeln!(self.body, "  %v{status} = call i64 @sentinel_stdin_recv(ptr %v{out})").unwrap();
+            self.used.stdin_recv = true;
+            let valid = self.fresh();
+            writeln!(self.body, "  %v{valid} = icmp eq i64 %v{status}, 0").unwrap();
+            let raw = self.fresh();
+            writeln!(self.body, "  %v{raw} = load i64, ptr %v{out}").unwrap();
+            let a0 = self.fresh();
+            writeln!(self.body, "  %v{a0} = insertvalue {{ i1, i64 }} undef, i1 %v{valid}, 0").unwrap();
+            let a1 = self.fresh();
+            writeln!(self.body, "  %v{a1} = insertvalue {{ i1, i64 }} %v{a0}, i64 %v{raw}, 1").unwrap();
+            return Ok(format!("%v{a1}"));
         }
         if id.0 < FIRST_USER_FN {
             return Err(format!("builtin call #{} (deferred to a later slice)", id.0));

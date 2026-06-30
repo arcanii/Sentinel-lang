@@ -1,0 +1,46 @@
+// ADR 0066 M2.4b real-pipe demo — the CHILD (responder / server). Spawned by the
+// parent (see parent.sentinel.in), it runs the SealedChannel x25519 handshake over
+// its OWN stdin/stdout (the M2.4b `stdin_recv`/`stdout_send` builtins), then receives
+// one sealed record from the parent and `open`s it — the value re-emerges `secret`
+// on this verified receiver. The child exits with the opened value so the parent can
+// confirm the end-to-end round-trip via `process_wait`.
+//
+// The fixed test vectors MUST match the parent's (the demo uses deterministic
+// ephemerals; a deployment draws them from std::sys::random and pins the real host
+// key). This child IS the host: it presents the ed25519 host key derived from
+// `host_seed`, which the parent pins.
+use std::security::sealed_pipe::sealed_pipe_server;
+use std::security::sealed_pipe::sealed_pipe_recv_record;
+use std::security::sealed_kex::SealedSession;
+use std::security::sealed::open;
+use std::security::sealed::OpenResult;
+
+fn mk(seed: i64, n: i64) -> [secret u8] {
+    let mut v: Vec<secret u8> = vec_new();
+    let mut i: i64 = 0;
+    while i < n { push(&mut v, i64_to_u8((i * seed + seed) & 255)); i = i + 1; }
+    vec_to_array(v)
+}
+
+fn main() -> i64 {
+    let server_eph: [secret u8] = mk(5, 32);
+    let host_seed: [secret u8] = mk(7, 32);
+    let cookie_c: [secret u8] = mk(11, 16);
+    let cookie_s: [secret u8] = mk(13, 16);
+    let banner: [secret u8] = mk(17, 24);
+
+    // Run the responder handshake over our own stdin/stdout.
+    let sess: SealedSession = sealed_pipe_server(&server_eph, &host_seed, &cookie_c, &cookie_s, &banner);
+
+    // Receive one sealed record (sealed by the parent with keyc, seqnr 0) and open
+    // it — the secret re-emerges secret here on the verified receiver.
+    let frame: [u8] = sealed_pipe_recv_record();
+    let r: OpenResult = open(&sess.keyc, 0, &frame);
+
+    // Exit with the opened value iff the record authenticated; else a sentinel.
+    if r.ok == 1 {
+        declassify(r.v)
+    } else {
+        0
+    }
+}

@@ -1687,6 +1687,55 @@ pub extern "C" fn sentinel_process_recv(p: *mut SentinelProcess, out: *mut i64) 
     }
 }
 
+/// ADR 0066 M2.4b: read exactly one 8-byte little-endian i64 frame from THIS
+/// process's OWN stdin, write it to `*out`, and return 0 (a value arrived). Returns
+/// **1** on EOF / a short read / any error (treated as a closed channel — the `recv`
+/// `?T` status). The child-side twin of [`sentinel_process_recv`]: where the parent
+/// reads the CHILD's stdout via `process_recv`, the spawned child reads what the
+/// parent sent (the parent's `process_send` writes the child's stdin) via this. The
+/// element is the public `i64` — the cross-process secret fence stays structural
+/// (the IPC value ABI is public-only); a `secret` re-emerges only after `open` on the
+/// verified receiver (the SealedChannel path), never raw.
+///
+/// # Safety
+///
+/// `out` must point to a writable `i64`.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+#[no_mangle]
+pub extern "C" fn sentinel_stdin_recv(out: *mut i64) -> i64 {
+    use std::io::Read;
+    if out.is_null() {
+        return 1;
+    }
+    let mut frame = [0u8; 8];
+    match std::io::stdin().lock().read_exact(&mut frame) {
+        Ok(()) => {
+            // SAFETY: caller passed a writable `i64` slot.
+            unsafe { *out = i64::from_le_bytes(frame) };
+            0
+        }
+        Err(_) => 1, // EOF / short read / error = closed channel
+    }
+}
+
+/// ADR 0066 M2.4b: frame `value` as 8 little-endian bytes to THIS process's OWN
+/// stdout and **flush** (so a peer blocked on a framed read sees it immediately — the
+/// interactive handshake needs each frame flushed). Returns 0 on success, -1 on a
+/// write/flush error. The child-side twin of [`sentinel_process_send`]: where the
+/// parent writes the CHILD's stdin via `process_send`, the spawned child replies on
+/// its own stdout (which the parent reads via `process_recv`) via this. The element
+/// is the public `i64` (the structural cross-process secret fence).
+#[no_mangle]
+pub extern "C" fn sentinel_stdout_send(value: i64) -> i64 {
+    use std::io::Write;
+    let frame = value.to_le_bytes();
+    let mut out = std::io::stdout().lock();
+    match out.write_all(&frame).and_then(|()| out.flush()) {
+        Ok(()) => 0,
+        Err(_) => -1,
+    }
+}
+
 /// Returns the crate name as a sanity-check that the build is wired up.
 pub fn crate_name() -> &'static str {
     "sentinel-runtime"
@@ -1946,14 +1995,20 @@ mod tests {
             // ADR 0066 M2.3: the typed framed-channel-over-pipe builtins.
             sentinel_process_send as *const (),
             sentinel_process_recv as *const (),
+            // ADR 0066 M2.4b: the child-side self-stdin/stdout framed builtins (the
+            // twins of process_recv/process_send for a spawned program's OWN stdio —
+            // the missing half that lets the child run a pipe handshake).
+            sentinel_stdin_recv as *const (),
+            sentinel_stdout_send as *const (),
         ];
-        // 34 symbols: 23 codegen-declared (incl. D.2's sentinel_str_eq,
+        // 36 symbols: 23 codegen-declared (incl. D.2's sentinel_str_eq,
         // D.3's sentinel_realloc, D.4's sentinel_read_file /
         // sentinel_write_file / sentinel_print_bytes, and ADR 0065 D6's
         // sentinel_kont_free) + sentinel_kont_panic_resumed + ADR 0066 M1.2's
         // 4 sentinel_channel_* + M2.1's 2 sentinel_process_spawn/_wait + M2.2's
-        // 2 sentinel_process_write/_read + M2.3's 2 sentinel_process_send/_recv.
-        assert_eq!(symbols.len(), 34);
+        // 2 sentinel_process_write/_read + M2.3's 2 sentinel_process_send/_recv +
+        // M2.4b's 2 sentinel_stdin_recv/_stdout_send.
+        assert_eq!(symbols.len(), 36);
         assert!(symbols.iter().all(|&s| !s.is_null()), "every symbol has an address");
     }
 

@@ -49,6 +49,7 @@ use sentinel_resolve::{
     CHANNEL_NEW_FN_ID, I64_TO_U8_FN_ID, IS_SOME_FN_ID, LEN_FN_ID, POP_FN_ID, PRINT_BYTES_FN_ID,
     PROCESS_READ_FN_ID, PROCESS_RECV_FN_ID, PROCESS_SEND_FN_ID, PROCESS_SPAWN_FN_ID,
     PROCESS_WAIT_FN_ID, PROCESS_WRITE_FN_ID, SEALED_CHANNEL_FN_ID, SEALED_PROCESS_FN_ID,
+    STDIN_RECV_FN_ID, STDOUT_SEND_FN_ID,
     PUSH_FN_ID, READ_FILE_FN_ID, RECV_FN_ID, SEND_FN_ID, STR_EQ_FN_ID, TCP_ACCEPT_FN_ID,
     TCP_CLOSE_FN_ID, TCP_CONNECT_FN_ID, TCP_LISTEN_FN_ID, TCP_LOCAL_PORT_FN_ID, TCP_READ_FN_ID,
     TCP_WRITE_FN_ID, U8_TO_I64_FN_ID, UNWRAP_OR_FN_ID, VEC_NEW_FN_ID, VEC_TO_ARRAY_FN_ID,
@@ -669,6 +670,20 @@ pub fn compile_to_object_for_module(
     let process_recv_fn = module.add_function(
         "sentinel_process_recv",
         i64_ty.fn_type(&[ptr_ty.into(), ptr_ty.into()], false),
+        None,
+    );
+    // ADR 0066 M2.4b: the child-side self-stdin/stdout framed symbols.
+    // `sentinel_stdin_recv(out) -> i64` (read one i64 frame from own stdin to `*out`;
+    // 0 some / 1 closed), `sentinel_stdout_send(value) -> i64` (frame an i64 to own
+    // stdout + flush; 0/-1).
+    let stdin_recv_fn = module.add_function(
+        "sentinel_stdin_recv",
+        i64_ty.fn_type(&[ptr_ty.into()], false),
+        None,
+    );
+    let stdout_send_fn = module.add_function(
+        "sentinel_stdout_send",
+        i64_ty.fn_type(&[i64_ty.into()], false),
         None,
     );
     // C5.4 (2/N) / ADR 0028: declare the broker scope-arena symbols.
@@ -1343,6 +1358,8 @@ pub fn compile_to_object_for_module(
             process_read_fn,
             process_send_fn,
             process_recv_fn,
+            stdin_recv_fn,
+            stdout_send_fn,
             arena_enter_fn,
             arena_alloc_fn,
             arena_exit_fn,
@@ -1610,6 +1627,9 @@ struct CodegenCtx<'ctx, 'plan> {
     /// ADR 0066 M2.3: the typed framed-channel-over-pipe runtime symbols.
     process_send_fn: FunctionValue<'ctx>,
     process_recv_fn: FunctionValue<'ctx>,
+    /// ADR 0066 M2.4b: the child-side self-stdin/stdout framed runtime symbols.
+    stdin_recv_fn: FunctionValue<'ctx>,
+    stdout_send_fn: FunctionValue<'ctx>,
     /// C5.4 (2/N) / ADR 0028: `sentinel_arena_enter(i64) -> *arena`
     /// creates a per-scope broker bump arena (capacity 0 → default).
     arena_enter_fn: FunctionValue<'ctx>,
@@ -6336,6 +6356,67 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
         Ok(with_value.into_struct_value().into())
     }
 
+    /// ADR 0066 M2.4b: `stdout_send(v: i64) -> i64` — frame `v` to THIS process's own
+    /// stdout via `sentinel_stdout_send(v)`; the i64 status is the value. The i64-only
+    /// child-side twin of `lower_process_send` (no `Process` arg, no element encode).
+    fn lower_stdout_send(
+        &mut self,
+        value: &TypedExpr,
+        program: &TypedProgram,
+    ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+        let v = self.lower_expr(value, program)?.into_int_value();
+        let call = self
+            .builder
+            .build_call(self.stdout_send_fn, &[v.into()], "stdout_send")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        Ok(call
+            .try_as_basic_value()
+            .left()
+            .expect("sentinel_stdout_send returns i64"))
+    }
+
+    /// ADR 0066 M2.4b: `stdin_recv() -> ?i64` — call `sentinel_stdin_recv(out)` (writes
+    /// the i64 frame to a stack `out` slot, returns 0 some / 1 closed) and BUILD the
+    /// `?i64` (`{ i1 valid, i64 value }`, `valid = status == 0`). The i64-only
+    /// child-side twin of `lower_process_recv` (no `Process` arg, no element decode).
+    fn lower_stdin_recv(&mut self) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+        let i64_ty = self.context.i64_type();
+        let out_slot = self
+            .builder
+            .build_alloca(i64_ty, "srecv_out")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        let status = self
+            .builder
+            .build_call(self.stdin_recv_fn, &[out_slot.into()], "stdin_recv")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?
+            .try_as_basic_value()
+            .left()
+            .expect("sentinel_stdin_recv returns i64")
+            .into_int_value();
+        let valid = self
+            .builder
+            .build_int_compare(IntPredicate::EQ, status, i64_ty.const_zero(), "srecv_valid")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        let raw = self
+            .builder
+            .build_load(i64_ty, out_slot, "srecv_val")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?
+            .into_int_value();
+        let opt_ty = self
+            .context
+            .struct_type(&[self.context.bool_type().into(), i64_ty.into()], false);
+        let agg = opt_ty.get_undef();
+        let with_valid = self
+            .builder
+            .build_insert_value(agg, valid, 0, "srecv_opt_valid")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        let with_value = self
+            .builder
+            .build_insert_value(with_valid, raw, 1, "srecv_opt_value")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        Ok(with_value.into_struct_value().into())
+    }
+
     /// D.3 / ADR 0034 D7: lower `vec_new() -> Vec<T>` to an empty vector
     /// value `{ i64 len = 0, i64 cap = 0, ptr data = null }`. No
     /// allocation happens until the first `push` (`realloc(null, …)` ==
@@ -7281,6 +7362,13 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                 // no-op. (The fence is enforced at typing, not codegen.)
                 if *id == SEALED_CHANNEL_FN_ID || *id == SEALED_PROCESS_FN_ID {
                     return self.lower_expr(&args[0], program);
+                }
+                // ADR 0066 M2.4b: the child-side self-stdin/stdout framed builtins.
+                if *id == STDOUT_SEND_FN_ID {
+                    return self.lower_stdout_send(&args[0], program);
+                }
+                if *id == STDIN_RECV_FN_ID {
+                    return self.lower_stdin_recv();
                 }
                 // C1.7.5 / ADR 0016 D7: user-defined generic-fn
                 // calls route to the monomorphic instance emitted

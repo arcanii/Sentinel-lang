@@ -41,7 +41,7 @@ fn borrow_dump_copy_no_moves() {
             "copy",
             "fn add(a: i64, b: i64) -> i64 { a + b }\nfn main() -> i64 { add(1, 2) }\n"
         ),
-        "(fn #33 add)\n(fn #34 main)\n"
+        "(fn #35 add)\n(fn #36 main)\n"
     );
 }
 
@@ -54,7 +54,7 @@ fn borrow_dump_struct_move() {
             "struct",
             "struct P { x: i64 }\nfn take(p: P) -> i64 { p.x }\nfn main() -> i64 { let a = P { x: 5 }; take(a) }\n"
         ),
-        "(fn #33 take)\n(fn #34 main #1)\n"
+        "(fn #35 take)\n(fn #36 main #1)\n"
     );
 }
 
@@ -66,7 +66,7 @@ fn borrow_dump_array_move() {
             "array",
             "fn take(a: [i64]) -> i64 { a[0] }\nfn main() -> i64 { let xs = [1, 2, 3]; take(xs) }\n"
         ),
-        "(fn #33 take)\n(fn #34 main #1)\n"
+        "(fn #35 take)\n(fn #36 main #1)\n"
     );
 }
 
@@ -81,6 +81,6 @@ fn borrow_dump_conservative_if_branch_merge() {
             "branch",
             "struct P { x: i64 }\nfn pick(c: bool, p: P, q: P) -> P { if c { p } else { q } }\nfn main() -> i64 { let r = pick(true, P { x: 1 }, P { x: 2 }); r.x }\n"
         ),
-        "(fn #33 pick #1 #2)\n(fn #34 main)\n"
+        "(fn #35 pick #1 #2)\n(fn #36 main)\n"
     );
 }

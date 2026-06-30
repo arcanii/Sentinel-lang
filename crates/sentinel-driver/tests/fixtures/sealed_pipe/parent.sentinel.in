@@ -1,0 +1,50 @@
+// ADR 0066 M2.4b real-pipe demo — the PARENT (initiator / client). TEMPLATE: the
+// test substitutes `__CHILD_PATH__` with the compiled child's absolute path before
+// building. The parent spawns the child, wraps the child's pipe as a SealedChannel,
+// runs the authenticated x25519 handshake over the pipe (pinning the child's host
+// key), seals a `secret i64` and sends it as a record, then waits for the child.
+//
+// The fixed test vectors MUST match the child's. The parent pins the child's host
+// key (`expected_host = ed25519_pubkey(host_seed)`); an unauthenticated / MITM'd KEX
+// would yield `authed = 0`.
+use std::security::sealed_pipe::sealed_pipe_client;
+use std::security::sealed_pipe::sealed_pipe_send_record;
+use std::security::sealed_kex::SealedSession;
+use std::security::sealed::seal;
+use std::security::ed25519::ed25519_pubkey;
+
+fn mk(seed: i64, n: i64) -> [secret u8] {
+    let mut v: Vec<secret u8> = vec_new();
+    let mut i: i64 = 0;
+    while i < n { push(&mut v, i64_to_u8((i * seed + seed) & 255)); i = i + 1; }
+    vec_to_array(v)
+}
+
+fn main() -> i64 {
+    let argv: [[u8]] = [];
+    let proc = process_spawn("__CHILD_PATH__", argv);
+    let sc = sealed_channel(proc);
+
+    let client_eph: [secret u8] = mk(3, 32);
+    let cookie_c: [secret u8] = mk(11, 16);
+    let cookie_s: [secret u8] = mk(13, 16);
+    let banner: [secret u8] = mk(17, 24);
+    let expected_host: [secret u8] = ed25519_pubkey(mk(7, 32));
+
+    // Run the initiator handshake over the child's pipe (authenticates + pins host).
+    let sess: SealedSession =
+        sealed_pipe_client(sc, &client_eph, &expected_host, &cookie_c, &cookie_s, &banner);
+
+    // Seal a secret and send it to the child as a record (over the real pipe).
+    let frame: [u8] = seal(&sess.keyc, 0, 42);
+    sealed_pipe_send_record(sc, &frame);
+
+    // The child opened the record and exits with the recovered value. Exit 42 iff we
+    // authenticated the child AND it recovered the sealed value.
+    let childcode: i64 = process_wait(proc);
+    if sess.authed == 1 {
+        childcode
+    } else {
+        0
+    }
+}

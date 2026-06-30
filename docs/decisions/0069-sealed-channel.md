@@ -1,9 +1,12 @@
 # ADR 0069: `SealedChannel<secret T>` — the AEAD-encrypted secret-cross-process path
 
-Status: **PROPOSED — design PINNED; M2.4a + M2.4b-crypto IMPLEMENTED (snc-side,
-2026-06-30)** — the M2.4 sub-phase of the ADR 0066 roadmap, broken out into its
-own ADR per **ADR 0066 D8a** ("Because this is security-critical and crypto-bearing,
-M2.4 gets its own ADR"). **The security-critical decisions D3/D4/D5/D9 are PINNED (maintainer
+Status: **PROPOSED — design PINNED; M2.4a + M2.4b IMPLEMENTED incl. the REAL pipe
+transport (snc-side, 2026-06-30)** — the M2.4 sub-phase of the ADR 0066 roadmap,
+broken out into its own ADR per **ADR 0066 D8a** ("Because this is security-critical
+and crypto-bearing, M2.4 gets its own ADR"). The authenticated cross-process
+`SealedChannel<secret i64>` now runs over a **real parent↔child process pipe**
+end-to-end (the self-stdin/stdout builtins closed the last blocker); what remains is
+M2.4c (generic `secret T` + variable-length) + the scg self-host mirror. **The security-critical decisions D3/D4/D5/D9 are PINNED (maintainer
 sign-off 2026-06-30):** D3 = reuse the ssh host-key authentication model (a); D4 =
 counter-nonces + per-direction HKDF keys; D5 = fixed-width frames at the
 i64-minimum (padding with the later variable-length phase); D9 = add only
@@ -43,10 +46,24 @@ passed between them) → both derive matching `keyc`/`keyd`, the initiator authe
 the host, and a 3-message counter-nonce sealed stream (seqnr 0/1/2, no reuse) re-emerges
 secret → exit 42. This removes M2.4a's **fixed pre-shared key** (now an authenticated
 x25519 exchange) and **single-message** (now a counter-nonce stream) caveats at the
-crypto level. **Deferred:** driving the handshake over a REAL parent↔child pipe — it
-needs a **self-stdin-read builtin** (the child must read what the parent sends; the
-`sentinel_process_*` runtime symbols are all parent→child), a follow-on infrastructure
-step. Then M2.4c (generic `secret T` + variable-length + padding).
+crypto level.
+
+**The REAL pipe transport is now implemented (2026-06-30).** The blocker — a child
+could not read its own stdin — is closed by two new **self-stdin/stdout framed
+builtins**: `stdin_recv() -> ?i64` + `stdout_send(v: i64) -> i64` (the child-side
+twins of `process_recv`/`process_send`, runtime symbols `sentinel_stdin_recv` /
+`sentinel_stdout_send`; abi-v1 34→36; user-fn FnId base 33→35, mirrored into
+`selfhost/` — all 6 differentials byte-identical). A new stdlib
+`std::security::sealed_pipe` drives the KEX over the actual pipe: the **parent**
+(initiator/client) frames bytes with `process_send`/`process_recv` over the child's
+`Process`; the spawned **child** (responder/server) frames on its own stdin/stdout via
+the new builtins; both run the same transport-free `sealed_kex` core. The end-to-end
+test `crates/sentinel-driver/tests/sealed_pipe.rs` spawns a child, runs the
+authenticated handshake over a **real pipe** (parent pins the child's host key), seals
+a `secret i64`, sends it as a record, the child `open`s it (re-emerges secret on the
+verified child) and exits 42, the parent `process_wait`s and exits 42. **So the
+authenticated cross-process `SealedChannel<secret i64>` is real end-to-end.** Then
+M2.4c (generic `secret T` + variable-length + padding) + the scg mirror.
 
 Date: 2026-06-30
 

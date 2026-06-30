@@ -290,7 +290,7 @@ fn builtin_id(q: &[u8]) -> i64 {
     }
 }
 
-// Resolve a call name to a FnId: a builtin (0..=32), else a user fn (33 + its
+// Resolve a call name to a FnId: a builtin (0..=34), else a user fn (35 + its
 // index in the user-fn table), else -1.
 fn fn_lookup(c: &mut RCtx, src: &[u8], q: &[u8]) -> i64 {
     let b: i64 = builtin_id(q);
@@ -303,7 +303,7 @@ fn fn_lookup(c: &mut RCtx, src: &[u8], q: &[u8]) -> i64 {
         while i < n {
             if found == 0 - 1 {
                 if name_eq_src(src, (*c).ufs[i], (*c).ufe[i], q) {
-                    found = 33 + i;
+                    found = 35 + i;
                     0
                 } else {
                     0

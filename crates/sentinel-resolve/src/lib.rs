@@ -202,6 +202,18 @@ pub const SEALED_CHANNEL_FN_ID: FnId = FnId(31);
 /// the stdlib seal/open framing can call `process_send`/`process_recv` on it.
 pub const SEALED_PROCESS_FN_ID: FnId = FnId(32);
 
+// ADR 0066 M2.4b: the child-side self-stdin/stdout framed builtins — the twins of
+// `process_recv`/`process_send` for a spawned program's OWN stdio. The missing half
+// that lets a spawned CHILD run a pipe handshake (read what the parent sent, reply on
+// its own stdout). Wrapping the `sentinel_stdin_recv`/`sentinel_stdout_send` runtime
+// primitives. Appending these shifts the user-fn FnId base 33 → 35.
+/// `stdin_recv() -> ?i64` — read one 8-byte LE frame from THIS process's own stdin;
+/// `null` = EOF/closed. The child-side twin of `process_recv`.
+pub const STDIN_RECV_FN_ID: FnId = FnId(33);
+/// `stdout_send(v: i64) -> i64` — frame `v` (8-byte LE) to THIS process's own stdout
+/// and flush; 0 ok, -1 error. The child-side twin of `process_send`.
+pub const STDOUT_SEND_FN_ID: FnId = FnId(34);
+
 /// Identifier for a struct declaration. Added at C1.4 per ADR 0013
 /// D4 / D5; unique per-program, assigned in source order starting
 /// at 0.
@@ -2841,6 +2853,14 @@ pub fn resolve_module(
     next_fn_id += 1;
     let sealed_process_sig = mk_socket_sig(next_fn_id, "sealed_process", 1);
     next_fn_id += 1;
+    // ADR 0066 M2.4b: the child-side self-stdin/stdout framed builtins.
+    // `stdin_recv()` (arity 0) -> ?i64; `stdout_send(v)` (arity 1) -> i64. Concrete
+    // signatures typed in sentinel-types; codegen lowers them to `sentinel_stdin_recv`
+    // / `sentinel_stdout_send` (mirroring `process_recv` / `process_send`).
+    let stdin_recv_sig = mk_socket_sig(next_fn_id, "stdin_recv", 0);
+    next_fn_id += 1;
+    let stdout_send_sig = mk_socket_sig(next_fn_id, "stdout_send", 1);
+    next_fn_id += 1;
 
     let mut fn_table: HashMap<String, FnId> = HashMap::new();
     let mut signatures: Vec<FnSignature> = vec![
@@ -2852,6 +2872,7 @@ pub fn resolve_module(
         process_spawn_sig, process_wait_sig, process_write_sig, process_read_sig,
         process_send_sig, process_recv_sig,
         sealed_channel_sig, sealed_process_sig,
+        stdin_recv_sig, stdout_send_sig,
     ];
     fn_table.insert("print".to_string(), PRINT_FN_ID);
     fn_table.insert("unwrap_or".to_string(), UNWRAP_OR_FN_ID);
@@ -2886,6 +2907,8 @@ pub fn resolve_module(
     fn_table.insert("process_recv".to_string(), PROCESS_RECV_FN_ID);
     fn_table.insert("sealed_channel".to_string(), SEALED_CHANNEL_FN_ID);
     fn_table.insert("sealed_process".to_string(), SEALED_PROCESS_FN_ID);
+    fn_table.insert("stdin_recv".to_string(), STDIN_RECV_FN_ID);
+    fn_table.insert("stdout_send".to_string(), STDOUT_SEND_FN_ID);
 
     // Phase D.6 / ADR 0037 D5.1: register each imported `pub fn` as an
     // EXTERN in this module's FnId space — after builtins, before own fns.
@@ -5081,13 +5104,13 @@ mod tests {
         }];
         let rp = resolve_module(&main, &imports).expect("resolve_module");
 
-        // Extern `add` = FnId(33) (right after the 33 builtins 0..=32: ADR
+        // Extern `add` = FnId(35) (right after the 35 builtins 0..=34: ADR
         // 0066 M1.2 channels 21..=24, M2.1 process_spawn/wait 25..=26, M2.2
         // process_write/read 27..=28, M2.3 process_send/recv 29..=30, M2.4a
-        // sealed_channel/sealed_process 31..=32 → base 33), marked extern; own
-        // `main` follows at FnId(34).
+        // sealed_channel/sealed_process 31..=32, M2.4b stdin_recv/stdout_send
+        // 33..=34 → base 35), marked extern; own `main` follows at FnId(36).
         let add_sig = rp.fn_signatures.iter().find(|s| s.name == "add").expect("add sig");
-        assert_eq!(add_sig.id, FnId(33));
+        assert_eq!(add_sig.id, FnId(35));
         assert_eq!(add_sig.arity, 2);
         assert!(!add_sig.is_runtime);
         assert_eq!(
@@ -5095,7 +5118,7 @@ mod tests {
             Some(vec!["util".to_string(), "math".to_string()])
         );
         let main_sig = rp.fn_signatures.iter().find(|s| s.name == "main").expect("main sig");
-        assert_eq!(main_sig.id, FnId(34));
+        assert_eq!(main_sig.id, FnId(36));
         assert_eq!(main_sig.extern_origin, None);
 
         // The extern has NO body — only the one own fn (`main`) is resolved.
@@ -5371,8 +5394,9 @@ mod tests {
         // (ADR 0066 M1.2); FnId(25..=26) = subprocess spawn/wait (M2.1);
         // FnId(27..=28) = subprocess write/read (M2.2); FnId(29..=30) =
         // subprocess send/recv (M2.3); FnId(31..=32) = the M2.4a sealed bridge
-        // builtins; FnId(33) = main (the first user fn).
-        assert_eq!(p.main().id, FnId(33));
+        // builtins; FnId(33..=34) = M2.4b stdin_recv/stdout_send; FnId(35) =
+        // main (the first user fn).
+        assert_eq!(p.main().id, FnId(35));
         assert_eq!(p.fn_signatures[0].name, "print");
         assert!(p.fn_signatures[0].is_runtime);
     }
@@ -5415,11 +5439,12 @@ mod tests {
         // FnId(0..=32) = the runtime builtins (0..=13 original, 14..=20
         // sockets, 21..=24 channels per ADR 0066 M1.2, 25..=26 subprocess
         // spawn/wait per M2.1, 27..=28 subprocess write/read per M2.2, 29..=30
-        // subprocess send/recv per M2.3, 31..=32 sealed bridge per M2.4a);
-        // FnId(33) = double (first user fn), FnId(34) = main.
+        // subprocess send/recv per M2.3, 31..=32 sealed bridge per M2.4a, 33..=34
+        // stdin_recv/stdout_send per M2.4b); FnId(35) = double (first user fn),
+        // FnId(36) = main.
         let main = p.main();
         match &main.body.tail.kind {
-            ResolvedExprKind::Call { id, .. } => assert_eq!(*id, FnId(33)),
+            ResolvedExprKind::Call { id, .. } => assert_eq!(*id, FnId(35)),
             other => panic!("expected Call, got {other:?}"),
         }
     }

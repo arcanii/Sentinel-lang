@@ -4725,6 +4725,13 @@ pub fn check_module(
             (30, &[Type::Process], opt_i64, &[]),                        // process_recv
             (31, &[Type::Process], Type::SealedChannel, &[]),            // sealed_channel
             (32, &[Type::SealedChannel], Type::Process, &[]),            // sealed_process
+            // ADR 0066 M2.4b: the child-side self-stdin/stdout framed builtins —
+            // `stdin_recv() -> ?i64` (read one i64 frame from own stdin) +
+            // `stdout_send(v: i64) -> i64` (frame an i64 to own stdout). The element
+            // is the public `i64` (the structural cross-process fence). Effect-free
+            // (they operate on the already-acquired own stdio).
+            (33, &[], opt_i64, &[]),                                     // stdin_recv
+            (34, &[Type::I64], Type::I64, &[]),                          // stdout_send
         ];
         for (idx, params, ret, eff) in process_sigs {
             let sig = &program.fn_signatures[*idx];
@@ -10584,7 +10591,10 @@ mod tests {
         // ADR 0066 M2.4a: the SealedChannel bridge builtins occupy FnId(31..=32).
         assert_eq!(p.fn_signatures[31].name, "sealed_channel");
         assert_eq!(p.fn_signatures[32].name, "sealed_process");
-        assert_eq!(p.fn_signatures[33].name, "main");
+        // ADR 0066 M2.4b: the self-stdin/stdout framed builtins occupy FnId(33..=34).
+        assert_eq!(p.fn_signatures[33].name, "stdin_recv");
+        assert_eq!(p.fn_signatures[34].name, "stdout_send");
+        assert_eq!(p.fn_signatures[35].name, "main");
         assert!(p.signature(main.id).is_main);
     }
 

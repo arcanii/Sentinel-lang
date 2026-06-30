@@ -48,9 +48,9 @@ fn types_dump_params_var_call() {
             "fns",
             "fn add(a: i64, b: i64) -> i64 { a + b }\nfn main() -> i64 { add(1, 2) }\n"
         ),
-        "(fn #33 add ((param #0 a i64) (param #1 b i64)) i64 \
+        "(fn #35 add ((param #0 a i64) (param #1 b i64)) i64 \
          (block (binop + (var #0 :i64) (var #1 :i64) :i64) :i64))\n\
-         (fn #34 main () i64 (block (call #33 (int 1 :i64) (int 2 :i64) :i64) :i64))\n\
+         (fn #36 main () i64 (block (call #35 (int 1 :i64) (int 2 :i64) :i64) :i64))\n\
          (effect #0 Async)\n\
          (effect #1 Subprocess)\n"
     );
@@ -62,7 +62,7 @@ fn types_dump_let_inference() {
     // unannotated `y`); here both are `i64`.
     assert_eq!(
         types_dump("lets", "fn main() -> i64 { let x: i64 = 5; let y = x + 1; y }\n"),
-        "(fn #33 main () i64 (block (let #0 i64 (int 5 :i64)) \
+        "(fn #35 main () i64 (block (let #0 i64 (int 5 :i64)) \
          (let #1 i64 (binop + (var #0 :i64) (int 1 :i64) :i64)) (var #1 :i64) :i64))\n\
          (effect #0 Async)\n\
          (effect #1 Subprocess)\n"
@@ -80,7 +80,7 @@ fn types_dump_struct_lit_and_field() {
             "struct Box { v: i64 }\nfn main() -> i64 { let b = Box { v: 42 }; b.v }\n"
         ),
         "(struct #0 Box (field v i64))\n\
-         (fn #33 main () i64 (block (let #0 Box (struct-lit #0 Box (int 42 :i64) :Box)) \
+         (fn #35 main () i64 (block (let #0 Box (struct-lit #0 Box (int 42 :i64) :Box)) \
          (field (var #0 :Box) v 0 :i64) :i64))\n\
          (effect #0 Async)\n\
          (effect #1 Subprocess)\n"
@@ -93,7 +93,7 @@ fn types_dump_nullable_widen() {
     // builtin `unwrap_or` (#1) call carries its inferred `(targs i64)`.
     assert_eq!(
         types_dump("nullable", "fn main() -> i64 { let x: ?i64 = 42; unwrap_or(x, 0) }\n"),
-        "(fn #33 main () i64 (block (let #0 ?i64 (widen-null (int 42 :i64) :?i64)) \
+        "(fn #35 main () i64 (block (let #0 ?i64 (widen-null (int 42 :i64) :?i64)) \
          (call #1 (targs i64) (var #0 :?i64) (int 0 :i64) :i64) :i64))\n\
          (effect #0 Async)\n\
          (effect #1 Subprocess)\n"
@@ -117,7 +117,7 @@ fn types_dump_method_dispatch() {
          (init #1 ((param #2 start i64)) (block (assign (field (var #1 :Counter) n 0 :i64) \
          (var #2 :i64)) (int 0 :i64) :i64)) \
          (method #3 get shared () i64 (block (field (var #3 :Counter) n 0 :i64) :i64)))\n\
-         (fn #33 main () i64 (block (let #0 Counter (class-init #0 Counter (int 7 :i64) :Counter)) \
+         (fn #35 main () i64 (block (let #0 Counter (class-init #0 Counter (int 7 :i64) :Counter)) \
          (method #0 0 (var #0 :Counter) get :i64) :i64))\n\
          (effect #0 Async)\n\
          (effect #1 Subprocess)\n"

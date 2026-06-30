@@ -14,7 +14,29 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
-**Latest (2026-06-30) — ADR 0066 M2.4b-crypto: authenticated x25519 KEX + per-direction keys +
+**Latest (2026-06-30) — ADR 0066 M2.4b: the REAL parent↔child pipe transport — an authenticated
+cross-process `SealedChannel<secret i64>` now runs end-to-end over a process pipe (snc-side).** The
+blocker (a spawned child could not read its own stdin) is closed by two new **self-stdin/stdout framed
+builtins**: **`stdin_recv() -> ?i64`** + **`stdout_send(v: i64) -> i64`** — the child-side twins of
+`process_recv`/`process_send` (runtime symbols `sentinel_stdin_recv` / `sentinel_stdout_send`; abi-v1
+34→36; the two builtins shifted the user-fn **FnId base 33→35** in both compilers, mirrored into
+`selfhost/` — **all 6 selfhost differentials byte-identical**, both bootstrap fixed points hold). A new
+stdlib **`std::security::sealed_pipe`** drives the M2.4b KEX over the actual pipe: the **parent**
+(initiator/client) frames bytes with `process_send`/`process_recv` over the child's `Process`; the
+spawned **child** (responder/server) frames on its own stdin/stdout via the new builtins; both run the
+same transport-free `sealed_kex` core. The end-to-end test
+**`crates/sentinel-driver/tests/sealed_pipe.rs`** builds a child program, spawns it from a parent,
+runs the authenticated x25519 handshake **over a real pipe** (the parent pins the child's ed25519 host
+key), seals a `secret i64`, sends it as a record, and the child `open`s it — the secret **re-emerges
+secret on the verified child** → the child exits 42, the parent `process_wait`s and exits 42. So the
+core M2.4 vision — a privilege-separated, authenticated, AEAD-encrypted secret-cross-process channel —
+**works end-to-end for `secret i64`**. Four-check green (clippy clean; the new test + all differentials
++ abi_v1=36 + the FnId-base golden dumps green; the smoke test confirms the builtins frame correctly);
+constant-time + the lexical borrow checker UNCHANGED. **Next:** M2.4c (generic `secret T` +
+variable-length `secret [u8]` + D5 padding) + the scg self-host mirror of the sealed stdlib. It remains
+a **cryptographic** guarantee + key management, NOT machine-verified CT (D8). See ADR 0069 + HANDOVER §0.
+
+**Earlier (2026-06-30) — ADR 0066 M2.4b-crypto: authenticated x25519 KEX + per-direction keys +
 counter-nonce sealed stream, verified IN-PROCESS (snc-side).** Establishes a SealedChannel's session
 keys via the **same x25519 KEX + ed25519 host-key auth + `ssh_kdf` key derivation that `std::net::ssh`
 runs over a socket** — here as **transport-free core functions** in the new stdlib
