@@ -1,0 +1,20 @@
+// ADR 0068 / scg empty-literal fix: an EMPTY nested-array literal `[]`. Its element
+// type can't be inferred from the (absent) elements, so it is taken from the
+// ANNOTATION (`[[u8]]` -> element `[u8]` = the abi-v1 `{ i64, ptr }`, a 16-byte
+// stride) — the Rust `snc` oracle and the self-hosted `scg` must agree byte-for-byte
+// on both the `:[[u8]]` type annotation and the size GEP. scg previously defaulted
+// the empty-literal element to `i64` (an 8-byte stride), diverging from snc; the fix
+// threads the expected/annotation element type (the first differential fixture to
+// exercise an empty nested array — c68_nested_array uses a non-empty literal, and the
+// empty-`[[u8]]` ui fence fixtures are oracle-rejected, so differential-skipped).
+//
+// Contrast cases: a non-empty `[[u8]]` (inferred element) + an empty FLAT `[i64]`
+// (whose element IS i64, so it already matched). len(empty)=0 + len(nums)=0 +
+// len(rows)=2 + len("ab")=2 + len("cde")=3 + 35 = 42.
+
+fn main() -> i64 {
+    let empty: [[u8]] = [];
+    let rows: [[u8]] = ["ab", "cde"];
+    let nums: [i64] = [];
+    len(empty) + len(nums) + len(rows) + len(rows[0]) + len(rows[1]) + 35
+}

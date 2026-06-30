@@ -43,9 +43,12 @@ fn dump_targs(out: &mut Vec<u8>, a: Args, src: &[u8], c: &mut TyCtx, gb: &mut Ve
 // (4c-2) array-literal elements: dump every element; RETURN the first element's
 // type (the inferred array element type). Empty → i64 default (a context-typed
 // follow-up). The first is dumped here; the rest reuse `dump_targs`.
+// Returns the element type inferred from the FIRST element, or the sentinel -1
+// for an EMPTY literal (`[]`) — the caller then takes the element type from the
+// expected/annotation type (`array_elem_of(exp)`) instead of defaulting to i64.
 fn dump_array_elems(out: &mut Vec<u8>, a: Args, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
     match a {
-        Args::End => 0,
+        Args::End => 0 - 1,
         Args::Cell(x, rest) => {
             push(out, ' ');
             // (6/N) the array arm sets consuming=true before this; elements inherit it.

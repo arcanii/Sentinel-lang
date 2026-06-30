@@ -14,7 +14,24 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
-**Latest (2026-06-30) — ADR 0066 M2.3: TYPED FRAMED CHANNEL OVER PIPES (`process_send` /
+**Latest (2026-06-30) — scg EMPTY-NESTED-ARRAY element-type fix (ADR 0068 follow-up).** The
+pre-existing latent self-host bug that M2.3 surfaced: an **empty** array literal `[]` can't infer its
+element type from the (absent) elements, so the self-hosted `scg` defaulted it to `i64` — diverging
+from the Rust `snc` oracle for empty **nested** arrays (`let argv: [[u8]] = []` emitted `getelementptr
+i64, ptr null, i64 0` + dumped `(array :[i64])` instead of the correct `{ i64, ptr }` 16-byte stride +
+`(array :[[u8]])`). **Fix (selfhost-only — `snc` was already correct, so NOT oracle-moving):**
+`dump_array_elems` (`selfhost/types/infer.sentinel`) returns a `-1` sentinel for an empty literal, and
+the array-literal arm (`selfhost/types/borrow.sentinel`) resolves the element from the
+expected/annotation type via `array_elem_of(exp)` — which is `i64` when `exp` is absent (`-1`) or not
+an array, preserving the old default for empty **flat** arrays (whose element *is* `i64`). The let-RHS
+already threads its declared type as `exp`, so this fixes the type dump, the MIR type, and the
+codegen size-GEP in one place. Fixture `tests/pass/c68_nested_array_empty` (an empty `[[u8]]` + a
+non-empty `[[u8]]` + an empty `[i64]`, exit 42) is byte-identical across all 9 self-host differential
+stages, both bootstrap fixed points hold; Windows four-check green. (The same `exp`-threading for an
+empty array in call-arg / return position is untested — a follow-up if a program needs it.) See ADR
+0068 + HANDOVER §0.
+
+**Earlier (2026-06-30) — ADR 0066 M2.3: TYPED FRAMED CHANNEL OVER PIPES (`process_send` /
 `process_recv`), self-hosted.** The cross-process twin of the M1.2 in-process channel: on top of
 the M2.2 raw byte pipes, **`process_send(p: Process, v: i64) -> i64`** frames an i64 as **8
 little-endian bytes** to the child's stdin (keeping it **open** — multi-message, unlike M2.2's

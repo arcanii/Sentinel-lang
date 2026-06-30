@@ -391,8 +391,8 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
         // index (for codegen's GEP) + the field type.
         Expr::Field(ft, fdn) => dump_te_field(out, ft, fdn, exp, src, c, gb),
         // (4c-2) array literal — `(array <e0> <e1>… :[T])`. The element type is
-        // inferred from the first element (empty arrays need the expected type — a
-        // follow-up); the node's type is `[T]`.
+        // inferred from the first element, or — for an EMPTY literal — from the
+        // expected type `exp` (ADR 0068; else i64); the node's type is `[T]`.
         Expr::Array(elems) => {
             append_str(out, "(array");
             // (6/N) array elements are CONSUMING (moved into the array).
@@ -425,7 +425,17 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             } else {
                 0
             };
-            let ety: i64 = dump_array_elems(out, elems, src, c, gb);
+            let ety_raw: i64 = dump_array_elems(out, elems, src, c, gb);
+            // (ADR 0068) an EMPTY literal `[]` can't infer its element from the
+            // elements — take it from the expected/annotation array type (`exp`),
+            // exactly as the Rust oracle uses the node's stored `elem_ty`. Non-empty
+            // literals keep the first-element type. `array_elem_of(exp)` is i64 when
+            // `exp` is absent (-1) / not an array, preserving the old default.
+            let ety: i64 = if ety_raw == 0 - 1 {
+                array_elem_of(c, exp)
+            } else {
+                ety_raw
+            };
             (*c).consuming = ar_svc;
             let aty: i64 = mk_array(c, ety);
             close_ty(out, aty, c);

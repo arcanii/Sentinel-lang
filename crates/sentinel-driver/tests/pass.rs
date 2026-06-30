@@ -1158,6 +1158,17 @@ fn pass_c68_nested_array() {
 }
 
 #[test]
+fn pass_c68_nested_array_empty() {
+    // ADR 0068 / scg fix: an EMPTY nested-array literal `[]` takes its element type
+    // from the annotation (`[[u8]]` -> `[u8]` = the 16-byte `{i64,ptr}`), not the
+    // i64 default — both compilers agree on the `:[[u8]]` type + the size GEP.
+    // len(empty=0) + len(nums=0) + len(rows=2) + len("ab"=2) + len("cde"=3) + 35.
+    let r = build_and_run("c68_nested_array_empty.sentinel");
+    assert_eq!(r.exit, 42);
+    assert_eq!(r.stdout, "");
+}
+
+#[test]
 fn pass_c66_nullable_u8() {
     // ADR 0066 M1.2b: `?T` generalized over scalars — `?u8` (null, an implicit
     // u8→?u8 widen, is_some, unwrap_or, a ?u8 param). 30 + 12 = 42.
