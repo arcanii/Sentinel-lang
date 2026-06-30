@@ -144,6 +144,16 @@ passes it back to the other `sentinel_channel_*` symbols. The struct's layout
 (an mpsc sender/receiver behind `Mutex`es) is therefore a runtime-internal
 detail, **not** ABI, and carries no size/offset contract here.
 
+### `SentinelProcess` — fully opaque (ADR 0066 M2.1)
+
+Like `SentinelChannel`, codegen never reads `SentinelProcess`'s fields — it holds
+the `*mut SentinelProcess` returned by `sentinel_process_spawn` (the `Type::Process`
+LLVM type is `ptr`) and passes it to `sentinel_process_wait`. The struct wraps a
+`std::process::Child` (runtime-internal, not ABI). The argv ABI *is* contractual:
+`sentinel_process_spawn(path_ptr, path_len, argv, argc)` decodes `argv` as `argc`
+consecutive abi-v1 array headers `{ i64 len, ptr data }` (§5) — the `[[u8]]`
+element buffer codegen emits.
+
 ---
 
 ## 4. Name mangling
@@ -275,6 +285,8 @@ Codegen declares these as external; `sentinel-runtime` defines them
 | `sentinel_channel_send` | `(ptr ch, i64 value) -> i64` | channels — move `value` in; 0 ok / -1 closed |
 | `sentinel_channel_recv` | `(ptr ch, ptr out) -> i64` | channels — block; writes `*out`, returns 0 (some) / 1 (closed). Codegen builds the `?i64` |
 | `sentinel_channel_close` | `(ptr ch) -> i64` | channels — drop the sender (signals recv EOF) |
+| `sentinel_process_spawn` | `(ptr path, i64 path_len, ptr argv, i64 argc) -> ptr` | subprocess (ADR 0066 M2.1) — spawn `path` with `argc` `[u8]` args (`argv` = abi-v1 array headers); null on failure |
+| `sentinel_process_wait` | `(ptr p) -> i64` | subprocess — wait; exit code, or -1 (error / no code / already waited) |
 
 **Runtime-internal (not codegen-declared):** `sentinel_kont_panic_resumed`
 — the runtime's `sentinel_kont_resume` calls it on the consumed-twice

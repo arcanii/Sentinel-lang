@@ -1397,6 +1397,99 @@ pub extern "C" fn sentinel_channel_close(ch: *mut SentinelChannel) -> i64 {
     0
 }
 
+// =============================================================================
+// ADR 0066 M2.1: subprocess spawn — `Process` over `std::process::Command`.
+//
+// Cross-platform (std::process::Command abstracts posix_spawn/fork+exec and
+// CreateProcess — NOT a `#[cfg(unix)]` path like the sockets). Codegen holds an
+// opaque `*mut SentinelProcess` (the `Type::Process` LLVM type is `ptr`). The
+// args arrive as a Sentinel `[[u8]]`: `argv` points to `argc` consecutive abi-v1
+// array headers `{ i64 len, ptr data }`, each an argument string.
+// =============================================================================
+
+/// The abi-v1 array header `{ i64 len, ptr data }` — used to decode the elements
+/// of a `[[u8]]` argv at the runtime boundary (the array layout is abi-v1, §5).
+#[repr(C)]
+struct SentinelArrayHeader {
+    len: i64,
+    data: *const u8,
+}
+
+/// A heap-allocated spawned child process. Codegen holds an opaque
+/// `*mut SentinelProcess`. `child` is taken (`None`) after a successful wait, so
+/// a second `wait` returns the no-child sentinel rather than blocking again.
+pub struct SentinelProcess {
+    child: Option<std::process::Child>,
+}
+
+/// ADR 0066 M2.1: spawn a child process. `path_ptr`/`path_len` are a Sentinel
+/// `[u8]` executable path; `argv`/`argc` describe a Sentinel `[[u8]]` (an array
+/// of `[u8]` argument strings, decoded via [`SentinelArrayHeader`]). Returns an
+/// opaque `*mut SentinelProcess`, or null on spawn failure (e.g. no such file).
+///
+/// # Safety
+///
+/// `path_ptr` must point to `path_len` readable bytes; `argv` must point to
+/// `argc` valid [`SentinelArrayHeader`]s, each with `len` readable bytes at
+/// `data` — exactly the abi-v1 `[u8]` / `[[u8]]` layout codegen emits.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+#[no_mangle]
+pub extern "C" fn sentinel_process_spawn(
+    path_ptr: *const u8,
+    path_len: i64,
+    argv: *const u8,
+    argc: i64,
+) -> *mut SentinelProcess {
+    if path_ptr.is_null() || path_len < 0 || argc < 0 {
+        return std::ptr::null_mut();
+    }
+    // SAFETY: the caller contract guarantees `path_len` bytes at `path_ptr`.
+    let path_bytes = unsafe { std::slice::from_raw_parts(path_ptr, path_len as usize) };
+    let path = String::from_utf8_lossy(path_bytes).into_owned();
+    let mut cmd = std::process::Command::new(&path);
+    if argc > 0 && !argv.is_null() {
+        // SAFETY: `argv` points to `argc` abi-v1 array headers (the `[[u8]]`
+        // element buffer), each a live `{ i64 len, ptr data }` `[u8]`.
+        let headers =
+            unsafe { std::slice::from_raw_parts(argv as *const SentinelArrayHeader, argc as usize) };
+        for h in headers {
+            if h.data.is_null() || h.len < 0 {
+                continue;
+            }
+            let arg_bytes = unsafe { std::slice::from_raw_parts(h.data, h.len as usize) };
+            cmd.arg(String::from_utf8_lossy(arg_bytes).into_owned());
+        }
+    }
+    match cmd.spawn() {
+        Ok(child) => Box::into_raw(Box::new(SentinelProcess { child: Some(child) })),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// ADR 0066 M2.1: wait for the child to exit and return its exit code. Returns
+/// -1 on error: a null handle, an already-waited handle, a wait failure, or a
+/// child terminated without an exit code (e.g. killed by a signal on Unix).
+///
+/// # Safety
+///
+/// `p` must be a `*mut SentinelProcess` from [`sentinel_process_spawn`].
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+#[no_mangle]
+pub extern "C" fn sentinel_process_wait(p: *mut SentinelProcess) -> i64 {
+    if p.is_null() {
+        return -1;
+    }
+    // SAFETY: `p` is a live SentinelProcess per the caller contract.
+    let proc = unsafe { &mut *p };
+    match proc.child.take() {
+        Some(mut child) => match child.wait() {
+            Ok(status) => status.code().map(|c| c as i64).unwrap_or(-1),
+            Err(_) => -1,
+        },
+        None => -1,
+    }
+}
+
 /// Returns the crate name as a sanity-check that the build is wired up.
 pub fn crate_name() -> &'static str {
     "sentinel-runtime"
@@ -1647,13 +1740,16 @@ mod tests {
             sentinel_channel_send as *const (),
             sentinel_channel_recv as *const (),
             sentinel_channel_close as *const (),
+            // ADR 0066 M2.1: the subprocess builtins (cross-platform).
+            sentinel_process_spawn as *const (),
+            sentinel_process_wait as *const (),
         ];
-        // 28 symbols: 23 codegen-declared (incl. D.2's sentinel_str_eq,
+        // 30 symbols: 23 codegen-declared (incl. D.2's sentinel_str_eq,
         // D.3's sentinel_realloc, D.4's sentinel_read_file /
         // sentinel_write_file / sentinel_print_bytes, and ADR 0065 D6's
         // sentinel_kont_free) + sentinel_kont_panic_resumed + ADR 0066 M1.2's
-        // 4 sentinel_channel_* symbols.
-        assert_eq!(symbols.len(), 28);
+        // 4 sentinel_channel_* + M2.1's 2 sentinel_process_* symbols.
+        assert_eq!(symbols.len(), 30);
         assert!(symbols.iter().all(|&s| !s.is_null()), "every symbol has an address");
     }
 
@@ -1798,6 +1894,45 @@ mod tests {
         }
         producer.join().unwrap();
         assert_eq!(sum, 42);
+    }
+
+    // ---- ADR 0066 M2.1: the subprocess spawn runtime surface ----
+
+    #[test]
+    fn sentinel_process_spawn_and_wait_exit_code() {
+        // Spawn a cross-platform child that exits 42, then wait for its code.
+        // The args arrive as a `[[u8]]` — an array of abi-v1 `{ i64 len, ptr }`
+        // headers — exactly as codegen will pass them.
+        #[cfg(windows)]
+        let (path, arg0, arg1) = ("cmd", "/c", "exit 42");
+        #[cfg(not(windows))]
+        let (path, arg0, arg1) = ("sh", "-c", "exit 42");
+
+        let arg_bytes = [arg0.as_bytes(), arg1.as_bytes()];
+        let headers: Vec<SentinelArrayHeader> = arg_bytes
+            .iter()
+            .map(|b| SentinelArrayHeader { len: b.len() as i64, data: b.as_ptr() })
+            .collect();
+        let p = sentinel_process_spawn(
+            path.as_ptr(),
+            path.len() as i64,
+            headers.as_ptr() as *const u8,
+            headers.len() as i64,
+        );
+        assert!(!p.is_null(), "spawn of `{path}` succeeded");
+        let code = sentinel_process_wait(p);
+        assert_eq!(code, 42, "the child exited 42");
+        // A second wait on the now-childless handle returns the -1 sentinel.
+        assert_eq!(sentinel_process_wait(p), -1);
+    }
+
+    #[test]
+    fn sentinel_process_spawn_nonexistent_returns_null() {
+        let path = "this_executable_does_not_exist_xyzzy";
+        let p = sentinel_process_spawn(path.as_ptr(), path.len() as i64, std::ptr::null(), 0);
+        assert!(p.is_null(), "spawning a nonexistent program returns null");
+        // wait on a null handle is the -1 sentinel (no panic).
+        assert_eq!(sentinel_process_wait(std::ptr::null_mut()), -1);
     }
 
     // ---- ADR 0056: the TCP sockets runtime surface (loopback) ----
