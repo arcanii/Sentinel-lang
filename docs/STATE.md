@@ -14,7 +14,35 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
-**Latest (2026-06-30) — ADR 0066 M2.2: BYTE-PIPE IPC (`process_write` / `process_read`) + the
+**Latest (2026-06-30) — ADR 0066 M2.3: TYPED FRAMED CHANNEL OVER PIPES (`process_send` /
+`process_recv`), self-hosted.** The cross-process twin of the M1.2 in-process channel: on top of
+the M2.2 raw byte pipes, **`process_send(p: Process, v: i64) -> i64`** frames an i64 as **8
+little-endian bytes** to the child's stdin (keeping it **open** — multi-message, unlike M2.2's
+one-shot `process_write`) and **`process_recv(p: Process) -> ?i64`** reads one frame back (`null` =
+closed/EOF). The runtime symbols mirror the channel ABI exactly (`sentinel_process_send (ptr,i64)
+-> i64`, `sentinel_process_recv (ptr,ptr out) -> i64` returning 0 some / 1 closed), so codegen
+builds the `?i64` from the status precisely as `recv` does — in all three emitters (inkwell, the
+`snc llvm` oracle, and the self-hosted `scg` cg). To let a loop-until-EOF child terminate,
+`sentinel_process_wait` now **closes the child's stdin before reaping** (idempotent, runtime-internal
+— no IR change). The **cross-process secret fence (D8) stays structural**: the element is the public
+`i64`, so a `secret i64` can't cross (rejected as a type mismatch — ui fixture
+`c66_process_channel_secret_fence`, "argument expects i64, got <secret>"); `process_send`/`_recv` are
+effect-free (they operate on an already-acquired handle). The `abi-v1` symbol set grew 32→**34** (the
+`abi_v1_runtime_symbol_set` test) and the two builtins shifted the user-fn **FnId base 29→31** in both
+compilers (auto in Rust; ~30 hardcoded selfhost sites + the four driver golden dumps +2 per user FnId
+— the delicate lockstep part, since `__spawn_wrapper_<id>` embeds the FnId). Fixture
+`tests/pass/c66_process_channel` (guarded send/recv, so the differential covers the IR) is
+byte-identical across all 9 self-host differential stages, both bootstrap fixed points hold; the real
+LE-i64 round-trip is covered by a `sentinel_process_send`/`_recv` runtime unit test (frames through
+`cat`, Unix-gated — Windows `findstr` line-buffers binary). Surfaced (and flagged separately) a
+PRE-EXISTING latent scg divergence on **empty** `[[u8]]` literals (the element-size defaults to `i64`
+instead of the annotation's `[u8]`) — out of M2.3 scope; the fixture uses a non-empty argv.
+Constant-time + the lexical borrow checker UNCHANGED; Windows four-check green (the pre-existing
+`/tmp`/`cc`/`--shared`/MSVC-link-dedup failures are unaffected). **Next (M2.3b):** generic word-scalar
+channel elements + length-prefixed framing; a reusable worker-pool library; M2.4
+`SealedChannel<secret T>` (own ADR). See ADR 0066 D8/D10/D11 + HANDOVER §0.
+
+**Earlier (2026-06-30) — ADR 0066 M2.2: BYTE-PIPE IPC (`process_write` / `process_read`) + the
 `Subprocess` capability effect (M2.1 completion), self-hosted.** Two follow-ons to M2.1 spawn:
 **(1) the `Subprocess` capability effect (D7).** `process_spawn` now carries the auto-registered
 built-in `Subprocess` effect (joins `Async`), so a spawning fn declares `! { Subprocess }` (the

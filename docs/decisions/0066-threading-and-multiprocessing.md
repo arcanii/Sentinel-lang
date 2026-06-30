@@ -30,9 +30,25 @@ FnId base shifted 25→29 in both compilers. Fixture `tests/pass/c66_process` (s
 + write/read IR) + the `sentinel_process_*` runtime unit tests (real `cmd /c exit
 42` / `sh -c` spawn + a `cat`/`findstr` pipe round-trip). The `?T` scalar
 generalization (`?u8`/`?f64`/`?ptr`) also landed (enabler for generic channel
-elements). **Next (M2.3):** typed channels over pipes — `send`/`recv` of
-serializable *public* `T` across the process boundary (serialization + the fence);
-generic word-scalar channel *elements*; a reusable worker-pool library.
+elements). And **M2.3** (DONE + self-hosted 2026-06-30) — typed framed channels
+over the M2.2 pipes — `process_send(p: Process, v: i64) -> i64` +
+`process_recv(p: Process) -> ?i64`, the exact cross-process mirror of the M1.2
+in-process `send`/`recv` channel ABI, framing each value as an **8-byte
+little-endian** i64 over the child's stdin/stdout. **i64-minimum** (matching the
+M1.2 `Channel<i64>` minimum; generic word-scalar elements + variable-width
+length-prefixed framing are the deferred M2.3b follow-up). 2 new runtime symbols
+(`sentinel_process_send`/`_recv`; the abi-v1 set grew 32→34), the FnId base
+shifted 29→31 in both compilers, and the cross-process secret fence stays
+**structural**: the element is the public `i64`, so a `secret i64` can't cross
+(rejected as a type mismatch, like M2.2's `[u8]`; ui fixture
+`c66_process_channel_secret_fence`). `process_send`/`_recv` are effect-free;
+`process_wait` now closes stdin before reaping so a loop-until-EOF child
+terminates. Fixture `tests/pass/c66_process_channel` (all 9 differential stages
+byte-identical, both fixed points hold) + a `sentinel_process_send`/`_recv`
+runtime round-trip unit test (the real LE-i64 frames through `cat`, Unix-gated).
+See D8 + D10 + D11. **Next (M2.3b / beyond):** generic word-scalar channel
+*elements*; a reusable worker-pool library; M2.4 `SealedChannel<secret T>` (its
+own ADR).
 This ADR lays out the complete threading + multi-processing vision with
 pinned D-points for each piece, **implemented incrementally** across
 sub-phases. It is the umbrella over the near-term maintainer ask (flagged
@@ -147,7 +163,7 @@ byte-identical → mark the sub-phase ACCEPTED).
 | | M1.4 | `Mutex<T>` + atomics — the bounded shared-state escape hatch, with **runtime deadlock detection → typed error** (D5) | yes (new `Type` + shared-handle machinery) — **gated on a shared-ownership story** |
 | **2 — multi-processing** | M2.1 | **✅ done** — **Process spawn** — `Process` handle over `std::process::Command`; `Subprocess` capability effect | yes (new `Type` + effect + runtime symbols) |
 | | M2.2 | **✅ done** — **Byte-pipe IPC** — child stdin/stdout as byte streams; the cross-process **secret fence** (D8) | yes (runtime symbols + fence rule) |
-| | M2.3 | Typed channels over pipes — `send`/`recv` of serializable *public* `T` across the process boundary | yes (serialization + fence) |
+| | M2.3 | **✅ done** — Typed framed channels over pipes — `process_send(p,i64)->i64` / `process_recv(p)->?i64` (8-byte LE frame, i64-minimum, the M1.2 channel ABI over a pipe) | yes (serialization + fence) |
 | | M2.4 | **`SealedChannel<secret T>`** — the AEAD-encrypted secret-cross-process path (D8a), built on the verified-constant-time `aead`/`x25519` stdlib | yes (its own ADR — Sentinel↔Sentinel only) |
 | **3 — actors** | M3.x | Typed-mailbox actors (SENTINEL_DESIGN2 §8.2) as sugar over channels; same syntax in-process + cross-process | yes (large; its own ADR) |
 | **far future** | — | `@shared` shared-memory segments + robust futexes (SENTINEL_DESIGN2 §6), broker-backed, Unix-first | yes (its own ADR) |
@@ -425,6 +441,17 @@ a pipe. Pinned by ui fixture `c66_process_secret_fence`. (The richer M2.3/M2.4
 payloads — typed public `T` over pipes, then the `SealedChannel<secret T>` encrypted
 escape — get their own per-sub-phase fence treatment, D8a.)
 
+**IMPLEMENTED (M2.3, 2026-06-30): the typed-channel fence is also structural.**
+`process_send(p, v)` / `process_recv(p) -> ?i64` carry the **public** element
+type `i64` (the i64-minimum, mirroring `Channel<i64>`), so a `secret i64` cannot
+cross by construction — it is rejected at the `process_send` call as a type
+mismatch (`secret i64 != i64`, no implicit secret→public coercion), exactly as
+M2.2's `[u8]` rejects `[secret u8]`. Pinned by ui fixture
+`c66_process_channel_secret_fence`. When M2.3b adds generic word-scalar elements
+the fence stays structural (the element type is always a *public* scalar; a
+`secret` scalar is a distinct type); the `secret`-cross-process escape remains
+`declassify` (or the M2.4 `SealedChannel<secret T>`, its own ADR).
+
 The reasoning rests on what the constant-time guarantee actually is. The
 guarantee (ADR 0008, README boundaries) is that **the program contains no
 secret-dependent branch, memory index, or divisor** — `secret_leak`
@@ -617,6 +644,16 @@ discipline, ADR 0029). Provisional set:
   -> ptr`, `sentinel_process_wait(p: ptr) -> i64`,
   plus `sentinel_process_stdin/stdout` pipe accessors at M2.2. The
   `SentinelProcess` struct wraps `std::process::Child`.
+- **M2.3 typed framed channel over the pipe** (implemented 2026-06-30): the
+  cross-process twin of the M1.2 channel ABI — `sentinel_process_send(p: ptr,
+  value: i64) -> i64` (frame `value` as 8 LE bytes to the child's stdin, flush,
+  **keep stdin open**; 0 ok / -1 error) and `sentinel_process_recv(p: ptr, out:
+  ptr) -> i64` (`read_exact(8)` from the child's stdout → `*out`; **0 some / 1
+  closed** — EOF/short read = closed, identical to `sentinel_channel_recv`).
+  `process_recv`'s `?i64` is built in codegen exactly as `recv`'s is. To let a
+  loop-until-EOF child terminate, `sentinel_process_wait` now **closes the
+  child's stdin before reaping** (idempotent if `process_write` already took it)
+  — runtime-internal, no IR change. The abi-v1 set grows **32 → 34**.
 - These are **new** symbols (no change to the frozen `sentinel_task_*` /
   `sentinel_scope_*` set), so existing artifacts keep linking; the ABI
   grows, it does not break.
