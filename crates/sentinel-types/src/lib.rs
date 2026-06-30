@@ -29,7 +29,8 @@ use sentinel_base::{Diagnostic, SentinelDb, Severity, SourceFile};
 use sentinel_resolve::{
     ClassId, EffectId, EnumId, FnId, ImplId, ImplTarget, ResolvedBlock, ResolvedExpr,
     ResolvedExprKind, ResolvedFnDef, ResolvedPattern, ResolvedProgram, ResolvedStmt,
-    ResolvedStmtKind, StructId, TraitId, TypeParamId, VarId, LEN_FN_ID,
+    ResolvedStmtKind, StructId, TraitId, TypeParamId, VarId, LEN_FN_ID, PROCESS_RECV_FN_ID,
+    PROCESS_SEND_FN_ID,
 };
 use sentinel_ast::SelfKind;
 
@@ -1234,6 +1235,20 @@ pub fn is_spawn_word_scalar(ty: Type) -> bool {
             | Type::Channel(_)
             | Type::Process
     )
+}
+
+/// ADR 0066 M2.3b: the element types a `process_send`/`process_recv` framed
+/// channel over a pipe can carry — the word-sized scalars that also have a `?T`
+/// form (so `process_recv -> ?T` is representable): `i64`/`i32`/`u8`/`bool`/
+/// `f64`/`ptr`. Each is encoded into the 8-byte LE i64 frame (the M1.1 spawn
+/// encode: zext a narrow int / bitcast an `f64` / ptrtoint a `ptr`), so the
+/// runtime stays i64-based — no runtime/ABI change. A `secret` element is NOT a
+/// word scalar, so it is rejected here: the cross-process secret fence (D8).
+/// `u128` (16 bytes) doesn't fit the i64 frame and is excluded (not a word
+/// scalar); the `Task`/`Channel`/`Process` handles have no `?T` form and would be
+/// nonsensical across a process boundary anyway.
+pub fn is_process_channel_elem(ty: Type) -> bool {
+    is_spawn_word_scalar(ty) && ty.to_nullable_inner().is_some()
 }
 
 /// Intern a `result_ty` into `tasks`, returning its [`TaskId`] per
@@ -6958,6 +6973,100 @@ fn check_call(
                 type_args: vec![elem],
             },
             Type::I64,
+        ));
+    }
+
+    // ADR 0066 M2.3b: the framed-channel-over-pipe builtins are generic over a
+    // word-scalar element T (the `Channel<T>`-style minimum, but element-from-
+    // context rather than a generic sig — `Process` carries no element type).
+    // `process_send(p, v: T)` takes T from the value arg; `process_recv(p) -> ?T`
+    // takes T from the expected return type. Codegen encodes/decodes T to/from the
+    // 8-byte i64 frame (M1.1). The `i64` case is byte-identical to M2.3. A `secret`
+    // / aggregate element is rejected — the cross-process secret fence (D8).
+    if id == PROCESS_SEND_FN_ID {
+        let p_typed = check_expr(
+            &args[0], Some(Type::Process), env, signatures, structs, class_decls, enums,
+            instances, refs, secrets, arrays, struct_type_param_counts, effect_decls,
+            trait_decls, impl_decls, konts, tasks,
+        )?;
+        if p_typed.ty != Type::Process {
+            return Err(TypeError::CallArgMismatch {
+                callee: "process_send".to_string(),
+                arg_index: 0,
+                expected: Type::Process,
+                got: p_typed.ty,
+                span: to_source_span(&args[0].span),
+            });
+        }
+        let v_typed = check_expr(
+            &args[1], None, env, signatures, structs, class_decls, enums, instances, refs,
+            secrets, arrays, struct_type_param_counts, effect_decls, trait_decls, impl_decls,
+            konts, tasks,
+        )?;
+        if !is_process_channel_elem(v_typed.ty) {
+            // A `secret`/aggregate element can't cross the pipe (D8): report it
+            // against the public-scalar ABI exactly as M2.3's concrete-i64 sig did
+            // (the `c66_process_channel_secret_fence` message is unchanged).
+            return Err(TypeError::CallArgMismatch {
+                callee: "process_send".to_string(),
+                arg_index: 1,
+                expected: Type::I64,
+                got: v_typed.ty,
+                span: to_source_span(&args[1].span),
+            });
+        }
+        // No `type_args`: codegen encodes by LLVM value kind, and an empty
+        // `type_args` keeps the `i64` case's dump byte-identical to M2.3 (the
+        // non-i64 element is carried by the value arg's own `:T` annotation).
+        return Ok((
+            TypedExprKind::Call {
+                id,
+                callee_span: callee_span.clone(),
+                args: vec![p_typed, v_typed],
+                type_args: vec![],
+            },
+            Type::I64,
+        ));
+    }
+    if id == PROCESS_RECV_FN_ID {
+        let p_typed = check_expr(
+            &args[0], Some(Type::Process), env, signatures, structs, class_decls, enums,
+            instances, refs, secrets, arrays, struct_type_param_counts, effect_decls,
+            trait_decls, impl_decls, konts, tasks,
+        )?;
+        if p_typed.ty != Type::Process {
+            return Err(TypeError::CallArgMismatch {
+                callee: "process_recv".to_string(),
+                arg_index: 0,
+                expected: Type::Process,
+                got: p_typed.ty,
+                span: to_source_span(&args[0].span),
+            });
+        }
+        // T from the expected `?T` (default `?i64`). A non-channel-elem expected
+        // (e.g. `?u128`) falls back to `i64`; the outer context surfaces a Mismatch.
+        let elem = match expected_return {
+            Some(Type::Nullable(inner)) if is_process_channel_elem(inner.to_type()) => {
+                inner.to_type()
+            }
+            _ => Type::I64,
+        };
+        let ret = Type::Nullable(
+            elem.to_nullable_inner().expect("a process-channel elem has a NullableInner"),
+        );
+        // Carry the element in `type_args` ONLY for a non-`i64` element (codegen's
+        // decode reads it); the `i64` case emits no `type_args` so its dump stays
+        // byte-identical to M2.3 (the differential corpus is i64-only — the generic
+        // elements are snc-side demonstrators in `examples/`, scg mirror deferred).
+        let type_args = if elem == Type::I64 { vec![] } else { vec![elem] };
+        return Ok((
+            TypedExprKind::Call {
+                id,
+                callee_span: callee_span.clone(),
+                args: vec![p_typed],
+                type_args,
+            },
+            ret,
         ));
     }
 

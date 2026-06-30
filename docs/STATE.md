@@ -14,7 +14,27 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
-**Latest (2026-06-30) — scg EMPTY-NESTED-ARRAY element-type fix (ADR 0068 follow-up).** The
+**Latest (2026-06-30) — ADR 0066 M2.3b: GENERIC word-scalar elements for the typed process channel
+(snc-side).** `process_send`/`process_recv` are generalized from `i64`-only to any **word-scalar
+element** — `i64`/`i32`/`u8`/`bool`/`f64`/`ptr` (`is_process_channel_elem` = `is_spawn_word_scalar` ∩
+has-`NullableInner`). The element is **encoded** into the 8-byte i64 frame on send (the M1.1 spawn
+encode: zext a narrow int / bitcast an `f64` / ptrtoint a `ptr`) and **decoded** back on recv
+(trunc / bitcast / inttoptr), so the **runtime stays i64-based — no runtime/ABI/FnId/symbol change**.
+`process_send`'s element is the value-arg type (encoded by LLVM value kind); `process_recv -> ?T` takes
+`T` from the **expected return type** (context-typed, default `?i64`). Implemented as a `check_call`
+special-case (like `LEN_FN_ID`) + the encode/decode in both snc emitters (inkwell + the `snc llvm`
+oracle). **The `i64` case is byte-identical to M2.3** (no encode/decode, no `type_args`), so the
+differential corpus's `c66_process_channel` is unchanged and **both bootstrap fixed points stay
+byte-identical with NO scg change** — the snc-only pattern (like `u128`/`f64`/`task_generic`). The
+cross-process secret fence (D8) holds: a `secret` element isn't a word-scalar, so it is rejected (the
+`c66_process_channel_secret_fence` message is unchanged). Demonstrator
+`examples/lang/process_channel_typed.sentinel` (`u8`/`i32`/`bool` send/recv, guarded spawn → 42, built
+both `--separate` and merged). The **scg mirror is deferred** (it needs the self-host to thread the
+expected type to `process_recv` + generalize the cg arms). Constant-time + the lexical borrow checker
+UNCHANGED; Windows four-check green. **Next:** M2.4 `SealedChannel<secret T>` (its own ADR — the
+security-critical AEAD secret-cross-process path, D8a). See ADR 0066 D2/D8/D11 + HANDOVER §0.
+
+**Earlier (2026-06-30) — scg EMPTY-NESTED-ARRAY element-type fix (ADR 0068 follow-up).** The
 pre-existing latent self-host bug that M2.3 surfaced: an **empty** array literal `[]` can't infer its
 element type from the (absent) elements, so the self-hosted `scg` defaulted it to `i64` — diverging
 from the Rust `snc` oracle for empty **nested** arrays (`let argv: [[u8]] = []` emitted `getelementptr

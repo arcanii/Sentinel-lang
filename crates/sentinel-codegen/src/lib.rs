@@ -6184,22 +6184,51 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
         Ok(with_data.into_struct_value().into())
     }
 
-    /// ADR 0066 M2.3: `process_send(p: Process, v: i64) -> i64` — frame `v` to the
-    /// child's stdin via `sentinel_process_send(p, v)`; the i64 status is the
-    /// expression value. The cross-process twin of `lower_channel_send`.
+    /// ADR 0066 M2.3 / M2.3b: `process_send(p: Process, v: T) -> i64` — ENCODE the
+    /// word-scalar element `v` into the 8-byte i64 frame (the M1.1 spawn encode:
+    /// zext a narrow int / bitcast an `f64` / ptrtoint a `ptr`; `i64` = no-op),
+    /// then frame it via `sentinel_process_send(p, encoded)`; the i64 status is the
+    /// expression value. The `secret` fence is upstream (typing rejects a `secret`
+    /// element). The cross-process twin of `lower_channel_send`.
     fn lower_process_send(
         &mut self,
         p: &TypedExpr,
         value: &TypedExpr,
         program: &TypedProgram,
     ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+        let i64_ty = self.context.i64_type();
         let p_v = self.lower_expr(p, program)?.into_pointer_value();
-        let val_v = self.lower_expr(value, program)?.into_int_value();
+        let raw = self.lower_expr(value, program)?;
+        let encoded: IntValue = match raw {
+            BasicValueEnum::IntValue(iv) => {
+                if iv.get_type().get_bit_width() == 64 {
+                    iv
+                } else {
+                    self.builder
+                        .build_int_z_extend(iv, i64_ty, "psend_enc")
+                        .map_err(|e| CodegenError::Builder(e.to_string()))?
+                }
+            }
+            BasicValueEnum::FloatValue(fv) => self
+                .builder
+                .build_bit_cast(fv, i64_ty, "psend_enc")
+                .map_err(|e| CodegenError::Builder(e.to_string()))?
+                .into_int_value(),
+            BasicValueEnum::PointerValue(pv) => self
+                .builder
+                .build_ptr_to_int(pv, i64_ty, "psend_enc")
+                .map_err(|e| CodegenError::Builder(e.to_string()))?,
+            other => {
+                return Err(CodegenError::Builder(format!(
+                    "process_send element unsupported (M2.3b word-scalar only): {other:?}"
+                )));
+            }
+        };
         let call = self
             .builder
             .build_call(
                 self.process_send_fn,
-                &[p_v.into(), val_v.into()],
+                &[p_v.into(), encoded.into()],
                 "process_send",
             )
             .map_err(|e| CodegenError::Builder(e.to_string()))?;
@@ -6209,15 +6238,17 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
             .expect("sentinel_process_send returns i64"))
     }
 
-    /// ADR 0066 M2.3: `process_recv(p: Process) -> ?i64` — call
-    /// `sentinel_process_recv(p, out)` (writes the value to a stack `out` slot,
-    /// returns a status: 0 = some / 1 = closed), then BUILD the `?i64`
-    /// (`{ i1 valid, i64 value }`, `valid = status == 0`). The cross-process twin
-    /// of `lower_channel_recv` — same `?i64` build, so the receiver type carries
-    /// no `secret` (the element is the public `i64`; the D8 fence is structural).
+    /// ADR 0066 M2.3 / M2.3b: `process_recv(p: Process) -> ?T` — call
+    /// `sentinel_process_recv(p, out)` (writes the i64 frame to a stack `out` slot,
+    /// returns a status: 0 = some / 1 = closed), DECODE the i64 frame into the
+    /// element `T` (the inverse of the M1.1 encode: trunc a narrow int / bitcast an
+    /// `f64` / inttoptr a `ptr`; `i64` = no-op), then BUILD the `?T`
+    /// (`{ i1 valid, T value }`, `valid = status == 0`). The cross-process twin of
+    /// `lower_channel_recv`; `elem` is the `type_args[0]` from `check_call`.
     fn lower_process_recv(
         &mut self,
         p: &TypedExpr,
+        elem: Type,
         program: &TypedProgram,
     ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
         let i64_ty = self.context.i64_type();
@@ -6242,14 +6273,43 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
             .builder
             .build_int_compare(IntPredicate::EQ, status, i64_ty.const_zero(), "precv_valid")
             .map_err(|e| CodegenError::Builder(e.to_string()))?;
-        let value = self
+        let raw = self
             .builder
             .build_load(i64_ty, out_slot, "precv_val")
-            .map_err(|e| CodegenError::Builder(e.to_string()))?;
-        // `?i64` is `{ i1, i64 }` (the inline-payload nullable, ADR 0014 D2).
+            .map_err(|e| CodegenError::Builder(e.to_string()))?
+            .into_int_value();
+        // Decode the i64 frame into the element type `T`.
+        let elem_llvm = self.llvm_basic_type(elem);
+        let value: BasicValueEnum = match elem_llvm {
+            BasicTypeEnum::IntType(it) => {
+                if it.get_bit_width() == 64 {
+                    raw.into()
+                } else {
+                    self.builder
+                        .build_int_truncate(raw, it, "precv_dec")
+                        .map_err(|e| CodegenError::Builder(e.to_string()))?
+                        .into()
+                }
+            }
+            BasicTypeEnum::FloatType(ft) => self
+                .builder
+                .build_bit_cast(raw, ft, "precv_dec")
+                .map_err(|e| CodegenError::Builder(e.to_string()))?,
+            BasicTypeEnum::PointerType(pt) => self
+                .builder
+                .build_int_to_ptr(raw, pt, "precv_dec")
+                .map_err(|e| CodegenError::Builder(e.to_string()))?
+                .into(),
+            other => {
+                return Err(CodegenError::Builder(format!(
+                    "process_recv element unsupported (M2.3b word-scalar only): {other:?}"
+                )));
+            }
+        };
+        // `?T` is `{ i1, <T> }` (the inline-payload nullable, ADR 0014 D2).
         let opt_ty = self
             .context
-            .struct_type(&[self.context.bool_type().into(), i64_ty.into()], false);
+            .struct_type(&[self.context.bool_type().into(), elem_llvm], false);
         let agg = opt_ty.get_undef();
         let with_valid = self
             .builder
@@ -7190,12 +7250,16 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                 if *id == PROCESS_READ_FN_ID {
                     return self.lower_process_read(&args[0], program);
                 }
-                // ADR 0066 M2.3: the typed framed-channel-over-pipe builtins.
+                // ADR 0066 M2.3 / M2.3b: the typed framed-channel-over-pipe builtins.
+                // `process_send` encodes by LLVM value kind (no element arg needed);
+                // `process_recv` decodes into the element `type_args[0]` (`i64` if
+                // absent — the M2.3 default).
                 if *id == PROCESS_SEND_FN_ID {
                     return self.lower_process_send(&args[0], &args[1], program);
                 }
                 if *id == PROCESS_RECV_FN_ID {
-                    return self.lower_process_recv(&args[0], program);
+                    let elem = type_args.first().copied().unwrap_or(Type::I64);
+                    return self.lower_process_recv(&args[0], elem, program);
                 }
                 // C1.7.5 / ADR 0016 D7: user-defined generic-fn
                 // calls route to the monomorphic instance emitted

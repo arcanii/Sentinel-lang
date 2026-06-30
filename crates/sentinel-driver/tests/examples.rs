@@ -467,6 +467,13 @@ const EXAMPLES: &[(&str, i32)] = &[
     // shared work queue (work-stealing via the mutex'd mpsc receiver) + a
     // results fan-in channel. Squares 1/4/5 across the pool. 1+16+25 = 42.
     ("examples/lang/worker_pool.sentinel", 42),
+    // ADR 0066 M2.3b: GENERIC word-scalar elements for the typed process channel —
+    // `process_send`/`process_recv` over `u8` / `i32` / `bool` (not just `i64`),
+    // encoded into / decoded from the 8-byte i64 frame (the M1.1 spawn encode). The
+    // spawn is guarded for cross-platform determinism; the generic send/recv IR +
+    // typing still lower. snc-only (the scg mirror is deferred, like task_generic /
+    // f64 — the differential corpus stays at the i64 `c66_process_channel`). 42.
+    ("examples/lang/process_channel_typed.sentinel", 42),
     // ADR 0037 / BACKLOG §10.9: the worked MULTI-FILE example — a program using
     // a `pub class` (`Rect`) defined in another file, the library module
     // `std::math::rect`. The class crosses the module / separate-compilation

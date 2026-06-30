@@ -3239,20 +3239,48 @@ impl Emit<'_> {
             writeln!(self.body, "  %v{a1} = insertvalue {{ i64, ptr }} %v{a0}, ptr %v{data}, 1").unwrap();
             return Ok(format!("%v{a1}"));
         }
-        // ADR 0066 M2.3: the typed framed-channel-over-pipe builtins. process_send
-        // frames an i64 to the child's stdin (i64 status); process_recv reads one
-        // i64 frame, building the `?i64` from the status exactly like `recv`.
+        // ADR 0066 M2.3 / M2.3b: the typed framed-channel-over-pipe builtins.
+        // process_send ENCODES the word-scalar element into the i64 frame (the M1.1
+        // encode); process_recv reads one i64 frame, DECODES it into the element T,
+        // and builds the `?T`. The `i64` case has no encode/decode → byte-identical
+        // to M2.3.
         if id == PROCESS_SEND_FN_ID {
             let p = self.lower_expr(&args[0])?;
             let v = self.lower_expr(&args[1])?;
+            let enc = match args[1].ty {
+                Type::I64 => v,
+                Type::I32 | Type::U8 | Type::Bool => {
+                    let ety = self.lty(args[1].ty)?;
+                    let e = self.fresh();
+                    writeln!(self.body, "  %v{e} = zext {ety} {v} to i64").unwrap();
+                    format!("%v{e}")
+                }
+                Type::F64 => {
+                    let e = self.fresh();
+                    writeln!(self.body, "  %v{e} = bitcast double {v} to i64").unwrap();
+                    format!("%v{e}")
+                }
+                Type::Ptr => {
+                    let e = self.fresh();
+                    writeln!(self.body, "  %v{e} = ptrtoint ptr {v} to i64").unwrap();
+                    format!("%v{e}")
+                }
+                other => {
+                    return Err(format!(
+                        "process_send element not ported (M2.3b word-scalar): {other:?}"
+                    ))
+                }
+            };
             let r = self.fresh();
-            writeln!(self.body, "  %v{r} = call i64 @sentinel_process_send(ptr {p}, i64 {v})").unwrap();
+            writeln!(self.body, "  %v{r} = call i64 @sentinel_process_send(ptr {p}, i64 {enc})").unwrap();
             self.used.process_send = true;
             return Ok(format!("%v{r}"));
         }
         if id == PROCESS_RECV_FN_ID {
-            // process_recv(p) -> ?i64: write the value to a stack out-slot, then
-            // build the `{ i1 valid, i64 value }` from the i64 status (valid = 0).
+            // process_recv(p) -> ?T: write the i64 frame to a stack out-slot, decode
+            // it into T, then build `{ i1 valid, T value }` (valid = status == 0).
+            let elem = type_args.first().copied().unwrap_or(Type::I64);
+            let ety = self.lty(elem)?;
             let p = self.lower_expr(&args[0])?;
             let out = self.alloca("i64");
             let status = self.fresh();
@@ -3260,12 +3288,35 @@ impl Emit<'_> {
             self.used.process_recv = true;
             let valid = self.fresh();
             writeln!(self.body, "  %v{valid} = icmp eq i64 %v{status}, 0").unwrap();
-            let value = self.fresh();
-            writeln!(self.body, "  %v{value} = load i64, ptr %v{out}").unwrap();
+            let raw = self.fresh();
+            writeln!(self.body, "  %v{raw} = load i64, ptr %v{out}").unwrap();
+            let value = match elem {
+                Type::I64 => format!("%v{raw}"),
+                Type::I32 | Type::U8 | Type::Bool => {
+                    let d = self.fresh();
+                    writeln!(self.body, "  %v{d} = trunc i64 %v{raw} to {ety}").unwrap();
+                    format!("%v{d}")
+                }
+                Type::F64 => {
+                    let d = self.fresh();
+                    writeln!(self.body, "  %v{d} = bitcast i64 %v{raw} to double").unwrap();
+                    format!("%v{d}")
+                }
+                Type::Ptr => {
+                    let d = self.fresh();
+                    writeln!(self.body, "  %v{d} = inttoptr i64 %v{raw} to ptr").unwrap();
+                    format!("%v{d}")
+                }
+                other => {
+                    return Err(format!(
+                        "process_recv element not ported (M2.3b word-scalar): {other:?}"
+                    ))
+                }
+            };
             let a0 = self.fresh();
-            writeln!(self.body, "  %v{a0} = insertvalue {{ i1, i64 }} undef, i1 %v{valid}, 0").unwrap();
+            writeln!(self.body, "  %v{a0} = insertvalue {{ i1, {ety} }} undef, i1 %v{valid}, 0").unwrap();
             let a1 = self.fresh();
-            writeln!(self.body, "  %v{a1} = insertvalue {{ i1, i64 }} %v{a0}, i64 %v{value}, 1").unwrap();
+            writeln!(self.body, "  %v{a1} = insertvalue {{ i1, {ety} }} %v{a0}, {ety} {value}, 1").unwrap();
             return Ok(format!("%v{a1}"));
         }
         if id.0 < FIRST_USER_FN {

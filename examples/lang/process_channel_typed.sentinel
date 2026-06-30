@@ -1,0 +1,40 @@
+// ADR 0066 M2.3b: GENERIC word-scalar elements for the typed process channel.
+// M2.3 shipped `process_send`/`process_recv` over `i64` only; M2.3b generalizes
+// them to any word-scalar element — `u8` / `i32` / `bool` (and `f64` / `ptr`) —
+// by ENCODING the element into the 8-byte i64 frame on send (the M1.1 spawn
+// encode: zext a narrow int / bitcast an `f64` / ptrtoint a `ptr`) and DECODING
+// it back on recv. The runtime stays i64-based (no ABI / FnId change). The
+// element of `process_send` comes from the value arg; `process_recv -> ?T` takes
+// its element from the expected type (here the `?u8` / `?i32` / `?bool`
+// annotations). A `secret` element is still rejected — the cross-process secret
+// fence (D8).
+//
+// snc-side (like `u128` / `f64` / `task_generic` — the scg mirror is deferred, so
+// the self-host differential corpus stays at the `i64` case, byte-identical). The
+// real spawn is GUARDED behind a runtime-false flag for cross-platform
+// determinism; the generic send/recv IR + typing still lower. Exit 42.
+
+fn echo_worker(argv: [[u8]]) -> i64 ! { Subprocess } {
+    let p = process_spawn("cat", argv);
+    let bs: i64 = process_send(p, 7 as u8);           // u8 element (zext encode)
+    let rb: ?u8 = process_recv(p);                    // ?u8 (trunc decode)
+    let is: i64 = process_send(p, 100000 as i32);     // i32 element
+    let ri: ?i32 = process_recv(p);                   // ?i32
+    let fs: i64 = process_send(p, true);              // bool element
+    let rf: ?bool = process_recv(p);                  // ?bool
+    let gb: u8 = unwrap_or(rb, 0 as u8);
+    let gi: i32 = unwrap_or(ri, 0 as i32);
+    let gf: bool = unwrap_or(rf, false);
+    let fb: i64 = if gf { 1 } else { 0 };
+    process_wait(p) + bs + is + fs + (gb as i64) + (gi as i64) + fb
+}
+
+fn main() -> i64 {
+    let probe: bool = false;
+    if probe {
+        let argv: [[u8]] = ["-"];
+        echo_worker(argv)
+    } else {
+        42
+    }
+}
