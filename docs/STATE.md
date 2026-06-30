@@ -14,7 +14,20 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
-**Latest (2026-06-30) — ADR 0066 M2.3b: GENERIC word-scalar elements for the typed process channel
+**Latest (2026-06-30) — ADR 0066 M2.4 designed: [ADR 0069](decisions/0069-sealed-channel.md)
+`SealedChannel<secret T>` PROPOSED, design PINNED (maintainer sign-off).** The own-ADR for the
+AEAD-encrypted secret-cross-process path (D8a mandates M2.4 gets its own ADR — security-critical +
+crypto-bearing). Encryption as a **cryptographic `declassify`** (`seal: secret T × key → public
+ciphertext`; `open: public ciphertext × key → secret T`), reusing the verified-CT `aead`/`x25519`/`ssh`
+stdlib (no new primitive — `SealedChannel` is the ssh KEX + per-record-AEAD machine pointed at a pipe).
+Security-critical decisions **PINNED**: D3 = reuse the ssh host-key auth model (authenticated x25519
+over the pipe; parent pins the child's ed25519 host key; v1 authenticates); D4 = counter-nonces +
+per-direction HKDF keys; D5 = fixed-width frames at the i64-minimum (no length leak), padding later;
+D9 = add only `SealedChannel<secret T>` in v1 (the fence becomes a static type property; the raw path
+stays M2.3's bare-`Process` builtins). **Implementation PENDING** — M2.4a (the `secret i64` minimum)
+first, snc-side. NO code yet. See ADR 0069 + ADR 0066 D8a + HANDOVER §0.
+
+**Earlier (2026-06-30) — ADR 0066 M2.3b: GENERIC word-scalar elements for the typed process channel
 (snc-side).** `process_send`/`process_recv` are generalized from `i64`-only to any **word-scalar
 element** — `i64`/`i32`/`u8`/`bool`/`f64`/`ptr` (`is_process_channel_elem` = `is_spawn_word_scalar` ∩
 has-`NullableInner`). The element is **encoded** into the 8-byte i64 frame on send (the M1.1 spawn
