@@ -14,7 +14,18 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
-**Latest (2026-06-30) — ADR 0066 M2.4b: the REAL parent↔child pipe transport — an authenticated
+**Latest (2026-06-30) — own command-line argument reflection (`arg_count` / `arg`), an ADR 0066 M2.4
+follow-on.** Two builtins — **`arg_count() -> i64`** + **`arg(i: i64) -> [u8]`** — let a program (e.g. a
+spawned child) read its own invocation, symmetric to `process_spawn(path, args)` passing argv to the
+child. Runtime symbols `sentinel_arg_count` / `sentinel_arg` over `std::env::args` (which reads the OS
+args directly — `GetCommandLineW` / `/proc/self/cmdline` — so it works under the custom LLVM entry);
+abi-v1 36→38; the two builtins shifted the user-fn **FnId base 35→37** in both compilers (mirrored into
+`selfhost/` — all 6 differentials byte-identical). Codegen mirrors the `read_file` result shape for
+`arg`. Custom test `crates/sentinel-driver/tests/argv.rs` (run with real args: `arg_count` reflects the
+count; `arg(1)` of `"*"` → 42). Four-check green; constant-time + the lexical borrow checker UNCHANGED.
+See HANDOVER §0.
+
+**Earlier (2026-06-30) — ADR 0066 M2.4b: the REAL parent↔child pipe transport — an authenticated
 cross-process `SealedChannel<secret i64>` now runs end-to-end over a process pipe (snc-side).** The
 blocker (a spawned child could not read its own stdin) is closed by two new **self-stdin/stdout framed
 builtins**: **`stdin_recv() -> ?i64`** + **`stdout_send(v: i64) -> i64`** — the child-side twins of

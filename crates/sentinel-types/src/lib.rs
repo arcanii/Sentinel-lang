@@ -4732,6 +4732,10 @@ pub fn check_module(
             // (they operate on the already-acquired own stdio).
             (33, &[], opt_i64, &[]),                                     // stdin_recv
             (34, &[Type::I64], Type::I64, &[]),                          // stdout_send
+            // ADR 0066 M2.4 follow-on: own command-line argument reflection.
+            // `arg_count() -> i64`; `arg(i: i64) -> [u8]`. Effect-free.
+            (35, &[], Type::I64, &[]),                                   // arg_count
+            (36, &[Type::I64], bytes_ty, &[]),                           // arg
         ];
         for (idx, params, ret, eff) in process_sigs {
             let sig = &program.fn_signatures[*idx];
@@ -10594,7 +10598,10 @@ mod tests {
         // ADR 0066 M2.4b: the self-stdin/stdout framed builtins occupy FnId(33..=34).
         assert_eq!(p.fn_signatures[33].name, "stdin_recv");
         assert_eq!(p.fn_signatures[34].name, "stdout_send");
-        assert_eq!(p.fn_signatures[35].name, "main");
+        // ADR 0066 M2.4 follow-on: arg reflection occupies FnId(35..=36).
+        assert_eq!(p.fn_signatures[35].name, "arg_count");
+        assert_eq!(p.fn_signatures[36].name, "arg");
+        assert_eq!(p.fn_signatures[37].name, "main");
         assert!(p.signature(main.id).is_main);
     }
 

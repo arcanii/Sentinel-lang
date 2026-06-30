@@ -45,7 +45,8 @@ use sentinel_ast::{BinOp, CmpOp, LogicOp, UnaryOp};
 use sentinel_borrow_check::DropPlan;
 use sentinel_hir::HirProgram;
 use sentinel_resolve::{
-    ClassId, EffectId, EnumId, FnId, ImplId, StructId, VarId, CHANNEL_CLOSE_FN_ID,
+    ClassId, EffectId, EnumId, FnId, ImplId, StructId, VarId, ARG_COUNT_FN_ID, ARG_FN_ID,
+    CHANNEL_CLOSE_FN_ID,
     CHANNEL_NEW_FN_ID, I64_TO_U8_FN_ID, IS_SOME_FN_ID, LEN_FN_ID, POP_FN_ID, PRINT_BYTES_FN_ID,
     PROCESS_READ_FN_ID, PROCESS_RECV_FN_ID, PROCESS_SEND_FN_ID, PROCESS_SPAWN_FN_ID,
     PROCESS_WAIT_FN_ID, PROCESS_WRITE_FN_ID, SEALED_CHANNEL_FN_ID, SEALED_PROCESS_FN_ID,
@@ -684,6 +685,19 @@ pub fn compile_to_object_for_module(
     let stdout_send_fn = module.add_function(
         "sentinel_stdout_send",
         i64_ty.fn_type(&[i64_ty.into()], false),
+        None,
+    );
+    // ADR 0066 M2.4 follow-on: own command-line argument reflection.
+    // `sentinel_arg_count() -> i64`, `sentinel_arg(i, out_len) -> ptr` (the read_file
+    // result shape — a malloc'd [u8] + its length to `*out_len`).
+    let arg_count_fn = module.add_function(
+        "sentinel_arg_count",
+        i64_ty.fn_type(&[], false),
+        None,
+    );
+    let arg_fn = module.add_function(
+        "sentinel_arg",
+        ptr_ty.fn_type(&[i64_ty.into(), ptr_ty.into()], false),
         None,
     );
     // C5.4 (2/N) / ADR 0028: declare the broker scope-arena symbols.
@@ -1360,6 +1374,8 @@ pub fn compile_to_object_for_module(
             process_recv_fn,
             stdin_recv_fn,
             stdout_send_fn,
+            arg_count_fn,
+            arg_fn,
             arena_enter_fn,
             arena_alloc_fn,
             arena_exit_fn,
@@ -1630,6 +1646,9 @@ struct CodegenCtx<'ctx, 'plan> {
     /// ADR 0066 M2.4b: the child-side self-stdin/stdout framed runtime symbols.
     stdin_recv_fn: FunctionValue<'ctx>,
     stdout_send_fn: FunctionValue<'ctx>,
+    /// ADR 0066 M2.4 follow-on: own command-line argument reflection.
+    arg_count_fn: FunctionValue<'ctx>,
+    arg_fn: FunctionValue<'ctx>,
     /// C5.4 (2/N) / ADR 0028: `sentinel_arena_enter(i64) -> *arena`
     /// creates a per-scope broker bump arena (capacity 0 → default).
     arena_enter_fn: FunctionValue<'ctx>,
@@ -6218,6 +6237,61 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
         Ok(with_data.into_struct_value().into())
     }
 
+    /// ADR 0066 M2.4 follow-on: `arg_count() -> i64` — call `sentinel_arg_count()`.
+    fn lower_arg_count(&mut self) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+        let call = self
+            .builder
+            .build_call(self.arg_count_fn, &[], "arg_count")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        Ok(call
+            .try_as_basic_value()
+            .left()
+            .expect("sentinel_arg_count returns i64"))
+    }
+
+    /// ADR 0066 M2.4 follow-on: `arg(i: i64) -> [u8]` — call `sentinel_arg(i, out_len)`
+    /// and assemble the `[u8]` array struct `{ i64 len, ptr data }` (the read_file /
+    /// process_read result shape).
+    fn lower_arg(
+        &mut self,
+        idx: &TypedExpr,
+        program: &TypedProgram,
+    ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+        let i64_type = self.context.i64_type();
+        let ptr_type = self.context.ptr_type(inkwell::AddressSpace::default());
+        let i_v = self.lower_expr(idx, program)?.into_int_value();
+        let out_len_slot = self
+            .builder
+            .build_alloca(i64_type, "arg_len_slot")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        let data_ptr = self
+            .builder
+            .build_call(self.arg_fn, &[i_v.into(), out_len_slot.into()], "arg")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?
+            .try_as_basic_value()
+            .left()
+            .expect("sentinel_arg returns ptr")
+            .into_pointer_value();
+        let len = self
+            .builder
+            .build_load(i64_type, out_len_slot, "arg_len")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?
+            .into_int_value();
+        let arr_struct_ty = self
+            .context
+            .struct_type(&[i64_type.into(), ptr_type.into()], false);
+        let agg = arr_struct_ty.get_undef();
+        let with_len = self
+            .builder
+            .build_insert_value(agg, len, 0, "arg_with_len")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        let with_data = self
+            .builder
+            .build_insert_value(with_len, data_ptr, 1, "arg_with_data")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        Ok(with_data.into_struct_value().into())
+    }
+
     /// ADR 0066 M2.3 / M2.3b: `process_send(p: Process, v: T) -> i64` — ENCODE the
     /// word-scalar element `v` into the 8-byte i64 frame (the M1.1 spawn encode:
     /// zext a narrow int / bitcast an `f64` / ptrtoint a `ptr`; `i64` = no-op),
@@ -7369,6 +7443,13 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                 }
                 if *id == STDIN_RECV_FN_ID {
                     return self.lower_stdin_recv();
+                }
+                // ADR 0066 M2.4 follow-on: own command-line argument reflection.
+                if *id == ARG_COUNT_FN_ID {
+                    return self.lower_arg_count();
+                }
+                if *id == ARG_FN_ID {
+                    return self.lower_arg(&args[0], program);
                 }
                 // C1.7.5 / ADR 0016 D7: user-defined generic-fn
                 // calls route to the monomorphic instance emitted

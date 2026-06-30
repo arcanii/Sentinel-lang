@@ -42,7 +42,8 @@ use sentinel_borrow_check::DropPlan;
 // oracle monomorphizes the same set, in the same order, as the production codegen.
 use sentinel_codegen::collect_mono_instantiations;
 use sentinel_resolve::{
-    ClassId, EffectId, EnumId, FnId, StructId, VarId, I64_TO_U8_FN_ID, IS_SOME_FN_ID, LEN_FN_ID,
+    ClassId, EffectId, EnumId, FnId, StructId, VarId, ARG_COUNT_FN_ID, ARG_FN_ID, I64_TO_U8_FN_ID,
+    IS_SOME_FN_ID, LEN_FN_ID,
     CHANNEL_CLOSE_FN_ID, CHANNEL_NEW_FN_ID, POP_FN_ID, PRINT_BYTES_FN_ID, PRINT_FN_ID,
     PROCESS_READ_FN_ID, PROCESS_RECV_FN_ID, PROCESS_SEND_FN_ID, PROCESS_SPAWN_FN_ID,
     PROCESS_WAIT_FN_ID, PROCESS_WRITE_FN_ID, PUSH_FN_ID, SEALED_CHANNEL_FN_ID, SEALED_PROCESS_FN_ID,
@@ -66,11 +67,12 @@ const TARGET_TRIPLE: &str = "arm64-apple-darwin";
 // channel builtins (21..=24); ADR 0066 M2.1 added subprocess spawn/wait
 // (25..=26); M2.2 added subprocess write/read (27..=28); M2.3 added subprocess
 // send/recv (29..=30); M2.4a added the SealedChannel bridge builtins (31..=32);
-// M2.4b added the self-stdin/stdout framed builtins (33..=34), shifting the
-// user-fn base to 35. A call to a builtin FnId not caught by a special lowering
-// arm above returns Err (the fixture is skipped); the channel + subprocess +
-// sealed-bridge + self-stdin/stdout builtins ARE specially lowered.
-const FIRST_USER_FN: u32 = 35;
+// M2.4b added the self-stdin/stdout framed builtins (33..=34); the M2.4 follow-on
+// added arg_count/arg (35..=36), shifting the user-fn base to 37. A call to a
+// builtin FnId not caught by a special lowering arm above returns Err (the fixture
+// is skipped); the channel + subprocess + sealed-bridge + self-stdin/stdout + arg
+// builtins ARE specially lowered.
+const FIRST_USER_FN: u32 = 37;
 
 /// Bar B / effects (ADR 0020): the reserved kont op_id for a PURE_RETURN wrap
 /// (`u32::MAX`) — the handle dispatch + `k(v)` pure-check compare against it.
@@ -152,6 +154,10 @@ struct RuntimeSyms {
     /// `sentinel_stdin_recv(ptr) -> i64`, `sentinel_stdout_send(i64) -> i64`.
     stdin_recv: bool,
     stdout_send: bool,
+    /// ADR 0066 M2.4 follow-on: own command-line argument reflection.
+    /// `sentinel_arg_count() -> i64`, `sentinel_arg(i64, ptr) -> ptr`.
+    arg_count: bool,
+    arg: bool,
 }
 
 impl RuntimeSyms {
@@ -188,6 +194,8 @@ impl RuntimeSyms {
         self.process_recv |= other.process_recv;
         self.stdin_recv |= other.stdin_recv;
         self.stdout_send |= other.stdout_send;
+        self.arg_count |= other.arg_count;
+        self.arg |= other.arg;
     }
 
     /// Emit the `declare`s for the used symbols, in the fixed canonical order,
@@ -294,6 +302,13 @@ impl RuntimeSyms {
         if self.stdout_send {
             writeln!(out, "declare i64 @sentinel_stdout_send(i64)").unwrap();
         }
+        // ADR 0066 M2.4 follow-on: own command-line argument reflection.
+        if self.arg_count {
+            writeln!(out, "declare i64 @sentinel_arg_count()").unwrap();
+        }
+        if self.arg {
+            writeln!(out, "declare ptr @sentinel_arg(i64, ptr)").unwrap();
+        }
         if self.memcpy {
             writeln!(out, "declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)").unwrap();
         }
@@ -328,6 +343,8 @@ impl RuntimeSyms {
             || self.process_recv
             || self.stdin_recv
             || self.stdout_send
+            || self.arg_count
+            || self.arg
             || self.memcpy
     }
 }
@@ -3365,6 +3382,27 @@ impl Emit<'_> {
             writeln!(self.body, "  %v{a0} = insertvalue {{ i1, i64 }} undef, i1 %v{valid}, 0").unwrap();
             let a1 = self.fresh();
             writeln!(self.body, "  %v{a1} = insertvalue {{ i1, i64 }} %v{a0}, i64 %v{raw}, 1").unwrap();
+            return Ok(format!("%v{a1}"));
+        }
+        // ADR 0066 M2.4 follow-on: own command-line argument reflection.
+        if id == ARG_COUNT_FN_ID {
+            let r = self.fresh();
+            writeln!(self.body, "  %v{r} = call i64 @sentinel_arg_count()").unwrap();
+            self.used.arg_count = true;
+            return Ok(format!("%v{r}"));
+        }
+        if id == ARG_FN_ID {
+            let i = self.lower_expr(&args[0])?;
+            let slot = self.alloca("i64");
+            let data = self.fresh();
+            writeln!(self.body, "  %v{data} = call ptr @sentinel_arg(i64 {i}, ptr %v{slot})").unwrap();
+            self.used.arg = true;
+            let rlen = self.fresh();
+            writeln!(self.body, "  %v{rlen} = load i64, ptr %v{slot}").unwrap();
+            let a0 = self.fresh();
+            writeln!(self.body, "  %v{a0} = insertvalue {{ i64, ptr }} undef, i64 %v{rlen}, 0").unwrap();
+            let a1 = self.fresh();
+            writeln!(self.body, "  %v{a1} = insertvalue {{ i64, ptr }} %v{a0}, ptr %v{data}, 1").unwrap();
             return Ok(format!("%v{a1}"));
         }
         if id.0 < FIRST_USER_FN {

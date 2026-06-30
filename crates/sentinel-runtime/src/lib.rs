@@ -1736,6 +1736,45 @@ pub extern "C" fn sentinel_stdout_send(value: i64) -> i64 {
     }
 }
 
+/// ADR 0066 M2.4 follow-on: the number of command-line arguments to THIS process
+/// (`argv[0]` included, the C/POSIX convention), so a spawned child can read its own
+/// invocation — e.g. detect a role flag — symmetric to `process_spawn(path, args)`
+/// passing argv to the child. Reads the OS args directly (`std::env::args` uses
+/// `GetCommandLineW` / `/proc/self/cmdline`), so it works under the custom LLVM entry.
+#[no_mangle]
+pub extern "C" fn sentinel_arg_count() -> i64 {
+    std::env::args().count() as i64
+}
+
+/// ADR 0066 M2.4 follow-on: the `i`-th command-line argument of THIS process as a
+/// freshly malloc'd `[u8]` (`*out_len` set to its length). Out-of-range `i` (or a
+/// non-UTF-8 arg) yields an empty buffer (`*out_len = 0`, a non-null 1-byte alloc so
+/// the slice header is well-formed) — the `read_file` result shape.
+///
+/// # Safety
+///
+/// `out_len` must point to a writable `i64`.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+#[no_mangle]
+pub extern "C" fn sentinel_arg(i: i64, out_len: *mut i64) -> *mut u8 {
+    let arg = if i >= 0 {
+        std::env::args().nth(i as usize).unwrap_or_default()
+    } else {
+        String::new()
+    };
+    let bytes = arg.into_bytes();
+    let n = bytes.len();
+    // Match `sentinel_read_file`: a non-null allocation even for an empty result.
+    let cap = if n == 0 { 1 } else { n };
+    let buf = sentinel_alloc(cap as i64);
+    if !buf.is_null() && n > 0 {
+        unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), buf, n) };
+    }
+    // SAFETY: caller passed a writable `i64` slot.
+    unsafe { *out_len = n as i64 };
+    buf
+}
+
 /// Returns the crate name as a sanity-check that the build is wired up.
 pub fn crate_name() -> &'static str {
     "sentinel-runtime"
@@ -2000,15 +2039,18 @@ mod tests {
             // the missing half that lets the child run a pipe handshake).
             sentinel_stdin_recv as *const (),
             sentinel_stdout_send as *const (),
+            // ADR 0066 M2.4 follow-on: own command-line argument reflection.
+            sentinel_arg_count as *const (),
+            sentinel_arg as *const (),
         ];
-        // 36 symbols: 23 codegen-declared (incl. D.2's sentinel_str_eq,
+        // 38 symbols: 23 codegen-declared (incl. D.2's sentinel_str_eq,
         // D.3's sentinel_realloc, D.4's sentinel_read_file /
         // sentinel_write_file / sentinel_print_bytes, and ADR 0065 D6's
         // sentinel_kont_free) + sentinel_kont_panic_resumed + ADR 0066 M1.2's
         // 4 sentinel_channel_* + M2.1's 2 sentinel_process_spawn/_wait + M2.2's
         // 2 sentinel_process_write/_read + M2.3's 2 sentinel_process_send/_recv +
-        // M2.4b's 2 sentinel_stdin_recv/_stdout_send.
-        assert_eq!(symbols.len(), 36);
+        // M2.4b's 2 sentinel_stdin_recv/_stdout_send + the 2 sentinel_arg_count/_arg.
+        assert_eq!(symbols.len(), 38);
         assert!(symbols.iter().all(|&s| !s.is_null()), "every symbol has an address");
     }
 
