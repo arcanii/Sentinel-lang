@@ -14,7 +14,32 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
-**Latest (2026-06-30) — ADR 0066 M2.1: SUBPROCESS SPAWN (`process_spawn` / `process_wait`),
+**Latest (2026-06-30) — ADR 0066 M2.2: BYTE-PIPE IPC (`process_write` / `process_read`) + the
+`Subprocess` capability effect (M2.1 completion), self-hosted.** Two follow-ons to M2.1 spawn:
+**(1) the `Subprocess` capability effect (D7).** `process_spawn` now carries the auto-registered
+built-in `Subprocess` effect (joins `Async`), so a spawning fn declares `! { Subprocess }` (the
+capability is visible in the type) and it **bubbles to `main`** — Pass-3's main-effect-free check
+EXEMPTS `Subprocess` (every other effect must still be handled). It is a capability effect (process
+runtime), not perform-based, so a `! { Subprocess }` fn is exempt from the Kont* ABI (returns its
+value directly). **(2) byte-pipe IPC (D7/D8).** `process_spawn` pipes the child's stdin/stdout, plus
+`process_write(p: Process, data: [u8]) -> i64` (write to the child's stdin + close it) and
+`process_read(p: Process) -> [u8]` (read the child's stdout to EOF, the `read_file` result shape).
+The **cross-process secret fence (D8) is structural**: the pipe payload is the PUBLIC `[u8]`, so a
+`[secret u8]` (ADR 0047) cannot cross — rejected as a type mismatch (`secret u8 != u8`, no implicit
+secret→public coercion); `declassify` stays the only escape hatch (ui fixture
+`c66_process_secret_fence`). Across M2.1+M2.2 the `abi-v1` symbol set grew 28→**32** (the
+`abi_v1_runtime_symbol_set` test) and adding the builtins shifted the user-fn **FnId base 25→29** in
+both compilers (auto in Rust; ~30 hardcoded sites in the selfhost — the delicate lockstep part since
+`__spawn_wrapper_<id>` embeds the FnId). `process_wait`/`_write`/`_read` are effect-free (they operate
+on an already-acquired handle; spawning is the capability-acquiring op). Fixture
+`tests/pass/c66_process` extended to exercise write/read (the differential covers the IR; runtime unit
+tests cover the real `cat`/`findstr` pipe round-trip). Full 9-stage self-host differential green, both
+bootstrap fixed points byte-identical; constant-time + the lexical borrow checker UNCHANGED; Windows
+four-check green (`pass_c5d4_file_io`'s `/tmp` failure is pre-existing). **Next (M2.3):** typed channels
+over pipes (serializable public `T` + the fence); generic word-scalar channel elements; a reusable
+worker-pool library. See ADR 0066 D7/D8/D10 + HANDOVER §0.
+
+**Earlier (2026-06-30) — ADR 0066 M2.1: SUBPROCESS SPAWN (`process_spawn` / `process_wait`),
 self-hosted.** Sentinel can now spawn + wait on child processes — the first cross-process piece (D7).
 `process_spawn(path: [u8], args: [[u8]]) -> Process` + `process_wait(p: Process) -> i64` (exit code),
 over cross-platform **`std::process::Command`** (not a `#[cfg(unix)]` path). **`Type::Process`** is a

@@ -14,18 +14,25 @@ runtime symbols / ABI change — front-end only, plus a behavior-preserving
 spawn-arg-lowering alignment across all three emitters); and **M1.3** (the worker
 pattern, D1) as EXAMPLES — `examples/lang/worker_pool.sentinel` (a two-worker
 fan-out/fan-in pool, built both `--separate` and merged) + the 2-channel-arg
-`tests/pass/c66_channel_pipeline` relay fixture; and **M2.1** (process spawn, D7)
+`tests/pass/c66_channel_pipeline` relay fixture; and **M2.1** (process spawn + the `Subprocess` capability effect, D7)
 — `process_spawn(path:[u8], args:[[u8]]) -> Process` + `process_wait(Process) ->
-i64` over `std::process::Command`, `Type::Process` (a plain handle → ptr), 2
-`sentinel_process_*` runtime symbols (abi-v1 §3/§5; symbol set 28→30), the FnId
-base shift 25→27 in both compilers, the secret fence implicit via the public
-`[u8]`/`[[u8]]` ABI; built on **nested arrays (ADR 0068)** for the `[[u8]]` argv.
-Fixture `tests/pass/c66_process` + the `sentinel_process_*` runtime unit tests
-(real `cmd /c exit 42` / `sh -c` spawn). The `?T` scalar generalization
-(`?u8`/`?f64`/`?ptr`) also landed (enabler for generic channel elements).
-**Next:** the `Subprocess` capability effect (M2.1 deferred it — process_spawn is
-currently a plain builtin); M2.2 byte-pipe IPC + the cross-process fence
-mechanism; generic word-scalar channel *elements*; a reusable worker-pool library.
+i64` over `std::process::Command`, `Type::Process` (a plain handle → ptr), the
+`sentinel_process_*` runtime symbols (abi-v1 §3/§5), built on **nested arrays (ADR
+0068)** for the `[[u8]]` argv; `process_spawn` carries the auto-registered built-in
+`Subprocess` effect, so a spawning fn declares `! { Subprocess }` and it BUBBLES to
+`main` (Pass-3 exemption — unlike `Async`, which a `scope` discharges); and **M2.2**
+(byte-pipe IPC, D7/D8) — `process_spawn` pipes the child's stdin/stdout +
+`process_write(Process, [u8]) -> i64` / `process_read(Process) -> [u8]`; the
+cross-process secret fence (D8) is structural — the pipe payload is the public
+`[u8]`, so a `[secret u8]` can't cross (rejected as a type mismatch; ui fixture
+`c66_process_secret_fence`). Across M2.1+M2.2 the symbol set grew 28→32 and the
+FnId base shifted 25→29 in both compilers. Fixture `tests/pass/c66_process` (spawn
++ write/read IR) + the `sentinel_process_*` runtime unit tests (real `cmd /c exit
+42` / `sh -c` spawn + a `cat`/`findstr` pipe round-trip). The `?T` scalar
+generalization (`?u8`/`?f64`/`?ptr`) also landed (enabler for generic channel
+elements). **Next (M2.3):** typed channels over pipes — `send`/`recv` of
+serializable *public* `T` across the process boundary (serialization + the fence);
+generic word-scalar channel *elements*; a reusable worker-pool library.
 This ADR lays out the complete threading + multi-processing vision with
 pinned D-points for each piece, **implemented incrementally** across
 sub-phases. It is the umbrella over the near-term maintainer ask (flagged
@@ -134,12 +141,12 @@ byte-identical → mark the sub-phase ACCEPTED).
 
 | Movement | Sub-phase | Deliverable | Oracle-moving? |
 |----------|-----------|-------------|----------------|
-| **1 — threading** | M1.1 | Generic `Task<T>` + `T`-typed spawn args (lift ADR 0024 A3/D7) | yes (typing + codegen) |
-| | M1.2 | **Channels** — `Channel<T>` typed message passing (mpsc), ownership-transfer `send`/`recv` | yes (new `Type`, builtins, runtime symbols) |
-| | M1.3 | Worker pattern — long-lived tasks within a scope wired by channels (library + examples; no new surface) | no (library) |
+| **1 — threading** | M1.1 | **✅ done** — Generic `Task<T>` + `T`-typed spawn args (lift ADR 0024 A3/D7) | yes (typing + codegen) |
+| | M1.2 | **✅ done** — **Channels** — `Channel<T>` typed message passing (mpsc), ownership-transfer `send`/`recv` | yes (new `Type`, builtins, runtime symbols) |
+| | M1.3 | **✅ done** — Worker pattern — long-lived tasks within a scope wired by channels (library + examples; no new surface) | no (library) |
 | | M1.4 | `Mutex<T>` + atomics — the bounded shared-state escape hatch, with **runtime deadlock detection → typed error** (D5) | yes (new `Type` + shared-handle machinery) — **gated on a shared-ownership story** |
-| **2 — multi-processing** | M2.1 | **Process spawn** — `Process` handle over `std::process::Command`; `Subprocess` capability effect | yes (new `Type` + effect + runtime symbols) |
-| | M2.2 | **Byte-pipe IPC** — child stdin/stdout as byte streams; the cross-process **secret fence** (D8) | yes (runtime symbols + fence rule) |
+| **2 — multi-processing** | M2.1 | **✅ done** — **Process spawn** — `Process` handle over `std::process::Command`; `Subprocess` capability effect | yes (new `Type` + effect + runtime symbols) |
+| | M2.2 | **✅ done** — **Byte-pipe IPC** — child stdin/stdout as byte streams; the cross-process **secret fence** (D8) | yes (runtime symbols + fence rule) |
 | | M2.3 | Typed channels over pipes — `send`/`recv` of serializable *public* `T` across the process boundary | yes (serialization + fence) |
 | | M2.4 | **`SealedChannel<secret T>`** — the AEAD-encrypted secret-cross-process path (D8a), built on the verified-constant-time `aead`/`x25519` stdlib | yes (its own ADR — Sentinel↔Sentinel only) |
 | **3 — actors** | M3.x | Typed-mailbox actors (SENTINEL_DESIGN2 §8.2) as sugar over channels; same syntax in-process + cross-process | yes (large; its own ADR) |
@@ -390,6 +397,14 @@ abstracts both `posix_spawn`/`fork`+`exec` and `CreateProcess`). Surface:
   implementation detail the scope hides); `main`'s effect-freedom is an
   `Async`-specific affordance, not a general one.
 
+  **PINNED (M2.1, 2026-06-30): bubble to `main`.** Implemented: `process_spawn`
+  carries `Subprocess`; Pass-3's main-effect-free check EXEMPTS `Subprocess`
+  (every other effect must still be handled before `main`). It is a capability
+  effect (process runtime), not perform-based — so a `! { Subprocess }` fn is
+  exempt from the Kont* ABI and returns its value directly. `process_wait` /
+  `process_write` / `process_read` are effect-free (they operate on an
+  already-acquired handle; spawning is the capability-acquiring op).
+
 ### D8. The `secret` fence — the boundary is "does the value leave the verified single-address-space program?", **not** the thread count.
 
 This is the security-critical analysis the maintainer asked to be worked
@@ -398,6 +413,17 @@ that, if wrong, is a constant-time **security bug**. The resolution:
 
 **In-process thread boundary → NO fence. Cross-process / IPC boundary →
 fence (identical to the FFI fence).**
+
+**IMPLEMENTED (M2.2, 2026-06-30): the byte-pipe fence is structural.** The
+M2.2 IPC surface (`process_write(p, [u8])` / `process_read(p) -> [u8]`) carries
+only the **public** type `[u8]`, so a `secret` cannot cross by construction: a
+secret-tainted byte array is `[secret u8]` (ADR 0047), a distinct type from `[u8]`
+(`secret u8 != u8`, with no implicit secret→public coercion), so it is rejected at
+the call as a type mismatch — the type system *is* the fence, exactly as it is for
+FFI. `declassify` remains the only sanctioned way to send formerly-secret data over
+a pipe. Pinned by ui fixture `c66_process_secret_fence`. (The richer M2.3/M2.4
+payloads — typed public `T` over pipes, then the `SealedChannel<secret T>` encrypted
+escape — get their own per-sub-phase fence treatment, D8a.)
 
 The reasoning rests on what the constant-time guarantee actually is. The
 guarantee (ADR 0008, README boundaries) is that **the program contains no
