@@ -749,7 +749,7 @@ fn resolve_fn(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: 
     *cur = *cur + 1;           // skip `(`
     (*c).base = len((*c).scs);
     append_str(out, "(fn #");
-    append_int(out, 27 + fnidx);
+    append_int(out, 29 + fnidx);
     push(out, ' ');
     append_slice(out, src, name_s, name_e);
     append_str(out, " (");

@@ -44,7 +44,7 @@ use sentinel_codegen::collect_mono_instantiations;
 use sentinel_resolve::{
     ClassId, EffectId, EnumId, FnId, StructId, VarId, I64_TO_U8_FN_ID, IS_SOME_FN_ID, LEN_FN_ID,
     CHANNEL_CLOSE_FN_ID, CHANNEL_NEW_FN_ID, POP_FN_ID, PRINT_BYTES_FN_ID, PRINT_FN_ID,
-    PROCESS_SPAWN_FN_ID, PROCESS_WAIT_FN_ID, PUSH_FN_ID,
+    PROCESS_READ_FN_ID, PROCESS_SPAWN_FN_ID, PROCESS_WAIT_FN_ID, PROCESS_WRITE_FN_ID, PUSH_FN_ID,
     READ_FILE_FN_ID, RECV_FN_ID, SEND_FN_ID, STR_EQ_FN_ID, U8_TO_I64_FN_ID, UNWRAP_OR_FN_ID,
     VEC_NEW_FN_ID, VEC_TO_ARRAY_FN_ID, WRITE_FILE_FN_ID,
 };
@@ -61,11 +61,12 @@ const TARGET_TRIPLE: &str = "arm64-apple-darwin";
 
 /// The lowest user FnId — ids 0..=13 are runtime/builtins (ADR 0044 FnId map).
 // ADR 0056 added the socket builtins (14..=20); ADR 0066 M1.2 added the
-// channel builtins (21..=24); ADR 0066 M2.1 added the subprocess builtins
-// (25..=26), shifting the user-fn base to 27. A call to a builtin FnId not
-// caught by a special lowering arm above returns Err (the fixture is skipped);
-// the channel + subprocess builtins ARE specially lowered.
-const FIRST_USER_FN: u32 = 27;
+// channel builtins (21..=24); ADR 0066 M2.1 added subprocess spawn/wait
+// (25..=26); M2.2 added subprocess write/read (27..=28), shifting the user-fn
+// base to 29. A call to a builtin FnId not caught by a special lowering arm
+// above returns Err (the fixture is skipped); the channel + subprocess
+// builtins ARE specially lowered.
+const FIRST_USER_FN: u32 = 29;
 
 /// Bar B / effects (ADR 0020): the reserved kont op_id for a PURE_RETURN wrap
 /// (`u32::MAX`) — the handle dispatch + `k(v)` pure-check compare against it.
@@ -135,6 +136,10 @@ struct RuntimeSyms {
     /// `sentinel_process_spawn(ptr, i64, ptr, i64) -> ptr`, `_wait(ptr) -> i64`.
     process_spawn: bool,
     process_wait: bool,
+    /// ADR 0066 M2.2: the byte-pipe IPC runtime symbols.
+    /// `sentinel_process_write(ptr, ptr, i64) -> i64`, `_read(ptr, ptr) -> ptr`.
+    process_write: bool,
+    process_read: bool,
 }
 
 impl RuntimeSyms {
@@ -165,6 +170,8 @@ impl RuntimeSyms {
         self.channel_close |= other.channel_close;
         self.process_spawn |= other.process_spawn;
         self.process_wait |= other.process_wait;
+        self.process_write |= other.process_write;
+        self.process_read |= other.process_read;
     }
 
     /// Emit the `declare`s for the used symbols, in the fixed canonical order,
@@ -250,6 +257,13 @@ impl RuntimeSyms {
         if self.process_wait {
             writeln!(out, "declare i64 @sentinel_process_wait(ptr)").unwrap();
         }
+        // ADR 0066 M2.2: the byte-pipe IPC runtime group.
+        if self.process_write {
+            writeln!(out, "declare i64 @sentinel_process_write(ptr, ptr, i64)").unwrap();
+        }
+        if self.process_read {
+            writeln!(out, "declare ptr @sentinel_process_read(ptr, ptr)").unwrap();
+        }
         if self.memcpy {
             writeln!(out, "declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)").unwrap();
         }
@@ -278,6 +292,8 @@ impl RuntimeSyms {
             || self.channel_close
             || self.process_spawn
             || self.process_wait
+            || self.process_write
+            || self.process_read
             || self.memcpy
     }
 }
@@ -3166,6 +3182,46 @@ impl Emit<'_> {
             writeln!(self.body, "  %v{v} = call i64 @sentinel_process_wait(ptr {p})").unwrap();
             self.used.process_wait = true;
             return Ok(format!("%v{v}"));
+        }
+        // ADR 0066 M2.2: the byte-pipe IPC builtins. process_write decomposes the
+        // `[u8]` data into (ptr, len) and returns the i64 status; process_read
+        // calls with an out-len alloca and reassembles the owned `[u8]` result
+        // (the read_file shape).
+        if id == PROCESS_WRITE_FN_ID {
+            let p = self.lower_expr(&args[0])?;
+            let data = self.lower_expr(&args[1])?;
+            let dl = self.fresh();
+            writeln!(self.body, "  %v{dl} = extractvalue {{ i64, ptr }} {data}, 0").unwrap();
+            let dp = self.fresh();
+            writeln!(self.body, "  %v{dp} = extractvalue {{ i64, ptr }} {data}, 1").unwrap();
+            let v = self.fresh();
+            writeln!(
+                self.body,
+                "  %v{v} = call i64 @sentinel_process_write(ptr {p}, ptr %v{dp}, i64 %v{dl})"
+            )
+            .unwrap();
+            self.used.process_write = true;
+            return Ok(format!("%v{v}"));
+        }
+        if id == PROCESS_READ_FN_ID {
+            let p = self.lower_expr(&args[0])?;
+            // The out-len slot is a hoisted i64 alloca; the call writes the byte
+            // count there and returns the data ptr → reassemble the owned `[u8]`.
+            let slot = self.alloca("i64");
+            let data = self.fresh();
+            writeln!(
+                self.body,
+                "  %v{data} = call ptr @sentinel_process_read(ptr {p}, ptr %v{slot})"
+            )
+            .unwrap();
+            self.used.process_read = true;
+            let rlen = self.fresh();
+            writeln!(self.body, "  %v{rlen} = load i64, ptr %v{slot}").unwrap();
+            let a0 = self.fresh();
+            writeln!(self.body, "  %v{a0} = insertvalue {{ i64, ptr }} undef, i64 %v{rlen}, 0").unwrap();
+            let a1 = self.fresh();
+            writeln!(self.body, "  %v{a1} = insertvalue {{ i64, ptr }} %v{a0}, ptr %v{data}, 1").unwrap();
+            return Ok(format!("%v{a1}"));
         }
         if id.0 < FIRST_USER_FN {
             return Err(format!("builtin call #{} (deferred to a later slice)", id.0));

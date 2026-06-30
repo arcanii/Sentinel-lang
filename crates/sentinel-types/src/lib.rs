@@ -4588,19 +4588,22 @@ pub fn check_module(
             });
         }
     }
-    // ADR 0066 M2.1: the subprocess builtins (FnId 25..=26). `process_spawn` takes
-    // a `[u8]` path + a `[[u8]]` args list (the nested-array type, ADR 0068) and
-    // returns a `Process` handle; `process_wait` takes the handle and returns the
-    // i64 exit code. The `secret` fence is implicit: the params are public `[u8]` /
-    // `[[u8]]`, so a `secret` value can't reach them (a type mismatch). Codegen
-    // lowers each to its `sentinel_process_*` runtime symbol.
+    // ADR 0066 M2.1 / M2.2: the subprocess builtins (FnId 25..=28). `process_spawn`
+    // takes a `[u8]` path + a `[[u8]]` args list (the nested-array type, ADR 0068)
+    // and returns a `Process` handle; `process_wait` takes the handle → the i64 exit
+    // code; `process_write(p, [u8]) -> i64` byte-writes to the child's stdin;
+    // `process_read(p) -> [u8]` reads the child's stdout (M2.2). The `secret` fence
+    // is implicit: every payload param is public `[u8]` / `[[u8]]`, so a `secret`
+    // value can't reach them (a type mismatch). Codegen lowers each to its
+    // `sentinel_process_*` runtime symbol.
     {
         let bytes_ty = Type::Array(ArrayElem::U8);
         let argv_ty = Type::Array(ArrayElem::Array(intern_array_elem(&mut arrays, ArrayElem::U8)));
         // ADR 0066 M2.1 / D7: `process_spawn` carries the built-in `Subprocess`
         // capability effect (auto-registered in resolve, after `Async`); it
-        // propagates to callers + bubbles to `main`. `process_wait` is effect-free
-        // (it queries an already-acquired handle).
+        // propagates to callers + bubbles to `main`. `process_wait` / `_write` /
+        // `_read` are effect-free (they operate on an already-acquired handle —
+        // spawning is the capability-acquiring op).
         let subprocess_eid: EffectId = EffectId(
             typed_effect_decls
                 .iter()
@@ -4610,6 +4613,8 @@ pub fn check_module(
         let process_sigs: &[(usize, &[Type], Type, &[EffectId])] = &[
             (25, &[bytes_ty, argv_ty], Type::Process, &[subprocess_eid]), // process_spawn
             (26, &[Type::Process], Type::I64, &[]),                       // process_wait
+            (27, &[Type::Process, bytes_ty], Type::I64, &[]),             // process_write
+            (28, &[Type::Process], bytes_ty, &[]),                        // process_read
         ];
         for (idx, params, ret, eff) in process_sigs {
             let sig = &program.fn_signatures[*idx];
@@ -10356,10 +10361,12 @@ mod tests {
         assert_eq!(p.fn_signatures[22].name, "send");
         assert_eq!(p.fn_signatures[23].name, "recv");
         assert_eq!(p.fn_signatures[24].name, "channel_close");
-        // ADR 0066 M2.1: the subprocess builtins occupy FnId(25..=26).
+        // ADR 0066 M2.1/M2.2: the subprocess builtins occupy FnId(25..=28).
         assert_eq!(p.fn_signatures[25].name, "process_spawn");
         assert_eq!(p.fn_signatures[26].name, "process_wait");
-        assert_eq!(p.fn_signatures[27].name, "main");
+        assert_eq!(p.fn_signatures[27].name, "process_write");
+        assert_eq!(p.fn_signatures[28].name, "process_read");
+        assert_eq!(p.fn_signatures[29].name, "main");
         assert!(p.signature(main.id).is_main);
     }
 

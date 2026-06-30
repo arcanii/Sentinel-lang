@@ -277,6 +277,10 @@ fn builtin_id(q: &[u8]) -> i64 {
         25
     } else if name_eq_lit(q, "process_wait") {
         26
+    } else if name_eq_lit(q, "process_write") {
+        27
+    } else if name_eq_lit(q, "process_read") {
+        28
     } else {
         0 - 1
     }
@@ -295,7 +299,7 @@ fn fn_lookup(c: &mut RCtx, src: &[u8], q: &[u8]) -> i64 {
         while i < n {
             if found == 0 - 1 {
                 if name_eq_src(src, (*c).ufs[i], (*c).ufe[i], q) {
-                    found = 27 + i;
+                    found = 29 + i;
                     0
                 } else {
                     0

@@ -112,6 +112,10 @@ ui_snapshot!(c66_spawn_aggregate_unsupported, "c66_spawn_aggregate_unsupported.s
 // ADR 0066 M1.2b: a `Channel<T>` annotation with a non-`i64` element is rejected
 // (channels carry `i64` at the M1.2b minimum; generic elements are a follow-on).
 ui_snapshot!(c66_channel_element_unsupported, "c66_channel_element_unsupported.sentinel");
+// ADR 0066 M2.2 / D8: the cross-process secret fence — a `[secret u8]` payload
+// cannot cross the public `[u8]` byte-pipe boundary (`process_write`), so the
+// program is rejected as a type mismatch (the type system IS the fence).
+ui_snapshot!(c66_process_secret_fence, "c66_process_secret_fence.sentinel");
 
 // ---- C5.2 constant-time verification rejection (the MIR D5 pass) ----
 ui_snapshot!(c52_secret_leak, "c52_secret_leak.sentinel");

@@ -3,7 +3,8 @@
 //! the Sentinel-written effect-check stage (`selfhost/effects.sentinel`)
 //! must reproduce byte-for-byte. One line per user fn in FnId order:
 //! `(fn #<id> <name> <effect-name>…)`, effects in EffectId order; an empty
-//! row dumps `(fn #N name)`. Builtins (#0–#13) are effect-free + omitted.
+//! row dumps `(fn #N name)`. Builtins (#0–#28) are omitted (the dump covers
+//! user fns only; e.g. `process_spawn` carries `Subprocess` but isn't listed).
 //! `snc effects` exits nonzero on any error (incl. effect errors), so the
 //! corpus differential skips rejected fixtures (the happy-path discipline).
 
@@ -42,7 +43,7 @@ fn effects_dump_effect_free() {
             "free",
             "fn add(a: i64, b: i64) -> i64 { a + b }\nfn main() -> i64 { add(1, 2) }\n"
         ),
-        "(fn #27 add)\n(fn #28 main)\n"
+        "(fn #29 add)\n(fn #30 main)\n"
     );
 }
 
@@ -57,7 +58,7 @@ fn effects_dump_annotated_and_handled() {
              fn do_work() -> i64 ! { Io } { perform Io.read() }\n\
              fn main() -> i64 { handle do_work() with { Io.read(k) => k(1) } }\n"
         ),
-        "(fn #27 do_work Io)\n(fn #28 main)\n"
+        "(fn #29 do_work Io)\n(fn #30 main)\n"
     );
 }
 
@@ -73,7 +74,7 @@ fn effects_dump_inferred_through_call_graph() {
              fn b() -> i64 { a() }\n\
              fn main() -> i64 { handle b() with { Io.read(k) => k(1) } }\n"
         ),
-        "(fn #27 a Io)\n(fn #28 b Io)\n(fn #29 main)\n"
+        "(fn #29 a Io)\n(fn #30 b Io)\n(fn #31 main)\n"
     );
 }
 
@@ -87,6 +88,6 @@ fn effects_dump_concurrency_scope_discharges_async() {
             "fn dbl(x: i64) -> i64 ! { Async } { x * 2 }\n\
              fn main() -> i64 { let r: i64 = scope concurrent { let t = spawn dbl(21); t.await }; r }\n"
         ),
-        "(fn #27 dbl Async)\n(fn #28 main)\n"
+        "(fn #29 dbl Async)\n(fn #30 main)\n"
     );
 }

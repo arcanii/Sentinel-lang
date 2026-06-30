@@ -47,7 +47,7 @@ use sentinel_hir::HirProgram;
 use sentinel_resolve::{
     ClassId, EffectId, EnumId, FnId, ImplId, StructId, VarId, CHANNEL_CLOSE_FN_ID,
     CHANNEL_NEW_FN_ID, I64_TO_U8_FN_ID, IS_SOME_FN_ID, LEN_FN_ID, POP_FN_ID, PRINT_BYTES_FN_ID,
-    PROCESS_SPAWN_FN_ID, PROCESS_WAIT_FN_ID,
+    PROCESS_READ_FN_ID, PROCESS_SPAWN_FN_ID, PROCESS_WAIT_FN_ID, PROCESS_WRITE_FN_ID,
     PUSH_FN_ID, READ_FILE_FN_ID, RECV_FN_ID, SEND_FN_ID, STR_EQ_FN_ID, TCP_ACCEPT_FN_ID,
     TCP_CLOSE_FN_ID, TCP_CONNECT_FN_ID, TCP_LISTEN_FN_ID, TCP_LOCAL_PORT_FN_ID, TCP_READ_FN_ID,
     TCP_WRITE_FN_ID, U8_TO_I64_FN_ID, UNWRAP_OR_FN_ID, VEC_NEW_FN_ID, VEC_TO_ARRAY_FN_ID,
@@ -640,6 +640,20 @@ pub fn compile_to_object_for_module(
     let process_wait_fn = module.add_function(
         "sentinel_process_wait",
         i64_ty.fn_type(&[ptr_ty.into()], false),
+        None,
+    );
+    // ADR 0066 M2.2: the byte-pipe IPC runtime symbols.
+    // `sentinel_process_write(p, data, data_len) -> i64` (write `[u8]` to the
+    // child's stdin + close it; 0/-1), `sentinel_process_read(p, out_len) -> ptr`
+    // (read the child's stdout to EOF; libc-malloc'd `[u8]`, len → out_len).
+    let process_write_fn = module.add_function(
+        "sentinel_process_write",
+        i64_ty.fn_type(&[ptr_ty.into(), ptr_ty.into(), i64_ty.into()], false),
+        None,
+    );
+    let process_read_fn = module.add_function(
+        "sentinel_process_read",
+        ptr_ty.fn_type(&[ptr_ty.into(), ptr_ty.into()], false),
         None,
     );
     // C5.4 (2/N) / ADR 0028: declare the broker scope-arena symbols.
@@ -1310,6 +1324,8 @@ pub fn compile_to_object_for_module(
             channel_close_fn,
             process_spawn_fn,
             process_wait_fn,
+            process_write_fn,
+            process_read_fn,
             arena_enter_fn,
             arena_alloc_fn,
             arena_exit_fn,
@@ -1572,6 +1588,8 @@ struct CodegenCtx<'ctx, 'plan> {
     /// ADR 0066 M2.1: the subprocess runtime symbols.
     process_spawn_fn: FunctionValue<'ctx>,
     process_wait_fn: FunctionValue<'ctx>,
+    process_write_fn: FunctionValue<'ctx>,
+    process_read_fn: FunctionValue<'ctx>,
     /// C5.4 (2/N) / ADR 0028: `sentinel_arena_enter(i64) -> *arena`
     /// creates a per-scope broker bump arena (capacity 0 → default).
     arena_enter_fn: FunctionValue<'ctx>,
@@ -6062,6 +6080,90 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
             .expect("sentinel_process_wait returns i64"))
     }
 
+    /// ADR 0066 M2.2: `process_write(p: Process, data: [u8]) -> i64` — decompose
+    /// `data` (`{i64 len, ptr data}`) and call `sentinel_process_write(p, ptr,
+    /// len)` (write to the child's stdin + close it). The `[u8]` payload is public
+    /// (the cross-process secret fence is structural — D8). `data` is borrowed.
+    fn lower_process_write(
+        &mut self,
+        p: &TypedExpr,
+        data: &TypedExpr,
+        program: &TypedProgram,
+    ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+        let p_v = self.lower_expr(p, program)?.into_pointer_value();
+        let data_val = self.lower_expr(data, program)?.into_struct_value();
+        let data_len = self
+            .builder
+            .build_extract_value(data_val, 0, "pw_data_len")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?
+            .into_int_value();
+        let data_ptr = self
+            .builder
+            .build_extract_value(data_val, 1, "pw_data_ptr")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?
+            .into_pointer_value();
+        let call = self
+            .builder
+            .build_call(
+                self.process_write_fn,
+                &[p_v.into(), data_ptr.into(), data_len.into()],
+                "process_write",
+            )
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        Ok(call
+            .try_as_basic_value()
+            .left()
+            .expect("sentinel_process_write returns i64"))
+    }
+
+    /// ADR 0066 M2.2: `process_read(p: Process) -> [u8]` — call
+    /// `sentinel_process_read(p, out_len_slot) -> ptr` (read the child's stdout to
+    /// EOF) and assemble the `[u8]` array struct `{ i64 len, ptr data }` from the
+    /// returned buffer + the out-len slot (the `read_file` result shape).
+    fn lower_process_read(
+        &mut self,
+        p: &TypedExpr,
+        program: &TypedProgram,
+    ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+        let i64_type = self.context.i64_type();
+        let ptr_type = self.context.ptr_type(inkwell::AddressSpace::default());
+
+        let p_v = self.lower_expr(p, program)?.into_pointer_value();
+        // Out-param slot for the byte count (the read_file ABI shape).
+        let out_len_slot = self
+            .builder
+            .build_alloca(i64_type, "process_read_len_slot")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        let data_ptr = self
+            .builder
+            .build_call(self.process_read_fn, &[p_v.into(), out_len_slot.into()], "process_read")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?
+            .try_as_basic_value()
+            .left()
+            .expect("sentinel_process_read returns ptr")
+            .into_pointer_value();
+        let len = self
+            .builder
+            .build_load(i64_type, out_len_slot, "process_read_len")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?
+            .into_int_value();
+
+        // Assemble the `[u8]` array struct `{ i64 len, ptr data }`.
+        let arr_struct_ty = self
+            .context
+            .struct_type(&[i64_type.into(), ptr_type.into()], false);
+        let agg = arr_struct_ty.get_undef();
+        let with_len = self
+            .builder
+            .build_insert_value(agg, len, 0, "pr_with_len")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        let with_data = self
+            .builder
+            .build_insert_value(with_len, data_ptr, 1, "pr_with_data")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        Ok(with_data.into_struct_value().into())
+    }
+
     /// D.3 / ADR 0034 D7: lower `vec_new() -> Vec<T>` to an empty vector
     /// value `{ i64 len = 0, i64 cap = 0, ptr data = null }`. No
     /// allocation happens until the first `push` (`realloc(null, …)` ==
@@ -6982,6 +7084,13 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                 }
                 if *id == PROCESS_WAIT_FN_ID {
                     return self.lower_process_wait(&args[0], program);
+                }
+                // ADR 0066 M2.2: the byte-pipe IPC builtins.
+                if *id == PROCESS_WRITE_FN_ID {
+                    return self.lower_process_write(&args[0], &args[1], program);
+                }
+                if *id == PROCESS_READ_FN_ID {
+                    return self.lower_process_read(&args[0], program);
                 }
                 // C1.7.5 / ADR 0016 D7: user-defined generic-fn
                 // calls route to the monomorphic instance emitted

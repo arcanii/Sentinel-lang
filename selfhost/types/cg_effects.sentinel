@@ -258,17 +258,17 @@ fn cg_emit_spawn_wrapper(c: &mut TyCtx, fid: i64, src: &[u8]) -> i64 {
     // the wrappers land LAST — after the fns + class/impl methods (the oracle's order).
     (*c).cg_to_body = false;
     (*c).cg_to_cls = true;
-    let ns: i64 = (*c).ufs[fid - 27];
-    let ne: i64 = (*c).ufe[fid - 27];
-    let np: i64 = (*c).ufpe[fid - 27] - (*c).ufps[fid - 27];
+    let ns: i64 = (*c).ufs[fid - 29];
+    let ne: i64 = (*c).ufe[fid - 29];
+    let np: i64 = (*c).ufpe[fid - 29] - (*c).ufps[fid - 29];
     cgo_str(c, "define void @__spawn_wrapper_");
     cgo_int(c, fid);
     cgo_str(c, "(ptr %arg0, ptr %arg1) {\nentry:\n");
     // ADR 0066 M1.1: load each arg with its real param type + encode the result into
     // the Task's i64 slot (mirrors the oracle's dump_spawn_wrapper). i64 args/result are
     // byte-identical to C4.4.
-    let ps: i64 = (*c).ufps[fid - 27];
-    let reth: i64 = strip_secret(c, (*c).ufret[fid - 27]);
+    let ps: i64 = (*c).ufps[fid - 29];
+    let reth: i64 = strip_secret(c, (*c).ufret[fid - 29]);
     let mut loads: Vec<i64> = vec_new();
     let mut ptys: Vec<i64> = vec_new();
     let mut i: i64 = 0;
@@ -618,6 +618,54 @@ fn cg_emit_call(c: &mut TyCtx, src: &[u8], fid: i64, snap: i64, rty: i64) -> i64
         (*c).cg_used_procwait = true;
         cg_reg(c, pw_d);
         0
+    } else if fid == 27 {
+        // (ADR 0066 M2.2) process_write(p, data: [u8]) -> i64. Decompose data
+        // into (len, ptr) and call sentinel_process_write(p, ptr, len).
+        let pwr_pk: i64 = (*c).cgak[snap];
+        let pwr_pv: i64 = (*c).cgav[snap];
+        let pwr_dk: i64 = (*c).cgak[snap + 1];
+        let pwr_dv: i64 = (*c).cgav[snap + 1];
+        let pwrdl: i64 = cg_lenptr(c, pwr_dk, pwr_dv);
+        let pwr_d: i64 = cg_dst(c);
+        cgo_str(c, "call i64 @sentinel_process_write(ptr ");
+        cgo_operand(c, pwr_pk, pwr_pv);
+        cgo_str(c, ", ptr %v");
+        cgo_int(c, pwrdl + 1);
+        cgo_str(c, ", i64 %v");
+        cgo_int(c, pwrdl);
+        cgo_str(c, ")\n");
+        (*c).cg_used_procwrite = true;
+        cg_reg(c, pwr_d);
+        0
+    } else if fid == 28 {
+        // (ADR 0066 M2.2) process_read(p) -> [u8]: call with an out-len alloca,
+        // then reassemble {len, data} (the read_file shape).
+        let prd_pk: i64 = (*c).cgak[snap];
+        let prd_pv: i64 = (*c).cgav[snap];
+        let prdslot: i64 = cg_alloca(c, 0);
+        let prddata: i64 = cg_dst(c);
+        cgo_str(c, "call ptr @sentinel_process_read(ptr ");
+        cgo_operand(c, prd_pk, prd_pv);
+        cgo_str(c, ", ptr %v");
+        cgo_int(c, prdslot);
+        cgo_str(c, ")\n");
+        (*c).cg_used_procread = true;
+        let prdlen: i64 = cg_dst(c);
+        cgo_str(c, "load i64, ptr %v");
+        cgo_int(c, prdslot);
+        cg_putc(c, '\n');
+        let prda0: i64 = cg_dst(c);
+        cgo_str(c, "insertvalue { i64, ptr } undef, i64 %v");
+        cgo_int(c, prdlen);
+        cgo_str(c, ", 0\n");
+        let prda1: i64 = cg_dst(c);
+        cgo_str(c, "insertvalue { i64, ptr } %v");
+        cgo_int(c, prda0);
+        cgo_str(c, ", ptr %v");
+        cgo_int(c, prddata);
+        cgo_str(c, ", 1\n");
+        cg_reg(c, prda1);
+        0
     } else if fid == 12 {
         // (8d) write_file(path, data) -> i64.
         let w_pk: i64 = (*c).cgak[snap];
@@ -936,11 +984,11 @@ fn cg_emit_call(c: &mut TyCtx, src: &[u8], fid: i64, snap: i64, rty: i64) -> i64
         cgo_str(c, ", 1\n");
         cg_reg(c, vt_a1);
         0
-    } else if fid >= 27 {
+    } else if fid >= 29 {
         // (Bar B / effects c35b) a call to an effecting fn yields a Kont* (`ptr`), not
         // its declared return type — and a tail effecting-call makes the caller's tail
         // kont-producing (so an enclosing effecting fn returns it as-is).
-        let efc: bool = (*c).ufeff[fid - 27] != 0;
+        let efc: bool = (*c).ufeff[fid - 29] != 0;
         let d: i64 = cg_dst(c);
         cgo_str(c, "call ");
         if efc {
@@ -949,12 +997,12 @@ fn cg_emit_call(c: &mut TyCtx, src: &[u8], fid: i64, snap: i64, rty: i64) -> i64
             cgo_ty(c, rty)
         };
         cgo_str(c, " @");
-        let us: i64 = (*c).ufs[fid - 27];
-        let ue: i64 = (*c).ufe[fid - 27];
+        let us: i64 = (*c).ufs[fid - 29];
+        let ue: i64 = (*c).ufe[fid - 29];
         cgo_slice(c, src, us, ue);
         // (Bar B / generics-b) a generic callee resolves to its monomorphic symbol
         // `name__<arg0>__…`; `cg_targs` was set by the preceding `dump_generic_call`.
-        if (*c).uftp[fid - 27] > 0 {
+        if (*c).uftp[fid - 29] > 0 {
             let ctargs: Vec<i64> = cg_copy_targs(c, 1);
             cg_emit_mono_suffix(c, &ctargs);
             0
