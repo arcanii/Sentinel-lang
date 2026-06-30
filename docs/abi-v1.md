@@ -148,11 +148,23 @@ detail, **not** ABI, and carries no size/offset contract here.
 
 Like `SentinelChannel`, codegen never reads `SentinelProcess`'s fields — it holds
 the `*mut SentinelProcess` returned by `sentinel_process_spawn` (the `Type::Process`
-LLVM type is `ptr`) and passes it to `sentinel_process_wait`. The struct wraps a
-`std::process::Child` (runtime-internal, not ABI). The argv ABI *is* contractual:
-`sentinel_process_spawn(path_ptr, path_len, argv, argc)` decodes `argv` as `argc`
-consecutive abi-v1 array headers `{ i64 len, ptr data }` (§5) — the `[[u8]]`
-element buffer codegen emits.
+LLVM type is `ptr`) and passes it to `sentinel_process_wait` / `_write` / `_read`.
+The struct wraps a `std::process::Child` (runtime-internal, not ABI). The argv ABI
+*is* contractual: `sentinel_process_spawn(path_ptr, path_len, argv, argc)` decodes
+`argv` as `argc` consecutive abi-v1 array headers `{ i64 len, ptr data }` (§5) — the
+`[[u8]]` element buffer codegen emits.
+
+**Byte-pipe IPC (M2.2).** `sentinel_process_spawn` pipes the child's stdin + stdout
+(stderr inherited). `sentinel_process_write(p, data, data_len)` writes a `[u8]` to the
+child's stdin then **closes** it (EOF — one-shot input); `sentinel_process_read(p,
+out_len) -> ptr` reads the child's stdout to EOF and returns a libc-malloc'd `[u8]`
+(length in `out_len`), exactly the `sentinel_read_file` result shape. The IPC payload
+is `[u8]` — a **public** type — so a `secret` can never cross the process boundary (the
+cross-process secret fence, ADR 0066 D8). The fence is structural, enforced by the
+type system exactly as the FFI boundary is: the builtin's parameter is `[u8]`, and a
+`secret`-tainted array is `[secret u8]` (a distinct type — `secret u8 ≠ u8`, with no
+implicit secret→public coercion), so it is rejected at the call. `declassify` remains
+the only sanctioned way to send formerly-secret data over a pipe.
 
 ---
 
@@ -287,6 +299,8 @@ Codegen declares these as external; `sentinel-runtime` defines them
 | `sentinel_channel_close` | `(ptr ch) -> i64` | channels — drop the sender (signals recv EOF) |
 | `sentinel_process_spawn` | `(ptr path, i64 path_len, ptr argv, i64 argc) -> ptr` | subprocess (ADR 0066 M2.1) — spawn `path` with `argc` `[u8]` args (`argv` = abi-v1 array headers); null on failure |
 | `sentinel_process_wait` | `(ptr p) -> i64` | subprocess — wait; exit code, or -1 (error / no code / already waited) |
+| `sentinel_process_write` | `(ptr p, ptr data, i64 data_len) -> i64` | subprocess IPC (ADR 0066 M2.2) — write `[u8]` to child stdin + close it; 0 ok, -1 error |
+| `sentinel_process_read` | `(ptr p, ptr out_len) -> ptr` | subprocess IPC — read child stdout to EOF; libc-malloc'd `[u8]` (len → `out_len`) |
 
 **Runtime-internal (not codegen-declared):** `sentinel_kont_panic_resumed`
 — the runtime's `sentinel_kont_resume` calls it on the consumed-twice

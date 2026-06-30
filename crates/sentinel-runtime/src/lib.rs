@@ -1447,6 +1447,11 @@ pub extern "C" fn sentinel_process_spawn(
     let path_bytes = unsafe { std::slice::from_raw_parts(path_ptr, path_len as usize) };
     let path = String::from_utf8_lossy(path_bytes).into_owned();
     let mut cmd = std::process::Command::new(&path);
+    // ADR 0066 M2.2: pipe stdin + stdout so the parent can byte-stream with the
+    // child (sentinel_process_write / _read). stderr stays inherited (diagnostics
+    // flow to the parent's terminal). Piping is harmless for children that ignore
+    // their std streams (e.g. M2.1's `exit 42`).
+    cmd.stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped());
     if argc > 0 && !argv.is_null() {
         // SAFETY: `argv` points to `argc` abi-v1 array headers (the `[[u8]]`
         // element buffer), each a live `{ i64 len, ptr data }` `[u8]`.
@@ -1488,6 +1493,111 @@ pub extern "C" fn sentinel_process_wait(p: *mut SentinelProcess) -> i64 {
         },
         None => -1,
     }
+}
+
+/// ADR 0066 M2.2: write all `data_len` bytes of `data` (a Sentinel `[u8]`) to the
+/// child's stdin, then **close** stdin (so a filter child sees EOF and produces
+/// its output). Returns 0 on success, -1 on error (null handle, no piped stdin,
+/// already-written/closed stdin, or a write failure). The byte-pipe payload is
+/// `[u8]` — a PUBLIC type — so a `secret` can never reach it (the cross-process
+/// secret fence, ADR 0066 D8: the IPC ABI is public-only, like FFI). `data` is
+/// borrowed (the ADR 0033 A3 runtime-builtin rule), not freed.
+///
+/// One-shot by design: stdin is closed after the write, so the contract is
+/// "write the child's full input once, then read its output". Streaming /
+/// multi-write IPC is a deferred post-M2.2 upgrade.
+///
+/// # Safety
+///
+/// `p` must be a `*mut SentinelProcess` from [`sentinel_process_spawn`]; `data`
+/// must point to `data_len` readable bytes (the abi-v1 `[u8]` layout).
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+#[no_mangle]
+pub extern "C" fn sentinel_process_write(
+    p: *mut SentinelProcess,
+    data: *const u8,
+    data_len: i64,
+) -> i64 {
+    use std::io::Write;
+    if p.is_null() || data_len < 0 {
+        return -1;
+    }
+    // SAFETY: `p` is a live SentinelProcess per the caller contract.
+    let proc = unsafe { &mut *p };
+    let child = match proc.child.as_mut() {
+        Some(c) => c,
+        None => return -1,
+    };
+    // Take stdin so the drop at end-of-scope closes the pipe (EOF for the child).
+    let mut stdin = match child.stdin.take() {
+        Some(s) => s,
+        None => return -1,
+    };
+    let bytes = if data_len == 0 || data.is_null() {
+        &[][..]
+    } else {
+        // SAFETY: the caller contract guarantees `data_len` bytes at `data`.
+        unsafe { std::slice::from_raw_parts(data, data_len as usize) }
+    };
+    match stdin.write_all(bytes) {
+        Ok(()) => 0,
+        Err(_) => -1,
+    }
+    // `stdin` drops here → the write end of the pipe closes (child sees EOF).
+}
+
+/// ADR 0066 M2.2: read the child's stdout to EOF and return it as a Sentinel
+/// `[u8]` — the buffer is libc-malloc'd (via [`sentinel_alloc`]) so scope-exit
+/// drop can free it, and the byte length is written to `out_len` (exactly the
+/// `sentinel_read_file` ABI shape). On any error (null handle, no piped stdout,
+/// already-read stdout, or a read failure) returns an empty `[u8]` (`out_len`=0,
+/// a non-null zero-length buffer). The payload is `[u8]` (PUBLIC) — the
+/// cross-process secret fence keeps the IPC boundary secret-free (ADR 0066 D8).
+///
+/// # Safety
+///
+/// `p` must be a `*mut SentinelProcess` from [`sentinel_process_spawn`];
+/// `out_len` must point to a writable `i64`.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+#[no_mangle]
+pub extern "C" fn sentinel_process_read(p: *mut SentinelProcess, out_len: *mut i64) -> *mut u8 {
+    use std::io::Read;
+    let empty = || {
+        // SAFETY: caller passed a writable `i64` slot; a 0-length sentinel_alloc
+        // returns a non-null, never-dereferenced buffer (matches read_file's n=0).
+        if !out_len.is_null() {
+            unsafe { *out_len = 0 };
+        }
+        sentinel_alloc(0)
+    };
+    if p.is_null() {
+        return empty();
+    }
+    // SAFETY: `p` is a live SentinelProcess per the caller contract.
+    let proc = unsafe { &mut *p };
+    let child = match proc.child.as_mut() {
+        Some(c) => c,
+        None => return empty(),
+    };
+    let mut stdout = match child.stdout.take() {
+        Some(s) => s,
+        None => return empty(),
+    };
+    let mut data = Vec::new();
+    if stdout.read_to_end(&mut data).is_err() {
+        return empty();
+    }
+    let n = data.len();
+    // Copy into a libc-malloc'd buffer so scope-exit drop can free it.
+    let buf = sentinel_alloc(n as i64);
+    if n > 0 {
+        // SAFETY: `buf` has `n` bytes (sentinel_alloc aborts on failure); `data`
+        // has `n` bytes; the regions don't overlap.
+        unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), buf, n) };
+    }
+    // SAFETY: caller passed a writable `i64` slot.
+    unsafe { *out_len = n as i64 };
+    buf
 }
 
 /// Returns the crate name as a sanity-check that the build is wired up.
@@ -1740,16 +1850,20 @@ mod tests {
             sentinel_channel_send as *const (),
             sentinel_channel_recv as *const (),
             sentinel_channel_close as *const (),
-            // ADR 0066 M2.1: the subprocess builtins (cross-platform).
+            // ADR 0066 M2.1: the subprocess spawn/wait builtins (cross-platform).
             sentinel_process_spawn as *const (),
             sentinel_process_wait as *const (),
+            // ADR 0066 M2.2: the byte-pipe IPC builtins (cross-platform).
+            sentinel_process_write as *const (),
+            sentinel_process_read as *const (),
         ];
-        // 30 symbols: 23 codegen-declared (incl. D.2's sentinel_str_eq,
+        // 32 symbols: 23 codegen-declared (incl. D.2's sentinel_str_eq,
         // D.3's sentinel_realloc, D.4's sentinel_read_file /
         // sentinel_write_file / sentinel_print_bytes, and ADR 0065 D6's
         // sentinel_kont_free) + sentinel_kont_panic_resumed + ADR 0066 M1.2's
-        // 4 sentinel_channel_* + M2.1's 2 sentinel_process_* symbols.
-        assert_eq!(symbols.len(), 30);
+        // 4 sentinel_channel_* + M2.1's 2 sentinel_process_spawn/_wait + M2.2's
+        // 2 sentinel_process_write/_read symbols.
+        assert_eq!(symbols.len(), 32);
         assert!(symbols.iter().all(|&s| !s.is_null()), "every symbol has an address");
     }
 
@@ -1933,6 +2047,65 @@ mod tests {
         assert!(p.is_null(), "spawning a nonexistent program returns null");
         // wait on a null handle is the -1 sentinel (no panic).
         assert_eq!(sentinel_process_wait(std::ptr::null_mut()), -1);
+    }
+
+    // ---- ADR 0066 M2.2: the byte-pipe IPC runtime surface ----
+
+    #[test]
+    fn sentinel_process_write_read_filter_round_trips() {
+        // The one-shot filter pattern: spawn a child that copies stdin → stdout,
+        // write input (which closes stdin → EOF), read the echoed output back.
+        // Cross-platform: `cat` on Unix, `findstr "^"` on Windows (matches every
+        // line → an identity filter).
+        #[cfg(windows)]
+        let (path, args): (&str, Vec<&str>) = ("findstr", vec!["x*"]);
+        #[cfg(not(windows))]
+        let (path, args): (&str, Vec<&str>) = ("cat", vec![]);
+
+        let headers: Vec<SentinelArrayHeader> = args
+            .iter()
+            .map(|a| SentinelArrayHeader { len: a.len() as i64, data: a.as_ptr() })
+            .collect();
+        let p = sentinel_process_spawn(
+            path.as_ptr(),
+            path.len() as i64,
+            if headers.is_empty() { std::ptr::null() } else { headers.as_ptr() as *const u8 },
+            headers.len() as i64,
+        );
+        assert!(!p.is_null(), "spawn of `{path}` succeeded");
+
+        let input = b"hello pipe\n";
+        assert_eq!(
+            sentinel_process_write(p, input.as_ptr(), input.len() as i64),
+            0,
+            "write to child stdin succeeds (and closes stdin)"
+        );
+        let mut out_len: i64 = -1;
+        let buf = sentinel_process_read(p, &mut out_len as *mut i64);
+        assert!(!buf.is_null());
+        assert!(out_len >= input.len() as i64, "got at least the echoed bytes");
+        // SAFETY: `buf` holds `out_len` readable bytes.
+        let got = unsafe { std::slice::from_raw_parts(buf, out_len as usize) };
+        // The identity filter echoes our line (findstr may normalize the newline,
+        // so assert on the substring rather than byte equality).
+        assert!(
+            got.windows(b"hello pipe".len()).any(|w| w == b"hello pipe"),
+            "child echoed the input line"
+        );
+        sentinel_free(buf);
+        assert_eq!(sentinel_process_wait(p), 0, "the filter exited cleanly");
+    }
+
+    #[test]
+    fn sentinel_process_write_read_null_handle_is_safe() {
+        // Null handle: write returns the -1 sentinel; read returns an empty,
+        // non-null `[u8]` (out_len = 0) — neither panics.
+        assert_eq!(sentinel_process_write(std::ptr::null_mut(), b"x".as_ptr(), 1), -1);
+        let mut out_len: i64 = -1;
+        let buf = sentinel_process_read(std::ptr::null_mut(), &mut out_len as *mut i64);
+        assert!(!buf.is_null(), "empty read still returns a non-null buffer");
+        assert_eq!(out_len, 0);
+        sentinel_free(buf);
     }
 
     // ---- ADR 0056: the TCP sockets runtime surface (loopback) ----
