@@ -474,6 +474,14 @@ const EXAMPLES: &[(&str, i32)] = &[
     // typing still lower. snc-only (the scg mirror is deferred, like task_generic /
     // f64 — the differential corpus stays at the i64 `c66_process_channel`). 42.
     ("examples/lang/process_channel_typed.sentinel", 42),
+    // ADR 0066 M2.4a / ADR 0069: SealedChannel<secret i64> — the AEAD-encrypted
+    // secret-cross-process path. An in-process `seal` -> `open` round-trip
+    // (runtime-verified crypto: the secret re-emerges secret, authenticated) plus a
+    // GUARDED pipe path (`sealed_channel` / `sealed_send` / `sealed_recv` over the
+    // bridge builtins, compiled but not run for cross-platform determinism). Reuses
+    // the verified-CT ssh record cipher (no new primitive). snc-only (the scg mirror
+    // is deferred, like process_channel_typed / task_generic). 42 = the opened value.
+    ("examples/lang/sealed_channel.sentinel", 42),
     // ADR 0037 / BACKLOG §10.9: the worked MULTI-FILE example — a program using
     // a `pub class` (`Rect`) defined in another file, the library module
     // `std::math::rect`. The class crosses the module / separate-compilation
@@ -749,6 +757,15 @@ fn lang_channel() {
 #[test]
 fn lang_worker_pool() {
     check_example("examples/lang/worker_pool.sentinel", "worker_pool", 42);
+}
+
+#[test]
+fn lang_sealed_channel() {
+    // ADR 0066 M2.4a / ADR 0069: seal a `secret i64`, frame the public ciphertext,
+    // open it back to `secret i64` (the AEAD-encrypted secret-cross-process path).
+    // The in-process round-trip is runtime-verified (exit 42 = the opened+declassified
+    // value); the pipe path is compiled but guarded. Built --separate and merged.
+    check_example("examples/lang/sealed_channel.sentinel", "sealed_channel", 42);
 }
 
 #[test]

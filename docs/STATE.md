@@ -14,7 +14,35 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
-**Latest (2026-06-30) — ADR 0066 M2.4 designed: [ADR 0069](decisions/0069-sealed-channel.md)
+**Latest (2026-06-30) — ADR 0066 M2.4a: `SealedChannel<secret i64>` IMPLEMENTED (snc-side).**
+The AEAD-encrypted secret-cross-process path (the D8a escape from the D8 fence) per
+[ADR 0069](decisions/0069-sealed-channel.md). A `secret` may cross a process boundary only by a
+**cryptographic `declassify`**: `seal` AEAD-encrypts a `secret i64` so only PUBLIC ciphertext touches
+the pipe, and `open` decrypts it so the value re-emerges `secret i64` on the verified receiver (whose
+`secret_leak` keeps constant-time intact end-to-end). **Architecture (maintainer choice "compiler Type
++ stdlib ops"):** a unit **`Type::SealedChannel`** interner variant (the fence-as-type, ADR 0069 D1/D9
+— a non-secret element is a type error) + two identity-ptr **bridge builtins**
+`sealed_channel(Process) -> SealedChannel` / `sealed_process(SealedChannel) -> Process` (FnId 31/32;
+the user-fn base shifted **31→33**, mirrored into `selfhost/` for differential parity) + a stdlib
+**`std::security::sealed`** module (`seal`/`open`/`sealed_send`/`sealed_recv`) that reuses the shipped
+**verified-CT ssh record cipher** (`ssh_seal`/`ssh_open_verify`/`ssh_open_payload`) — **no new
+cryptographic primitive** (D2), **no new runtime symbol** (`abi-v1` untouched at 34; the 40-byte
+fixed-width frame = 5 public i64 over the M2.3 `process_send`/`process_recv`, D5). `open` returns
+`OpenResult { ok: i64, v: secret i64 }` (`?(secret i64)` is unrepresentable — `NullableInner` has no
+`Secret` — so the public verdict bit is a separate field; auth failure is a typed verdict, never a
+panic). Demonstrator `examples/lang/sealed_channel.sentinel` (an in-process `seal`→`open` round-trip,
+**runtime-verified** — the secret re-emerges secret + authenticated → exit 42 — plus a guarded pipe
+path compiling `sealed_send`/`sealed_recv` + the bridge lowering); ui rejection
+`tests/ui/c66_sealed_channel_public_element`. **snc-side first** (the scg mirror of seal/open + the
+bridge lowering is deferred, like M2.3b — the demonstrator lives in `examples/`, out of the
+differential; only the symmetric FnId-base shift touches `selfhost/`). Constant-time + the lexical
+borrow checker UNCHANGED; four-check green; both bootstrap fixed points byte-identical. **M2.4a uses
+a FIXED pre-shared key + FIXED single-message nonce** — the authenticated x25519 handshake (D3) +
+per-direction HKDF keys + counter-nonces (D4) are **M2.4b** (next). A **cryptographic** guarantee +
+key management, NOT machine-verified CT (D8) — never sold as extending CT across processes. See ADR
+0069 + ADR 0066 D8a + HANDOVER §0.
+
+**Earlier (2026-06-30) — ADR 0066 M2.4 designed: [ADR 0069](decisions/0069-sealed-channel.md)
 `SealedChannel<secret T>` PROPOSED, design PINNED (maintainer sign-off).** The own-ADR for the
 AEAD-encrypted secret-cross-process path (D8a mandates M2.4 gets its own ADR — security-critical +
 crypto-bearing). Encryption as a **cryptographic `declassify`** (`seal: secret T × key → public

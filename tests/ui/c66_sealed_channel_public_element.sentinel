@@ -1,0 +1,15 @@
+// ADR 0066 M2.4a / ADR 0069 D1: a `SealedChannel<T>` whose element is NOT secret is
+// a type error — the SealedChannel exists to carry an ENCRYPTED secret across a
+// process boundary, so sealing a PUBLIC value is pointless (use the raw
+// `process_send` path for public elements). The fence is a STATIC property of the
+// type: the compiler — not a convention — rejects a non-secret element here, so
+// "was this value sealed-because-secret?" is answered at type-check. Generic
+// `secret T` (a wider payload) is the M2.4c follow-on. Surfaces
+// SealedChannelElementNotSupported.
+fn bad(sc: SealedChannel<i64>) -> i64 {
+    0
+}
+
+fn main() -> i64 {
+    0
+}

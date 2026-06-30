@@ -45,7 +45,7 @@ use sentinel_resolve::{
     ClassId, EffectId, EnumId, FnId, StructId, VarId, I64_TO_U8_FN_ID, IS_SOME_FN_ID, LEN_FN_ID,
     CHANNEL_CLOSE_FN_ID, CHANNEL_NEW_FN_ID, POP_FN_ID, PRINT_BYTES_FN_ID, PRINT_FN_ID,
     PROCESS_READ_FN_ID, PROCESS_RECV_FN_ID, PROCESS_SEND_FN_ID, PROCESS_SPAWN_FN_ID,
-    PROCESS_WAIT_FN_ID, PROCESS_WRITE_FN_ID, PUSH_FN_ID,
+    PROCESS_WAIT_FN_ID, PROCESS_WRITE_FN_ID, PUSH_FN_ID, SEALED_CHANNEL_FN_ID, SEALED_PROCESS_FN_ID,
     READ_FILE_FN_ID, RECV_FN_ID, SEND_FN_ID, STR_EQ_FN_ID, U8_TO_I64_FN_ID, UNWRAP_OR_FN_ID,
     VEC_NEW_FN_ID, VEC_TO_ARRAY_FN_ID, WRITE_FILE_FN_ID,
 };
@@ -63,11 +63,12 @@ const TARGET_TRIPLE: &str = "arm64-apple-darwin";
 /// The lowest user FnId — ids 0..=13 are runtime/builtins (ADR 0044 FnId map).
 // ADR 0056 added the socket builtins (14..=20); ADR 0066 M1.2 added the
 // channel builtins (21..=24); ADR 0066 M2.1 added subprocess spawn/wait
-// (25..=26); M2.2 added subprocess write/read (27..=28), shifting the user-fn
-// base to 29. A call to a builtin FnId not caught by a special lowering arm
-// above returns Err (the fixture is skipped); the channel + subprocess
-// builtins ARE specially lowered.
-const FIRST_USER_FN: u32 = 31;
+// (25..=26); M2.2 added subprocess write/read (27..=28); M2.3 added subprocess
+// send/recv (29..=30); M2.4a added the SealedChannel bridge builtins (31..=32),
+// shifting the user-fn base to 33. A call to a builtin FnId not caught by a
+// special lowering arm above returns Err (the fixture is skipped); the channel
+// + subprocess + sealed-bridge builtins ARE specially lowered.
+const FIRST_USER_FN: u32 = 33;
 
 /// Bar B / effects (ADR 0020): the reserved kont op_id for a PURE_RETURN wrap
 /// (`u32::MAX`) — the handle dispatch + `k(v)` pure-check compare against it.
@@ -3319,6 +3320,12 @@ impl Emit<'_> {
             writeln!(self.body, "  %v{a1} = insertvalue {{ i1, {ety} }} %v{a0}, {ety} {value}, 1").unwrap();
             return Ok(format!("%v{a1}"));
         }
+        // ADR 0066 M2.4a / ADR 0069: the SealedChannel bridge builtins are
+        // identity-ptr passthroughs — both `Process` and `SealedChannel` lower to
+        // the same opaque ptr (bridge (iii)), so re-typing is a value-level no-op.
+        if id == SEALED_CHANNEL_FN_ID || id == SEALED_PROCESS_FN_ID {
+            return self.lower_expr(&args[0]);
+        }
         if id.0 < FIRST_USER_FN {
             return Err(format!("builtin call #{} (deferred to a later slice)", id.0));
         }
@@ -3422,6 +3429,8 @@ fn llvm_ty(ty: Type, program: &TypedProgram) -> Result<String, String> {
         Type::Channel(_) => Ok("ptr".to_string()),
         // ADR 0066 M2.1: a Process handle lowers to an opaque ptr.
         Type::Process => Ok("ptr".to_string()),
+        // ADR 0066 M2.4a: a SealedChannel lowers to the same opaque ptr as Process.
+        Type::SealedChannel => Ok("ptr".to_string()),
         other => Err(format!("type not yet ported (8a scalars only): {other:?}")),
     }
 }

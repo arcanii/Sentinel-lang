@@ -1,0 +1,170 @@
+// std::security::sealed — SealedChannel<secret i64>: the AEAD-encrypted
+// secret-cross-process path (ADR 0066 M2.4a / ADR 0069, the D8a escape).
+//
+// A `secret` may NOT cross a process boundary over the public pipe (the ADR 0066
+// D8 fence). The sanctioned escape is a CRYPTOGRAPHIC declassify: `seal` AEAD-
+// encrypts a `secret i64` so that only PUBLIC ciphertext touches the pipe, and
+// `open` AEAD-decrypts it so the value re-emerges `secret i64` on the verified
+// receiver (whose `secret_leak` keeps constant-time intact end-to-end). The
+// plaintext is NEVER declassified — only the ciphertext + tag (their public, wire-
+// bound nature is the whole point of an AEAD). This composes the shipped, verified-
+// constant-time chacha20-poly1305 record cipher (std::net::ssh_cipher): a
+// SealedChannel is, per ADR 0069, "the ssh per-record-AEAD machine pointed at a
+// pipe instead of a socket." NO new cryptographic primitive is written (ADR 0069 D2).
+//
+// =====================================================================
+// !!! M2.4a SECURITY SCOPE — READ BEFORE USE !!!
+// M2.4a uses a FIXED pre-shared key and a FIXED single-message nonce (`seqnr`).
+// Nonce reuse under ChaCha20-Poly1305 is CATASTROPHIC — it breaks BOTH
+// confidentiality AND authenticity (ADR 0069 D4). This minimum is sound ONLY
+// because it seals AT MOST ONE message per direction. The authenticated x25519
+// handshake (D3) and per-direction HKDF keys + monotonic counter-nonces (D4) land
+// in M2.4b, BEFORE any multi-message use. Do NOT seal more than one message under
+// one (key, seqnr) pair. This is a DIFFERENT, weaker guarantee than in-process
+// `secret` (cryptographic + key-management, NOT machine-verified constant-time);
+// never document it as "extending machine-verified CT across processes" (D8).
+// =====================================================================
+//
+// Threat model: confidentiality-in-transit across a TRUST boundary (different UID,
+// a sandbox) is the decisive win — exactly the privilege-separation case the bare
+// D8 fence blocked. Sentinel<->Sentinel only (a foreign C peer could branch on the
+// plaintext post-decrypt, so encryption buys nothing there — ADR 0069 D6).
+use std::net::ssh_cipher::ssh_seal;
+use std::net::ssh_cipher::ssh_open_verify;
+use std::net::ssh_cipher::ssh_open_payload;
+
+// The result of `open`: a PUBLIC authenticity verdict `ok` (1 = the tag verified,
+// 0 = forged/tampered) and the recovered `secret i64` `v` (meaningful ONLY when
+// ok == 1). `?(secret i64)` is not representable (NullableInner has no Secret
+// variant), so the validity bit is a separate PUBLIC field — the caller branches
+// on `ok` (constant-time: it is public), never on `v`. Auth failure is this typed
+// verdict, never a panic (ADR 0069 D2).
+pub struct OpenResult { ok: i64, v: secret i64 }
+
+// The fixed-width sealed frame for a `secret i64`: `ssh_seal` of an 8-byte payload
+// produces a 40-byte record (4 enc-len + 20 enc-pay + 16 tag), so every sealed
+// frame is the SAME 40 bytes = 5 i64 pipe frames — no length leak (ADR 0069 D5).
+// (M2.4c generalizes to variable-length payloads + an explicit padding policy.)
+
+// Serialize a `secret i64` to 8 little-endian secret bytes. Branch-free, a PUBLIC
+// index, a PUBLIC shift amount (ADR 0048: a secret value shifted by a public amount
+// is constant-time) → no secret reaches a branch / index / divisor.
+fn i64_to_bytes(v: secret i64) -> [secret u8] {
+    let mut out: Vec<secret u8> = vec_new();
+    let mut k: i64 = 0;
+    while k < 8 {
+        push(&mut out, (v >> (8 * k)) as u8);
+        k = k + 1;
+    }
+    vec_to_array(out)
+}
+
+// Reassemble a `secret i64` from 8 little-endian secret bytes (the inverse). The
+// byte (a `secret u8`) zero-extends to a `secret i64`; the OR-accumulate is
+// branch-free → constant-time.
+fn bytes_to_i64(b: &[secret u8]) -> secret i64 {
+    let mut acc: secret i64 = 0;
+    let mut k: i64 = 0;
+    while k < 8 {
+        acc = acc | (((*b)[k] as i64) << (8 * k));
+        k = k + 1;
+    }
+    acc
+}
+
+// Declassify the first `n` bytes of a secret record to a PUBLIC [u8] — the sealed
+// ciphertext + tag are public, pipe-bound output (the sanctioned crypto declassify).
+fn declassify_record(r: &[secret u8], n: i64) -> [u8] {
+    let mut v: Vec<u8> = vec_new();
+    let mut i: i64 = 0;
+    while i < n { push(&mut v, declassify((*r)[i])); i = i + 1; }
+    vec_to_array(v)
+}
+
+// Widen a public [u8] frame back into the secret domain to feed the constant-time
+// open (widening only ADDS secrecy — always sound, ADR 0049).
+fn widen_record(p: &[u8]) -> [secret u8] {
+    let n: i64 = len(*p);
+    let mut v: Vec<secret u8> = vec_new();
+    let mut i: i64 = 0;
+    while i < n { push(&mut v, (*p)[i]); i = i + 1; }
+    vec_to_array(v)
+}
+
+// seal: AEAD-encrypt a `secret i64` under `key64` (a 64-byte session key) + `seqnr`
+// (the nonce) into a PUBLIC sealed frame. Reuses the verified-CT ssh record cipher;
+// the plaintext is never declassified — only the resulting ciphertext + tag.
+pub fn seal(key64: &[secret u8], seqnr: i64, v: secret i64) -> [u8] {
+    let payload: [secret u8] = i64_to_bytes(v);
+    let record: [secret u8] = ssh_seal(key64, seqnr, &payload);
+    declassify_record(&record, len(record))
+}
+
+// open: authenticate + AEAD-decrypt a PUBLIC sealed `frame` back to a `secret i64`.
+// `ok` = 1 iff the Poly1305 tag verifies (a branch-free constant-time compare whose
+// 1-bit verdict is the only declassify); `v` is the recovered secret (trust it only
+// when ok == 1). Never panics on a forgery.
+pub fn open(key64: &[secret u8], seqnr: i64, frame: &[u8]) -> OpenResult {
+    let record: [secret u8] = widen_record(frame);
+    let ok: i64 = ssh_open_verify(key64, seqnr, &record);
+    let payload: [secret u8] = ssh_open_payload(key64, seqnr, &record);
+    let v: secret i64 = bytes_to_i64(&payload);
+    OpenResult { ok: ok, v: v }
+}
+
+// Pack 8 PUBLIC little-endian bytes of `frame` starting at `off` into one i64
+// (the pipe carries public i64 frames via `process_send`).
+fn pack8(frame: &[u8], off: i64) -> i64 {
+    let mut w: i64 = 0;
+    let mut k: i64 = 0;
+    while k < 8 {
+        w = w | (u8_to_i64((*frame)[off + k]) << (8 * k));
+        k = k + 1;
+    }
+    w
+}
+
+// Append the 8 little-endian bytes of a PUBLIC i64 `w` onto `out`.
+fn unpack8(out: &mut Vec<u8>, w: i64) -> i64 {
+    let mut k: i64 = 0;
+    while k < 8 {
+        push(out, i64_to_u8((w >> (8 * k)) & 255));
+        k = k + 1;
+    }
+    0
+}
+
+// sealed_send: `seal` `v` and frame the resulting PUBLIC sealed ciphertext over the
+// channel's pipe as public i64 frames (`process_send`). The `secret` NEVER crosses
+// the pipe — only the ciphertext — so the structural D8 fence stays intact; the
+// value re-emerges `secret i64` only after `open` on the verified receiver. To send
+// a secret over a SealedChannel's pipe you MUST go through here: raw
+// `process_send(sealed_process(sc), <secret>)` is rejected structurally. That is
+// the fence-as-type (ADR 0069 D1). Returns 0 on success.
+pub fn sealed_send(sc: SealedChannel<secret i64>, key64: &[secret u8], seqnr: i64, v: secret i64) -> i64 {
+    let frame: [u8] = seal(key64, seqnr, v);
+    let p = sealed_process(sc);
+    let n: i64 = len(frame);
+    let mut off: i64 = 0;
+    while off < n {
+        process_send(p, pack8(&frame, off));
+        off = off + 8;
+    }
+    0
+}
+
+// sealed_recv: read the fixed-width sealed frame back off the channel's pipe (5
+// public i64 frames = 40 bytes for a `secret i64`, ADR 0069 D5) and `open` it. The
+// value re-emerges `secret i64` inside the returned OpenResult; check `.ok` first.
+pub fn sealed_recv(sc: SealedChannel<secret i64>, key64: &[secret u8], seqnr: i64) -> OpenResult {
+    let p = sealed_process(sc);
+    let mut buf: Vec<u8> = vec_new();
+    let mut i: i64 = 0;
+    while i < 5 {
+        let w: i64 = unwrap_or(process_recv(p), 0);
+        unpack8(&mut buf, w);
+        i = i + 1;
+    }
+    let frame: [u8] = vec_to_array(buf);
+    open(key64, seqnr, &frame)
+}

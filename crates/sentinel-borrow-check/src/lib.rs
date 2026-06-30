@@ -1478,6 +1478,8 @@ fn is_copy_type(ty: Type, program: &TypedProgram) -> bool {
         // ADR 0066 M2.1: a Process handle is pointer-like + Copy (runtime-owned;
         // `process_wait` consumes the child). Not codegen-drop.
         Type::Process => true,
+        // ADR 0066 M2.4a: a SealedChannel wraps a Process pipe — pointer-like + Copy.
+        Type::SealedChannel => true,
     }
 }
 

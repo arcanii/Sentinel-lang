@@ -48,7 +48,7 @@ use sentinel_resolve::{
     ClassId, EffectId, EnumId, FnId, ImplId, StructId, VarId, CHANNEL_CLOSE_FN_ID,
     CHANNEL_NEW_FN_ID, I64_TO_U8_FN_ID, IS_SOME_FN_ID, LEN_FN_ID, POP_FN_ID, PRINT_BYTES_FN_ID,
     PROCESS_READ_FN_ID, PROCESS_RECV_FN_ID, PROCESS_SEND_FN_ID, PROCESS_SPAWN_FN_ID,
-    PROCESS_WAIT_FN_ID, PROCESS_WRITE_FN_ID,
+    PROCESS_WAIT_FN_ID, PROCESS_WRITE_FN_ID, SEALED_CHANNEL_FN_ID, SEALED_PROCESS_FN_ID,
     PUSH_FN_ID, READ_FILE_FN_ID, RECV_FN_ID, SEND_FN_ID, STR_EQ_FN_ID, TCP_ACCEPT_FN_ID,
     TCP_CLOSE_FN_ID, TCP_CONNECT_FN_ID, TCP_LISTEN_FN_ID, TCP_LOCAL_PORT_FN_ID, TCP_READ_FN_ID,
     TCP_WRITE_FN_ID, U8_TO_I64_FN_ID, UNWRAP_OR_FN_ID, VEC_NEW_FN_ID, VEC_TO_ARRAY_FN_ID,
@@ -2006,6 +2006,8 @@ fn field_type_needs_drop_inner(
         // codegen-dropped (like Task).
         Type::Channel(_) => false,
         Type::Process => false,
+        // ADR 0066 M2.4a: a SealedChannel wraps a Process pipe — runtime-owned.
+        Type::SealedChannel => false,
         // Phase D.1 / ADR 0032 D6 (4/N): an enum owns its heap-boxed
         // payload, so it needs drop (free the payload box) iff *some*
         // variant carries a payload — a pure-unit enum (every variant
@@ -2172,6 +2174,9 @@ fn llvm_basic_type<'ctx>(
         Type::Channel(_) => context.ptr_type(inkwell::AddressSpace::default()).into(),
         // ADR 0066 M2.1: a Process handle lowers to an opaque ptr (*SentinelProcess).
         Type::Process => context.ptr_type(inkwell::AddressSpace::default()).into(),
+        // ADR 0066 M2.4a: a SealedChannel lowers to the same opaque ptr as Process
+        // (bridge (iii): it wraps the child's pipe handle).
+        Type::SealedChannel => context.ptr_type(inkwell::AddressSpace::default()).into(),
         // Phase D.1 / ADR 0032 D4: an enum lowers to the abi-v1
         // `{ i32 tag, ptr payload }` — a 4-byte discriminant (variant
         // index, source order) + an opaque pointer to a heap-allocated
@@ -2806,6 +2811,8 @@ fn mangle_type(ty: Type, program: &TypedProgram) -> String {
         Type::Channel(id) => format!("chan{}", id.0),
         // ADR 0066 M2.1: Process carries no TypeParam; defensive mangle label.
         Type::Process => "process".to_string(),
+        // ADR 0066 M2.4a: SealedChannel carries no TypeParam; defensive mangle label.
+        Type::SealedChannel => "sealedchannel".to_string(),
         // C4.1 / ADR 0022 D9: render class types by name.
         Type::Class(id) => program
             .class_decls
@@ -2874,6 +2881,8 @@ fn arg_contains_typeparam(
         // ADR 0066 M1.2: Channel<i64> carries no TypeParam.
         Type::Channel(_) => false,
         Type::Process => false,
+        // ADR 0066 M2.4a: SealedChannel carries no TypeParam.
+        Type::SealedChannel => false,
     }
 }
 
@@ -2941,6 +2950,7 @@ fn llvm_int_type<'ctx>(context: &'ctx Context, ty: Type) -> IntType<'ctx> {
         Type::Task(_) => panic!("llvm_int_type called on non-int Type::Task"),
         Type::Channel(_) => panic!("llvm_int_type called on non-int Type::Channel"),
         Type::Process => panic!("llvm_int_type called on non-int Type::Process"),
+        Type::SealedChannel => panic!("llvm_int_type called on non-int Type::SealedChannel"),
         Type::Class(_) => panic!("llvm_int_type called on non-int Type::Class"),
         Type::Enum(_) => panic!("llvm_int_type called on non-int Type::Enum"),
         Type::TraitSelf(_) => {
@@ -4662,6 +4672,10 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                 // ADR 0066 M2.1: a Process handle is a Copy pointer; the
                 // SentinelProcess is runtime-owned (freed when the program
                 // exits — no codegen-emitted drop).
+            }
+            Type::SealedChannel => {
+                // ADR 0066 M2.4a: a SealedChannel wraps the child's pipe (a Copy
+                // pointer); runtime-owned like Process — no codegen-emitted drop.
             }
             Type::Class(_) => {
                 // C4.1 / ADR 0022 D9: class drop reuses struct
@@ -7261,6 +7275,13 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                     let elem = type_args.first().copied().unwrap_or(Type::I64);
                     return self.lower_process_recv(&args[0], elem, program);
                 }
+                // ADR 0066 M2.4a / ADR 0069: the SealedChannel bridge builtins are
+                // identity-ptr passthroughs — `Process` and `SealedChannel` lower to
+                // the same opaque ptr (bridge (iii)), so re-typing is a value-level
+                // no-op. (The fence is enforced at typing, not codegen.)
+                if *id == SEALED_CHANNEL_FN_ID || *id == SEALED_PROCESS_FN_ID {
+                    return self.lower_expr(&args[0], program);
+                }
                 // C1.7.5 / ADR 0016 D7: user-defined generic-fn
                 // calls route to the monomorphic instance emitted
                 // in the pre-pass. Non-generic calls take the
@@ -7756,7 +7777,8 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                         .builder
                         .build_bit_cast(raw, self.context.f64_type(), "await_dec")
                         .map_err(|e| CodegenError::Builder(e.to_string()))?,
-                    Type::Ptr | Type::Task(_) | Type::Channel(_) => self
+                    // ADR 0066 M2.4a: SealedChannel is pointer-lowered like Channel.
+                    Type::Ptr | Type::Task(_) | Type::Channel(_) | Type::SealedChannel => self
                         .builder
                         .build_int_to_ptr(
                             raw,

@@ -1,15 +1,33 @@
 # ADR 0069: `SealedChannel<secret T>` — the AEAD-encrypted secret-cross-process path
 
-Status: **PROPOSED — design PINNED, implementation pending** — the M2.4 sub-phase
-of the ADR 0066 roadmap, broken out into its own ADR per **ADR 0066 D8a**
-("Because this is security-critical and crypto-bearing, M2.4 gets its own ADR").
-**The security-critical decisions D3/D4/D5/D9 are PINNED (maintainer sign-off
-2026-06-30):** D3 = reuse the ssh host-key authentication model (a); D4 =
+Status: **PROPOSED — design PINNED; M2.4a IMPLEMENTED (snc-side, 2026-06-30)** —
+the M2.4 sub-phase of the ADR 0066 roadmap, broken out into its own ADR per **ADR
+0066 D8a** ("Because this is security-critical and crypto-bearing, M2.4 gets its
+own ADR"). **The security-critical decisions D3/D4/D5/D9 are PINNED (maintainer
+sign-off 2026-06-30):** D3 = reuse the ssh host-key authentication model (a); D4 =
 counter-nonces + per-direction HKDF keys; D5 = fixed-width frames at the
 i64-minimum (padding with the later variable-length phase); D9 = add only
 `SealedChannel<secret T>` in v1 (leave M2.3's raw path as bare-`Process`
-builtins). Nothing is built yet; M2.4a (D7 minimum) is the first implementation
-sub-phase, snc-side first (like M2.3b).
+builtins).
+
+**M2.4a (D7 minimum) is now implemented snc-side** (the scg mirror is deferred,
+like M2.3b): a unit `Type::SealedChannel` interner variant (the fence-as-type, D1/D9)
++ two identity-ptr **bridge builtins** `sealed_channel(Process) -> SealedChannel` /
+`sealed_process(SealedChannel) -> Process` (FnId 31/32, user-fn base shift 31→33
+mirrored into `selfhost/` for differential parity — **no new runtime symbol**,
+abi-v1 untouched at 34) + a stdlib `std::security::sealed` module whose `seal`/`open`/
+`sealed_send`/`sealed_recv` reuse the **verified-CT ssh record cipher**
+(`ssh_seal`/`ssh_open_verify`/`ssh_open_payload`) — no new primitive (D2). `open`
+returns `OpenResult { ok: i64, v: secret i64 }` (`?(secret i64)` is unrepresentable —
+`NullableInner` has no `Secret` variant — so the public verdict is a separate field).
+The fixed-width frame is 40 bytes = 5 public i64 pipe frames over the M2.3
+`process_send`/`process_recv` (D5). Demonstrator `examples/lang/sealed_channel.sentinel`
+(an in-process `seal`→`open` round-trip — runtime-verified, the secret re-emerges
+secret and authenticated → exit 42 — plus a guarded pipe path); ui rejection
+`tests/ui/c66_sealed_channel_public_element` (a non-secret element is a type error,
+D1). Four-check green; both bootstrap fixed points byte-identical. M2.4a uses a FIXED
+pre-shared key + FIXED single-message nonce (the handshake D3 + counter-nonces D4 are
+**M2.4b**, next).
 
 Date: 2026-06-30
 

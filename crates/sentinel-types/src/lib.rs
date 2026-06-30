@@ -209,6 +209,20 @@ pub enum Type {
     /// `process_wait` consumes the child). Produced by `process_spawn`, consumed
     /// by `process_wait`.
     Process,
+    /// ADR 0066 M2.4a / ADR 0069: `SealedChannel<secret i64>` — the AEAD-encrypted
+    /// secret-cross-process endpoint (the cryptographic-`declassify` escape from the
+    /// D8 fence). Like [`Type::Process`] it is a **plain** handle — a unit variant
+    /// fixed at `secret i64` at the M2.4a minimum (no element type, so NOT
+    /// interner-generic; M2.4c promotes it to `SealedChannel(SealId)` carrying a
+    /// generic `secret T`). It lowers to the same opaque `ptr` as `Process` (bridge
+    /// (iii): a `SealedChannel` *wraps* the child's pipe — the AEAD key is threaded as
+    /// an ordinary `[secret i32]` value, never stored behind the handle). `Copy`
+    /// (pointer-like, runtime-owned). Produced by the `sealed_channel(Process)` bridge
+    /// builtin; the underlying `Process` is recovered by `sealed_process(SealedChannel)`
+    /// for the stdlib `seal`/`open` framing. The distinct type is what makes the fence a
+    /// **static** property (ADR 0069 D1/D9): a `secret` may cross the pipe only after
+    /// `seal` (a cryptographic declassify), never raw.
+    SealedChannel,
 }
 
 /// Identifier for an interned reference type. C2 / ADR 0017 D11.
@@ -764,6 +778,8 @@ impl Type {
             // is not a nullable payload nor an array element at M1.2).
             | Type::Channel(_)
             | Type::Process
+            // ADR 0066 M2.4a: no `?SealedChannel` (a handle, like `Process`).
+            | Type::SealedChannel
             | Type::Class(_)
             | Type::TraitSelf(_)
             // Phase D.1 / ADR 0032: `?Enum` is out of scope at the MVP
@@ -819,6 +835,8 @@ impl Type {
             // is not a nullable payload nor an array element at M1.2).
             | Type::Channel(_)
             | Type::Process
+            // ADR 0066 M2.4a: no `[SealedChannel]` (a handle, like `Process`).
+            | Type::SealedChannel
             | Type::Class(_)
             | Type::TraitSelf(_)
             // Phase D.1 / ADR 0032: `[Enum]` is out of scope at the MVP
@@ -902,6 +920,8 @@ impl Type {
             // is not a nullable payload nor an array element at M1.2).
             | Type::Channel(_)
             | Type::Process
+            // ADR 0066 M2.4a: no `Vec<SealedChannel>` (a handle, like `Process`).
+            | Type::SealedChannel
             | Type::Class(_)
             | Type::TraitSelf(_)
             | Type::Enum(_) => None,
@@ -1098,6 +1118,8 @@ impl Type {
             Type::Channel(_) => self,
             // ADR 0066 M2.1: `Process` carries no TypeParam — pass through.
             Type::Process => self,
+            // ADR 0066 M2.4a: `SealedChannel` carries no TypeParam — pass through.
+            Type::SealedChannel => self,
         }
     }
 
@@ -1234,6 +1256,8 @@ pub fn is_spawn_word_scalar(ty: Type) -> bool {
             // point of the worker pattern.
             | Type::Channel(_)
             | Type::Process
+            // ADR 0066 M2.4a: a `SealedChannel` handle is a pointer (like `Process`).
+            | Type::SealedChannel
     )
 }
 
@@ -1423,6 +1447,8 @@ pub fn type_display(ty: Type, program: Option<&TypedProgram>) -> String {
         }
         // ADR 0066 M2.1: a plain `Process` handle (no element type).
         Type::Process => "Process".to_string(),
+        // ADR 0066 M2.4a: the `secret i64`-minimum sealed endpoint (unit variant).
+        Type::SealedChannel => "SealedChannel<secret i64>".to_string(),
         Type::Class(id) => match program.and_then(|p| p.class_decls.get(id.0 as usize)) {
             Some(c) => c.name.clone(),
             None => format!("<class#{}>", id.0),
@@ -1465,6 +1491,7 @@ impl std::fmt::Display for Type {
             Type::Task(id) => write!(f, "<task#{}>", id.0),
             Type::Channel(id) => write!(f, "<channel#{}>", id.0),
             Type::Process => write!(f, "Process"),
+            Type::SealedChannel => write!(f, "SealedChannel"),
             Type::Class(id) => write!(f, "<class#{}>", id.0),
             Type::TraitSelf(id) => write!(f, "<Self-trait#{}>", id.0),
             Type::Enum(id) => write!(f, "<enum#{}>", id.0),
@@ -1782,6 +1809,44 @@ fn resolve_type_expr_with_scope(
                         });
                     }
                     Ok(Type::Channel(ChanId(0)))
+                }
+                // ADR 0066 M2.4a / ADR 0069: `SealedChannel<secret i64>` in type
+                // position — so the stdlib `seal`/`open` framing fns can take a
+                // sealed endpoint as a parameter. The element MUST be `secret i64`
+                // at the M2.4a minimum (D1: a public element is a type error —
+                // sealing a public value is pointless; generic `secret T` is M2.4c).
+                // A unit `Type::SealedChannel` (no interner) — fixed at `secret i64`.
+                "SealedChannel" => {
+                    if args.len() != 1 {
+                        return Err(TypeError::TypeArgCountMismatch {
+                            type_name: "SealedChannel".to_string(),
+                            expected: 1,
+                            found: args.len(),
+                            span: to_source_span(&te.span),
+                        });
+                    }
+                    let elem_ty = resolve_type_expr_with_scope(
+                        &args[0],
+                        struct_table,
+                        class_table,
+                        enum_table,
+                        type_param_scope,
+                        instances,
+                        refs,
+                        secrets,
+                        arrays,
+                        struct_type_param_counts,
+                    )?;
+                    let is_secret_i64 = match elem_ty {
+                        Type::Secret(id) => secrets[id.0 as usize].inner == Type::I64,
+                        _ => false,
+                    };
+                    if !is_secret_i64 {
+                        return Err(TypeError::SealedChannelElementNotSupported {
+                            span: to_source_span(&te.span),
+                        });
+                    }
+                    Ok(Type::SealedChannel)
                 }
                 other => {
                     let struct_id = match struct_table.get(other) {
@@ -3299,6 +3364,21 @@ pub enum TypeError {
         span: miette::SourceSpan,
     },
 
+    /// ADR 0066 M2.4a / ADR 0069 D1: a `SealedChannel<…>` type annotation's
+    /// element must be `secret i64` at the M2.4a minimum. A *non-secret* element
+    /// (`SealedChannel<i64>`) is a type error — sealing a public value is
+    /// pointless (use the raw `process_send` path). Generic `secret T` + a wider
+    /// payload are M2.4c.
+    #[error("`SealedChannel<T>` element type must be `secret i64`")]
+    #[diagnostic(
+        code(sentinel::types::sealed_channel_element_not_supported),
+        help("a SealedChannel carries an encrypted SECRET — write `SealedChannel<secret i64>` (a public element is pointless; use the raw `process_send` path); generic `secret T` is a follow-on")
+    )]
+    SealedChannelElementNotSupported {
+        #[label("unsupported SealedChannel element type here")]
+        span: miette::SourceSpan,
+    },
+
     /// C1.7 / ADR 0016 D11: `fn main` cannot be generic (the C ABI
     /// is monomorphic; main is the program entry point).
     #[error("`fn main` cannot have type parameters")]
@@ -4631,6 +4711,11 @@ pub fn check_module(
         // `i64`, so the cross-process secret fence is structural (a `secret i64`
         // arg to `process_send` is a type mismatch); all effect-free.
         let opt_i64 = Type::Nullable(NullableInner::I64);
+        // ADR 0066 M2.4a / ADR 0069: the `SealedChannel` bridge builtins —
+        // `sealed_channel(p: Process) -> SealedChannel` re-types the pipe as the
+        // encrypted endpoint (the fence-as-type, D1/D9); `sealed_process(sc) ->
+        // Process` recovers it for the stdlib seal/open framing. Both effect-free
+        // (no I/O; they re-type an already-acquired handle) and identity in codegen.
         let process_sigs: &[(usize, &[Type], Type, &[EffectId])] = &[
             (25, &[bytes_ty, argv_ty], Type::Process, &[subprocess_eid]), // process_spawn
             (26, &[Type::Process], Type::I64, &[]),                       // process_wait
@@ -4638,6 +4723,8 @@ pub fn check_module(
             (28, &[Type::Process], bytes_ty, &[]),                        // process_read
             (29, &[Type::Process, Type::I64], Type::I64, &[]),            // process_send
             (30, &[Type::Process], opt_i64, &[]),                        // process_recv
+            (31, &[Type::Process], Type::SealedChannel, &[]),            // sealed_channel
+            (32, &[Type::SealedChannel], Type::Process, &[]),            // sealed_process
         ];
         for (idx, params, ret, eff) in process_sigs {
             let sig = &program.fn_signatures[*idx];
@@ -6712,6 +6799,8 @@ fn try_substitute(
         Type::Channel(_) => Some(ty),
         // ADR 0066 M2.1: `Process` carries no TypeParam.
         Type::Process => Some(ty),
+        // ADR 0066 M2.4a: `SealedChannel` carries no TypeParam.
+        Type::SealedChannel => Some(ty),
     }
 }
 
@@ -6765,6 +6854,8 @@ fn contains_type_param(
         // ADR 0066 M1.2: `Channel<i64>` carries no TypeParam.
         Type::Channel(_) => false,
         Type::Process => false,
+        // ADR 0066 M2.4a: `SealedChannel` carries no TypeParam.
+        Type::SealedChannel => false,
     }
 }
 
@@ -10002,6 +10093,11 @@ fn type_error_to_diagnostic(err: &TypeError) -> Diagnostic {
             "`Vec<T>` element type is not supported at the D.3 MVP".to_string(),
             span.offset()..(span.offset() + span.len()),
         ),
+        TypeError::SealedChannelElementNotSupported { span } => (
+            "sentinel::types::sealed_channel_element_not_supported",
+            "`SealedChannel<T>` element type must be `secret i64`".to_string(),
+            span.offset()..(span.offset() + span.len()),
+        ),
         TypeError::ChannelElementNotSupported { span } => (
             "sentinel::types::channel_element_not_supported",
             "`Channel<T>` element type is not supported yet".to_string(),
@@ -10485,7 +10581,10 @@ mod tests {
         assert_eq!(p.fn_signatures[28].name, "process_read");
         assert_eq!(p.fn_signatures[29].name, "process_send");
         assert_eq!(p.fn_signatures[30].name, "process_recv");
-        assert_eq!(p.fn_signatures[31].name, "main");
+        // ADR 0066 M2.4a: the SealedChannel bridge builtins occupy FnId(31..=32).
+        assert_eq!(p.fn_signatures[31].name, "sealed_channel");
+        assert_eq!(p.fn_signatures[32].name, "sealed_process");
+        assert_eq!(p.fn_signatures[33].name, "main");
         assert!(p.signature(main.id).is_main);
     }
 

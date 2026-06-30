@@ -126,7 +126,7 @@ fn type_fn(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u
         0
     };
     append_str(out, "(fn #");
-    append_int(out, 31 + fnidx);
+    append_int(out, 33 + fnidx);
     push(out, ' ');
     append_slice(out, src, name_s, name_e);
     append_str(out, " (");

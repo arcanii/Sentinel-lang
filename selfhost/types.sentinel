@@ -747,7 +747,7 @@ pub fn run(src: [u8], mode: i64, result: &mut Vec<u8>) -> i64 {
             // modes 0–3 it's dumped normally.
             let cg_skip_gen: bool = ctx.mode == 4 && ctx.uftp[fnct] > 0;
             if cg_skip_gen {
-                push(&mut ctx.cggfn_id, 31 + fnct);
+                push(&mut ctx.cggfn_id, 33 + fnct);
                 push(&mut ctx.cggfn_pos, itempos[ia]);
                 0
             } else {
@@ -968,7 +968,7 @@ pub fn run(src: [u8], mode: i64, result: &mut Vec<u8>) -> i64 {
             ctx.cg_mono_on = true;
             let mut mcur: i64 = mpos;
             let mut mbuf: Vec<u8> = vec_new();
-            type_fn(&mut mbuf, &kinds, &starts, &ends, &src, &mut mcur, &mut ctx, &mut garbage, mfid - 31);
+            type_fn(&mut mbuf, &kinds, &starts, &ends, &src, &mut mcur, &mut ctx, &mut garbage, mfid - 33);
             let _mbx: [u8] = vec_to_array(mbuf);
             ctx.cg_mono_on = false;
             mqi = mqi + 1;
@@ -1250,7 +1250,7 @@ pub fn dump_moves(c: &mut TyCtx, src: &[u8], out: &mut Vec<u8>) -> i64 {
     let mut i: i64 = 0;
     while i < nf {
         append_str(out, "(fn #");
-        append_int(out, 31 + i);
+        append_int(out, 33 + i);
         push(out, ' ');
         append_slice(out, src, (*c).ufs[i], (*c).ufe[i]);
         let mut vid: i64 = 0;

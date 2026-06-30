@@ -1,0 +1,78 @@
+// ADR 0066 M2.4a / ADR 0069: SealedChannel<secret i64> — the AEAD-encrypted
+// secret-cross-process path (the D8a escape from the D8 cross-process secret fence).
+//
+// A `secret` may not cross a process boundary over the public pipe (the raw
+// `process_send` rejects a `secret` — the structural D8 fence). The sanctioned
+// escape is a CRYPTOGRAPHIC declassify: `seal` AEAD-encrypts a `secret i64` so only
+// PUBLIC ciphertext touches the pipe, and `open` decrypts it so the value re-emerges
+// `secret i64` on the verified receiver (whose `secret_leak` keeps constant-time
+// intact). This composes the shipped verified-CT chacha20-poly1305 record cipher —
+// NO new cryptographic primitive (ADR 0069 D2).
+//
+// !!! M2.4a SECURITY SCOPE: a FIXED pre-shared key + FIXED single-message nonce.
+// Nonce reuse under ChaCha20-Poly1305 is catastrophic (ADR 0069 D4); sound ONLY
+// because this seals at most ONE message per direction. The authenticated x25519
+// handshake (D3) + per-direction HKDF keys + counter-nonces (D4) are M2.4b. This is
+// a CRYPTOGRAPHIC guarantee (+ key management), NOT machine-verified CT (D8). !!!
+//
+// snc-side demonstrator: the scg mirror of `seal`/`open` + the bridge builtins is
+// deferred (like `process_channel_typed` / `task_generic`), so it lives in
+// `examples/` (OUT of the self-host differential corpus). Built BOTH `--separate`
+// and merged; exit 42.
+use std::security::sealed::seal;
+use std::security::sealed::open;
+use std::security::sealed::sealed_send;
+use std::security::sealed::sealed_recv;
+use std::security::sealed::OpenResult;
+
+// A fixed 64-byte demo session key. M2.4a is pre-shared; M2.4b derives this via the
+// authenticated x25519 handshake over the pipe (D3) — `seal`/`open`'s `key64`
+// parameter is unchanged, so only the key's SOURCE changes.
+fn demo_key() -> [secret u8] {
+    let mut v: Vec<secret u8> = vec_new();
+    let mut i: i64 = 0;
+    while i < 64 {
+        push(&mut v, i64_to_u8((i * 7 + 13) & 255));
+        i = i + 1;
+    }
+    vec_to_array(v)
+}
+
+// The GUARDED pipe path: spawn a child, wrap its pipe as a SealedChannel<secret i64>,
+// `sealed_send` a secret over it, and `sealed_recv` the echo. GUARDED behind a
+// runtime-false flag for cross-platform determinism (both branches still lower, so
+// the sealed_send/sealed_recv + bridge-builtin codegen is exercised) — the real
+// child round-trip is an M2.4b concern. `process_spawn` carries `Subprocess`, which
+// bubbles to `main` (exempt). Demonstrates the fence-as-type: to put a secret on
+// this pipe you MUST seal — raw `process_send(sealed_process(sc), <secret>)` is a
+// type error.
+fn pipe_path(key: &[secret u8], v: secret i64) -> i64 ! { Subprocess } {
+    let argv: [[u8]] = ["-"];
+    let p = process_spawn("cat", argv);
+    let sc = sealed_channel(p);
+    let sent: i64 = sealed_send(sc, key, 0, v);
+    let r: OpenResult = sealed_recv(sc, key, 0);
+    process_wait(p) + sent + r.ok
+}
+
+fn main() -> i64 {
+    let key: [secret u8] = demo_key();
+    let sv: secret i64 = 42;
+
+    // (1) In-process seal -> open round-trip: REAL crypto, runtime-verified. The
+    //     plaintext never leaves the secret domain un-encrypted; `open` re-emerges
+    //     it as `secret i64`. We declassify the AUTHENTICATED result as the exit
+    //     code (a deliberate, legitimate declassify — it proves the value survived).
+    let frame: [u8] = seal(&key, 0, sv);
+    let r: OpenResult = open(&key, 0, &frame);
+
+    // (2) The pipe-framed path: compiled (type/CT/codegen-checked) but guarded.
+    let probe: bool = false;
+    let viapipe: i64 = if probe { pipe_path(&key, sv) } else { 0 };
+
+    if r.ok == 1 {
+        declassify(r.v) + viapipe
+    } else {
+        0
+    }
+}
