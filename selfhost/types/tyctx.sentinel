@@ -197,6 +197,8 @@ fn new_tyctx(mode: i64) -> TyCtx {
         cg_used_channelsend: false,
         cg_used_channelrecv: false,
         cg_used_channelclose: false,
+        cg_used_procspawn: false,
+        cg_used_procwait: false,
         cg_scope: 0 - 1,
         cg_spawn_t: vec_new(),
         cg_eff: false,

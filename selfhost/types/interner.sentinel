@@ -59,6 +59,9 @@ fn mk_task(c: &mut TyCtx, elem: i64) -> i64 { intern_type(c, 12, elem, 0) }
 // (ADR 0066 M1.2) a `Channel<T>` handle (interner kind 13; a = the element type
 // handle); renders `Channel<T>`. Lowers to an opaque `ptr` (*SentinelChannel).
 fn mk_channel(c: &mut TyCtx, elem: i64) -> i64 { intern_type(c, 13, elem, 0) }
+// (ADR 0066 M2.1) a `Process` handle (interner kind 14; a plain handle, no
+// element); renders `Process`. Lowers to an opaque `ptr` (*SentinelProcess).
+fn mk_process(c: &mut TyCtx) -> i64 { intern_type(c, 14, 0, 0) }
 
 // --- (4h) type-param scope --------------------------------------------------
 
@@ -421,6 +424,9 @@ fn render_type(out: &mut Vec<u8>, h: i64, c: &mut TyCtx) -> i64 {
             append_str(out, "Channel<");
             render_type(out, a, c);
             push(out, '>')
+        } else if k == 14 {
+            // (ADR 0066 M2.1) Process: a plain handle (no element).
+            append_str(out, "Process")
         } else {
             append_str(out, "??")
         }
@@ -1261,6 +1267,10 @@ fn builtin_id(q: &[u8]) -> i64 {
         23
     } else if name_eq_lit(q, "channel_close") {
         24
+    } else if name_eq_lit(q, "process_spawn") {
+        25
+    } else if name_eq_lit(q, "process_wait") {
+        26
     } else {
         0 - 1
     }
@@ -1285,6 +1295,9 @@ fn builtin_ret(c: &mut TyCtx, fid: i64) -> i64 {
         mk_channel(c, 0)
     } else if fid == 23 {
         mk_nullable(c, 0)
+    } else if fid == 25 {
+        // (ADR 0066 M2.1) process_spawn(...) -> Process.
+        mk_process(c)
     } else {
         0
     }
@@ -1303,7 +1316,7 @@ fn fn_lookup(c: &mut TyCtx, src: &[u8], q: &[u8]) -> i64 {
         while i < n {
             if found == 0 - 1 {
                 if name_eq_src(src, (*c).ufs[i], (*c).ufe[i], q) {
-                    found = 25 + i;
+                    found = 27 + i;
                     0
                 } else {
                     0
@@ -1320,10 +1333,10 @@ fn fn_lookup(c: &mut TyCtx, src: &[u8], q: &[u8]) -> i64 {
 
 // The return-type handle for a resolved FnId.
 fn fn_ret(c: &mut TyCtx, fid: i64) -> i64 {
-    if fid < 25 {
+    if fid < 27 {
         builtin_ret(c, fid)
     } else {
-        (*c).ufret[fid - 25]
+        (*c).ufret[fid - 27]
     }
 }
 

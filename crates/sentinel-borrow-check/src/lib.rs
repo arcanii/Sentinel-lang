@@ -1475,6 +1475,9 @@ fn is_copy_type(ty: Type, program: &TypedProgram) -> bool {
         // producer↔consumer by copying; it is the values that move on
         // `send`, not the handle). Runtime-reclaimed, not codegen-drop.
         Type::Channel(_) => true,
+        // ADR 0066 M2.1: a Process handle is pointer-like + Copy (runtime-owned;
+        // `process_wait` consumes the child). Not codegen-drop.
+        Type::Process => true,
     }
 }
 

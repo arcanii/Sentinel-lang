@@ -273,6 +273,10 @@ fn builtin_id(q: &[u8]) -> i64 {
         23
     } else if name_eq_lit(q, "channel_close") {
         24
+    } else if name_eq_lit(q, "process_spawn") {
+        25
+    } else if name_eq_lit(q, "process_wait") {
+        26
     } else {
         0 - 1
     }
@@ -291,7 +295,7 @@ fn fn_lookup(c: &mut RCtx, src: &[u8], q: &[u8]) -> i64 {
         while i < n {
             if found == 0 - 1 {
                 if name_eq_src(src, (*c).ufs[i], (*c).ufe[i], q) {
-                    found = 25 + i;
+                    found = 27 + i;
                     0
                 } else {
                     0

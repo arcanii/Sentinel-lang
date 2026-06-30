@@ -258,17 +258,17 @@ fn cg_emit_spawn_wrapper(c: &mut TyCtx, fid: i64, src: &[u8]) -> i64 {
     // the wrappers land LAST — after the fns + class/impl methods (the oracle's order).
     (*c).cg_to_body = false;
     (*c).cg_to_cls = true;
-    let ns: i64 = (*c).ufs[fid - 25];
-    let ne: i64 = (*c).ufe[fid - 25];
-    let np: i64 = (*c).ufpe[fid - 25] - (*c).ufps[fid - 25];
+    let ns: i64 = (*c).ufs[fid - 27];
+    let ne: i64 = (*c).ufe[fid - 27];
+    let np: i64 = (*c).ufpe[fid - 27] - (*c).ufps[fid - 27];
     cgo_str(c, "define void @__spawn_wrapper_");
     cgo_int(c, fid);
     cgo_str(c, "(ptr %arg0, ptr %arg1) {\nentry:\n");
     // ADR 0066 M1.1: load each arg with its real param type + encode the result into
     // the Task's i64 slot (mirrors the oracle's dump_spawn_wrapper). i64 args/result are
     // byte-identical to C4.4.
-    let ps: i64 = (*c).ufps[fid - 25];
-    let reth: i64 = strip_secret(c, (*c).ufret[fid - 25]);
+    let ps: i64 = (*c).ufps[fid - 27];
+    let reth: i64 = strip_secret(c, (*c).ufret[fid - 27]);
     let mut loads: Vec<i64> = vec_new();
     let mut ptys: Vec<i64> = vec_new();
     let mut i: i64 = 0;
@@ -583,6 +583,40 @@ fn cg_emit_call(c: &mut TyCtx, src: &[u8], fid: i64, snap: i64, rty: i64) -> i64
         cgo_str(c, ")\n");
         (*c).cg_used_channelclose = true;
         cg_reg(c, cc_d);
+        0
+    } else if fid == 25 {
+        // (ADR 0066 M2.1) process_spawn(path: [u8], args: [[u8]]) -> Process (ptr).
+        // Decompose path + args into (len, ptr) pairs (args ptr = argv element
+        // buffer, args len = argc), then call sentinel_process_spawn.
+        let ps_pk: i64 = (*c).cgak[snap];
+        let ps_pv: i64 = (*c).cgav[snap];
+        let ps_ak: i64 = (*c).cgak[snap + 1];
+        let ps_av: i64 = (*c).cgav[snap + 1];
+        let pspl: i64 = cg_lenptr(c, ps_pk, ps_pv);
+        let psal: i64 = cg_lenptr(c, ps_ak, ps_av);
+        let ps_d: i64 = cg_dst(c);
+        cgo_str(c, "call ptr @sentinel_process_spawn(ptr %v");
+        cgo_int(c, pspl + 1);
+        cgo_str(c, ", i64 %v");
+        cgo_int(c, pspl);
+        cgo_str(c, ", ptr %v");
+        cgo_int(c, psal + 1);
+        cgo_str(c, ", i64 %v");
+        cgo_int(c, psal);
+        cgo_str(c, ")\n");
+        (*c).cg_used_procspawn = true;
+        cg_reg(c, ps_d);
+        0
+    } else if fid == 26 {
+        // (ADR 0066 M2.1) process_wait(p) -> i64 exit code.
+        let pw_pk: i64 = (*c).cgak[snap];
+        let pw_pv: i64 = (*c).cgav[snap];
+        let pw_d: i64 = cg_dst(c);
+        cgo_str(c, "call i64 @sentinel_process_wait(ptr ");
+        cgo_operand(c, pw_pk, pw_pv);
+        cgo_str(c, ")\n");
+        (*c).cg_used_procwait = true;
+        cg_reg(c, pw_d);
         0
     } else if fid == 12 {
         // (8d) write_file(path, data) -> i64.
@@ -902,11 +936,11 @@ fn cg_emit_call(c: &mut TyCtx, src: &[u8], fid: i64, snap: i64, rty: i64) -> i64
         cgo_str(c, ", 1\n");
         cg_reg(c, vt_a1);
         0
-    } else if fid >= 25 {
+    } else if fid >= 27 {
         // (Bar B / effects c35b) a call to an effecting fn yields a Kont* (`ptr`), not
         // its declared return type — and a tail effecting-call makes the caller's tail
         // kont-producing (so an enclosing effecting fn returns it as-is).
-        let efc: bool = (*c).ufeff[fid - 25] != 0;
+        let efc: bool = (*c).ufeff[fid - 27] != 0;
         let d: i64 = cg_dst(c);
         cgo_str(c, "call ");
         if efc {
@@ -915,12 +949,12 @@ fn cg_emit_call(c: &mut TyCtx, src: &[u8], fid: i64, snap: i64, rty: i64) -> i64
             cgo_ty(c, rty)
         };
         cgo_str(c, " @");
-        let us: i64 = (*c).ufs[fid - 25];
-        let ue: i64 = (*c).ufe[fid - 25];
+        let us: i64 = (*c).ufs[fid - 27];
+        let ue: i64 = (*c).ufe[fid - 27];
         cgo_slice(c, src, us, ue);
         // (Bar B / generics-b) a generic callee resolves to its monomorphic symbol
         // `name__<arg0>__…`; `cg_targs` was set by the preceding `dump_generic_call`.
-        if (*c).uftp[fid - 25] > 0 {
+        if (*c).uftp[fid - 27] > 0 {
             let ctargs: Vec<i64> = cg_copy_targs(c, 1);
             cg_emit_mono_suffix(c, &ctargs);
             0

@@ -47,6 +47,7 @@ use sentinel_hir::HirProgram;
 use sentinel_resolve::{
     ClassId, EffectId, EnumId, FnId, ImplId, StructId, VarId, CHANNEL_CLOSE_FN_ID,
     CHANNEL_NEW_FN_ID, I64_TO_U8_FN_ID, IS_SOME_FN_ID, LEN_FN_ID, POP_FN_ID, PRINT_BYTES_FN_ID,
+    PROCESS_SPAWN_FN_ID, PROCESS_WAIT_FN_ID,
     PUSH_FN_ID, READ_FILE_FN_ID, RECV_FN_ID, SEND_FN_ID, STR_EQ_FN_ID, TCP_ACCEPT_FN_ID,
     TCP_CLOSE_FN_ID, TCP_CONNECT_FN_ID, TCP_LISTEN_FN_ID, TCP_LOCAL_PORT_FN_ID, TCP_READ_FN_ID,
     TCP_WRITE_FN_ID, U8_TO_I64_FN_ID, UNWRAP_OR_FN_ID, VEC_NEW_FN_ID, VEC_TO_ARRAY_FN_ID,
@@ -625,6 +626,19 @@ pub fn compile_to_object_for_module(
     );
     let channel_close_fn = module.add_function(
         "sentinel_channel_close",
+        i64_ty.fn_type(&[ptr_ty.into()], false),
+        None,
+    );
+    // ADR 0066 M2.1: declare the subprocess runtime symbols (cross-platform).
+    // `sentinel_process_spawn(path, path_len, argv, argc) -> ptr` (null on
+    // failure), `sentinel_process_wait(ptr) -> i64` (exit code / -1).
+    let process_spawn_fn = module.add_function(
+        "sentinel_process_spawn",
+        ptr_ty.fn_type(&[ptr_ty.into(), i64_ty.into(), ptr_ty.into(), i64_ty.into()], false),
+        None,
+    );
+    let process_wait_fn = module.add_function(
+        "sentinel_process_wait",
         i64_ty.fn_type(&[ptr_ty.into()], false),
         None,
     );
@@ -1294,6 +1308,8 @@ pub fn compile_to_object_for_module(
             channel_send_fn,
             channel_recv_fn,
             channel_close_fn,
+            process_spawn_fn,
+            process_wait_fn,
             arena_enter_fn,
             arena_alloc_fn,
             arena_exit_fn,
@@ -1553,6 +1569,9 @@ struct CodegenCtx<'ctx, 'plan> {
     channel_send_fn: FunctionValue<'ctx>,
     channel_recv_fn: FunctionValue<'ctx>,
     channel_close_fn: FunctionValue<'ctx>,
+    /// ADR 0066 M2.1: the subprocess runtime symbols.
+    process_spawn_fn: FunctionValue<'ctx>,
+    process_wait_fn: FunctionValue<'ctx>,
     /// C5.4 (2/N) / ADR 0028: `sentinel_arena_enter(i64) -> *arena`
     /// creates a per-scope broker bump arena (capacity 0 → default).
     arena_enter_fn: FunctionValue<'ctx>,
@@ -1948,6 +1967,7 @@ fn field_type_needs_drop_inner(
         // ADR 0066 M1.2: a Channel handle is runtime-reclaimed, not
         // codegen-dropped (like Task).
         Type::Channel(_) => false,
+        Type::Process => false,
         // Phase D.1 / ADR 0032 D6 (4/N): an enum owns its heap-boxed
         // payload, so it needs drop (free the payload box) iff *some*
         // variant carries a payload — a pure-unit enum (every variant
@@ -2112,6 +2132,8 @@ fn llvm_basic_type<'ctx>(
         // ADR 0066 M1.2: a Channel lowers to an opaque pointer
         // (*SentinelChannel); the runtime owns the struct layout.
         Type::Channel(_) => context.ptr_type(inkwell::AddressSpace::default()).into(),
+        // ADR 0066 M2.1: a Process handle lowers to an opaque ptr (*SentinelProcess).
+        Type::Process => context.ptr_type(inkwell::AddressSpace::default()).into(),
         // Phase D.1 / ADR 0032 D4: an enum lowers to the abi-v1
         // `{ i32 tag, ptr payload }` — a 4-byte discriminant (variant
         // index, source order) + an opaque pointer to a heap-allocated
@@ -2744,6 +2766,8 @@ fn mangle_type(ty: Type, program: &TypedProgram) -> String {
         Type::Task(id) => format!("task{}", id.0),
         // ADR 0066 M1.2: Channel<i64> carries no TypeParam; defensive label.
         Type::Channel(id) => format!("chan{}", id.0),
+        // ADR 0066 M2.1: Process carries no TypeParam; defensive mangle label.
+        Type::Process => "process".to_string(),
         // C4.1 / ADR 0022 D9: render class types by name.
         Type::Class(id) => program
             .class_decls
@@ -2811,6 +2835,7 @@ fn arg_contains_typeparam(
         Type::Task(_) => false,
         // ADR 0066 M1.2: Channel<i64> carries no TypeParam.
         Type::Channel(_) => false,
+        Type::Process => false,
     }
 }
 
@@ -2877,6 +2902,7 @@ fn llvm_int_type<'ctx>(context: &'ctx Context, ty: Type) -> IntType<'ctx> {
         ),
         Type::Task(_) => panic!("llvm_int_type called on non-int Type::Task"),
         Type::Channel(_) => panic!("llvm_int_type called on non-int Type::Channel"),
+        Type::Process => panic!("llvm_int_type called on non-int Type::Process"),
         Type::Class(_) => panic!("llvm_int_type called on non-int Type::Class"),
         Type::Enum(_) => panic!("llvm_int_type called on non-int Type::Enum"),
         Type::TraitSelf(_) => {
@@ -4594,6 +4620,11 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                 // ADR 0066 M1.2: Channel cleanup is the runtime's job;
                 // no codegen-emitted drop (the handle is a Copy pointer).
             }
+            Type::Process => {
+                // ADR 0066 M2.1: a Process handle is a Copy pointer; the
+                // SentinelProcess is runtime-owned (freed when the program
+                // exits — no codegen-emitted drop).
+            }
             Type::Class(_) => {
                 // C4.1 / ADR 0022 D9: class drop reuses struct
                 // recursive field drop machinery. Classes own
@@ -5966,6 +5997,71 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
             .expect("sentinel_channel_close returns i64"))
     }
 
+    /// ADR 0066 M2.1: `process_spawn(path: [u8], args: [[u8]]) -> Process`.
+    /// Decompose `path` ([u8] = `{i64 len, ptr data}`) into (data, len) and
+    /// `args` ([[u8]] = `{i64 len, ptr data}`) into (data = argv element buffer,
+    /// len = argc), then call `sentinel_process_spawn(path_ptr, path_len, argv,
+    /// argc) -> ptr` (the `Process` handle).
+    fn lower_process_spawn(
+        &mut self,
+        path: &TypedExpr,
+        args: &TypedExpr,
+        program: &TypedProgram,
+    ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+        let path_val = self.lower_expr(path, program)?.into_struct_value();
+        let path_len = self
+            .builder
+            .build_extract_value(path_val, 0, "ps_path_len")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?
+            .into_int_value();
+        let path_ptr = self
+            .builder
+            .build_extract_value(path_val, 1, "ps_path_ptr")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?
+            .into_pointer_value();
+        let args_val = self.lower_expr(args, program)?.into_struct_value();
+        let argc = self
+            .builder
+            .build_extract_value(args_val, 0, "ps_argc")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?
+            .into_int_value();
+        let argv = self
+            .builder
+            .build_extract_value(args_val, 1, "ps_argv")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?
+            .into_pointer_value();
+        let call = self
+            .builder
+            .build_call(
+                self.process_spawn_fn,
+                &[path_ptr.into(), path_len.into(), argv.into(), argc.into()],
+                "process_spawn",
+            )
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        Ok(call
+            .try_as_basic_value()
+            .left()
+            .expect("sentinel_process_spawn returns ptr"))
+    }
+
+    /// ADR 0066 M2.1: `process_wait(p: Process) -> i64` — block for the child's
+    /// exit, returning its exit code (or -1 on error).
+    fn lower_process_wait(
+        &mut self,
+        p: &TypedExpr,
+        program: &TypedProgram,
+    ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+        let p_v = self.lower_expr(p, program)?.into_pointer_value();
+        let call = self
+            .builder
+            .build_call(self.process_wait_fn, &[p_v.into()], "process_wait")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        Ok(call
+            .try_as_basic_value()
+            .left()
+            .expect("sentinel_process_wait returns i64"))
+    }
+
     /// D.3 / ADR 0034 D7: lower `vec_new() -> Vec<T>` to an empty vector
     /// value `{ i64 len = 0, i64 cap = 0, ptr data = null }`. No
     /// allocation happens until the first `push` (`realloc(null, …)` ==
@@ -6879,6 +6975,13 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                 }
                 if *id == CHANNEL_CLOSE_FN_ID {
                     return self.lower_channel_close(&args[0], program);
+                }
+                // ADR 0066 M2.1: the subprocess builtins.
+                if *id == PROCESS_SPAWN_FN_ID {
+                    return self.lower_process_spawn(&args[0], &args[1], program);
+                }
+                if *id == PROCESS_WAIT_FN_ID {
+                    return self.lower_process_wait(&args[0], program);
                 }
                 // C1.7.5 / ADR 0016 D7: user-defined generic-fn
                 // calls route to the monomorphic instance emitted

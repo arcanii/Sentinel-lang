@@ -201,6 +201,13 @@ pub enum Type {
     /// M1.2 minimum `elem_ty` is a word-sized scalar (the payload moves as
     /// an `i64`-encoded value, reusing the M1.1 spawn encode/decode).
     Channel(ChanId),
+    /// ADR 0066 M2.1: `Process` — a handle to a spawned child process
+    /// (`std::process::Command`). A **plain** handle (no element type, so NOT
+    /// interner-generic, unlike `Task`/`Channel`) — a unit variant that lowers to
+    /// an opaque `ptr` (`*SentinelProcess`). `Copy` (pointer-like, runtime-owned;
+    /// `process_wait` consumes the child). Produced by `process_spawn`, consumed
+    /// by `process_wait`.
+    Process,
 }
 
 /// Identifier for an interned reference type. C2 / ADR 0017 D11.
@@ -755,6 +762,7 @@ impl Type {
             // ADR 0066 M1.2: no `?Channel` / `[Channel]` (a channel handle
             // is not a nullable payload nor an array element at M1.2).
             | Type::Channel(_)
+            | Type::Process
             | Type::Class(_)
             | Type::TraitSelf(_)
             // Phase D.1 / ADR 0032: `?Enum` is out of scope at the MVP
@@ -809,6 +817,7 @@ impl Type {
             // ADR 0066 M1.2: no `?Channel` / `[Channel]` (a channel handle
             // is not a nullable payload nor an array element at M1.2).
             | Type::Channel(_)
+            | Type::Process
             | Type::Class(_)
             | Type::TraitSelf(_)
             // Phase D.1 / ADR 0032: `[Enum]` is out of scope at the MVP
@@ -891,6 +900,7 @@ impl Type {
             // ADR 0066 M1.2: no `?Channel` / `[Channel]` (a channel handle
             // is not a nullable payload nor an array element at M1.2).
             | Type::Channel(_)
+            | Type::Process
             | Type::Class(_)
             | Type::TraitSelf(_)
             | Type::Enum(_) => None,
@@ -1085,6 +1095,8 @@ impl Type {
             // ADR 0066 M1.2: `Channel<i64>` carries no TypeParam at the
             // minimum — pass through unchanged.
             Type::Channel(_) => self,
+            // ADR 0066 M2.1: `Process` carries no TypeParam — pass through.
+            Type::Process => self,
         }
     }
 
@@ -1220,6 +1232,7 @@ pub fn is_spawn_word_scalar(ty: Type) -> bool {
             // channel endpoint into a spawned producer/consumer is the whole
             // point of the worker pattern.
             | Type::Channel(_)
+            | Type::Process
     )
 }
 
@@ -1393,6 +1406,8 @@ pub fn type_display(ty: Type, program: Option<&TypedProgram>) -> String {
             }
             format!("<channel#{}>", id.0)
         }
+        // ADR 0066 M2.1: a plain `Process` handle (no element type).
+        Type::Process => "Process".to_string(),
         Type::Class(id) => match program.and_then(|p| p.class_decls.get(id.0 as usize)) {
             Some(c) => c.name.clone(),
             None => format!("<class#{}>", id.0),
@@ -1434,6 +1449,7 @@ impl std::fmt::Display for Type {
             Type::Kont(id) => write!(f, "<kont#{}>", id.0),
             Type::Task(id) => write!(f, "<task#{}>", id.0),
             Type::Channel(id) => write!(f, "<channel#{}>", id.0),
+            Type::Process => write!(f, "Process"),
             Type::Class(id) => write!(f, "<class#{}>", id.0),
             Type::TraitSelf(id) => write!(f, "<Self-trait#{}>", id.0),
             Type::Enum(id) => write!(f, "<enum#{}>", id.0),
@@ -4572,6 +4588,35 @@ pub fn check_module(
             });
         }
     }
+    // ADR 0066 M2.1: the subprocess builtins (FnId 25..=26). `process_spawn` takes
+    // a `[u8]` path + a `[[u8]]` args list (the nested-array type, ADR 0068) and
+    // returns a `Process` handle; `process_wait` takes the handle and returns the
+    // i64 exit code. The `secret` fence is implicit: the params are public `[u8]` /
+    // `[[u8]]`, so a `secret` value can't reach them (a type mismatch). Codegen
+    // lowers each to its `sentinel_process_*` runtime symbol.
+    {
+        let bytes_ty = Type::Array(ArrayElem::U8);
+        let argv_ty = Type::Array(ArrayElem::Array(intern_array_elem(&mut arrays, ArrayElem::U8)));
+        let process_sigs: &[(usize, &[Type], Type)] = &[
+            (25, &[bytes_ty, argv_ty], Type::Process), // process_spawn([u8], [[u8]]) -> Process
+            (26, &[Type::Process], Type::I64),         // process_wait(Process) -> i64
+        ];
+        for (idx, params, ret) in process_sigs {
+            let sig = &program.fn_signatures[*idx];
+            typed_signatures.push(TypedFnSignature {
+                id: sig.id,
+                name: sig.name.clone(),
+                name_span: sig.name_span.clone(),
+                type_params: vec![],
+                param_types: params.to_vec(),
+                return_type: *ret,
+                effect_row: vec![],
+                is_main: false,
+                is_runtime: true,
+                extern_origin: None,
+            });
+        }
+    }
 
     for fn_def in &program.fns {
         let resolved_sig = &program.fn_signatures[fn_def.id.0 as usize];
@@ -6627,6 +6672,8 @@ fn try_substitute(
         Type::Task(_) => Some(ty),
         // ADR 0066 M1.2: `Channel<i64>` carries no TypeParam.
         Type::Channel(_) => Some(ty),
+        // ADR 0066 M2.1: `Process` carries no TypeParam.
+        Type::Process => Some(ty),
     }
 }
 
@@ -6679,6 +6726,7 @@ fn contains_type_param(
         Type::Task(_) => false,
         // ADR 0066 M1.2: `Channel<i64>` carries no TypeParam.
         Type::Channel(_) => false,
+        Type::Process => false,
     }
 }
 
@@ -10298,7 +10346,10 @@ mod tests {
         assert_eq!(p.fn_signatures[22].name, "send");
         assert_eq!(p.fn_signatures[23].name, "recv");
         assert_eq!(p.fn_signatures[24].name, "channel_close");
-        assert_eq!(p.fn_signatures[25].name, "main");
+        // ADR 0066 M2.1: the subprocess builtins occupy FnId(25..=26).
+        assert_eq!(p.fn_signatures[25].name, "process_spawn");
+        assert_eq!(p.fn_signatures[26].name, "process_wait");
+        assert_eq!(p.fn_signatures[27].name, "main");
         assert!(p.signature(main.id).is_main);
     }
 
@@ -11355,7 +11406,10 @@ fn main() -> i64 {
         // D6) is lifted via the `arrays` interner. `[[i64]]` resolves to
         // `Array(Array(id))` with the inner element `i64` interned into `arrays`.
         let p = check_ok("fn f(x: [[i64]]) -> i64 { len(x) }\nfn main() -> i64 { 0 }");
-        assert_eq!(p.arrays, vec![ArrayElem::I64], "the inner `[i64]` element is interned");
+        // The `[[i64]]` param interns its inner `[i64]` element (`ArrayElem::I64`).
+        // (`arrays` also holds `ArrayElem::U8` from the `process_spawn` builtin's
+        // `[[u8]]` arg type, interned at sig-setup — ADR 0066 M2.1.)
+        assert!(p.arrays.contains(&ArrayElem::I64), "the inner `[i64]` element is interned");
     }
 
     #[test]

@@ -21,6 +21,9 @@ fn is_move_type(c: &mut TyCtx, h: i64) -> bool {
             // producer↔consumer by copying — it is the values that move on
             // `send`, not the handle). Mirrors the Rust is_copy_type.
             false
+        } else if k == 14 {
+            // (ADR 0066 M2.1) a Process handle is Copy (pointer-like, runtime-owned).
+            false
         } else if k == 3 {
             is_move_type(c, (*c).ta[idx])
         } else if k == 4 {

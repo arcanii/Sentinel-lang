@@ -1,0 +1,22 @@
+// ADR 0066 M2.1: subprocess spawn — `process_spawn(path: [u8], args: [[u8]]) ->
+// Process` + `process_wait(Process) -> i64`. This differential fixture exercises
+// the lowering of both builtins (decompose the `[u8]` path + `[[u8]]` argv into
+// (ptr, len) pairs; the `Process` handle is an opaque `ptr`) in BOTH compilers.
+//
+// The real spawn is GUARDED behind a runtime-false flag so the exit code is
+// platform-independent (42 on every host) — a genuine cross-platform spawn needs
+// per-OS path/args (ADR 0062 `process_<os>.sentinel`), out of scope here. The IR
+// for `process_spawn`/`process_wait` is still emitted (both branches lower), so
+// the self-host differential covers it; the real spawn behaviour is covered by
+// the `sentinel_process_*` runtime unit tests. Exit 42.
+
+fn main() -> i64 {
+    let probe: bool = false;
+    if probe {
+        let argv: [[u8]] = ["/c", "exit 7"];
+        let p = process_spawn("cmd", argv);
+        process_wait(p)
+    } else {
+        42
+    }
+}

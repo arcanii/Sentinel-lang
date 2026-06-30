@@ -43,7 +43,8 @@ use sentinel_borrow_check::DropPlan;
 use sentinel_codegen::collect_mono_instantiations;
 use sentinel_resolve::{
     ClassId, EffectId, EnumId, FnId, StructId, VarId, I64_TO_U8_FN_ID, IS_SOME_FN_ID, LEN_FN_ID,
-    CHANNEL_CLOSE_FN_ID, CHANNEL_NEW_FN_ID, POP_FN_ID, PRINT_BYTES_FN_ID, PRINT_FN_ID, PUSH_FN_ID,
+    CHANNEL_CLOSE_FN_ID, CHANNEL_NEW_FN_ID, POP_FN_ID, PRINT_BYTES_FN_ID, PRINT_FN_ID,
+    PROCESS_SPAWN_FN_ID, PROCESS_WAIT_FN_ID, PUSH_FN_ID,
     READ_FILE_FN_ID, RECV_FN_ID, SEND_FN_ID, STR_EQ_FN_ID, U8_TO_I64_FN_ID, UNWRAP_OR_FN_ID,
     VEC_NEW_FN_ID, VEC_TO_ARRAY_FN_ID, WRITE_FILE_FN_ID,
 };
@@ -60,10 +61,11 @@ const TARGET_TRIPLE: &str = "arm64-apple-darwin";
 
 /// The lowest user FnId — ids 0..=13 are runtime/builtins (ADR 0044 FnId map).
 // ADR 0056 added the socket builtins (14..=20); ADR 0066 M1.2 added the
-// channel builtins (21..=24), shifting the user-fn base to 25. A call to a
-// builtin FnId not caught by a special lowering arm above returns Err (the
-// fixture is skipped); the channel builtins ARE specially lowered.
-const FIRST_USER_FN: u32 = 25;
+// channel builtins (21..=24); ADR 0066 M2.1 added the subprocess builtins
+// (25..=26), shifting the user-fn base to 27. A call to a builtin FnId not
+// caught by a special lowering arm above returns Err (the fixture is skipped);
+// the channel + subprocess builtins ARE specially lowered.
+const FIRST_USER_FN: u32 = 27;
 
 /// Bar B / effects (ADR 0020): the reserved kont op_id for a PURE_RETURN wrap
 /// (`u32::MAX`) — the handle dispatch + `k(v)` pure-check compare against it.
@@ -129,6 +131,10 @@ struct RuntimeSyms {
     channel_send: bool,
     channel_recv: bool,
     channel_close: bool,
+    /// ADR 0066 M2.1: the subprocess runtime symbols.
+    /// `sentinel_process_spawn(ptr, i64, ptr, i64) -> ptr`, `_wait(ptr) -> i64`.
+    process_spawn: bool,
+    process_wait: bool,
 }
 
 impl RuntimeSyms {
@@ -157,6 +163,8 @@ impl RuntimeSyms {
         self.channel_send |= other.channel_send;
         self.channel_recv |= other.channel_recv;
         self.channel_close |= other.channel_close;
+        self.process_spawn |= other.process_spawn;
+        self.process_wait |= other.process_wait;
     }
 
     /// Emit the `declare`s for the used symbols, in the fixed canonical order,
@@ -235,6 +243,13 @@ impl RuntimeSyms {
         if self.channel_close {
             writeln!(out, "declare i64 @sentinel_channel_close(ptr)").unwrap();
         }
+        // ADR 0066 M2.1: the subprocess runtime group.
+        if self.process_spawn {
+            writeln!(out, "declare ptr @sentinel_process_spawn(ptr, i64, ptr, i64)").unwrap();
+        }
+        if self.process_wait {
+            writeln!(out, "declare i64 @sentinel_process_wait(ptr)").unwrap();
+        }
         if self.memcpy {
             writeln!(out, "declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)").unwrap();
         }
@@ -261,6 +276,8 @@ impl RuntimeSyms {
             || self.channel_send
             || self.channel_recv
             || self.channel_close
+            || self.process_spawn
+            || self.process_wait
             || self.memcpy
     }
 }
@@ -3119,6 +3136,37 @@ impl Emit<'_> {
             writeln!(self.body, "  %v{a1} = insertvalue {{ i1, i64 }} %v{a0}, i64 %v{value}, 1").unwrap();
             return Ok(format!("%v{a1}"));
         }
+        // ADR 0066 M2.1: the subprocess builtins. process_spawn decomposes the
+        // `[u8]` path + `[[u8]]` args into (ptr, len) pairs (the args ptr is the
+        // element buffer = argv, the args len = argc) and returns a `Process` ptr;
+        // process_wait returns the i64 exit code.
+        if id == PROCESS_SPAWN_FN_ID {
+            let path = self.lower_expr(&args[0])?;
+            let argsv = self.lower_expr(&args[1])?;
+            let pl = self.fresh();
+            writeln!(self.body, "  %v{pl} = extractvalue {{ i64, ptr }} {path}, 0").unwrap();
+            let pp = self.fresh();
+            writeln!(self.body, "  %v{pp} = extractvalue {{ i64, ptr }} {path}, 1").unwrap();
+            let ac = self.fresh();
+            writeln!(self.body, "  %v{ac} = extractvalue {{ i64, ptr }} {argsv}, 0").unwrap();
+            let av = self.fresh();
+            writeln!(self.body, "  %v{av} = extractvalue {{ i64, ptr }} {argsv}, 1").unwrap();
+            let v = self.fresh();
+            writeln!(
+                self.body,
+                "  %v{v} = call ptr @sentinel_process_spawn(ptr %v{pp}, i64 %v{pl}, ptr %v{av}, i64 %v{ac})"
+            )
+            .unwrap();
+            self.used.process_spawn = true;
+            return Ok(format!("%v{v}"));
+        }
+        if id == PROCESS_WAIT_FN_ID {
+            let p = self.lower_expr(&args[0])?;
+            let v = self.fresh();
+            writeln!(self.body, "  %v{v} = call i64 @sentinel_process_wait(ptr {p})").unwrap();
+            self.used.process_wait = true;
+            return Ok(format!("%v{v}"));
+        }
         if id.0 < FIRST_USER_FN {
             return Err(format!("builtin call #{} (deferred to a later slice)", id.0));
         }
@@ -3220,6 +3268,8 @@ fn llvm_ty(ty: Type, program: &TypedProgram) -> Result<String, String> {
         Type::Task(_) => Ok("ptr".to_string()),
         // ADR 0066 M1.2: a `Channel<i64>` is an opaque `*SentinelChannel`.
         Type::Channel(_) => Ok("ptr".to_string()),
+        // ADR 0066 M2.1: a Process handle lowers to an opaque ptr.
+        Type::Process => Ok("ptr".to_string()),
         other => Err(format!("type not yet ported (8a scalars only): {other:?}")),
     }
 }
