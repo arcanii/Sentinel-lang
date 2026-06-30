@@ -14,6 +14,29 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
+**Latest (2026-06-30) — ADR 0066 M2.1: SUBPROCESS SPAWN (`process_spawn` / `process_wait`),
+self-hosted.** Sentinel can now spawn + wait on child processes — the first cross-process piece (D7).
+`process_spawn(path: [u8], args: [[u8]]) -> Process` + `process_wait(p: Process) -> i64` (exit code),
+over cross-platform **`std::process::Command`** (not a `#[cfg(unix)]` path). **`Type::Process`** is a
+plain handle (no element — unit variant, lowers to `ptr`, Copy, runtime-owned); the argv is the
+nested-array type **`[[u8]]`** (ADR 0068, built first as the prerequisite). 2 `sentinel_process_*`
+runtime symbols over an opaque `SentinelProcess` (`abi-v1` §3/§5; the `abi_v1_runtime_symbol_set` test
+28→30, in the same commit). Adding 2 builtins shifted the **user-fn FnId base 25→27** in BOTH
+compilers (auto in Rust; the selfhost was hardcoded — 31 `25 +`/`- 25`/`>= 25`/`< 25` sites → 27, the
+delicate lockstep part since the `__spawn_wrapper_<id>` symbol embeds the FnId). The **secret fence
+(D8) is implicit**: the public `[u8]`/`[[u8]]` param ABI rejects a `secret` (a type mismatch), like
+the FFI/socket builtins. Codegen lowers both builtins in inkwell + the `snc llvm` oracle (decompose
+the `[u8]` path + `[[u8]]` argv into (ptr,len); `Process` = ptr); the **self-host mirror** adds
+interner kind 14 + render + `cgo_ty`→ptr + `is_move_type`(Copy) + builtin_id/ret + the cg_emit_call
+arms + mir names. Fixture `tests/pass/c66_process` (process IR, guarded spawn for cross-platform
+determinism → 42) is byte-identical across all 9 differential stages, both bootstrap fixed points
+hold; real spawn verified end-to-end via inkwell (`process_spawn("cmd", ["/c","exit 42"]) → 42`) + the
+runtime unit tests (`cmd /c exit 42` / `sh -c`). Also this session: **`?T` made fully general over
+scalars** (`?u8`/`?u128`/`?f64`/`?ptr`). Constant-time + the lexical borrow checker UNCHANGED. Windows
+four-check green. **Next:** the `Subprocess` capability effect (M2.1 left process_spawn a plain
+builtin); M2.2 byte-pipe IPC + the cross-process fence mechanism; generic word-scalar channel
+elements; a reusable worker-pool library. See ADR 0066 D7/D8/D10 + ADR 0068 + HANDOVER §0.
+
 **Latest (2026-06-30) — NESTED ARRAYS `[[T]]` (ADR 0068 ACCEPTED), lifting the depth-1 array rule.**
 `[[u8]]` (a list of byte-strings, e.g. process argv) is now a first-class type — the ADR 0015 D6
 depth-1 rule is lifted. Kept `Type: Copy` via an **interner**: `ArrayElem::Array(ArrayId)` + a

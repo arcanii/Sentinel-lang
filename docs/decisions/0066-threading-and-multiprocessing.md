@@ -14,10 +14,18 @@ runtime symbols / ABI change — front-end only, plus a behavior-preserving
 spawn-arg-lowering alignment across all three emitters); and **M1.3** (the worker
 pattern, D1) as EXAMPLES — `examples/lang/worker_pool.sentinel` (a two-worker
 fan-out/fan-in pool, built both `--separate` and merged) + the 2-channel-arg
-`tests/pass/c66_channel_pipeline` relay fixture. **Next:** M1.2b generic
-word-scalar channel *elements* (gated on `recv -> ?T` needing a `NullableInner`
-for `u8`/`f64`/`ptr`) + a *reusable* worker-pool library (also needs first-class
-functions for the worker body), then M2 (processes).
+`tests/pass/c66_channel_pipeline` relay fixture; and **M2.1** (process spawn, D7)
+— `process_spawn(path:[u8], args:[[u8]]) -> Process` + `process_wait(Process) ->
+i64` over `std::process::Command`, `Type::Process` (a plain handle → ptr), 2
+`sentinel_process_*` runtime symbols (abi-v1 §3/§5; symbol set 28→30), the FnId
+base shift 25→27 in both compilers, the secret fence implicit via the public
+`[u8]`/`[[u8]]` ABI; built on **nested arrays (ADR 0068)** for the `[[u8]]` argv.
+Fixture `tests/pass/c66_process` + the `sentinel_process_*` runtime unit tests
+(real `cmd /c exit 42` / `sh -c` spawn). The `?T` scalar generalization
+(`?u8`/`?f64`/`?ptr`) also landed (enabler for generic channel elements).
+**Next:** the `Subprocess` capability effect (M2.1 deferred it — process_spawn is
+currently a plain builtin); M2.2 byte-pipe IPC + the cross-process fence
+mechanism; generic word-scalar channel *elements*; a reusable worker-pool library.
 This ADR lays out the complete threading + multi-processing vision with
 pinned D-points for each piece, **implemented incrementally** across
 sub-phases. It is the umbrella over the near-term maintainer ask (flagged
