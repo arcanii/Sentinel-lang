@@ -1275,6 +1275,10 @@ fn builtin_id(q: &[u8]) -> i64 {
         27
     } else if name_eq_lit(q, "process_read") {
         28
+    } else if name_eq_lit(q, "process_send") {
+        29
+    } else if name_eq_lit(q, "process_recv") {
+        30
     } else {
         0 - 1
     }
@@ -1305,6 +1309,10 @@ fn builtin_ret(c: &mut TyCtx, fid: i64) -> i64 {
     } else if fid == 28 {
         // (ADR 0066 M2.2) process_read(p) -> [u8].
         mk_array(c, 3)
+    } else if fid == 30 {
+        // (ADR 0066 M2.3) process_recv(p) -> ?i64 (process_send (29) -> i64 via
+        // the default 0=i64 below, like send/channel_close).
+        mk_nullable(c, 0)
     } else {
         0
     }
@@ -1323,7 +1331,7 @@ fn fn_lookup(c: &mut TyCtx, src: &[u8], q: &[u8]) -> i64 {
         while i < n {
             if found == 0 - 1 {
                 if name_eq_src(src, (*c).ufs[i], (*c).ufe[i], q) {
-                    found = 29 + i;
+                    found = 31 + i;
                     0
                 } else {
                     0
@@ -1340,10 +1348,10 @@ fn fn_lookup(c: &mut TyCtx, src: &[u8], q: &[u8]) -> i64 {
 
 // The return-type handle for a resolved FnId.
 fn fn_ret(c: &mut TyCtx, fid: i64) -> i64 {
-    if fid < 29 {
+    if fid < 31 {
         builtin_ret(c, fid)
     } else {
-        (*c).ufret[fid - 29]
+        (*c).ufret[fid - 31]
     }
 }
 

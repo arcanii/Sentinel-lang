@@ -360,6 +360,8 @@ struct TyCtx {
     cg_used_procwait: bool,
     cg_used_procwrite: bool,
     cg_used_procread: bool,
+    cg_used_procsend: bool,
+    cg_used_procrecv: bool,
     cg_scope: i64,         // the enclosing `scope`'s *ScopeCtx register (-1 = no scope)
     cg_spawn_t: Vec<i64>,  // spawn-target FnIds (sorted+deduped) → one wrapper each at end
     cg_eff: bool,     // (c35b) is the fn being emitted effecting (Kont* ABI: ret ptr)?
@@ -745,7 +747,7 @@ pub fn run(src: [u8], mode: i64, result: &mut Vec<u8>) -> i64 {
             // modes 0–3 it's dumped normally.
             let cg_skip_gen: bool = ctx.mode == 4 && ctx.uftp[fnct] > 0;
             if cg_skip_gen {
-                push(&mut ctx.cggfn_id, 29 + fnct);
+                push(&mut ctx.cggfn_id, 31 + fnct);
                 push(&mut ctx.cggfn_pos, itempos[ia]);
                 0
             } else {
@@ -966,7 +968,7 @@ pub fn run(src: [u8], mode: i64, result: &mut Vec<u8>) -> i64 {
             ctx.cg_mono_on = true;
             let mut mcur: i64 = mpos;
             let mut mbuf: Vec<u8> = vec_new();
-            type_fn(&mut mbuf, &kinds, &starts, &ends, &src, &mut mcur, &mut ctx, &mut garbage, mfid - 29);
+            type_fn(&mut mbuf, &kinds, &starts, &ends, &src, &mut mcur, &mut ctx, &mut garbage, mfid - 31);
             let _mbx: [u8] = vec_to_array(mbuf);
             ctx.cg_mono_on = false;
             mqi = mqi + 1;
@@ -1175,6 +1177,19 @@ pub fn run(src: [u8], mode: i64, result: &mut Vec<u8>) -> i64 {
         } else {
             0
         };
+        // (ADR 0066 M2.3) the typed framed-channel-over-pipe runtime group.
+        if ctx.cg_used_procsend {
+            append_str(result, "declare i64 @sentinel_process_send(ptr, i64)\n");
+            0
+        } else {
+            0
+        };
+        if ctx.cg_used_procrecv {
+            append_str(result, "declare i64 @sentinel_process_recv(ptr, ptr)\n");
+            0
+        } else {
+            0
+        };
         // (8d-Vec-2) the `llvm.memcpy` intrinsic declares LAST — after the
         // `sentinel_*` runtime-symbol group (it is an `@llvm.*` intrinsic, not a
         // runtime symbol), matching the oracle's `RuntimeSyms::emit_declares`.
@@ -1235,7 +1250,7 @@ pub fn dump_moves(c: &mut TyCtx, src: &[u8], out: &mut Vec<u8>) -> i64 {
     let mut i: i64 = 0;
     while i < nf {
         append_str(out, "(fn #");
-        append_int(out, 29 + i);
+        append_int(out, 31 + i);
         push(out, ' ');
         append_slice(out, src, (*c).ufs[i], (*c).ufe[i]);
         let mut vid: i64 = 0;

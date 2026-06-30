@@ -4610,11 +4610,19 @@ pub fn check_module(
                 .position(|d| d.name == "Subprocess")
                 .expect("Subprocess auto-registered in resolve") as u32,
         );
+        // ADR 0066 M2.3: `process_send(p, v: i64) -> i64` (frame an i64 to the
+        // child's stdin) + `process_recv(p) -> ?i64` (read one i64 frame; `null` =
+        // closed/EOF — the cross-process twin of `recv`). The element is the public
+        // `i64`, so the cross-process secret fence is structural (a `secret i64`
+        // arg to `process_send` is a type mismatch); all effect-free.
+        let opt_i64 = Type::Nullable(NullableInner::I64);
         let process_sigs: &[(usize, &[Type], Type, &[EffectId])] = &[
             (25, &[bytes_ty, argv_ty], Type::Process, &[subprocess_eid]), // process_spawn
             (26, &[Type::Process], Type::I64, &[]),                       // process_wait
             (27, &[Type::Process, bytes_ty], Type::I64, &[]),             // process_write
             (28, &[Type::Process], bytes_ty, &[]),                        // process_read
+            (29, &[Type::Process, Type::I64], Type::I64, &[]),            // process_send
+            (30, &[Type::Process], opt_i64, &[]),                        // process_recv
         ];
         for (idx, params, ret, eff) in process_sigs {
             let sig = &program.fn_signatures[*idx];
@@ -10361,12 +10369,14 @@ mod tests {
         assert_eq!(p.fn_signatures[22].name, "send");
         assert_eq!(p.fn_signatures[23].name, "recv");
         assert_eq!(p.fn_signatures[24].name, "channel_close");
-        // ADR 0066 M2.1/M2.2: the subprocess builtins occupy FnId(25..=28).
+        // ADR 0066 M2.1/M2.2/M2.3: the subprocess builtins occupy FnId(25..=30).
         assert_eq!(p.fn_signatures[25].name, "process_spawn");
         assert_eq!(p.fn_signatures[26].name, "process_wait");
         assert_eq!(p.fn_signatures[27].name, "process_write");
         assert_eq!(p.fn_signatures[28].name, "process_read");
-        assert_eq!(p.fn_signatures[29].name, "main");
+        assert_eq!(p.fn_signatures[29].name, "process_send");
+        assert_eq!(p.fn_signatures[30].name, "process_recv");
+        assert_eq!(p.fn_signatures[31].name, "main");
         assert!(p.signature(main.id).is_main);
     }
 

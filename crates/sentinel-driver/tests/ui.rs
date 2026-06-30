@@ -116,6 +116,10 @@ ui_snapshot!(c66_channel_element_unsupported, "c66_channel_element_unsupported.s
 // cannot cross the public `[u8]` byte-pipe boundary (`process_write`), so the
 // program is rejected as a type mismatch (the type system IS the fence).
 ui_snapshot!(c66_process_secret_fence, "c66_process_secret_fence.sentinel");
+// ADR 0066 M2.3 / D8: the typed framed-channel fence — a `secret i64` cannot cross
+// the public `i64` framed-channel boundary (`process_send`), rejected as a type
+// mismatch (the type system IS the fence, exactly as M2.2's `[u8]` byte-pipe).
+ui_snapshot!(c66_process_channel_secret_fence, "c66_process_channel_secret_fence.sentinel");
 
 // ---- C5.2 constant-time verification rejection (the MIR D5 pass) ----
 ui_snapshot!(c52_secret_leak, "c52_secret_leak.sentinel");

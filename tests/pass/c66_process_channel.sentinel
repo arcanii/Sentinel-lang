@@ -1,0 +1,39 @@
+// ADR 0066 M2.3: typed framed channel over the process pipes. `process_send(p,
+// i64) -> i64` frames an i64 to the child's stdin (8-byte LE, keeping it open);
+// `process_recv(p) -> ?i64` reads one frame back (`null` = closed/EOF). The
+// cross-process twin of the M1.2 in-process channel `send`/`recv` — same `?i64`
+// build for `recv`. The element is the PUBLIC `i64`, so a `secret` can never cross
+// the process boundary (the D8 cross-process fence stays structural; see the ui
+// fixture `c66_process_channel_secret_fence`). `process_send`/`_recv` are
+// effect-free (they operate on an already-acquired handle — `process_spawn` is the
+// `Subprocess` capability-acquiring op, so `pipe_worker` declares `! { Subprocess }`
+// and it bubbles to `main`).
+//
+// This fixture exercises the two builtins' lowering: `process_send` decomposes to a
+// 2-arg call returning i64; `process_recv` calls with an out-slot and assembles the
+// `?i64` from the status. The real spawn is GUARDED behind a runtime-false flag for
+// cross-platform determinism (both branches still lower, so the self-host
+// differential covers the IR); the `sentinel_process_send`/`_recv` runtime unit
+// tests cover the real LE-i64 round-trip through `cat`/`findstr`. Exit 42.
+
+fn pipe_worker() -> i64 ! { Subprocess } {
+    // A non-empty argv: an EMPTY `[[u8]]` literal hits a separate latent scg
+    // element-size divergence for empty nested-array literals (the differential's
+    // first such case) — out of M2.3 scope; the call is guarded, so content is
+    // irrelevant.
+    let argv: [[u8]] = ["-"];
+    let p = process_spawn("cat", argv);
+    let s = process_send(p, 40);
+    let r: ?i64 = process_recv(p);
+    let got: i64 = unwrap_or(r, 0);
+    process_wait(p) + s + got
+}
+
+fn main() -> i64 {
+    let probe: bool = false;
+    if probe {
+        pipe_worker()
+    } else {
+        42
+    }
+}

@@ -47,7 +47,8 @@ use sentinel_hir::HirProgram;
 use sentinel_resolve::{
     ClassId, EffectId, EnumId, FnId, ImplId, StructId, VarId, CHANNEL_CLOSE_FN_ID,
     CHANNEL_NEW_FN_ID, I64_TO_U8_FN_ID, IS_SOME_FN_ID, LEN_FN_ID, POP_FN_ID, PRINT_BYTES_FN_ID,
-    PROCESS_READ_FN_ID, PROCESS_SPAWN_FN_ID, PROCESS_WAIT_FN_ID, PROCESS_WRITE_FN_ID,
+    PROCESS_READ_FN_ID, PROCESS_RECV_FN_ID, PROCESS_SEND_FN_ID, PROCESS_SPAWN_FN_ID,
+    PROCESS_WAIT_FN_ID, PROCESS_WRITE_FN_ID,
     PUSH_FN_ID, READ_FILE_FN_ID, RECV_FN_ID, SEND_FN_ID, STR_EQ_FN_ID, TCP_ACCEPT_FN_ID,
     TCP_CLOSE_FN_ID, TCP_CONNECT_FN_ID, TCP_LISTEN_FN_ID, TCP_LOCAL_PORT_FN_ID, TCP_READ_FN_ID,
     TCP_WRITE_FN_ID, U8_TO_I64_FN_ID, UNWRAP_OR_FN_ID, VEC_NEW_FN_ID, VEC_TO_ARRAY_FN_ID,
@@ -654,6 +655,20 @@ pub fn compile_to_object_for_module(
     let process_read_fn = module.add_function(
         "sentinel_process_read",
         ptr_ty.fn_type(&[ptr_ty.into(), ptr_ty.into()], false),
+        None,
+    );
+    // ADR 0066 M2.3: the typed framed-channel-over-pipe runtime symbols (the
+    // cross-process twin of the channel ABI). `sentinel_process_send(p, value)
+    // -> i64` (frame an i64 to the child's stdin; 0/-1), `sentinel_process_recv(p,
+    // out) -> i64` (read one i64 frame to `*out`; 0 some / 1 closed).
+    let process_send_fn = module.add_function(
+        "sentinel_process_send",
+        i64_ty.fn_type(&[ptr_ty.into(), i64_ty.into()], false),
+        None,
+    );
+    let process_recv_fn = module.add_function(
+        "sentinel_process_recv",
+        i64_ty.fn_type(&[ptr_ty.into(), ptr_ty.into()], false),
         None,
     );
     // C5.4 (2/N) / ADR 0028: declare the broker scope-arena symbols.
@@ -1326,6 +1341,8 @@ pub fn compile_to_object_for_module(
             process_wait_fn,
             process_write_fn,
             process_read_fn,
+            process_send_fn,
+            process_recv_fn,
             arena_enter_fn,
             arena_alloc_fn,
             arena_exit_fn,
@@ -1590,6 +1607,9 @@ struct CodegenCtx<'ctx, 'plan> {
     process_wait_fn: FunctionValue<'ctx>,
     process_write_fn: FunctionValue<'ctx>,
     process_read_fn: FunctionValue<'ctx>,
+    /// ADR 0066 M2.3: the typed framed-channel-over-pipe runtime symbols.
+    process_send_fn: FunctionValue<'ctx>,
+    process_recv_fn: FunctionValue<'ctx>,
     /// C5.4 (2/N) / ADR 0028: `sentinel_arena_enter(i64) -> *arena`
     /// creates a per-scope broker bump arena (capacity 0 → default).
     arena_enter_fn: FunctionValue<'ctx>,
@@ -6164,6 +6184,84 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
         Ok(with_data.into_struct_value().into())
     }
 
+    /// ADR 0066 M2.3: `process_send(p: Process, v: i64) -> i64` — frame `v` to the
+    /// child's stdin via `sentinel_process_send(p, v)`; the i64 status is the
+    /// expression value. The cross-process twin of `lower_channel_send`.
+    fn lower_process_send(
+        &mut self,
+        p: &TypedExpr,
+        value: &TypedExpr,
+        program: &TypedProgram,
+    ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+        let p_v = self.lower_expr(p, program)?.into_pointer_value();
+        let val_v = self.lower_expr(value, program)?.into_int_value();
+        let call = self
+            .builder
+            .build_call(
+                self.process_send_fn,
+                &[p_v.into(), val_v.into()],
+                "process_send",
+            )
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        Ok(call
+            .try_as_basic_value()
+            .left()
+            .expect("sentinel_process_send returns i64"))
+    }
+
+    /// ADR 0066 M2.3: `process_recv(p: Process) -> ?i64` — call
+    /// `sentinel_process_recv(p, out)` (writes the value to a stack `out` slot,
+    /// returns a status: 0 = some / 1 = closed), then BUILD the `?i64`
+    /// (`{ i1 valid, i64 value }`, `valid = status == 0`). The cross-process twin
+    /// of `lower_channel_recv` — same `?i64` build, so the receiver type carries
+    /// no `secret` (the element is the public `i64`; the D8 fence is structural).
+    fn lower_process_recv(
+        &mut self,
+        p: &TypedExpr,
+        program: &TypedProgram,
+    ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+        let i64_ty = self.context.i64_type();
+        let p_v = self.lower_expr(p, program)?.into_pointer_value();
+        let out_slot = self
+            .builder
+            .build_alloca(i64_ty, "precv_out")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        let status = self
+            .builder
+            .build_call(
+                self.process_recv_fn,
+                &[p_v.into(), out_slot.into()],
+                "process_recv",
+            )
+            .map_err(|e| CodegenError::Builder(e.to_string()))?
+            .try_as_basic_value()
+            .left()
+            .expect("sentinel_process_recv returns i64")
+            .into_int_value();
+        let valid = self
+            .builder
+            .build_int_compare(IntPredicate::EQ, status, i64_ty.const_zero(), "precv_valid")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        let value = self
+            .builder
+            .build_load(i64_ty, out_slot, "precv_val")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        // `?i64` is `{ i1, i64 }` (the inline-payload nullable, ADR 0014 D2).
+        let opt_ty = self
+            .context
+            .struct_type(&[self.context.bool_type().into(), i64_ty.into()], false);
+        let agg = opt_ty.get_undef();
+        let with_valid = self
+            .builder
+            .build_insert_value(agg, valid, 0, "precv_opt_valid")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        let with_value = self
+            .builder
+            .build_insert_value(with_valid, value, 1, "precv_opt_value")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        Ok(with_value.into_struct_value().into())
+    }
+
     /// D.3 / ADR 0034 D7: lower `vec_new() -> Vec<T>` to an empty vector
     /// value `{ i64 len = 0, i64 cap = 0, ptr data = null }`. No
     /// allocation happens until the first `push` (`realloc(null, …)` ==
@@ -7091,6 +7189,13 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                 }
                 if *id == PROCESS_READ_FN_ID {
                     return self.lower_process_read(&args[0], program);
+                }
+                // ADR 0066 M2.3: the typed framed-channel-over-pipe builtins.
+                if *id == PROCESS_SEND_FN_ID {
+                    return self.lower_process_send(&args[0], &args[1], program);
+                }
+                if *id == PROCESS_RECV_FN_ID {
+                    return self.lower_process_recv(&args[0], program);
                 }
                 // C1.7.5 / ADR 0016 D7: user-defined generic-fn
                 // calls route to the monomorphic instance emitted

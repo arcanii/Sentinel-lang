@@ -345,9 +345,9 @@ fn mir_dump_block(out: &mut Vec<u8>, c: &mut TyCtx, src: &[u8], blk: i64) -> i64
 // (7c) render a call's callee name: a USER fn (FnId >= 14) from `ufs`/`ufe` via
 // `src`; else a builtin's fixed name (FnId 0..=13 — the resolve/runtime map).
 fn mir_put_callee(out: &mut Vec<u8>, c: &mut TyCtx, src: &[u8], fid: i64) -> i64 {
-    if fid >= 29 {
-        let s: i64 = (*c).ufs[fid - 29];
-        let e: i64 = (*c).ufe[fid - 29];
+    if fid >= 31 {
+        let s: i64 = (*c).ufs[fid - 31];
+        let e: i64 = (*c).ufe[fid - 31];
         append_slice(out, src, s, e);
         0
     } else {
@@ -395,6 +395,10 @@ fn mir_put_callee(out: &mut Vec<u8>, c: &mut TyCtx, src: &[u8], fid: i64) -> i64
             "process_write"
         } else if fid == 28 {
             "process_read"
+        } else if fid == 29 {
+            "process_send"
+        } else if fid == 30 {
+            "process_recv"
         } else {
             "print_bytes"
         };

@@ -1475,6 +1475,11 @@ pub extern "C" fn sentinel_process_spawn(
 /// -1 on error: a null handle, an already-waited handle, a wait failure, or a
 /// child terminated without an exit code (e.g. killed by a signal on Unix).
 ///
+/// ADR 0066 M2.3: closes the child's stdin (if still open) BEFORE reaping, so a
+/// loop-until-EOF child driven by `sentinel_process_send` (which keeps stdin open
+/// for framing) sees EOF and terminates. Idempotent — a no-op if
+/// `sentinel_process_write` already took/closed stdin.
+///
 /// # Safety
 ///
 /// `p` must be a `*mut SentinelProcess` from [`sentinel_process_spawn`].
@@ -1487,10 +1492,14 @@ pub extern "C" fn sentinel_process_wait(p: *mut SentinelProcess) -> i64 {
     // SAFETY: `p` is a live SentinelProcess per the caller contract.
     let proc = unsafe { &mut *p };
     match proc.child.take() {
-        Some(mut child) => match child.wait() {
-            Ok(status) => status.code().map(|c| c as i64).unwrap_or(-1),
-            Err(_) => -1,
-        },
+        Some(mut child) => {
+            // Drop any still-open stdin → the child sees EOF (M2.3 framed channel).
+            drop(child.stdin.take());
+            match child.wait() {
+                Ok(status) => status.code().map(|c| c as i64).unwrap_or(-1),
+                Err(_) => -1,
+            }
+        }
         None => -1,
     }
 }
@@ -1598,6 +1607,84 @@ pub extern "C" fn sentinel_process_read(p: *mut SentinelProcess, out_len: *mut i
     // SAFETY: caller passed a writable `i64` slot.
     unsafe { *out_len = n as i64 };
     buf
+}
+
+/// ADR 0066 M2.3: frame `value` as 8 little-endian bytes to the child's stdin and
+/// flush, keeping stdin **open** (the multi-message framed channel — unlike
+/// [`sentinel_process_write`], which closes it after one write). The typed
+/// cross-process twin of [`sentinel_channel_send`]. Returns 0 on success, -1 on
+/// error (null handle, no piped / already-closed stdin, or a write failure). The
+/// channel element is the public `i64`, so a `secret` can never reach it (the
+/// cross-process secret fence is structural, ADR 0066 D8 — the IPC value ABI is
+/// public-only, like FFI).
+///
+/// # Safety
+///
+/// `p` must be a `*mut SentinelProcess` from [`sentinel_process_spawn`].
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+#[no_mangle]
+pub extern "C" fn sentinel_process_send(p: *mut SentinelProcess, value: i64) -> i64 {
+    use std::io::Write;
+    if p.is_null() {
+        return -1;
+    }
+    // SAFETY: `p` is a live SentinelProcess per the caller contract.
+    let proc = unsafe { &mut *p };
+    let child = match proc.child.as_mut() {
+        Some(c) => c,
+        None => return -1,
+    };
+    // Borrow stdin in place (do NOT take it) so the pipe stays open for more frames.
+    let stdin = match child.stdin.as_mut() {
+        Some(s) => s,
+        None => return -1,
+    };
+    let frame = value.to_le_bytes();
+    match stdin.write_all(&frame).and_then(|()| stdin.flush()) {
+        Ok(()) => 0,
+        Err(_) => -1,
+    }
+}
+
+/// ADR 0066 M2.3: read exactly one 8-byte little-endian i64 frame from the child's
+/// stdout, write it to `*out`, and return 0 (a value arrived). Returns **1** on a
+/// closed/EOF channel — an EOF before a full frame (a clean close or a short read)
+/// — which is the `recv` `?T` status of D4 (codegen builds the `?i64`: `null` when
+/// the status is non-zero). Any error (null handle/out, no piped stdout, read
+/// failure) also returns 1 (treated as closed). stdout is borrowed in place (kept
+/// open) so more frames can follow. The typed cross-process twin of
+/// [`sentinel_channel_recv`]; the element is the public `i64` (the D8 fence).
+///
+/// # Safety
+///
+/// `p` must be a `*mut SentinelProcess` from [`sentinel_process_spawn`]; `out`
+/// must point to a writable `i64`.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+#[no_mangle]
+pub extern "C" fn sentinel_process_recv(p: *mut SentinelProcess, out: *mut i64) -> i64 {
+    use std::io::Read;
+    if p.is_null() || out.is_null() {
+        return 1;
+    }
+    // SAFETY: `p` is a live SentinelProcess per the caller contract.
+    let proc = unsafe { &mut *p };
+    let child = match proc.child.as_mut() {
+        Some(c) => c,
+        None => return 1,
+    };
+    let stdout = match child.stdout.as_mut() {
+        Some(s) => s,
+        None => return 1,
+    };
+    let mut frame = [0u8; 8];
+    match stdout.read_exact(&mut frame) {
+        Ok(()) => {
+            // SAFETY: caller passed a writable `i64` slot.
+            unsafe { *out = i64::from_le_bytes(frame) };
+            0
+        }
+        Err(_) => 1, // EOF / short read / error = closed channel
+    }
 }
 
 /// Returns the crate name as a sanity-check that the build is wired up.
@@ -1856,14 +1943,17 @@ mod tests {
             // ADR 0066 M2.2: the byte-pipe IPC builtins (cross-platform).
             sentinel_process_write as *const (),
             sentinel_process_read as *const (),
+            // ADR 0066 M2.3: the typed framed-channel-over-pipe builtins.
+            sentinel_process_send as *const (),
+            sentinel_process_recv as *const (),
         ];
-        // 32 symbols: 23 codegen-declared (incl. D.2's sentinel_str_eq,
+        // 34 symbols: 23 codegen-declared (incl. D.2's sentinel_str_eq,
         // D.3's sentinel_realloc, D.4's sentinel_read_file /
         // sentinel_write_file / sentinel_print_bytes, and ADR 0065 D6's
         // sentinel_kont_free) + sentinel_kont_panic_resumed + ADR 0066 M1.2's
         // 4 sentinel_channel_* + M2.1's 2 sentinel_process_spawn/_wait + M2.2's
-        // 2 sentinel_process_write/_read symbols.
-        assert_eq!(symbols.len(), 32);
+        // 2 sentinel_process_write/_read + M2.3's 2 sentinel_process_send/_recv.
+        assert_eq!(symbols.len(), 34);
         assert!(symbols.iter().all(|&s| !s.is_null()), "every symbol has an address");
     }
 
@@ -2106,6 +2196,45 @@ mod tests {
         assert!(!buf.is_null(), "empty read still returns a non-null buffer");
         assert_eq!(out_len, 0);
         sentinel_free(buf);
+    }
+
+    // ---- ADR 0066 M2.3: the typed framed-channel-over-pipe runtime surface ----
+
+    // The interactive round-trip needs a byte-faithful, UNBUFFERED stdin→stdout echo
+    // so each 8-byte LE i64 frame comes back promptly (no waiting on a newline/EOF).
+    // `cat` is exactly that. Windows `findstr` is line-oriented (it buffers until a
+    // newline/EOF and isn't byte-faithful for binary), so it can't echo interactive
+    // binary frames — hence this test is Unix-only (like the socket runtime tests).
+    // On Windows the M2.3 lowering is still covered by the `c66_process_channel`
+    // differential fixture + the build; only the real interactive round-trip is
+    // Unix-validated.
+    #[cfg(unix)]
+    #[test]
+    fn sentinel_process_send_recv_i64_frames_round_trip() {
+        let path = "cat";
+        let p = sentinel_process_spawn(path.as_ptr(), path.len() as i64, std::ptr::null(), 0);
+        assert!(!p.is_null(), "spawned the echo child");
+
+        for v in [42_i64, -7, 0x0102_0304_0506_0708] {
+            assert_eq!(sentinel_process_send(p, v), 0, "send a frame");
+            let mut out: i64 = 0;
+            assert_eq!(sentinel_process_recv(p, &mut out as *mut i64), 0, "a frame arrived");
+            assert_eq!(out, v, "the echoed i64 round-trips");
+        }
+
+        // wait() closes stdin → the echo child sees EOF and exits cleanly (0).
+        assert_eq!(sentinel_process_wait(p), 0, "the echo child exited cleanly");
+        // After the child is reaped + dropped, recv reports the channel closed (1).
+        let mut out: i64 = -1;
+        assert_eq!(sentinel_process_recv(p, &mut out as *mut i64), 1, "closed after wait");
+    }
+
+    #[test]
+    fn sentinel_process_send_recv_null_handle_is_safe() {
+        // Null handle: send returns -1; recv returns 1 (closed). Neither panics.
+        assert_eq!(sentinel_process_send(std::ptr::null_mut(), 5), -1);
+        let mut out: i64 = -1;
+        assert_eq!(sentinel_process_recv(std::ptr::null_mut(), &mut out as *mut i64), 1);
     }
 
     // ---- ADR 0056: the TCP sockets runtime surface (loopback) ----

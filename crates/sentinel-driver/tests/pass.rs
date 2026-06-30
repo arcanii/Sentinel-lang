@@ -1137,6 +1137,18 @@ fn pass_c66_process() {
 }
 
 #[test]
+fn pass_c66_process_channel() {
+    // ADR 0066 M2.3: process_send/process_recv lowering — frame an i64 to the
+    // child's stdin (process_send) + read one i64 frame back as a ?i64
+    // (process_recv, the cross-process recv twin), consumed via unwrap_or. The
+    // real spawn is guarded behind a runtime-false flag for cross-platform
+    // determinism; the IR is still emitted for the differential. Exit 42.
+    let r = build_and_run("c66_process_channel.sentinel");
+    assert_eq!(r.exit, 42);
+    assert_eq!(r.stdout, "");
+}
+
+#[test]
 fn pass_c68_nested_array() {
     // ADR 0068: nested arrays `[[u8]]` — a `[[u8]]` literal + param + outer `len`
     // + inner indexing `rows[i]` (a `[u8]`) + its `len`. 3+2+1 + 36 = 42.

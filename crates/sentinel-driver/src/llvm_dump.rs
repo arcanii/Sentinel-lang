@@ -44,7 +44,8 @@ use sentinel_codegen::collect_mono_instantiations;
 use sentinel_resolve::{
     ClassId, EffectId, EnumId, FnId, StructId, VarId, I64_TO_U8_FN_ID, IS_SOME_FN_ID, LEN_FN_ID,
     CHANNEL_CLOSE_FN_ID, CHANNEL_NEW_FN_ID, POP_FN_ID, PRINT_BYTES_FN_ID, PRINT_FN_ID,
-    PROCESS_READ_FN_ID, PROCESS_SPAWN_FN_ID, PROCESS_WAIT_FN_ID, PROCESS_WRITE_FN_ID, PUSH_FN_ID,
+    PROCESS_READ_FN_ID, PROCESS_RECV_FN_ID, PROCESS_SEND_FN_ID, PROCESS_SPAWN_FN_ID,
+    PROCESS_WAIT_FN_ID, PROCESS_WRITE_FN_ID, PUSH_FN_ID,
     READ_FILE_FN_ID, RECV_FN_ID, SEND_FN_ID, STR_EQ_FN_ID, U8_TO_I64_FN_ID, UNWRAP_OR_FN_ID,
     VEC_NEW_FN_ID, VEC_TO_ARRAY_FN_ID, WRITE_FILE_FN_ID,
 };
@@ -66,7 +67,7 @@ const TARGET_TRIPLE: &str = "arm64-apple-darwin";
 // base to 29. A call to a builtin FnId not caught by a special lowering arm
 // above returns Err (the fixture is skipped); the channel + subprocess
 // builtins ARE specially lowered.
-const FIRST_USER_FN: u32 = 29;
+const FIRST_USER_FN: u32 = 31;
 
 /// Bar B / effects (ADR 0020): the reserved kont op_id for a PURE_RETURN wrap
 /// (`u32::MAX`) — the handle dispatch + `k(v)` pure-check compare against it.
@@ -140,6 +141,10 @@ struct RuntimeSyms {
     /// `sentinel_process_write(ptr, ptr, i64) -> i64`, `_read(ptr, ptr) -> ptr`.
     process_write: bool,
     process_read: bool,
+    /// ADR 0066 M2.3: the typed framed-channel-over-pipe runtime symbols.
+    /// `sentinel_process_send(ptr, i64) -> i64`, `_recv(ptr, ptr) -> i64`.
+    process_send: bool,
+    process_recv: bool,
 }
 
 impl RuntimeSyms {
@@ -172,6 +177,8 @@ impl RuntimeSyms {
         self.process_wait |= other.process_wait;
         self.process_write |= other.process_write;
         self.process_read |= other.process_read;
+        self.process_send |= other.process_send;
+        self.process_recv |= other.process_recv;
     }
 
     /// Emit the `declare`s for the used symbols, in the fixed canonical order,
@@ -264,6 +271,13 @@ impl RuntimeSyms {
         if self.process_read {
             writeln!(out, "declare ptr @sentinel_process_read(ptr, ptr)").unwrap();
         }
+        // ADR 0066 M2.3: the typed framed-channel-over-pipe runtime group.
+        if self.process_send {
+            writeln!(out, "declare i64 @sentinel_process_send(ptr, i64)").unwrap();
+        }
+        if self.process_recv {
+            writeln!(out, "declare i64 @sentinel_process_recv(ptr, ptr)").unwrap();
+        }
         if self.memcpy {
             writeln!(out, "declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)").unwrap();
         }
@@ -294,6 +308,8 @@ impl RuntimeSyms {
             || self.process_wait
             || self.process_write
             || self.process_read
+            || self.process_send
+            || self.process_recv
             || self.memcpy
     }
 }
@@ -3221,6 +3237,35 @@ impl Emit<'_> {
             writeln!(self.body, "  %v{a0} = insertvalue {{ i64, ptr }} undef, i64 %v{rlen}, 0").unwrap();
             let a1 = self.fresh();
             writeln!(self.body, "  %v{a1} = insertvalue {{ i64, ptr }} %v{a0}, ptr %v{data}, 1").unwrap();
+            return Ok(format!("%v{a1}"));
+        }
+        // ADR 0066 M2.3: the typed framed-channel-over-pipe builtins. process_send
+        // frames an i64 to the child's stdin (i64 status); process_recv reads one
+        // i64 frame, building the `?i64` from the status exactly like `recv`.
+        if id == PROCESS_SEND_FN_ID {
+            let p = self.lower_expr(&args[0])?;
+            let v = self.lower_expr(&args[1])?;
+            let r = self.fresh();
+            writeln!(self.body, "  %v{r} = call i64 @sentinel_process_send(ptr {p}, i64 {v})").unwrap();
+            self.used.process_send = true;
+            return Ok(format!("%v{r}"));
+        }
+        if id == PROCESS_RECV_FN_ID {
+            // process_recv(p) -> ?i64: write the value to a stack out-slot, then
+            // build the `{ i1 valid, i64 value }` from the i64 status (valid = 0).
+            let p = self.lower_expr(&args[0])?;
+            let out = self.alloca("i64");
+            let status = self.fresh();
+            writeln!(self.body, "  %v{status} = call i64 @sentinel_process_recv(ptr {p}, ptr %v{out})").unwrap();
+            self.used.process_recv = true;
+            let valid = self.fresh();
+            writeln!(self.body, "  %v{valid} = icmp eq i64 %v{status}, 0").unwrap();
+            let value = self.fresh();
+            writeln!(self.body, "  %v{value} = load i64, ptr %v{out}").unwrap();
+            let a0 = self.fresh();
+            writeln!(self.body, "  %v{a0} = insertvalue {{ i1, i64 }} undef, i1 %v{valid}, 0").unwrap();
+            let a1 = self.fresh();
+            writeln!(self.body, "  %v{a1} = insertvalue {{ i1, i64 }} %v{a0}, i64 %v{value}, 1").unwrap();
             return Ok(format!("%v{a1}"));
         }
         if id.0 < FIRST_USER_FN {

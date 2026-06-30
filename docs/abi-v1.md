@@ -166,6 +166,18 @@ type system exactly as the FFI boundary is: the builtin's parameter is `[u8]`, a
 implicit secret→public coercion), so it is rejected at the call. `declassify` remains
 the only sanctioned way to send formerly-secret data over a pipe.
 
+**Typed framed channel over the pipe (M2.3).** On top of the raw byte pipes,
+`sentinel_process_send(p, value)` frames an `i64` as **8 little-endian bytes** to the
+child's stdin and flushes, keeping stdin **open** (multi-message, unlike `_write`'s
+one-shot close); `sentinel_process_recv(p, out) -> i64` reads exactly one 8-byte LE
+frame from the child's stdout into `*out` and returns the status `0` (a value
+arrived) / `1` (closed — EOF or short read), from which codegen builds the `?i64`
+exactly as `recv` does (`valid = status == 0`). These are the cross-process twins of
+`sentinel_channel_send` / `_recv`. `sentinel_process_wait` closes stdin before
+reaping so a loop-until-EOF child terminates (idempotent vs `_write`). The framed
+element is the **public** `i64`, so the cross-process secret fence (D8) stays
+structural: a `secret i64` argument to `process_send` is rejected as a type mismatch.
+
 ---
 
 ## 4. Name mangling
@@ -301,6 +313,8 @@ Codegen declares these as external; `sentinel-runtime` defines them
 | `sentinel_process_wait` | `(ptr p) -> i64` | subprocess — wait; exit code, or -1 (error / no code / already waited) |
 | `sentinel_process_write` | `(ptr p, ptr data, i64 data_len) -> i64` | subprocess IPC (ADR 0066 M2.2) — write `[u8]` to child stdin + close it; 0 ok, -1 error |
 | `sentinel_process_read` | `(ptr p, ptr out_len) -> ptr` | subprocess IPC — read child stdout to EOF; libc-malloc'd `[u8]` (len → `out_len`) |
+| `sentinel_process_send` | `(ptr p, i64 value) -> i64` | typed framed IPC (ADR 0066 M2.3) — frame `value` (8-byte LE) to child stdin, keep open; 0 ok, -1 error |
+| `sentinel_process_recv` | `(ptr p, ptr out) -> i64` | typed framed IPC — read one 8-byte LE i64 frame from child stdout; writes `*out`, returns 0 (some) / 1 (closed). Codegen builds the `?i64` |
 
 **Runtime-internal (not codegen-declared):** `sentinel_kont_panic_resumed`
 — the runtime's `sentinel_kont_resume` calls it on the consumed-twice
