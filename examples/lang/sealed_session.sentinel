@@ -1,0 +1,83 @@
+// ADR 0066 M2.4b / ADR 0069 D3/D4: the authenticated x25519 key exchange that
+// establishes a SealedChannel's per-direction session keys, + the counter-nonce
+// sealed stream those keys protect — verified IN-PROCESS.
+//
+// This runs BOTH halves of the KEX in one program (the wire bytes passed between
+// them) to verify the crypto without a real pipe: the initiator (parent) and the
+// responder (child) each independently derive the SAME directional keys via x25519
+// ECDH + ssh_kdf, and the initiator AUTHENTICATES the responder by verifying its
+// ed25519 host signature over the exchange hash AND pinning its host key (ADR 0069
+// D3). Then a multi-message sealed STREAM in the keyc direction uses MONOTONIC
+// counter nonces (seqnr 0,1,2 — never reused, ADR 0069 D4): the initiator seals,
+// the responder opens with the same derived key. Every message re-emerges `secret`
+// and authenticated. Exit 42.
+//
+// This removes M2.4a's two big caveats at the CRYPTO level: the fixed pre-shared key
+// (now an authenticated x25519 exchange) and the single-message limit (now a
+// counter-nonce stream). The only deferred piece is driving the handshake over a
+// REAL parent<->child pipe — that needs a self-stdin-read builtin (the child must
+// read what the parent sends), a follow-on infrastructure step. NO new cryptographic
+// primitive — every step reuses the shipped verified-CT x25519 / ed25519 / ssh KEX
+// (ADR 0069 D2). snc-side demonstrator (no compiler change; the scg mirror of the
+// sealed stdlib is deferred), so it lives in examples/, out of the differential.
+use std::security::sealed_kex::sealed_kex_client_msg;
+use std::security::sealed_kex::sealed_kex_server;
+use std::security::sealed_kex::sealed_kex_client_finish;
+use std::security::sealed_kex::ct_eq;
+use std::security::sealed_kex::SealedSession;
+use std::security::sealed_kex::SealedServerKex;
+use std::security::sealed::seal;
+use std::security::sealed::open;
+use std::security::sealed::OpenResult;
+use std::security::ed25519::ed25519_pubkey;
+
+// A deterministic `n`-byte secret buffer (a fixed test vector — M2.4b verifies the
+// KEX crypto; real ephemerals come from std::sys::random in a deployment).
+fn mk(seed: i64, n: i64) -> [secret u8] {
+    let mut v: Vec<secret u8> = vec_new();
+    let mut i: i64 = 0;
+    while i < n { push(&mut v, i64_to_u8((i * seed + seed) & 255)); i = i + 1; }
+    vec_to_array(v)
+}
+
+fn main() -> i64 {
+    let client_eph: [secret u8] = mk(3, 32);
+    let server_eph: [secret u8] = mk(5, 32);
+    let host_seed: [secret u8] = mk(7, 32);
+    let cookie_c: [secret u8] = mk(11, 16);
+    let cookie_s: [secret u8] = mk(13, 16);
+    let banner: [secret u8] = mk(17, 24);
+    // The PARENT pins the CHILD's ed25519 host key (it spawned the child, so it knows
+    // the expected key). Here both derive from the same host_seed for the demo.
+    let expected_host: [secret u8] = ed25519_pubkey(mk(7, 32));
+
+    // ---- the authenticated x25519 KEX, run in-process (initiator <-> responder) ----
+    let qc: [u8] = sealed_kex_client_msg(&client_eph);
+    let srv: SealedServerKex =
+        sealed_kex_server(&server_eph, &host_seed, &qc, &cookie_c, &cookie_s, &banner);
+    let cli: SealedSession =
+        sealed_kex_client_finish(&client_eph, &srv.resp, &expected_host, &cookie_c, &cookie_s, &banner);
+
+    // Both ends derived identical directional keys; the initiator authenticated the host.
+    let keyc_match: i64 = ct_eq(&cli.keyc, &srv.keyc, 64);
+    let keyd_match: i64 = ct_eq(&cli.keyd, &srv.keyd, 64);
+
+    // ---- a counter-nonce sealed STREAM, initiator -> responder (keyc) ----
+    // Distinct seqnr per message (0, 1, 2) — never reused (ADR 0069 D4).
+    let f0: [u8] = seal(&cli.keyc, 0, 5);
+    let f1: [u8] = seal(&cli.keyc, 1, 15);
+    let f2: [u8] = seal(&cli.keyc, 2, 20);
+    let r0: OpenResult = open(&srv.keyc, 0, &f0);
+    let r1: OpenResult = open(&srv.keyc, 1, &f1);
+    let r2: OpenResult = open(&srv.keyc, 2, &f2);
+    let sum: i64 = declassify(r0.v) + declassify(r1.v) + declassify(r2.v);   // 5 + 15 + 20 = 40
+
+    // Exit 42 iff every record authenticated, both directional keys agree, and the
+    // host was authenticated: 40 + keyc_match(1) + authed(1) = 42.
+    let allok: i64 = r0.ok & r1.ok & r2.ok & keyc_match & keyd_match & cli.authed;
+    if allok == 1 {
+        sum + keyc_match + cli.authed
+    } else {
+        0
+    }
+}

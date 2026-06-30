@@ -482,6 +482,14 @@ const EXAMPLES: &[(&str, i32)] = &[
     // the verified-CT ssh record cipher (no new primitive). snc-only (the scg mirror
     // is deferred, like process_channel_typed / task_generic). 42 = the opened value.
     ("examples/lang/sealed_channel.sentinel", 42),
+    // ADR 0066 M2.4b / ADR 0069 D3/D4: the authenticated x25519 KEX that establishes
+    // a SealedChannel's per-direction session keys, + the counter-nonce sealed stream
+    // — verified in-process (both halves derive matching keyc/keyd; the initiator
+    // authenticates the host via ed25519 sig + a pinned host key; a 3-message stream
+    // with distinct counter nonces re-emerges secret). Reuses the verified-CT ssh KEX
+    // (no new primitive). The real-pipe transport is deferred (needs a self-stdin
+    // builtin). snc-only. 5+15+20 + keyc_match + authed = 42.
+    ("examples/lang/sealed_session.sentinel", 42),
     // ADR 0037 / BACKLOG §10.9: the worked MULTI-FILE example — a program using
     // a `pub class` (`Rect`) defined in another file, the library module
     // `std::math::rect`. The class crosses the module / separate-compilation
@@ -766,6 +774,15 @@ fn lang_sealed_channel() {
     // The in-process round-trip is runtime-verified (exit 42 = the opened+declassified
     // value); the pipe path is compiled but guarded. Built --separate and merged.
     check_example("examples/lang/sealed_channel.sentinel", "sealed_channel", 42);
+}
+
+#[test]
+fn lang_sealed_session() {
+    // ADR 0066 M2.4b / ADR 0069 D3/D4: the authenticated x25519 KEX + per-direction
+    // keys + a counter-nonce sealed stream, verified in-process (matching keyc/keyd,
+    // host authenticated via ed25519 sig + pinned host key, a 3-message stream re-
+    // emerges secret). 5+15+20 + keyc_match + authed = 42. Built --separate and merged.
+    check_example("examples/lang/sealed_session.sentinel", "sealed_session", 42);
 }
 
 #[test]

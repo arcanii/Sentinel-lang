@@ -1,0 +1,168 @@
+// std::security::sealed_kex — the authenticated x25519 key exchange for a
+// SealedChannel (ADR 0066 M2.4b / ADR 0069 D3/D4).
+//
+// Establishes the per-direction session keys a SealedChannel seals/opens with, by
+// running the SAME x25519 KEX + ed25519 host-key authentication + ssh_kdf key
+// derivation that std::net::ssh runs over a socket — here as **transport-free CORE
+// functions** (they take/return the wire BYTES rather than doing the I/O), so the
+// handshake can be driven over a process pipe (when the self-stdin transport lands)
+// OR verified in-process. NO new cryptographic primitive — every step reuses the
+// shipped, verified-constant-time `x25519` / `ed25519` / `ssh_exchange_hash` /
+// `ssh_kdf` (ADR 0069 D2).
+//
+// AUTHENTICATION (ADR 0069 D3, PINNED: reuse the ssh host-key model). The responder
+// (the spawned CHILD) presents an ed25519 host key; the initiator (the PARENT, which
+// spawned the child and therefore can ship/pin the expected key) verifies the host
+// signature over the exchange hash AND that the presented host key matches the pinned
+// one. An unauthenticated / MITM'd KEX yields `authed = 0` — there is no
+// unauthenticated default (D3 (c) rejected).
+//
+// NONCE DISCIPLINE (ADR 0069 D4). The exchange yields two directional keys —
+// `keyc` (initiator -> responder) and `keyd` (responder -> initiator) — via
+// `ssh_kdf` (letters 'C'/'D'), exactly as the ssh data phase does. A sealed STREAM
+// then uses MONOTONIC COUNTER nonces per direction (the `seqnr` argument of
+// `std::security::sealed::seal`/`open`, starting at 0 and incrementing per message,
+// never reused). Two independent counters (one per direction). No random nonces.
+//
+// SCOPE: the in-process orchestration + the directional keys + the counter-nonce
+// discipline are the verifiable content of M2.4b. Driving this over a REAL parent
+// <-> child pipe is deferred — it needs a self-stdin-read builtin (the child must
+// read what the parent sends; the `sentinel_process_*` runtime symbols are all
+// parent->child) — a follow-on infrastructure step.
+use std::net::ssh::ssh_kexinit_payload;
+use std::net::ssh::ssh_hostkey_blob;
+use std::net::ssh::ssh_exchange_hash;
+use std::net::ssh::ssh_kdf;
+use std::security::x25519::x25519;
+use std::security::ed25519::ed25519_pubkey;
+use std::security::ed25519::ed25519_sign;
+use std::security::ed25519::ed25519_verify;
+
+// The established session both ends share after a successful KEX: the two directional
+// keys (64-byte chacha20-poly1305@openssh.com keys), the session id (the exchange hash
+// H), and `authed` = 1 iff the host signature verified AND the host key matched the
+// pinned one (the initiator's verdict; the responder sets it to 1, it IS the host).
+pub struct SealedSession { keyc: [secret u8], keyd: [secret u8], session_id: [secret u8], authed: i64 }
+
+// The responder's KEX output: the 128-byte response to hand back to the initiator
+// (Q_S | host pubkey | signature) plus the derived directional keys + session id.
+pub struct SealedServerKex { resp: [u8], keyc: [secret u8], keyd: [secret u8], session_id: [secret u8] }
+
+// The x25519 base point u=9 (32 bytes, little-endian), widened to secret.
+fn base9() -> [secret u8] {
+    let mut v: Vec<secret u8> = vec_new();
+    push(&mut v, i64_to_u8(9));
+    let mut i: i64 = 1;
+    while i < 32 { push(&mut v, i64_to_u8(0)); i = i + 1; }
+    vec_to_array(v)
+}
+
+// Copy the first `n` bytes of a secret borrow into a fresh owned `[secret u8]` (the
+// crypto primitives take their `[secret u8]` args by value / Move, so each use needs
+// its own copy — the same discipline std::net::ssh_handshake uses).
+fn copy_n(s: &[secret u8], n: i64) -> [secret u8] {
+    let mut v: Vec<secret u8> = vec_new();
+    let mut i: i64 = 0;
+    while i < n { push(&mut v, (*s)[i]); i = i + 1; }
+    vec_to_array(v)
+}
+
+// Declassify the first `n` bytes of a secret buffer into a fresh public `[u8]` — the
+// wire-public KEX values (ephemeral public keys, the host pubkey, the signature) are
+// public output (they cross the wire), the sanctioned declassify boundary.
+fn declassify_n(s: &[secret u8], n: i64) -> [u8] {
+    let mut v: Vec<u8> = vec_new();
+    let mut i: i64 = 0;
+    while i < n { push(&mut v, declassify((*s)[i])); i = i + 1; }
+    vec_to_array(v)
+}
+
+// Widen the `n`-byte window of a public buffer at `start` into the secret domain so
+// received wire bytes can feed the constant-time crypto (widening only ADDS secrecy).
+fn widen_window(p: &[u8], start: i64, n: i64) -> [secret u8] {
+    let mut v: Vec<secret u8> = vec_new();
+    let mut i: i64 = 0;
+    while i < n { push(&mut v, (*p)[start + i]); i = i + 1; }
+    vec_to_array(v)
+}
+
+// Constant-time equality of two `n`-byte secret buffers → a PUBLIC 1 (equal) / 0
+// (differ). Branch-free OR-accumulate of the per-byte XOR; the 1-bit verdict is the
+// only declassify (the ssh_open_verify shape). Used for the host-key pinning check.
+pub fn ct_eq(a: &[secret u8], b: &[secret u8], n: i64) -> i64 {
+    let mut acc: secret i64 = 0;
+    let mut i: i64 = 0;
+    while i < n {
+        acc = acc | (((*a)[i] as i64) ^ ((*b)[i] as i64));
+        i = i + 1;
+    }
+    declassify(1 - (((0 - acc) >> 63) & 1))
+}
+
+// INITIATOR step 1: the ephemeral public key Q_C = x25519(eph, 9), as 32 PUBLIC bytes
+// (sent to the responder first).
+pub fn sealed_kex_client_msg(eph: &[secret u8]) -> [u8] {
+    let qcv: [secret u8] = x25519(copy_n(eph, 32), base9());
+    declassify_n(&qcv, 32)
+}
+
+// RESPONDER: given the initiator's Q_C, derive the shared secret K = eph . Q_C,
+// compute + sign the exchange hash H with the host key, build the 128-byte response
+// (Q_S | host pubkey | sig), and derive the directional keys. The transport-free twin
+// of std::net::ssh_handshake::ssh_server_handshake (the I/O removed).
+pub fn sealed_kex_server(eph: &[secret u8], host_seed: &[secret u8], qc_pub: &[u8],
+                         cookie_c: &[secret u8], cookie_s: &[secret u8],
+                         banner: &[secret u8]) -> SealedServerKex {
+    let qcv: [secret u8] = widen_window(qc_pub, 0, 32);
+    let qsv: [secret u8] = x25519(copy_n(eph, 32), base9());
+    let hpubv: [secret u8] = ed25519_pubkey(copy_n(host_seed, 32));
+    let ks: [secret u8] = x25519(copy_n(eph, 32), copy_n(&qcv, 32));
+
+    let ic: [secret u8] = ssh_kexinit_payload(cookie_c);
+    let is: [secret u8] = ssh_kexinit_payload(cookie_s);
+    let ksb: [secret u8] = ssh_hostkey_blob(&hpubv);
+    let h: [secret u8] = ssh_exchange_hash(banner, banner, &ic, &is, &ksb, &qcv, &qsv, &ks);
+    let sig: [secret u8] = ed25519_sign(copy_n(host_seed, 32), copy_n(&h, 32));
+
+    // resp = Q_S (32) | host pubkey (32) | signature (64), all PUBLIC wire bytes.
+    let mut resp: Vec<u8> = vec_new();
+    let mut a: i64 = 0;
+    while a < 32 { push(&mut resp, declassify(qsv[a])); a = a + 1; }
+    let mut b: i64 = 0;
+    while b < 32 { push(&mut resp, declassify(hpubv[b])); b = b + 1; }
+    let mut c: i64 = 0;
+    while c < 64 { push(&mut resp, declassify(sig[c])); c = c + 1; }
+    let resp_bytes: [u8] = vec_to_array(resp);
+
+    let keyc: [secret u8] = ssh_kdf(&ks, &h, 67, 64);
+    let keyd: [secret u8] = ssh_kdf(&ks, &h, 68, 64);
+    SealedServerKex { resp: resp_bytes, keyc: keyc, keyd: keyd, session_id: copy_n(&h, 32) }
+}
+
+// INITIATOR step 2: given the responder's 128-byte response, derive K = eph . Q_S,
+// recompute the exchange hash H, VERIFY the host signature over it AND that the
+// presented host key matches the PINNED `expected_host` (ADR 0069 D3), and derive the
+// directional keys. `authed` = 1 iff both checks pass. The transport-free twin of
+// std::net::ssh_handshake::ssh_client_handshake (the I/O removed) + the host-key pin.
+pub fn sealed_kex_client_finish(eph: &[secret u8], resp: &[u8], expected_host: &[secret u8],
+                                cookie_c: &[secret u8], cookie_s: &[secret u8],
+                                banner: &[secret u8]) -> SealedSession {
+    let qcv: [secret u8] = x25519(copy_n(eph, 32), base9());
+    let qsv: [secret u8] = widen_window(resp, 0, 32);
+    let hpubv: [secret u8] = widen_window(resp, 32, 32);
+    let sig: [secret u8] = widen_window(resp, 64, 64);
+    let kc: [secret u8] = x25519(copy_n(eph, 32), copy_n(&qsv, 32));
+
+    let ic: [secret u8] = ssh_kexinit_payload(cookie_c);
+    let is: [secret u8] = ssh_kexinit_payload(cookie_s);
+    let ksb: [secret u8] = ssh_hostkey_blob(&hpubv);
+    let h: [secret u8] = ssh_exchange_hash(banner, banner, &ic, &is, &ksb, &qcv, &qsv, &kc);
+
+    let sig_ok: i64 = ed25519_verify(copy_n(&hpubv, 32), copy_n(&h, 32), copy_n(&sig, 64));
+    let pin_ok: i64 = ct_eq(&hpubv, expected_host, 32);   // D3: pin the child's host key
+    let authed: i64 = sig_ok & pin_ok;
+
+    let keyc: [secret u8] = ssh_kdf(&kc, &h, 67, 64);
+    let keyd: [secret u8] = ssh_kdf(&kc, &h, 68, 64);
+    SealedSession { keyc: keyc, keyd: keyd, session_id: copy_n(&h, 32), authed: authed }
+}

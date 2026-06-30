@@ -1,9 +1,9 @@
 # ADR 0069: `SealedChannel<secret T>` — the AEAD-encrypted secret-cross-process path
 
-Status: **PROPOSED — design PINNED; M2.4a IMPLEMENTED (snc-side, 2026-06-30)** —
-the M2.4 sub-phase of the ADR 0066 roadmap, broken out into its own ADR per **ADR
-0066 D8a** ("Because this is security-critical and crypto-bearing, M2.4 gets its
-own ADR"). **The security-critical decisions D3/D4/D5/D9 are PINNED (maintainer
+Status: **PROPOSED — design PINNED; M2.4a + M2.4b-crypto IMPLEMENTED (snc-side,
+2026-06-30)** — the M2.4 sub-phase of the ADR 0066 roadmap, broken out into its
+own ADR per **ADR 0066 D8a** ("Because this is security-critical and crypto-bearing,
+M2.4 gets its own ADR"). **The security-critical decisions D3/D4/D5/D9 are PINNED (maintainer
 sign-off 2026-06-30):** D3 = reuse the ssh host-key authentication model (a); D4 =
 counter-nonces + per-direction HKDF keys; D5 = fixed-width frames at the
 i64-minimum (padding with the later variable-length phase); D9 = add only
@@ -25,9 +25,28 @@ The fixed-width frame is 40 bytes = 5 public i64 pipe frames over the M2.3
 (an in-process `seal`→`open` round-trip — runtime-verified, the secret re-emerges
 secret and authenticated → exit 42 — plus a guarded pipe path); ui rejection
 `tests/ui/c66_sealed_channel_public_element` (a non-secret element is a type error,
-D1). Four-check green; both bootstrap fixed points byte-identical. M2.4a uses a FIXED
-pre-shared key + FIXED single-message nonce (the handshake D3 + counter-nonces D4 are
-**M2.4b**, next).
+D1). Four-check green; both bootstrap fixed points byte-identical.
+
+**M2.4b-crypto (D3/D4) is now implemented + verified IN-PROCESS** (snc-side; the real
+cross-process pipe transport is deferred — see below). New stdlib
+`std::security::sealed_kex`: the authenticated x25519 KEX (D3 — the ssh host-key model:
+the initiator verifies the responder's ed25519 host signature over the exchange hash
+**and** pins the host key, so an unauthenticated/MITM'd KEX yields `authed=0`) as
+**transport-free core functions** (`sealed_kex_client_msg` / `sealed_kex_server` /
+`sealed_kex_client_finish` take/return the wire bytes), reusing the verified-CT
+`x25519`/`ed25519`/`ssh_exchange_hash`/`ssh_kdf` — **no new primitive (D2), no
+compiler change.** The exchange yields the two directional keys `keyc`/`keyd`
+(`ssh_kdf` letters 'C'/'D', D4); a sealed stream then uses **monotonic counter nonces**
+per direction (the `seqnr` of `seal`/`open`). Demonstrator
+`examples/lang/sealed_session.sentinel` runs both KEX halves in-process (the wire bytes
+passed between them) → both derive matching `keyc`/`keyd`, the initiator authenticates
+the host, and a 3-message counter-nonce sealed stream (seqnr 0/1/2, no reuse) re-emerges
+secret → exit 42. This removes M2.4a's **fixed pre-shared key** (now an authenticated
+x25519 exchange) and **single-message** (now a counter-nonce stream) caveats at the
+crypto level. **Deferred:** driving the handshake over a REAL parent↔child pipe — it
+needs a **self-stdin-read builtin** (the child must read what the parent sends; the
+`sentinel_process_*` runtime symbols are all parent→child), a follow-on infrastructure
+step. Then M2.4c (generic `secret T` + variable-length + padding).
 
 Date: 2026-06-30
 

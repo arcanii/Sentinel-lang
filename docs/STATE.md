@@ -14,7 +14,32 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
-**Latest (2026-06-30) — ADR 0066 M2.4a: `SealedChannel<secret i64>` IMPLEMENTED (snc-side).**
+**Latest (2026-06-30) — ADR 0066 M2.4b-crypto: authenticated x25519 KEX + per-direction keys +
+counter-nonce sealed stream, verified IN-PROCESS (snc-side).** Establishes a SealedChannel's session
+keys via the **same x25519 KEX + ed25519 host-key auth + `ssh_kdf` key derivation that `std::net::ssh`
+runs over a socket** — here as **transport-free core functions** in the new stdlib
+**`std::security::sealed_kex`** (`sealed_kex_client_msg` / `sealed_kex_server` / `sealed_kex_client_finish`
+take/return the wire bytes), reusing the verified-CT `x25519`/`ed25519`/`ssh_exchange_hash`/`ssh_kdf` —
+**no new cryptographic primitive (ADR 0069 D2), and NO compiler change** (pure stdlib + example).
+**Authentication (D3, the ssh host-key model):** the initiator (parent) verifies the responder's
+(child's) ed25519 host signature over the exchange hash AND **pins** the host key (the parent spawned
+the child, so it knows the expected key) → an unauthenticated / MITM'd KEX yields `authed = 0` (no
+unauthenticated default). **Directional keys + nonces (D4):** the exchange yields `keyc` (initiator→
+responder) / `keyd` (responder→initiator) via `ssh_kdf` letters 'C'/'D'; a sealed stream then uses
+**monotonic counter nonces** per direction (the `seqnr` of `seal`/`open`, starting at 0, never reused).
+Demonstrator `examples/lang/sealed_session.sentinel` runs **both KEX halves in-process** (the wire bytes
+passed between them) → both independently derive matching `keyc`/`keyd`, the initiator authenticates the
+host, and a **3-message counter-nonce sealed stream** (seqnr 0/1/2) re-emerges secret + authenticated →
+exit 42. This **removes M2.4a's two big caveats at the crypto level**: the fixed pre-shared key (now an
+authenticated x25519 exchange) and the single-message limit (now a counter-nonce stream). **Deferred:**
+driving the handshake over a REAL parent↔child pipe — it needs a **self-stdin-read builtin** (the child
+must read what the parent sends; the `sentinel_process_*` runtime symbols are all parent→child), a
+follow-on infrastructure step. Since there is no compiler/selfhost change, both bootstrap fixed points
+stay byte-identical by construction; clippy + the example tests (`--separate` + merged → 42) green. It is
+a **cryptographic** guarantee + key management, NOT machine-verified CT (D8). See ADR 0069 D3/D4 +
+HANDOVER §0.
+
+**Earlier (2026-06-30) — ADR 0066 M2.4a: `SealedChannel<secret i64>` IMPLEMENTED (snc-side).**
 The AEAD-encrypted secret-cross-process path (the D8a escape from the D8 fence) per
 [ADR 0069](decisions/0069-sealed-channel.md). A `secret` may cross a process boundary only by a
 **cryptographic `declassify`**: `seal` AEAD-encrypts a `secret i64` so only PUBLIC ciphertext touches
