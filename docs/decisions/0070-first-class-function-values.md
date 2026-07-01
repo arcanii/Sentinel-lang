@@ -1,11 +1,14 @@
-# ADR 0070: Non-capturing first-class function values (`Fn<i64,i64>` v1)
+# ADR 0070: Non-capturing first-class function values (`Fn<T,R>`)
 
-Status: **ACCEPTED — v1 IMPLEMENTED (snc-side, 2026-07-01).** Four-check
-green; both bootstrap fixed points byte-identical (all 9 selfhost
-differential stages, including the resolve-stage `apply`/`FnRef` mirror
-D7 required — see the correction note there).
+Status: **ACCEPTED — v1 IMPLEMENTED, THEN GENERALIZED same-day
+(snc-side, 2026-07-01).** Four-check green; both bootstrap fixed points
+byte-identical (all 9 selfhost differential stages) after BOTH the v1
+landing and the M-cont generalization below. v1 shipped `Fn<i64,i64>`
+only; the M-cont amendment (end of this document) generalized to any
+word-scalar `Fn<T,R>` in the same session, mirroring the
+`Task<i64>`→`Task<T>` / `Channel<i64>`→`Channel<T>` precedent.
 
-Date: 2026-07-01
+Date: 2026-07-01 (v1); 2026-07-01 (M-cont generalization, same day)
 
 ## Related
 
@@ -207,8 +210,9 @@ the existing tracked scg-mirror follow-up.**
   zero-payload variant, cheaper than even an interned id).
 
 ## Revisit
-- Generalize `Fn<i64,i64>` to word-scalar params/return (the
-  `Channel<T>`-M1.2b-cont-style follow-up) once v1 is proven in real use.
+- ~~Generalize `Fn<i64,i64>` to word-scalar params/return (the
+  `Channel<T>`-M1.2b-cont-style follow-up) once v1 is proven in real use.~~
+  **DONE same-day — see the M-cont amendment at the end of this document.**
 - Unify `apply(f, x)` with ordinary `f(x)` call syntax — requires carefully
   generalizing the `ident(args)`-over-a-local-var resolve dispatch
   (`crates/sentinel-resolve/src/lib.rs:3999-4020`) to disambiguate kont vs.
@@ -249,3 +253,84 @@ byte-identical (incl. the resolve-stage `apply`/`FnRef` mirror D7 required).
 Deferred follow-ups tracked in Revisit: generalized `Fn<T,R>`, `f(x)` call
 syntax, effecting Fn values, `spawn` of an indirect target, the scg
 type-check/codegen lowering mirror.
+
+---
+
+## Amendment (M-cont, same day): generalize `Fn<i64,i64>` → `Fn<T,R>` over any word-scalar
+
+**PINNED (2026-07-01):** the Revisit item above, done immediately rather than
+deferred — the natural continuation of the same session, following the
+`Task<i64>`→`Task<T>` (M1.1) / `Channel<i64>`→`Channel<T>` (M1.2→M1.2b-cont)
+precedent of shipping the smallest concrete instantiation first and
+generalizing next.
+
+### D10. Representation — arithmetic signature id, not an interner table.
+
+`Channel<T>`'s generalization kept `Type::Channel(ChanId)` but PRE-INTERNED
+all 6 word-scalar element types at fixed `ChanId`s during builtin-sig setup
+(`channel_chanid_for`/`channel_elem_for`), specifically to avoid threading
+the `channels` table through `check_call`. `Fn<T,R>` has **two** axes
+(param, return) — pre-interning all 36 word-scalar × word-scalar
+combinations would work but is more machinery than needed. Instead:
+`Type::Fn(FnValueSigId)` where the id is **computed arithmetically**
+(`param_index * 6 + ret_index` over the same 6-element word-scalar
+enumeration `channel_chanid_for` uses, independently duplicated rather than
+reused so the two features don't couple on an incidental shared numbering)
+via `fn_value_sig_id_for(param_ty, ret_ty) -> Option<FnValueSigId>` /
+`fn_value_sig_param_ret(id) -> (Type, Type)` (`sentinel-types`). **No
+interner table, no `TypedProgram` field, no threading through
+`resolve_type_expr` or the check pipeline at all** — a pure function pair,
+lower-machinery than even `Channel<T>`'s pre-intern trick.
+
+**PINNED: arithmetic id over 6×6 word-scalars; no interner table.**
+
+### D11. `apply` becomes `check_call`-special-cased (context-typed from `f`).
+
+v1's `apply` had ONE fixed concrete signature, so it needed no special-casing
+(the generic call-checking path handled it via a registered
+`TypedFnSignature`). Generalized, `apply(f: Fn<T,R>, x: T) -> R`'s shape
+depends on the CALL SITE's `f` argument, so it now follows the
+`process_recv`/`recv` pattern: special-cased in `check_call`, type-checks
+`args[0]` first, extracts `(param_ty, ret_ty)` from its `Type::Fn(id)` via
+`fn_value_sig_param_ret`, then checks `args[1]` against `param_ty` and
+returns `ret_ty`. No `type_args` needed (unlike `process_recv`, which needs
+`type_args` for codegen's decode step) — `apply`'s codegen (`lower_apply`)
+derives both LLVM types directly from the typed AST (`x.ty` for the param,
+the `Call` node's own `expr.ty` for the return), so nothing needs to ride
+through `type_args`. A first argument that isn't `Type::Fn` at all gets a
+dedicated `ApplyTargetNotFn` diagnostic (not `CallArgMismatch`, which would
+misleadingly imply a single "expected" type when any word-scalar `Fn<T,R>`
+is acceptable).
+
+### D12. Self-host mirror — unaffected; no new corpus risk.
+
+The v1 GOTCHA (D7: `tests/ui` fixtures sweep into the resolve-stage
+differential when they resolve cleanly) does **not** recur here — verified,
+not assumed. Both `tests/ui/` fixtures were re-examined:
+`c70_fn_value_ineligible.sentinel` is unchanged (still calls `apply` by
+name, still covered by the existing `builtin_id`/`Expr::Var` resolve-stage
+mirror from v1); the replacement `c70_fn_type_args_unsupported.sentinel`
+(`Fn<u128, i64>`, now genuinely unsupported since `u128` isn't a
+word-scalar) only exercises the "Fn" TYPE-EXPRESSION arm, which carries no
+semantic type info at the resolve stage (type names are uninterpreted
+strings until the TYPES stage) — so it needs no resolve-stage mirror. All 9
+selfhost differential stages confirmed byte-identical after the
+generalization with **zero further `selfhost/` changes**.
+
+### Consequences (amendment)
+
+- **Positive:** the worker-pool motivation now covers non-`i64` operations
+  (byte transforms, float transforms, bool predicates) — the realistic 80%
+  case, not just an `i64`-shaped demo.
+- **Positive:** lower implementation cost than `Channel<T>`'s own
+  generalization (no table, no threading) — the two-axis problem turned out
+  simpler than the one-axis precedent once framed arithmetically.
+- **Neutral:** `Fn<T,R>` stays restricted to word-scalar T/R (no aggregates,
+  no `secret`, no generics) — same boundary as v1, just wider within it.
+
+Demonstrator `examples/lang/fn_value_generic.sentinel` (`Fn<u8,u8>` /
+`Fn<f64,f64>` / `Fn<bool,bool>`, runtime-verified, exit 42, both
+`--separate` and merged); `tests/ui/c70_fn_type_args_unsupported.sentinel`
+updated to `Fn<u128, i64>` (still genuinely rejected). Four-check green; all
+9 selfhost differential stages byte-identical, zero `selfhost/` changes
+beyond what v1 already required.

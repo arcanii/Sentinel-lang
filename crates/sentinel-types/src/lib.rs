@@ -29,8 +29,8 @@ use sentinel_base::{Diagnostic, SentinelDb, Severity, SourceFile};
 use sentinel_resolve::{
     ClassId, EffectId, EnumId, FnId, ImplId, ImplTarget, ResolvedBlock, ResolvedExpr,
     ResolvedExprKind, ResolvedFnDef, ResolvedPattern, ResolvedProgram, ResolvedStmt,
-    ResolvedStmtKind, StructId, TraitId, TypeParamId, VarId, CHANNEL_CLOSE_FN_ID, CHANNEL_NEW_FN_ID,
-    LEN_FN_ID, PROCESS_RECV_FN_ID, PROCESS_SEND_FN_ID, RECV_FN_ID, SEND_FN_ID,
+    ResolvedStmtKind, StructId, TraitId, TypeParamId, VarId, APPLY_FN_ID, CHANNEL_CLOSE_FN_ID,
+    CHANNEL_NEW_FN_ID, LEN_FN_ID, PROCESS_RECV_FN_ID, PROCESS_SEND_FN_ID, RECV_FN_ID, SEND_FN_ID,
 };
 use sentinel_ast::SelfKind;
 
@@ -223,17 +223,20 @@ pub enum Type {
     /// **static** property (ADR 0069 D1/D9): a `secret` may cross the pipe only after
     /// `seal` (a cryptographic declassify), never raw.
     SealedChannel,
-    /// ADR 0070: `Fn<i64,i64>` — a non-capturing first-class function value (a bare
-    /// code pointer, no environment). A **plain** handle (no interner table, unlike
-    /// `Channel`/`Task`) — a unit variant fixed at the single shape `(i64) -> i64` at
-    /// the v1 minimum (generalizing to word-scalar params/return is the
-    /// `Channel<i64>` → `Channel<T>` style follow-up, promoting this to an interned
-    /// `Fn(FnSigId)`). `Copy` (a bare LLVM function pointer — pointer-like, owns
-    /// nothing, like `Process`/`Ptr`). Produced by referencing a non-generic,
-    /// non-builtin, effect-free top-level fn by bare name in value position
-    /// (`ResolvedExprKind::FnRef`); consumed by the `apply(f, x)` builtin (an
-    /// indirect call — NOT ordinary `f(x)` syntax, see ADR 0070 D3).
-    Fn,
+    /// ADR 0070 (generalized, M-cont): `Fn<T,R>` — a non-capturing first-class
+    /// function value (a bare code pointer, no environment). The [`FnValueSigId`]
+    /// indexes `TypedProgram.fn_value_sigs`, where `FnValueSigData { param_ty,
+    /// ret_ty }` lives — both restricted to word-scalars
+    /// (`is_spawn_word_scalar`), mirroring `Channel<T>`'s M1.2b-cont
+    /// generalization. `Copy` (a bare LLVM function pointer — pointer-like, owns
+    /// nothing, like `Process`/`Ptr`; the signature id doesn't change the
+    /// runtime representation, which is always just a `ptr`). Produced by
+    /// referencing a non-generic, non-builtin, effect-free top-level fn by bare
+    /// name in value position (`ResolvedExprKind::FnRef`); consumed by the
+    /// `apply(f, x)` builtin (an indirect call — NOT ordinary `f(x)` syntax, see
+    /// ADR 0070 D3), context-typed from `f`'s own `FnValueSigId` (the
+    /// `Channel<T>` `recv`-style pattern).
+    Fn(FnValueSigId),
 }
 
 /// Identifier for an interned reference type. C2 / ADR 0017 D11.
@@ -266,6 +269,19 @@ pub struct KontData {
     pub arg_ty: Type,
     pub ret_ty: Type,
 }
+
+/// ADR 0070 (generalized): identifier for a `Fn<T,R>` value signature —
+/// **not** an interner-table index (unlike `RefId`/`SecretId`/`KontId`).
+/// `(param_ty, ret_ty)` are both restricted to word-scalars
+/// (`is_spawn_word_scalar` ∩ has-`NullableInner`, the same 6-element set
+/// `Channel<T>`'s M1.2b-cont generalization uses), so the id is computed
+/// ARITHMETICALLY as `param_index * 6 + ret_index` (see
+/// [`fn_value_sig_id_for`] / [`fn_value_sig_param_ret`]) — avoiding
+/// threading an interner table through `resolve_type_expr`'s full
+/// recursion (the way `channel_chanid_for`/`channel_elem_for` avoid
+/// threading `channels` through `check_call`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FnValueSigId(pub u32);
 
 /// Identifier for an interned task type per ADR 0024 D4 (C4.4).
 /// Assigned in source-encounter order during type-check of `spawn`
@@ -801,7 +817,7 @@ impl Type {
             // (NullableInner gains no Vec variant).
             | Type::Vec(_)
             // ADR 0070: no `?Fn` (a handle, like `Process`/`SealedChannel`).
-            | Type::Fn => None,
+            | Type::Fn(_) => None,
         }
     }
 
@@ -860,7 +876,7 @@ impl Type {
             // collection nesting at the MVP.
             | Type::Vec(_)
             // ADR 0070: no `[Fn]` (a handle, like `Process`/`SealedChannel`).
-            | Type::Fn => None,
+            | Type::Fn(_) => None,
         }
     }
 
@@ -941,7 +957,7 @@ impl Type {
             | Type::TraitSelf(_)
             | Type::Enum(_)
             // ADR 0070: no `Vec<Fn>` (a handle, like `Process`/`SealedChannel`).
-            | Type::Fn => None,
+            | Type::Fn(_) => None,
         }
     }
 
@@ -1137,9 +1153,9 @@ impl Type {
             Type::Process => self,
             // ADR 0066 M2.4a: `SealedChannel` carries no TypeParam — pass through.
             Type::SealedChannel => self,
-            // ADR 0070: `Fn` is fixed at `Fn<i64,i64>` — no TypeParam payload to
-            // substitute. Pass through unchanged.
-            Type::Fn => self,
+            // ADR 0070 (generalized): Fn<T,R>'s T/R are always concrete
+            // word-scalars, never a TypeParam — pass through unchanged.
+            Type::Fn(_) => self,
         }
     }
 
@@ -1243,6 +1259,51 @@ pub fn intern_kont(konts: &mut Vec<KontData>, arg_ty: Type, ret_ty: Type) -> Kon
     let id = KontId(konts.len() as u32);
     konts.push(KontData { arg_ty, ret_ty });
     id
+}
+
+/// ADR 0070 (generalized): word-scalar index for one axis of a `Fn<T,R>`
+/// signature — the same 6-element enumeration + order as
+/// [`channel_chanid_for`] (kept independent/duplicated rather than reused,
+/// so the two features don't couple on an incidental shared numbering).
+fn fn_value_word_scalar_index(ty: Type) -> Option<u32> {
+    match ty {
+        Type::I64 => Some(0),
+        Type::I32 => Some(1),
+        Type::U8 => Some(2),
+        Type::Bool => Some(3),
+        Type::F64 => Some(4),
+        Type::Ptr => Some(5),
+        _ => None,
+    }
+}
+
+/// The inverse of [`fn_value_word_scalar_index`].
+fn fn_value_word_scalar_at(idx: u32) -> Type {
+    match idx {
+        1 => Type::I32,
+        2 => Type::U8,
+        3 => Type::Bool,
+        4 => Type::F64,
+        5 => Type::Ptr,
+        _ => Type::I64,
+    }
+}
+
+/// ADR 0070 (generalized): compute the [`FnValueSigId`] for a `Fn<param_ty,
+/// ret_ty>` value type — `None` unless BOTH are word-scalars. Pure
+/// arithmetic (`param_index * 6 + ret_index`); no interner table, so no
+/// threading through `resolve_type_expr` or the check pipeline.
+pub fn fn_value_sig_id_for(param_ty: Type, ret_ty: Type) -> Option<FnValueSigId> {
+    let p = fn_value_word_scalar_index(param_ty)?;
+    let r = fn_value_word_scalar_index(ret_ty)?;
+    Some(FnValueSigId(p * 6 + r))
+}
+
+/// The inverse of [`fn_value_sig_id_for`]: recover `(param_ty, ret_ty)`
+/// from a `Type::Fn(id)`. Total (defensive `(i64, i64)` default for an
+/// out-of-range id, mirroring [`channel_elem_for`]).
+pub fn fn_value_sig_param_ret(id: FnValueSigId) -> (Type, Type) {
+    (fn_value_word_scalar_at(id.0 / 6), fn_value_word_scalar_at(id.0 % 6))
 }
 
 /// ADR 0066 M1.1: is `ty` a **word-sized scalar** that the per-spawn
@@ -1502,8 +1563,15 @@ pub fn type_display(ty: Type, program: Option<&TypedProgram>) -> String {
         Type::Process => "Process".to_string(),
         // ADR 0066 M2.4a: the `secret i64`-minimum sealed endpoint (unit variant).
         Type::SealedChannel => "SealedChannel<secret i64>".to_string(),
-        // ADR 0070: the `Fn<i64,i64>`-minimum non-capturing function value (unit variant).
-        Type::Fn => "Fn<i64,i64>".to_string(),
+        // ADR 0070 (generalized): render the concrete word-scalar signature.
+        Type::Fn(id) => {
+            let (param_ty, ret_ty) = fn_value_sig_param_ret(id);
+            format!(
+                "Fn<{},{}>",
+                type_display(param_ty, program),
+                type_display(ret_ty, program)
+            )
+        }
         Type::Class(id) => match program.and_then(|p| p.class_decls.get(id.0 as usize)) {
             Some(c) => c.name.clone(),
             None => format!("<class#{}>", id.0),
@@ -1547,7 +1615,10 @@ impl std::fmt::Display for Type {
             Type::Channel(id) => write!(f, "<channel#{}>", id.0),
             Type::Process => write!(f, "Process"),
             Type::SealedChannel => write!(f, "SealedChannel"),
-            Type::Fn => write!(f, "Fn<i64,i64>"),
+            Type::Fn(id) => {
+                let (param_ty, ret_ty) = fn_value_sig_param_ret(*id);
+                write!(f, "Fn<{param_ty},{ret_ty}>")
+            }
             Type::Class(id) => write!(f, "<class#{}>", id.0),
             Type::TraitSelf(id) => write!(f, "<Self-trait#{}>", id.0),
             Type::Enum(id) => write!(f, "<enum#{}>", id.0),
@@ -1908,10 +1979,11 @@ fn resolve_type_expr_with_scope(
                     }
                     Ok(Type::SealedChannel)
                 }
-                // ADR 0070 D1/D2: `Fn<T, R>` in type position — fixed at the v1
-                // minimum `Fn<i64, i64>` (a plain unit `Type::Fn`, no interner;
-                // generalizing is a follow-on). Both type args must resolve to
-                // exactly `i64`.
+                // ADR 0070 D1/D2 (generalized, M-cont): `Fn<T, R>` in type position —
+                // any WORD-SCALAR param/return (mirrors Channel<T>'s M1.2b-cont
+                // generalization). `fn_value_sig_id_for` is pure arithmetic (no
+                // interner table), so no threading here beyond the ordinary
+                // recursive resolve of each type arg.
                 "Fn" => {
                     if args.len() != 2 {
                         return Err(TypeError::TypeArgCountMismatch {
@@ -1945,12 +2017,12 @@ fn resolve_type_expr_with_scope(
                         arrays,
                         struct_type_param_counts,
                     )?;
-                    if param_ty != Type::I64 || ret_ty != Type::I64 {
-                        return Err(TypeError::FnTypeArgsNotSupported {
+                    match fn_value_sig_id_for(param_ty, ret_ty) {
+                        Some(id) => Ok(Type::Fn(id)),
+                        None => Err(TypeError::FnTypeArgsNotSupported {
                             span: to_source_span(&te.span),
-                        });
+                        }),
                     }
-                    Ok(Type::Fn)
                 }
                 other => {
                     let struct_id = match struct_table.get(other) {
@@ -3489,30 +3561,45 @@ pub enum TypeError {
         span: miette::SourceSpan,
     },
 
-    /// ADR 0070 D1: `Fn<T, R>` type position is fixed at the v1 minimum
-    /// `Fn<i64, i64>` — any other arity or argument types is a type error
-    /// (generalizing to word-scalar params/return is a follow-on).
-    #[error("`Fn<T, R>` is only supported as `Fn<i64, i64>` at the v1 minimum")]
+    /// ADR 0070 D1 (generalized): `Fn<T, R>` requires both T and R to be
+    /// word-scalars (i64/i32/u8/bool/f64/ptr) — any other type (aggregates,
+    /// `secret`, generics) is a type error.
+    #[error("`Fn<T, R>` requires word-scalar T and R")]
     #[diagnostic(
         code(sentinel::types::fn_type_args_not_supported),
-        help("write `Fn<i64, i64>` — other parameter/return shapes are a follow-on")
+        help("both T and R must be word-scalars (i64/i32/u8/bool/f64/ptr) — other shapes (aggregates, secret, generics) are a follow-on")
     )]
     FnTypeArgsNotSupported {
         #[label("unsupported Fn<..> shape here")]
         span: miette::SourceSpan,
     },
 
-    /// ADR 0070 D4: a bare fn name used as a value (`let op = name;`) must
-    /// name a non-generic, non-builtin, `(i64) -> i64`, effect-free
-    /// top-level fn to be eligible as a `Fn<i64,i64>` value.
+    /// ADR 0070 D4 (generalized): a bare fn name used as a value
+    /// (`let op = name;`) must name a non-generic, non-builtin, effect-free
+    /// top-level fn with exactly one word-scalar param and a word-scalar
+    /// return to be eligible as a `Fn<T,R>` value.
     #[error("`{name}` cannot be used as a function value")]
     #[diagnostic(
         code(sentinel::types::fn_value_signature_not_supported),
-        help("a function value must be a non-generic, non-builtin, effect-free top-level fn with signature `(i64) -> i64`")
+        help("a function value must be a non-generic, non-builtin, effect-free top-level fn taking exactly one word-scalar param and returning a word-scalar")
     )]
     FnValueSignatureNotSupported {
         name: String,
-        #[label("not eligible as a Fn<i64,i64> value")]
+        #[label("not eligible as a Fn<T,R> value")]
+        span: miette::SourceSpan,
+    },
+
+    /// ADR 0070: `apply(f, x)`'s first argument must be a `Fn<T,R>` value —
+    /// surfaced separately from `CallArgMismatch` because there is no single
+    /// "expected" type to show (any word-scalar `Fn<T,R>` is acceptable).
+    #[error("`apply`'s first argument must be a function value (`Fn<T,R>`), got `{got}`")]
+    #[diagnostic(
+        code(sentinel::types::apply_target_not_fn),
+        help("pass a bare top-level fn name (e.g. `apply(square, x)`), not a call result or other value")
+    )]
+    ApplyTargetNotFn {
+        got: Type,
+        #[label("not a Fn<T,R> value")]
         span: miette::SourceSpan,
     },
 
@@ -4902,11 +4989,13 @@ pub fn check_module(
             });
         }
     }
-    // ADR 0070: `apply(f: Fn<i64,i64>, x: i64) -> i64` (FnId 37) — the
-    // indirect-call builtin for non-capturing function values. A fixed
-    // concrete signature (v1 is monomorphic, no generic-call path needed),
-    // effect-free (the FnRef eligibility check already requires the
-    // referenced fn to have an empty effect row, D4).
+    // ADR 0070 (generalized): `apply(f: Fn<T,R>, x: T) -> R` (FnId 37) — the
+    // indirect-call builtin for non-capturing function values, context-typed
+    // from `f`'s own `Fn<T,R>` signature (special-cased in `check_call`,
+    // the `process_recv`/`recv` pattern). The registered param_types below
+    // are a PLACEHOLDER (arity=2 only — `check_call` intercepts `id ==
+    // APPLY_FN_ID` before any generic param-type comparison, exactly like
+    // `channel_new`/`send`/`recv`'s registered `Channel<i64>` default).
     {
         let apply_sig = &program.fn_signatures[37];
         typed_signatures.push(TypedFnSignature {
@@ -4914,7 +5003,7 @@ pub fn check_module(
             name: apply_sig.name.clone(),
             name_span: apply_sig.name_span.clone(),
             type_params: vec![],
-            param_types: vec![Type::Fn, Type::I64],
+            param_types: vec![Type::Fn(FnValueSigId(0)), Type::I64],
             return_type: Type::I64,
             effect_row: vec![],
             is_main: false,
@@ -6981,8 +7070,9 @@ fn try_substitute(
         Type::Process => Some(ty),
         // ADR 0066 M2.4a: `SealedChannel` carries no TypeParam.
         Type::SealedChannel => Some(ty),
-        // ADR 0070: `Fn` is fixed at `Fn<i64,i64>` — no TypeParam payload.
-        Type::Fn => Some(ty),
+        // ADR 0070 (generalized): Fn<T,R>'s T/R are always concrete word-scalars
+        // (never a TypeParam) — no substitution needed.
+        Type::Fn(_) => Some(ty),
     }
 }
 
@@ -7038,8 +7128,8 @@ fn contains_type_param(
         Type::Process => false,
         // ADR 0066 M2.4a: `SealedChannel` carries no TypeParam.
         Type::SealedChannel => false,
-        // ADR 0070: `Fn` is fixed at `Fn<i64,i64>` — no TypeParam payload.
-        Type::Fn => false,
+        // ADR 0070 (generalized): Fn<T,R>'s T/R are always concrete word-scalars.
+        Type::Fn(_) => false,
     }
 }
 
@@ -7342,6 +7432,51 @@ fn check_call(
                 type_args,
             },
             ret,
+        ));
+    }
+    // ADR 0070 (generalized): `apply(f: Fn<T,R>, x: T) -> R` — context-typed
+    // from `f`'s own `Fn<T,R>` signature (the `process_recv` pattern: read
+    // the element/shape off the arg's interned/computed id, no type_args
+    // needed since codegen derives both LLVM types from the typed AST
+    // directly — see `lower_apply`).
+    if id == APPLY_FN_ID {
+        let f_typed = check_expr(
+            &args[0], None, env, signatures, structs, class_decls, enums,
+            instances, refs, secrets, arrays, struct_type_param_counts, effect_decls,
+            trait_decls, impl_decls, konts, tasks,
+        )?;
+        let sig_id = match f_typed.ty {
+            Type::Fn(sig_id) => sig_id,
+            other => {
+                return Err(TypeError::ApplyTargetNotFn {
+                    got: other,
+                    span: to_source_span(&args[0].span),
+                });
+            }
+        };
+        let (param_ty, ret_ty) = fn_value_sig_param_ret(sig_id);
+        let x_typed = check_expr(
+            &args[1], Some(param_ty), env, signatures, structs, class_decls, enums,
+            instances, refs, secrets, arrays, struct_type_param_counts, effect_decls,
+            trait_decls, impl_decls, konts, tasks,
+        )?;
+        if x_typed.ty != param_ty {
+            return Err(TypeError::CallArgMismatch {
+                callee: "apply".to_string(),
+                arg_index: 1,
+                expected: param_ty,
+                got: x_typed.ty,
+                span: to_source_span(&args[1].span),
+            });
+        }
+        return Ok((
+            TypedExprKind::Call {
+                id,
+                callee_span: callee_span.clone(),
+                args: vec![f_typed, x_typed],
+                type_args: vec![],
+            },
+            ret_ty,
         ));
     }
 
@@ -7709,28 +7844,33 @@ fn check_expr(
             }
             (TypedExprKind::Var(*id), ty)
         }
-        // ADR 0070 D4: a bare top-level fn name used as a value. Eligible
-        // only if the referenced fn is non-generic, not a builtin/runtime
-        // symbol, not `main`, not a cross-module extern import, has the
-        // fixed v1 signature `(i64) -> i64`, and an EMPTY effect row (so
+        // ADR 0070 D4 (generalized): a bare top-level fn name used as a value.
+        // Eligible only if the referenced fn is non-generic, not a
+        // builtin/runtime symbol, not `main`, not a cross-module extern
+        // import, has exactly ONE word-scalar param + a word-scalar return
+        // (any pair — `fn_value_sig_id_for`), and an EMPTY effect row (so
         // the `apply` builtin can stay effect-free itself — see ADR 0070
         // D4 for why effecting fn values are deferred).
         ResolvedExprKind::FnRef(fid) => {
             let sig = &signatures[fid.0 as usize];
-            let eligible = sig.type_params.is_empty()
+            let sig_id = (sig.type_params.is_empty()
                 && !sig.is_main
                 && !sig.is_runtime
                 && sig.extern_origin.is_none()
-                && sig.param_types == [Type::I64]
-                && sig.return_type == Type::I64
-                && sig.effect_row.is_empty();
-            if !eligible {
-                return Err(TypeError::FnValueSignatureNotSupported {
-                    name: sig.name.clone(),
-                    span: to_source_span(&expr.span),
-                });
-            }
-            (TypedExprKind::FnRef(*fid), Type::Fn)
+                && sig.param_types.len() == 1
+                && sig.effect_row.is_empty())
+            .then(|| fn_value_sig_id_for(sig.param_types[0], sig.return_type))
+            .flatten();
+            let sig_id = match sig_id {
+                Some(id) => id,
+                None => {
+                    return Err(TypeError::FnValueSignatureNotSupported {
+                        name: sig.name.clone(),
+                        span: to_source_span(&expr.span),
+                    });
+                }
+            };
+            (TypedExprKind::FnRef(*fid), Type::Fn(sig_id))
         }
         ResolvedExprKind::Unary(op, inner) => {
             // C2 / ADR 0017 D3 + D4: borrow / deref need
@@ -10439,12 +10579,17 @@ fn type_error_to_diagnostic(err: &TypeError) -> Diagnostic {
         ),
         TypeError::FnTypeArgsNotSupported { span } => (
             "sentinel::types::fn_type_args_not_supported",
-            "`Fn<T, R>` is only supported as `Fn<i64, i64>` at the v1 minimum".to_string(),
+            "`Fn<T, R>` requires word-scalar T and R".to_string(),
             span.offset()..(span.offset() + span.len()),
         ),
         TypeError::FnValueSignatureNotSupported { name, span } => (
             "sentinel::types::fn_value_signature_not_supported",
             format!("`{name}` cannot be used as a function value"),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        TypeError::ApplyTargetNotFn { got, span } => (
+            "sentinel::types::apply_target_not_fn",
+            format!("`apply`'s first argument must be a function value (`Fn<T,R>`), got `{got}`"),
             span.offset()..(span.offset() + span.len()),
         ),
         TypeError::GenericMain { span } => (

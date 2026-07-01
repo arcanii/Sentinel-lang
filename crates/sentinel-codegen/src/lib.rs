@@ -58,10 +58,10 @@ use sentinel_resolve::{
 };
 use sentinel_ast::SelfKind;
 use sentinel_types::{
-    ArrayElem, ClassData, GenericInstanceData, GenericInstanceId, ImplData, NullableInner, RefData,
-    SecretData, Type, TypedBlock, TypedExpr, TypedExprKind, TypedFnDef, TypedFnSignature,
-    TypedHandlerArm, TypedMatchArm, TypedPattern, TypedProgram, TypedReturnArm, TypedStmt,
-    TypedStmtKind, TypedStructDecl,
+    fn_value_sig_param_ret, ArrayElem, ClassData, GenericInstanceData, GenericInstanceId, ImplData,
+    NullableInner, RefData, SecretData, Type, TypedBlock, TypedExpr, TypedExprKind, TypedFnDef,
+    TypedFnSignature, TypedHandlerArm, TypedMatchArm, TypedPattern, TypedProgram, TypedReturnArm,
+    TypedStmt, TypedStmtKind, TypedStructDecl,
 };
 
 #[derive(Debug, thiserror::Error, miette::Diagnostic)]
@@ -2084,9 +2084,9 @@ fn field_type_needs_drop_inner(
         // C4.2 / ADR 0023 D7: `Self` never reaches codegen — impl-
         // sig substitution resolves it before bodies type-check.
         Type::TraitSelf(_) => false,
-        // ADR 0070: a Fn value is a bare LLVM function pointer — no heap
-        // payload, no drop.
-        Type::Fn => false,
+        // ADR 0070 (generalized): a Fn value is a bare LLVM function pointer —
+        // no heap payload, no drop, regardless of its signature.
+        Type::Fn(_) => false,
     }
 }
 
@@ -2225,8 +2225,8 @@ fn llvm_basic_type<'ctx>(
         // ADR 0070: a Fn value lowers to a bare LLVM function pointer — an
         // opaque ptr under LLVM 18's opaque-pointer model, exactly like
         // `Process`/`Kont`/`Task`/`Channel` (no captured environment, so no
-        // struct wrapper is needed).
-        Type::Fn => context.ptr_type(inkwell::AddressSpace::default()).into(),
+        // struct wrapper is needed) — regardless of its signature id.
+        Type::Fn(_) => context.ptr_type(inkwell::AddressSpace::default()).into(),
         // Phase D.1 / ADR 0032 D4: an enum lowers to the abi-v1
         // `{ i32 tag, ptr payload }` — a 4-byte discriminant (variant
         // index, source order) + an opaque pointer to a heap-allocated
@@ -2883,8 +2883,11 @@ fn mangle_type(ty: Type, program: &TypedProgram) -> String {
             .unwrap_or_else(|| format!("enum{}", id.0)),
         // C4.2: TraitSelf doesn't reach mangling.
         Type::TraitSelf(id) => format!("Self_trait{}", id.0),
-        // ADR 0070: Fn<i64,i64> carries no TypeParam; defensive mangle label.
-        Type::Fn => "fn_i64_i64".to_string(),
+        // ADR 0070 (generalized): mangle the concrete word-scalar signature.
+        Type::Fn(id) => {
+            let (param_ty, ret_ty) = fn_value_sig_param_ret(id);
+            format!("fn_{}_{}", mangle_type(param_ty, program), mangle_type(ret_ty, program))
+        }
     }
 }
 
@@ -2938,8 +2941,8 @@ fn arg_contains_typeparam(
         Type::Process => false,
         // ADR 0066 M2.4a: SealedChannel carries no TypeParam.
         Type::SealedChannel => false,
-        // ADR 0070: Fn<i64,i64> carries no TypeParam.
-        Type::Fn => false,
+        // ADR 0070 (generalized): Fn<T,R>'s T/R are always concrete word-scalars.
+        Type::Fn(_) => false,
     }
 }
 
@@ -3013,7 +3016,7 @@ fn llvm_int_type<'ctx>(context: &'ctx Context, ty: Type) -> IntType<'ctx> {
         Type::TraitSelf(_) => {
             panic!("llvm_int_type called on Type::TraitSelf — must be substituted before codegen")
         }
-        Type::Fn => panic!("llvm_int_type called on non-int Type::Fn"),
+        Type::Fn(_) => panic!("llvm_int_type called on non-int Type::Fn"),
     }
 }
 
@@ -4784,10 +4787,10 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
             Type::TraitSelf(_) => {
                 // C4.2: unreachable post-substitution; defensive.
             }
-            Type::Fn => {
-                // ADR 0070: a Fn value is a bare LLVM function pointer (Copy,
-                // no captured environment at the v1 non-capturing minimum) —
-                // no heap data to free.
+            Type::Fn(_) => {
+                // ADR 0070 (generalized): a Fn value is a bare LLVM function
+                // pointer (Copy, no captured environment) — no heap data to
+                // free, regardless of its signature.
             }
         }
         Ok(())
@@ -7090,19 +7093,24 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
         })
     }
 
-    /// ADR 0070: `apply(f, x)` — invoke a non-capturing `Fn<i64,i64>` value
-    /// indirectly. `f` lowers to a bare function pointer (no wrapper struct,
-    /// unlike spawn); the call signature is the fixed v1 shape `i64 (i64)`.
+    /// ADR 0070 (generalized): `apply(f, x)` — invoke a non-capturing
+    /// `Fn<T,R>` value indirectly. `f` lowers to a bare function pointer (no
+    /// wrapper struct, unlike spawn); the call signature `R (T)` is built
+    /// from the typed AST directly (`x.ty` = `T`, `ret_ty` = `R` — the
+    /// caller reads it off the `Call` node's own `expr.ty`), no `type_args`
+    /// or `program.fn_value_sigs` lookup needed.
     fn lower_apply(
         &mut self,
         f: &TypedExpr,
         x: &TypedExpr,
+        ret_ty: Type,
         program: &TypedProgram,
     ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
         let fn_ptr = self.lower_expr(f, program)?.into_pointer_value();
         let arg_val = self.lower_expr(x, program)?;
-        let i64_ty = self.context.i64_type();
-        let fn_type = i64_ty.fn_type(&[i64_ty.into()], false);
+        let param_llvm_ty = self.llvm_basic_type(x.ty);
+        let ret_llvm_ty = self.llvm_basic_type(ret_ty);
+        let fn_type = ret_llvm_ty.fn_type(&[param_llvm_ty.into()], false);
         let call = self
             .builder
             .build_indirect_call(fn_type, fn_ptr, &[arg_val.into()], "apply_call")
@@ -7573,7 +7581,7 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                 // ADR 0070: the indirect-call builtin for non-capturing
                 // function values.
                 if *id == APPLY_FN_ID {
-                    return self.lower_apply(&args[0], &args[1], program);
+                    return self.lower_apply(&args[0], &args[1], expr.ty, program);
                 }
                 // C1.7.5 / ADR 0016 D7: user-defined generic-fn
                 // calls route to the monomorphic instance emitted

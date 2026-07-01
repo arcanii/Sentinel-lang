@@ -14,7 +14,31 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
-**Latest (2026-07-01) — non-capturing first-class function values (ADR 0070, `Fn<i64,i64>` v1).**
+**Latest (2026-07-01) — `Fn<T,R>` GENERALIZED to any word-scalar pair (ADR 0070 M-cont).** The
+same-day follow-up to ADR 0070 v1 (below), mirroring the `Task<i64>`→`Task<T>` / `Channel<i64>`→
+`Channel<T>` precedent (ship the smallest concrete shape, generalize next). `Type::Fn` is now
+**`Type::Fn(FnValueSigId)`**, but — unlike `Channel<T>`'s pre-interned-`ChanId` trick or a general
+interner table — the id is **pure arithmetic**: `fn_value_sig_id_for(param_ty, ret_ty)` /
+`fn_value_sig_param_ret(id)` compute `param_index * 6 + ret_index` over the same 6-element
+word-scalar enumeration `channel_chanid_for` uses (independently duplicated, not shared, so the two
+features don't couple on an incidental numbering). **No interner table, no new `TypedProgram`
+field, no threading through `resolve_type_expr` or the check pipeline at all** — simpler than even
+`Channel<T>`'s own generalization. The `apply(f, x)` builtin — concrete in v1, so it rode the
+generic call-checking path for free — now needs `check_call` special-casing (the `process_recv`
+pattern): type-check `f` first, read `(param_ty, ret_ty)` off its `Type::Fn(id)`, check `x` against
+`param_ty`, return `ret_ty`; a non-`Fn` first argument gets a dedicated `ApplyTargetNotFn` diagnostic
+(not `CallArgMismatch`, which would misleadingly imply one "expected" type). Codegen's `lower_apply`
+derives both LLVM types straight from the typed AST (`x.ty`, the call's own `expr.ty`) — no
+`type_args` needed. **Self-host mirror: zero further changes** — verified, not assumed, by
+re-checking both `tests/ui/` fixtures against the exact resolve-stage-corpus gotcha ADR 0070 v1 hit:
+`c70_fn_value_ineligible` is unchanged (already covered); the replacement
+`c70_fn_type_args_unsupported` (now `Fn<u128, i64>`) only touches the type-expression arm, which
+carries no semantic info at the resolve stage. Demonstrator `examples/lang/fn_value_generic.sentinel`
+(`Fn<u8,u8>` / `Fn<f64,f64>` / `Fn<bool,bool>`, exit 42, both `--separate` and merged). Four-check
+green; all 9 selfhost differential stages byte-identical. See ADR 0070's M-cont amendment
+(D10–D12) + HANDOVER §0.
+
+**Earlier (2026-07-01) — non-capturing first-class function values (ADR 0070, `Fn<i64,i64>` v1).**
 The first fresh-session pick off the post-ADR-0066-M2.4 decision menu: a top-level, non-generic,
 non-builtin, effect-free fn with signature `(i64) -> i64` can now be referenced by bare name as a
 **value** (`let op = square;`, `ResolvedExprKind::FnRef`/`TypedExprKind::FnRef`, typed `Type::Fn` —

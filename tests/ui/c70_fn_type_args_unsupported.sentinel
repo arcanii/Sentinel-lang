@@ -1,7 +1,9 @@
-// ADR 0070 D1: `Fn<T, R>` is fixed at the v1 minimum `Fn<i64, i64>` — any
-// other parameter/return shape is a type error (generalizing to word-scalar
-// params/return is a follow-on). Surfaces FnTypeArgsNotSupported.
-fn apply_to(op: Fn<i32, i64>, x: i32) -> i64 {
+// ADR 0070 D1 (generalized): `Fn<T, R>` requires BOTH T and R to be
+// word-scalars (i64/i32/u8/bool/f64/ptr) — `u128` doesn't fit the plain
+// LLVM function-pointer signature (no encode/decode step, unlike
+// `Channel<T>`/`process_send`, so the param/return types must already be
+// ordinary LLVM scalar types). Surfaces FnTypeArgsNotSupported.
+fn apply_to(op: Fn<u128, i64>, x: u128) -> i64 {
     0
 }
 

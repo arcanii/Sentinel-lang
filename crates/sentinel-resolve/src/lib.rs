@@ -224,16 +224,19 @@ pub const ARG_COUNT_FN_ID: FnId = FnId(35);
 /// `arg(i: i64) -> [u8]` — the `i`-th command-line arg as bytes (empty if out of range).
 pub const ARG_FN_ID: FnId = FnId(36);
 
-// ADR 0070: `apply` — the indirect-call builtin for non-capturing first-class
-// function values (`Type::Fn`, v1 fixed at `Fn<i64,i64>`). A dedicated builtin
-// rather than ordinary `f(x)` call syntax (D3): `ident(args)` where `ident` is
-// a bound local var already unconditionally resolves to a kont resume-call
-// (ADR 0020 D5, `vars.get(callee)` wins over `fn_table` at the Call-callee
-// site) — `apply` resolves through the *existing* `fn_table` lookup instead,
-// so it never touches that dispatch. Appending this shifts the user-fn FnId
-// base 37 → 38.
-/// `apply(f: Fn<i64,i64>, x: i64) -> i64` — invoke a non-capturing function
-/// value indirectly (an LLVM indirect call through `f`'s code pointer).
+// ADR 0070 (generalized): `apply` — the indirect-call builtin for
+// non-capturing first-class function values (`Type::Fn`, any word-scalar
+// `Fn<T,R>` — sentinel-types' `fn_value_sig_id_for`/`fn_value_sig_param_ret`
+// compute the signature id arithmetically, no interner threading). A
+// dedicated builtin rather than ordinary `f(x)` call syntax (D3): `ident(args)`
+// where `ident` is a bound local var already unconditionally resolves to a
+// kont resume-call (ADR 0020 D5, `vars.get(callee)` wins over `fn_table` at
+// the Call-callee site) — `apply` resolves through the *existing* `fn_table`
+// lookup instead, so it never touches that dispatch. Appending this shifts
+// the user-fn FnId base 37 → 38.
+/// `apply(f: Fn<T,R>, x: T) -> R` — invoke a non-capturing function value
+/// indirectly (an LLVM indirect call through `f`'s code pointer),
+/// context-typed from `f`'s own `Fn<T,R>` signature.
 pub const APPLY_FN_ID: FnId = FnId(37);
 
 /// Identifier for a struct declaration. Added at C1.4 per ADR 0013

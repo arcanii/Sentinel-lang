@@ -4,11 +4,11 @@ expression: "reject_stderr(\"c70_fn_type_args_unsupported.sentinel\")"
 ---
 sentinel::types::fn_type_args_not_supported
 
-  × `Fn<T, R>` is only supported as `Fn<i64, i64>` at the v1 minimum
-   ╭─[tests/ui/c70_fn_type_args_unsupported.sentinel:4:17]
- 3 │ // params/return is a follow-on). Surfaces FnTypeArgsNotSupported.
- 4 │ fn apply_to(op: Fn<i32, i64>, x: i32) -> i64 {
-   ·                 ──────┬─────
+  × `Fn<T, R>` requires word-scalar T and R
+   ╭─[tests/ui/c70_fn_type_args_unsupported.sentinel:6:17]
+ 5 │ // ordinary LLVM scalar types). Surfaces FnTypeArgsNotSupported.
+ 6 │ fn apply_to(op: Fn<u128, i64>, x: u128) -> i64 {
+   ·                 ──────┬──────
    ·                       ╰── 
- 5 │     0
+ 7 │     0
    ╰────

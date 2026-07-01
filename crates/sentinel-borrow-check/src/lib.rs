@@ -1484,10 +1484,10 @@ fn is_copy_type(ty: Type, program: &TypedProgram) -> bool {
         Type::Process => true,
         // ADR 0066 M2.4a: a SealedChannel wraps a Process pipe — pointer-like + Copy.
         Type::SealedChannel => true,
-        // ADR 0070: a Fn value is a bare LLVM function pointer — pointer-like +
-        // Copy, owns nothing (no captured environment at the v1 non-capturing
-        // minimum).
-        Type::Fn => true,
+        // ADR 0070 (generalized): a Fn value is a bare LLVM function pointer —
+        // pointer-like + Copy, owns nothing (no captured environment; the
+        // signature id doesn't change the runtime representation).
+        Type::Fn(_) => true,
     }
 }
 

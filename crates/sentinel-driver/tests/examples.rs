@@ -515,6 +515,11 @@ const EXAMPLES: &[(&str, i32)] = &[
     // double(3) = 36 + 6 = 42. snc-only (the scg mirror is deferred, like
     // task_generic / f64 / process_channel_typed — see ADR 0070 D7).
     ("examples/lang/fn_value.sentinel", 42),
+    // ADR 0070 (generalized, M-cont): GENERIC word-scalar Fn<T,R> — not just
+    // Fn<i64,i64>. Fn<u8,u8>/Fn<f64,f64>/Fn<bool,bool>, the signature id
+    // computed arithmetically (no interner threading). inc_u8(29)=30 +
+    // double_f64(5.0) as i64=10 + flip(false)-contributes-2 = 42. snc-only.
+    ("examples/lang/fn_value_generic.sentinel", 42),
 ];
 
 #[test]
@@ -835,6 +840,14 @@ fn lang_fn_value() {
     // fn name used as a value, invoked indirectly via `apply(f, x)`. Two distinct
     // fns (square, double) through the same `apply_to` parameter: 36 + 6 = 42.
     check_example("examples/lang/fn_value.sentinel", "fn_value", 42);
+}
+
+#[test]
+fn lang_fn_value_generic() {
+    // ADR 0070 (generalized): Fn<T,R> over any word-scalar pair, not just
+    // Fn<i64,i64> — Fn<u8,u8>/Fn<f64,f64>/Fn<bool,bool> via the same `apply`
+    // builtin, context-typed from each Fn value's own signature.
+    check_example("examples/lang/fn_value_generic.sentinel", "fn_value_generic", 42);
 }
 
 /// Coverage guard: every `.sentinel` program under `examples/` must be

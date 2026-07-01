@@ -51,18 +51,42 @@ reference as you work through the milestones.
 
 ---
 
-### ▶ RESUME HERE (2026-07-01 — ADR 0070 DONE: non-capturing first-class function values (`Fn<i64,i64>` v1) → NEXT: a fresh-session DECISION, see the menu below)
+### ▶ RESUME HERE (2026-07-01 — ADR 0070 DONE + GENERALIZED same-day: `Fn<T,R>` over any word-scalar → NEXT: a fresh-session DECISION, see the menu below)
 
-> **▶ NEXT DECISION (fresh session) — ADR 0070's v1 slice (non-capturing `Fn<i64,i64>` + the `apply` indirect-call builtin) is DONE & landed. HANDOFF STATE: four-check green (`cargo build` + `cargo test` + doctests + `clippy -D warnings`, all under the vcvars MSVC shell), all 9 selfhost differential stages byte-identical (both bootstrap fixed points hold), working tree CLEAN. Known pre-existing Windows-only failures (NOT regressions): `pass_c5d4_file_io` (`/tmp`), `tests/modules.rs` `separate_*_linkonce_*` (MSVC link / `nm`), `tests/llvm.rs`'s `llvm_behaviour_matches_inkwell_*` (hardcodes the Unix runtime), the `export --shared` tests (DLL export unsupported on Windows), the POSIX-FFI + socket `examples/` (macOS-only). Pick a direction:**
-> 1. **Generalize `Fn<T,R>`** — the natural M1.2b-cont-style follow-up: word-scalar params/return (today fixed at `i64→i64`), maybe arity > 1. Small-medium, high value (the worker-pool motivation wants more than one shape).
-> 2. **Unify `apply(f,x)` with ordinary `f(x)` call syntax** — ADR 0070's own-flagged deferral: `ident(args)` where `ident` is a local var unconditionally resolves to a kont resume-call today (ADR 0020 D5); generalizing that dispatch to disambiguate kont-vs-Fn by the var's TYPE is differential-critical (touches the effect-handler resume-call path) — do carefully, in a focused session. Medium effort, ergonomics payoff.
-> 3. **Full capturing closures** — ADR 0024 D10's original deferral, still not done: environment capture + lifetime tracking interacting with the lexical borrow checker. The biggest, most foundational rock still on the table; ADR-first, a real language-feature design. *Most impactful but largest — ADR 0070 was the SAFE SLICE of this, not the whole thing.*
-> 4. **M1.4 Mutex (gated)** — the last M1 concurrency piece (Mutex + the D5a runtime deadlock-detection → typed error). Gated on a `Shared<T>` shared-ownership story Sentinel lacks; ADR-first. Large.
-> 5. **scg self-host mirror** — bring the M2.x sealed/stdio/arg/generic-channel builtins (AND now ADR 0070's `Type::Fn`/`apply` type-check+codegen lowering) into scg parity. The FnId BASES are already mirrored (corpus green); what's missing = the per-builtin LOWERING in `selfhost/types/cg*.sentinel` + (for ADR 0070) a `Type::Fn` interner-or-unit kind. Medium effort, project-identity value, rush-dangerous (do carefully).
-> 6. **Switch areas** — BACKLOG §11.6 (`return value;` as a fn terminator) / §11.7 (cross-module `pub class`), the ADR-0067 self-host-modularization tails, or the standing macOS verification.
-> Also still pending (older, lower-priority): **M2.4c-2** (generic word-scalar `Type::SealedChannel` — cosmetic, low value, do BEFORE the scg mirror if at all); the scg mirror of M2.3b. See the two-items-deferred note below (superseded by item 5 above, which now also covers ADR 0070) for the M2.4 tails' ROI/risk.
+> **▶ NEXT DECISION (fresh session) — ADR 0070 is DONE & landed, v1 AND its same-day M-cont generalization (`Fn<i64,i64>` → any word-scalar `Fn<T,R>`, mirroring the `Task<T>`/`Channel<T>` precedent). HANDOFF STATE: four-check green (`cargo build` + `cargo test` + doctests + `clippy -D warnings`, all under the vcvars MSVC shell), all 9 selfhost differential stages byte-identical (both bootstrap fixed points hold), working tree CLEAN. Known pre-existing Windows-only failures (NOT regressions): `pass_c5d4_file_io` (`/tmp`), `tests/modules.rs` `separate_*_linkonce_*` (MSVC link / `nm`), `tests/llvm.rs`'s `llvm_behaviour_matches_inkwell_*` (hardcodes the Unix runtime), the `export --shared` tests (DLL export unsupported on Windows), the POSIX-FFI + socket `examples/` (macOS-only). Pick a direction:**
+> 1. **Unify `apply(f,x)` with ordinary `f(x)` call syntax** — ADR 0070's own-flagged deferral: `ident(args)` where `ident` is a local var unconditionally resolves to a kont resume-call today (ADR 0020 D5); generalizing that dispatch to disambiguate kont-vs-Fn by the var's TYPE is differential-critical (touches the effect-handler resume-call path) — do carefully, in a focused session. Medium effort, ergonomics payoff.
+> 2. **Full capturing closures** — ADR 0024 D10's original deferral, still not done: environment capture + lifetime tracking interacting with the lexical borrow checker. The biggest, most foundational rock still on the table; ADR-first, a real language-feature design. *Most impactful but largest — ADR 0070 (+ its generalization) was the SAFE SLICE of this, not the whole thing.*
+> 3. **M1.4 Mutex (gated)** — the last M1 concurrency piece (Mutex + the D5a runtime deadlock-detection → typed error). Gated on a `Shared<T>` shared-ownership story Sentinel lacks; ADR-first. Large.
+> 4. **scg self-host mirror** — bring the M2.x sealed/stdio/arg/generic-channel builtins (AND now ADR 0070's `Type::Fn`/`apply` type-check+codegen lowering) into scg parity. The FnId BASES are already mirrored (corpus green); what's missing = the per-builtin LOWERING in `selfhost/types/cg*.sentinel` + (for ADR 0070) a `Type::Fn` cg mirror (the arithmetic-id scheme in `sentinel-types` needs no interner mirror, just the cg lowering arms). Medium effort, project-identity value, rush-dangerous (do carefully).
+> 5. **Switch areas** — BACKLOG §11.6 (`return value;` as a fn terminator) / §11.7 (cross-module `pub class`), the ADR-0067 self-host-modularization tails, or the standing macOS verification.
+> Also still pending (older, lower-priority): **M2.4c-2** (generic word-scalar `Type::SealedChannel` — cosmetic, low value, do BEFORE the scg mirror if at all); the scg mirror of M2.3b. See the two-items-deferred note below (superseded by item 4 above, which now also covers ADR 0070) for the M2.4 tails' ROI/risk.
 
-**▶ DONE (2026-07-01) — ADR 0070: non-capturing first-class function values (`Fn<i64,i64>` v1).** The
+**▶ DONE (2026-07-01) — ADR 0070 M-cont: `Fn<T,R>` GENERALIZED to any word-scalar pair, same session as v1.** Mirrors the `Task<i64>`→`Task<T>` (M1.1) / `Channel<i64>`→`Channel<T>` (M1.2b-cont) precedent — ship the
+smallest concrete shape, generalize immediately after. `Type::Fn` is now `Type::Fn(FnValueSigId)`, but
+UNLIKE `Channel<T>`'s pre-interned-`ChanId` trick (needed because 4 builtins consume the element) or a
+general interner table, the id is **pure arithmetic**: `fn_value_sig_id_for(param_ty, ret_ty)` /
+`fn_value_sig_param_ret(id)` compute `param_index * 6 + ret_index` over the same 6-word-scalar
+enumeration `channel_chanid_for` uses (independently duplicated — no incidental coupling between the two
+features). **NO interner table, NO new `TypedProgram` field, NO threading through `resolve_type_expr` or
+the check pipeline** — simpler than `Channel<T>`'s own generalization, because `Fn`'s only consuming
+builtin (`apply`) can just decode the id directly. `apply(f, x)` — concrete in v1, so it rode the generic
+call-checking path free — now needs `check_call` special-casing (the `process_recv` pattern): type-check
+`f` first, decode `(param_ty, ret_ty)` from its `Type::Fn(id)`, check `x` against `param_ty`, return
+`ret_ty`; a non-`Fn` first arg gets a dedicated `ApplyTargetNotFn` diagnostic (not `CallArgMismatch`,
+which would misleadingly imply one "expected" type). `lower_apply` derives both LLVM types from the typed
+AST directly (`x.ty`, the `Call`'s own `expr.ty`) — no `type_args` needed. **GOTCHA CHECK (verified, not
+assumed): does this reopen v1's resolve-stage-corpus surprise?** No — both `tests/ui/` fixtures were
+re-examined against `selfhost_resolve.rs`'s `collect_fixtures` sweep: `c70_fn_value_ineligible` is
+unchanged (still covered by v1's `builtin_id`/`Expr::Var` mirror); the replacement
+`c70_fn_type_args_unsupported` (now `Fn<u128, i64>`, still genuinely rejected — `u128` isn't a
+word-scalar) only touches the "Fn" TYPE-EXPRESSION arm, which carries no semantic type info at resolve
+time — so **zero further `selfhost/` changes** were needed, confirmed by running all 9 differential
+stages, not by assumption. Demonstrator `examples/lang/fn_value_generic.sentinel` (`Fn<u8,u8>` /
+`Fn<f64,f64>` / `Fn<bool,bool>` through the same `apply` builtin, exit 42, both `--separate` and merged).
+Four-check green; all 9 selfhost differential stages byte-identical. See ADR 0070's M-cont amendment
+(D10-D12) for the full design writeup.
+
+**▶ DONE (2026-07-01) — ADR 0070 v1: non-capturing first-class function values (`Fn<i64,i64>` v1).** The
 foundational-rock item from the prior menu, scoped DOWN to the safe slice: not full closures (ADR 0024
 D10 stays deferred), just a non-capturing function VALUE — a top-level, non-generic, non-builtin,
 effect-free `(i64) -> i64` fn referenced by bare name (`let op = square;` → `ResolvedExprKind::FnRef` /

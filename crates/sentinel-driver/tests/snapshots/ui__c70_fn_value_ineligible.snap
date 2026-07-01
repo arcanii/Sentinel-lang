@@ -5,10 +5,10 @@ expression: "reject_stderr(\"c70_fn_value_ineligible.sentinel\")"
 sentinel::types::fn_value_signature_not_supported
 
   × `add` cannot be used as a function value
-    ╭─[tests/ui/c70_fn_value_ineligible.sentinel:15:14]
- 14 │ fn main() -> i64 {
- 15 │     let op = add;
+    ╭─[tests/ui/c70_fn_value_ineligible.sentinel:17:14]
+ 16 │ fn main() -> i64 {
+ 17 │     let op = add;
     ·              ─┬─
     ·               ╰── 
- 16 │     apply_to(op, 1)
+ 18 │     apply_to(op, 1)
     ╰────

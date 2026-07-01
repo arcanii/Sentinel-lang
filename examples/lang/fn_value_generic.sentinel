@@ -1,0 +1,47 @@
+// ADR 0070 (generalized, M-cont): GENERIC word-scalar `Fn<T,R>` values — not
+// just `Fn<i64,i64>`. `fn_value_sig_id_for`/`fn_value_sig_param_ret` compute
+// the signature id ARITHMETICALLY (param_index * 6 + ret_index over the same
+// 6-element word-scalar set `Channel<T>`'s M1.2b-cont uses) — no interner
+// table, so no threading through resolve_type_expr (unlike the array/secret
+// interners). `apply(f, x)` is context-typed from `f`'s own signature, exactly
+// like `process_recv` reads its element from the channel arg. snc-only (the
+// scg mirror is deferred, like `fn_value.sentinel`/`channel_generic.sentinel`).
+//
+// Three distinct Fn<T,R> shapes: Fn<u8,u8>, Fn<f64,f64>, Fn<bool,bool>.
+// inc_u8(29) = 30; double_f64(5.0) = 10.0; flip(false) = true (contributes 2).
+// 30 + 10 + 2 = 42.
+
+fn inc_u8(x: u8) -> u8 {
+    x + (1 as u8)
+}
+
+fn double_f64(x: f64) -> f64 {
+    x * 2.0
+}
+
+fn flip(x: bool) -> bool {
+    !x
+}
+
+fn apply_u8(op: Fn<u8, u8>, x: u8) -> u8 {
+    apply(op, x)
+}
+
+fn apply_f64(op: Fn<f64, f64>, x: f64) -> f64 {
+    apply(op, x)
+}
+
+fn apply_bool(op: Fn<bool, bool>, x: bool) -> bool {
+    apply(op, x)
+}
+
+fn main() -> i64 {
+    let a: u8 = apply_u8(inc_u8, 29 as u8);
+    let b: f64 = apply_f64(double_f64, 5.0);
+    let c: bool = apply_bool(flip, false);
+
+    let sum_a: i64 = u8_to_i64(a);
+    let sum_b: i64 = b as i64;
+    let sum_c: i64 = if c { 2 } else { 0 };
+    sum_a + sum_b + sum_c
+}
