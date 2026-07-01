@@ -362,6 +362,10 @@ struct TyCtx {
     cg_used_procread: bool,
     cg_used_procsend: bool,
     cg_used_procrecv: bool,
+    cg_used_stdinrecv: bool,
+    cg_used_stdoutsend: bool,
+    cg_used_argcount: bool,
+    cg_used_arg: bool,
     cg_scope: i64,         // the enclosing `scope`'s *ScopeCtx register (-1 = no scope)
     cg_spawn_t: Vec<i64>,  // spawn-target FnIds (sorted+deduped) → one wrapper each at end
     cg_eff: bool,     // (c35b) is the fn being emitted effecting (Kont* ABI: ret ptr)?
@@ -1190,6 +1194,32 @@ pub fn run(src: [u8], mode: i64, result: &mut Vec<u8>) -> i64 {
         } else {
             0
         };
+        // (ADR 0066 M2.4b) the child-side self-stdin/stdout framed runtime group.
+        if ctx.cg_used_stdinrecv {
+            append_str(result, "declare i64 @sentinel_stdin_recv(ptr)\n");
+            0
+        } else {
+            0
+        };
+        if ctx.cg_used_stdoutsend {
+            append_str(result, "declare i64 @sentinel_stdout_send(i64)\n");
+            0
+        } else {
+            0
+        };
+        // (ADR 0066 M2.4 follow-on) own command-line argument reflection.
+        if ctx.cg_used_argcount {
+            append_str(result, "declare i64 @sentinel_arg_count()\n");
+            0
+        } else {
+            0
+        };
+        if ctx.cg_used_arg {
+            append_str(result, "declare ptr @sentinel_arg(i64, ptr)\n");
+            0
+        } else {
+            0
+        };
         // (8d-Vec-2) the `llvm.memcpy` intrinsic declares LAST — after the
         // `sentinel_*` runtime-symbol group (it is an `@llvm.*` intrinsic, not a
         // runtime symbol), matching the oracle's `RuntimeSyms::emit_declares`.
@@ -1199,7 +1229,7 @@ pub fn run(src: [u8], mode: i64, result: &mut Vec<u8>) -> i64 {
         } else {
             0
         };
-        let cg_anydecl: bool = ctx.cg_used_alloc || ctx.cg_used_realloc || ctx.cg_used_free || ctx.cg_used_panic || ctx.cg_used_streq || ctx.cg_used_rdfile || ctx.cg_used_wrfile || ctx.cg_used_print || ctx.cg_used_prbytes || ctx.cg_used_perform || ctx.cg_used_resume || ctx.cg_used_consume || ctx.cg_used_kontpure || ctx.cg_used_kontpush || ctx.cg_used_taskspawn || ctx.cg_used_taskawait || ctx.cg_used_scopeenter || ctx.cg_used_scoperegister || ctx.cg_used_scopeexit || ctx.cg_used_channelnew || ctx.cg_used_channelsend || ctx.cg_used_channelrecv || ctx.cg_used_channelclose || ctx.cg_used_procspawn || ctx.cg_used_procwait || ctx.cg_used_procwrite || ctx.cg_used_procread || ctx.cg_used_memcpy;
+        let cg_anydecl: bool = ctx.cg_used_alloc || ctx.cg_used_realloc || ctx.cg_used_free || ctx.cg_used_panic || ctx.cg_used_streq || ctx.cg_used_rdfile || ctx.cg_used_wrfile || ctx.cg_used_print || ctx.cg_used_prbytes || ctx.cg_used_perform || ctx.cg_used_resume || ctx.cg_used_consume || ctx.cg_used_kontpure || ctx.cg_used_kontpush || ctx.cg_used_taskspawn || ctx.cg_used_taskawait || ctx.cg_used_scopeenter || ctx.cg_used_scoperegister || ctx.cg_used_scopeexit || ctx.cg_used_channelnew || ctx.cg_used_channelsend || ctx.cg_used_channelrecv || ctx.cg_used_channelclose || ctx.cg_used_procspawn || ctx.cg_used_procwait || ctx.cg_used_procwrite || ctx.cg_used_procread || ctx.cg_used_stdinrecv || ctx.cg_used_stdoutsend || ctx.cg_used_argcount || ctx.cg_used_arg || ctx.cg_used_memcpy;
         if cg_anydecl {
             push(result, '\n');
             0

@@ -399,6 +399,14 @@ fn mir_put_callee(out: &mut Vec<u8>, c: &mut TyCtx, src: &[u8], fid: i64) -> i64
             "process_send"
         } else if fid == 30 {
             "process_recv"
+        } else if fid == 33 {
+            "stdin_recv"
+        } else if fid == 34 {
+            "stdout_send"
+        } else if fid == 35 {
+            "arg_count"
+        } else if fid == 36 {
+            "arg"
         } else {
             "print_bytes"
         };

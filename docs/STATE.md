@@ -14,7 +14,46 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
-**Latest (2026-07-01) — unified `apply(f, x)` with ordinary `f(x)` call syntax (ADR 0070 D3-revisit).**
+**Latest (2026-07-01) — scg self-host mirror: `stdin_recv`/`stdout_send`/`arg_count`/`arg` (ADR 0066
+M2.4b/M2.4-follow-on).** The fresh-session pick off the decision menu: bring 4 of the 6 tracked
+"snc-only, scg mirror deferred" builtins into `scg`'s own type-check + codegen, closing part of a
+gap that had been repeatedly flagged "rush-dangerous — do in a fresh session" across several past
+sessions. A dedicated research pass first mapped the **exact** state of all 6 unmirrored areas
+(confirmed by reading every dispatch table directly, not inferred) before choosing a scope: these 4
+builtins were **genuinely green-field in scg** (no name mapping, no type-check, no codegen — not
+even a stub) but **mechanically identical to 4 already-working, already-differential-proven scg
+patterns** (`stdin_recv` = `channel_recv`/`process_recv`'s exact shape minus the handle arg;
+`stdout_send` = `channel_send`/`process_send`'s; `arg_count` = `channel_new`'s bare zero-arg call;
+`arg` = `process_read`'s `{i64,ptr}`-assembly shape) — verified by reading the Rust oracle's exact
+text-IR (`crates/sentinel-driver/src/llvm_dump.rs`) side by side with scg's existing arms before
+writing a single line. Touched 6 files across the same 7 mechanical sites every prior 2-builtin
+addition needed: `builtin_id` in **both** `selfhost/resolve.sentinel` and
+`selfhost/types/interner.sentinel` (each file keeps its own separate copy), `builtin_ret` (2 of the
+4 needed an entry — `stdin_recv`→`mk_nullable(c,0)`, `arg`→`mk_array(c,3)`; `stdout_send`/`arg_count`
+correctly fall through to the existing default-i64 fallback, like `process_send`/`channel_close`),
+the `cg_emit_call` dispatch arms in `selfhost/types/cg_effects.sentinel` (hand-transcribed from the
+oracle's exact text, byte-identical on the first try), 4 new `cg_used_*` struct fields + declare-group
+entries + `tyctx` inits in `selfhost/types.sentinel`/`tyctx.sentinel` (correctly added to the
+`cg_anydecl` OR-chain this time — noted in passing that `cg_used_procsend`/`cg_used_procrecv` are
+curiously absent from that chain, a separate pre-existing question left alone, out of scope), and the
+MIR callee-name table in `selfhost/types/mir.sentinel`. **No `FnId` renumbering** (33-36 already
+existed on both sides — only the name lookup and lowering were missing), no new type interner kind,
+no resolve-stage dump changes (ordinary named-builtin calls never touch the `Expr::Var`/`FnRef`
+fallback path that bit ADR 0070 v1). New differential fixture `tests/pass/c70_scg_stdio_arg.sentinel`
+(guarded behind a runtime-`false` flag, mirroring `c66_process.sentinel`'s pattern, since the real
+stdin/argv content is environment-dependent — both IR branches still lower) brings all 4 builtins'
+full lowering into every self-host differential stage for the first time; all 9 stages confirmed
+byte-identical, including both bootstrap-fixed-point tests. Four-check green (`cargo test --workspace
+--no-fail-fast`: exactly the same 19 known pre-existing Windows-only failures across 5 targets, zero
+new; `pass.rs` 139→140 total with the new fixture passing). **5 gaps remain, deliberately deferred**
+(genuinely new machinery, not mechanical copies): `sealed_channel`/`sealed_process` (FnId 31/32 — needs
+a new `SealedChannel` type interner kind), `Type::Fn`/`apply`/the direct-call unification (FnId 37 —
+needs scg's first indirect-call codegen shape, not a copy of an existing pattern), and generalizing
+`Channel<T>`/`process_send`/`process_recv` beyond `i64` (scg's existing i64-only paths are correct and
+differential-clean — the non-`i64` element paths are snc-only, `examples/`-only, so this isn't blocking
+anything today, just incomplete relative to snc's full feature set).
+
+**Earlier (2026-07-01) — unified `apply(f, x)` with ordinary `f(x)` call syntax (ADR 0070 D3-revisit).**
 The fresh-session pick off the post-M-cont decision menu, closing D3's own named follow-up: a
 `Fn<T,R>`-typed local variable can now be called directly (`let op = square; op(5)`), not only via
 the `apply` builtin — both spellings are fully interchangeable. **Disambiguation lives entirely at

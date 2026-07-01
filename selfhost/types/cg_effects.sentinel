@@ -716,6 +716,85 @@ fn cg_emit_call(c: &mut TyCtx, src: &[u8], fid: i64, snap: i64, rty: i64) -> i64
         cgo_str(c, ", 1\n");
         cg_reg(c, prc_o1);
         0
+    } else if fid == 33 {
+        // (ADR 0066 M2.4b) stdin_recv() -> ?i64: read one i64 frame from this
+        // process's own stdin to a stack slot; build { i1 valid, i64 value }
+        // from the status (valid = status == 0). The child-side twin of
+        // recv/process_recv (no Process handle — this process's own stdin).
+        let sir_slot: i64 = cg_alloca(c, 0);
+        let sir_status: i64 = cg_dst(c);
+        cgo_str(c, "call i64 @sentinel_stdin_recv(ptr %v");
+        cgo_int(c, sir_slot);
+        cgo_str(c, ")\n");
+        (*c).cg_used_stdinrecv = true;
+        let sir_valid: i64 = cg_dst(c);
+        cgo_str(c, "icmp eq i64 %v");
+        cgo_int(c, sir_status);
+        cgo_str(c, ", 0\n");
+        let sir_value: i64 = cg_dst(c);
+        cgo_str(c, "load i64, ptr %v");
+        cgo_int(c, sir_slot);
+        cg_putc(c, '\n');
+        let sir_o0: i64 = cg_dst(c);
+        cgo_str(c, "insertvalue { i1, i64 } undef, i1 %v");
+        cgo_int(c, sir_valid);
+        cgo_str(c, ", 0\n");
+        let sir_o1: i64 = cg_dst(c);
+        cgo_str(c, "insertvalue { i1, i64 } %v");
+        cgo_int(c, sir_o0);
+        cgo_str(c, ", i64 %v");
+        cgo_int(c, sir_value);
+        cgo_str(c, ", 1\n");
+        cg_reg(c, sir_o1);
+        0
+    } else if fid == 34 {
+        // (ADR 0066 M2.4b) stdout_send(v: i64) -> i64. The child-side twin of
+        // send/process_send (no Process handle — this process's own stdout).
+        let sos_vk: i64 = (*c).cgak[snap];
+        let sos_vv: i64 = (*c).cgav[snap];
+        let sos_d: i64 = cg_dst(c);
+        cgo_str(c, "call i64 @sentinel_stdout_send(i64 ");
+        cgo_operand(c, sos_vk, sos_vv);
+        cgo_str(c, ")\n");
+        (*c).cg_used_stdoutsend = true;
+        cg_reg(c, sos_d);
+        0
+    } else if fid == 35 {
+        // (ADR 0066 M2.4 follow-on) arg_count() -> i64: own argv length.
+        let acnt_d: i64 = cg_dst(c);
+        cgo_str(c, "call i64 @sentinel_arg_count()\n");
+        (*c).cg_used_argcount = true;
+        cg_reg(c, acnt_d);
+        0
+    } else if fid == 36 {
+        // (ADR 0066 M2.4 follow-on) arg(i: i64) -> [u8]: own argv[i], the
+        // read_file/process_read result shape (a len out-slot + a data ptr).
+        let arg_ik: i64 = (*c).cgak[snap];
+        let arg_iv: i64 = (*c).cgav[snap];
+        let arg_slot: i64 = cg_alloca(c, 0);
+        let arg_data: i64 = cg_dst(c);
+        cgo_str(c, "call ptr @sentinel_arg(i64 ");
+        cgo_operand(c, arg_ik, arg_iv);
+        cgo_str(c, ", ptr %v");
+        cgo_int(c, arg_slot);
+        cgo_str(c, ")\n");
+        (*c).cg_used_arg = true;
+        let arg_len: i64 = cg_dst(c);
+        cgo_str(c, "load i64, ptr %v");
+        cgo_int(c, arg_slot);
+        cg_putc(c, '\n');
+        let arg_a0: i64 = cg_dst(c);
+        cgo_str(c, "insertvalue { i64, ptr } undef, i64 %v");
+        cgo_int(c, arg_len);
+        cgo_str(c, ", 0\n");
+        let arg_a1: i64 = cg_dst(c);
+        cgo_str(c, "insertvalue { i64, ptr } %v");
+        cgo_int(c, arg_a0);
+        cgo_str(c, ", ptr %v");
+        cgo_int(c, arg_data);
+        cgo_str(c, ", 1\n");
+        cg_reg(c, arg_a1);
+        0
     } else if fid == 12 {
         // (8d) write_file(path, data) -> i64.
         let w_pk: i64 = (*c).cgak[snap];

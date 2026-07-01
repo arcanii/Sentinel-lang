@@ -1137,6 +1137,18 @@ fn pass_c66_process() {
 }
 
 #[test]
+fn pass_c70_scg_stdio_arg() {
+    // ADR 0066 M2.4b / M2.4 follow-on, scg self-host mirror: stdin_recv/
+    // stdout_send/arg_count/arg lowering, previously snc-only (scg had no
+    // dispatch at all for FnIds 33..=36). The real syscalls are guarded
+    // behind a runtime-false flag for determinism; the IR is still emitted
+    // for the differential. Exit 42.
+    let r = build_and_run("c70_scg_stdio_arg.sentinel");
+    assert_eq!(r.exit, 42);
+    assert_eq!(r.stdout, "");
+}
+
+#[test]
 fn pass_c66_process_channel() {
     // ADR 0066 M2.3: process_send/process_recv lowering — frame an i64 to the
     // child's stdin (process_send) + read one i64 frame back as a ?i64

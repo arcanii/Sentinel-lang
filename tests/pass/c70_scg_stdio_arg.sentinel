@@ -1,0 +1,25 @@
+// ADR 0066 M2.4b / M2.4 follow-on, scg self-host mirror: stdin_recv() -> ?i64,
+// stdout_send(v: i64) -> i64, arg_count() -> i64, arg(i: i64) -> [u8]. These
+// four builtins were snc-only until now — scg had no dispatch for FnIds
+// 33..=36 at all (not even a name mapping). This fixture brings their full
+// lowering into the self-host differential. The real syscalls are GUARDED
+// behind a runtime-false flag for determinism (this process's own stdin/argv
+// content varies per test run/environment) — both IR branches still lower,
+// so the differential covers the complete builtin shape. Exit 42.
+
+fn stdio_probe() -> i64 {
+    let got: ?i64 = stdin_recv();
+    let sent: i64 = stdout_send(1);
+    let n: i64 = arg_count();
+    let a0: [u8] = arg(0);
+    unwrap_or(got, 0) + sent + n + len(a0)
+}
+
+fn main() -> i64 {
+    let probe: bool = false;
+    if probe {
+        stdio_probe()
+    } else {
+        42
+    }
+}

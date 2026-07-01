@@ -1279,6 +1279,17 @@ fn builtin_id(q: &[u8]) -> i64 {
         29
     } else if name_eq_lit(q, "process_recv") {
         30
+    } else if name_eq_lit(q, "stdin_recv") {
+        // ADR 0066 M2.4b: the self-stdin/stdout framed builtins (child-side
+        // twins of process_recv/send — no Process handle argument).
+        33
+    } else if name_eq_lit(q, "stdout_send") {
+        34
+    } else if name_eq_lit(q, "arg_count") {
+        // ADR 0066 M2.4 follow-on: own command-line argument reflection.
+        35
+    } else if name_eq_lit(q, "arg") {
+        36
     } else {
         0 - 1
     }
@@ -1313,6 +1324,14 @@ fn builtin_ret(c: &mut TyCtx, fid: i64) -> i64 {
         // (ADR 0066 M2.3) process_recv(p) -> ?i64 (process_send (29) -> i64 via
         // the default 0=i64 below, like send/channel_close).
         mk_nullable(c, 0)
+    } else if fid == 33 {
+        // (ADR 0066 M2.4b) stdin_recv() -> ?i64 (stdout_send (34) -> i64 via
+        // the default 0=i64 below, like recv/process_recv).
+        mk_nullable(c, 0)
+    } else if fid == 36 {
+        // (ADR 0066 M2.4 follow-on) arg(i) -> [u8] (arg_count (35) -> i64 via
+        // the default 0=i64 below, like read_file/process_read).
+        mk_array(c, 3)
     } else {
         0
     }
