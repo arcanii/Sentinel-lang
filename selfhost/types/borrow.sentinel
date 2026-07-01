@@ -27,6 +27,10 @@ fn is_move_type(c: &mut TyCtx, h: i64) -> bool {
         } else if k == 15 {
             // (ADR 0066 M2.4a / ADR 0069) a SealedChannel handle is Copy, same as Process.
             false
+        } else if k == 16 {
+            // (ADR 0070) a Fn<T,R> value is Copy (a bare, non-capturing LLVM function
+            // pointer — no owned state, like Process/Channel).
+            false
         } else if k == 3 {
             is_move_type(c, (*c).ta[idx])
         } else if k == 4 {
@@ -176,6 +180,9 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
         },
         Expr::Var(nm) => {
             let vid: i64 = sc_lookup(c, &nm);
+            if vid < 0 {
+                dump_te_fnref(out, nm, exp, src, c, gb)
+            } else {
             sink_name(gb, nm);
             // (ADR 0046) record this directly-named binding so an enclosing FieldAccess can
             // detect a `base.field` partial move (the dump_texpr top reset cleared it, so a
@@ -249,6 +256,7 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             mir_widen(c, w, exp);
             cg_widen(c, w, exp);
             widen_post(out, w, exp, ty, c)
+            }
         },
         Expr::Unary(uop, inner) => dump_te_unary(out, uop, inner, exp, src, c, gb),
         Expr::Binary(bop, l, r) => dump_te_binary(out, bop, l, r, exp, src, c, gb),

@@ -1162,6 +1162,18 @@ fn pass_c70_scg_sealed_bridge() {
 }
 
 #[test]
+fn pass_c70_scg_fn_apply() {
+    // ADR 0070, scg self-host mirror: Type::Fn<i64,i64> + apply(f, x) lowering,
+    // now including codegen (the snc llvm text-IR oracle was ported alongside
+    // scg's own first indirect-call codegen shape — a call through a register
+    // AND a call through a bare fn-name constant, both exercised here).
+    // Exit 42.
+    let r = build_and_run("c70_scg_fn_apply.sentinel");
+    assert_eq!(r.exit, 42);
+    assert_eq!(r.stdout, "");
+}
+
+#[test]
 fn pass_c66_process_channel() {
     // ADR 0066 M2.3: process_send/process_recv lowering — frame an i64 to the
     // child's stdin (process_send) + read one i64 frame back as a ?i64
@@ -1381,16 +1393,49 @@ fn pass_c5d4_file_io() {
     // the read-back content to stdout. File I/O is runtime builtins
     // (ADR 0035 D2), panic-on-failure (D5). Leak-free under `leaks
     // --atExit` (verified separately). Exit = len("hello") = 5; stdout =
-    // "hello" (print_bytes writes exactly the bytes, no newline). The
-    // temp path is removed before + after so the test is hermetic.
-    let tmp = std::path::Path::new("/tmp/sentinel_c5d4_io.txt");
-    let _ = std::fs::remove_file(tmp);
-    let r = build_and_run("c5d4_file_io.sentinel");
-    assert_eq!(r.exit, 5);
-    assert_eq!(r.stdout, "hello"); // print_bytes(back), no trailing newline
+    // "hello" (print_bytes writes exactly the bytes, no newline).
+    //
+    // The fixture's own `write_file` call uses a plain relative filename
+    // (Sentinel has no portable-temp-dir builtin), so this test can't use
+    // the shared `build_and_run` (which doesn't control the child's CWD) —
+    // it duplicates that helper's build+run steps, spawning the compiled
+    // binary with its CWD set to the OS temp dir so the relative path
+    // resolves there on every platform. The temp path is removed before +
+    // after so the test is hermetic.
+    let tmp_dir = std::env::temp_dir();
+    let tmp = tmp_dir.join("sentinel_c5d4_io.txt");
+    let _ = std::fs::remove_file(&tmp);
+
+    let src = workspace_root().join("tests/pass/c5d4_file_io.sentinel");
+    let out_dir = build_dir();
+    std::fs::create_dir_all(&out_dir).expect("create build dir");
+    let exe = out_dir.join("c5d4_file_io");
+    let build = Command::new(snc_binary())
+        .arg("build")
+        .arg(&src)
+        .arg("-o")
+        .arg(&exe)
+        .output()
+        .expect("snc invocation failed");
+    assert!(
+        build.status.success(),
+        "snc build c5d4_file_io.sentinel failed: status={}, stderr={}",
+        build.status,
+        String::from_utf8_lossy(&build.stderr)
+    );
+
+    let run = Command::new(&exe)
+        .current_dir(&tmp_dir)
+        .output()
+        .expect("running compiled binary failed");
+    let exit = run.status.code().expect("process killed by signal");
+    let stdout = String::from_utf8(run.stdout).expect("stdout is not valid UTF-8");
+
+    assert_eq!(exit, 5);
+    assert_eq!(stdout, "hello"); // print_bytes(back), no trailing newline
     // The fixture must have created the file (write_file ran).
     assert!(tmp.exists(), "c5d4 fixture should have written the temp file");
-    let _ = std::fs::remove_file(tmp);
+    let _ = std::fs::remove_file(&tmp);
 }
 
 #[test]

@@ -42,7 +42,8 @@ use sentinel_borrow_check::DropPlan;
 // oracle monomorphizes the same set, in the same order, as the production codegen.
 use sentinel_codegen::collect_mono_instantiations;
 use sentinel_resolve::{
-    ClassId, EffectId, EnumId, FnId, StructId, VarId, ARG_COUNT_FN_ID, ARG_FN_ID, I64_TO_U8_FN_ID,
+    ClassId, EffectId, EnumId, FnId, StructId, VarId, APPLY_FN_ID, ARG_COUNT_FN_ID, ARG_FN_ID,
+    I64_TO_U8_FN_ID,
     IS_SOME_FN_ID, LEN_FN_ID,
     CHANNEL_CLOSE_FN_ID, CHANNEL_NEW_FN_ID, POP_FN_ID, PRINT_BYTES_FN_ID, PRINT_FN_ID,
     PROCESS_READ_FN_ID, PROCESS_RECV_FN_ID, PROCESS_SEND_FN_ID, PROCESS_SPAWN_FN_ID,
@@ -1600,11 +1601,13 @@ impl Emit<'_> {
             // corpus codegen differential SKIPS any f64 fixture (the skip is
             // keyed on the oracle erroring) — scg stays untouched.
             TypedExprKind::FloatLit(_) => Err("float literal not ported (ADR 0058 snc-only)".into()),
-            // ADR 0070: a Fn value is snc-only at v1 (the demonstrator lives in
-            // `examples/`, never `tests/pass`) — Err cleanly so the selfhost
-            // differential SKIPS any fixture using it, mirroring the `f64` /
-            // `FloatLit` deferral above (NOT a stub — a deliberate scope cut).
-            TypedExprKind::FnRef(_) => Err("Fn value not ported to the snc llvm oracle (ADR 0070 snc-only)".into()),
+            // ADR 0070: a Fn value is the LLVM address of its already-declared
+            // function, used directly as a `ptr`-typed constant — no instruction
+            // (mirrors `VEC_NEW_FN_ID`'s own "return a constant literal" shape).
+            TypedExprKind::FnRef(fid) => {
+                let sig = self.program.signature(*fid);
+                Ok(format!("@{}", sig.name))
+            }
             TypedExprKind::BoolLit(b) => Ok(if *b { "1".into() } else { "0".into() }),
             TypedExprKind::CharLit(b) => Ok(b.to_string()),
             // `secret T` lowers identically to `T` (ADR 0019 D12); declassify
@@ -3456,6 +3459,22 @@ impl Emit<'_> {
             writeln!(self.body, "  %v{a1} = insertvalue {{ i64, ptr }} %v{a0}, ptr %v{data}, 1").unwrap();
             return Ok(format!("%v{a1}"));
         }
+        // ADR 0070: `apply(f, x)` — an indirect call through a function-pointer
+        // VALUE (f), not a named `@symbol`. `f` is lowered first, then `x`
+        // (mirroring the real inkwell `lower_apply`'s evaluation order exactly);
+        // the callee's implied function type is fully specified by the surface
+        // syntax (return type before the callee, arg type inside the parens) —
+        // no separate function-pointer-type annotation needed under opaque
+        // pointers (verified against LLVM 18's own IR verifier).
+        if id == APPLY_FN_ID {
+            let f_op = self.lower_expr(&args[0])?;
+            let x_op = self.lower_expr(&args[1])?;
+            let param_ty = self.lty(args[1].ty)?;
+            let ret_ty_text = self.lty(ret_ty)?;
+            let v = self.fresh();
+            writeln!(self.body, "  %v{v} = call {ret_ty_text} {f_op}({param_ty} {x_op})").unwrap();
+            return Ok(format!("%v{v}"));
+        }
         if id.0 < FIRST_USER_FN {
             return Err(format!("builtin call #{} (deferred to a later slice)", id.0));
         }
@@ -3561,6 +3580,8 @@ fn llvm_ty(ty: Type, program: &TypedProgram) -> Result<String, String> {
         Type::Process => Ok("ptr".to_string()),
         // ADR 0066 M2.4a: a SealedChannel lowers to the same opaque ptr as Process.
         Type::SealedChannel => Ok("ptr".to_string()),
+        // ADR 0070: a Fn value is a bare LLVM function pointer.
+        Type::Fn(_) => Ok("ptr".to_string()),
         other => Err(format!("type not yet ported (8a scalars only): {other:?}")),
     }
 }

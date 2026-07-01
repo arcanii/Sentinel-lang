@@ -1477,7 +1477,7 @@ fn cg_emit_fn(c: &mut TyCtx, src: &[u8], name_s: i64, name_e: i64, rty: i64) -> 
         cgo_str(c, "  %v");
         cgo_int(c, asl);
         cgo_str(c, " = alloca ");
-        if aty < 0 {
+        if aty == 0 - 2 {
             cgo_str(c, "ptr")
         } else {
             cgo_ty(c, aty)
@@ -1547,7 +1547,7 @@ fn cg_flush_allocas_body(c: &mut TyCtx) -> i64 {
         cgo_str(c, "  %v");
         cgo_int(c, asl);
         cgo_str(c, " = alloca ");
-        if aty < 0 {
+        if aty == 0 - 2 {
             cgo_str(c, "ptr")
         } else {
             cgo_ty(c, aty)

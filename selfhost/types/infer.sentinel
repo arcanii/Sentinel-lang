@@ -433,6 +433,91 @@ fn dump_gcall(out: &mut Vec<u8>, fid: i64, ca: Args, exp: i64, src: &[u8], c: &m
     }
 }
 
+// (ADR 0070) `apply(f: Fn<T,R>, x: T) -> R`: f's type is DYNAMIC — decoded
+// from its own interned `Fn<T,R>` handle (kind 16, a=param_ty, b=ret_ty) —
+// so the call's overall type can't come from the generic `fn_ret`/
+// `builtin_ret` table (which only takes an FnId, not the concrete arg's
+// type). Mirrors `check_call`'s `APPLY_FN_ID` special-case,
+// `crates/sentinel-types/src/lib.rs:7442-7481`. Unlike `dump_gcall`'s
+// generic builtins, `apply` renders NO `(targs …)` annotation (its
+// `type_args` is always empty on the Rust side — codegen derives both LLVM
+// types straight from the typed AST) — so args are dumped straight into
+// `out`, no temp buffer needed. `f` not being a `Fn<T,R>` value falls back
+// to `i64` (this project's usual "reject-path isn't rigorously handled"
+// stance — the oracle rejects that case too, so the differential never
+// compares scg's behavior for it).
+fn dump_apply_call(out: &mut Vec<u8>, ca: Args, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
+    match ca {
+        Args::End => 0,
+        Args::Cell(f, rest) => {
+            // (ADR 0070) codegen: snapshot the collected-arg stack BEFORE dumping
+            // either arg, so both operands can be read back after collection to
+            // emit the indirect call (mirrors `dump_te_call`'s own `cg_snap`).
+            let cg_snap: i64 = if cg_on(c) {
+                len((*c).cgak)
+            } else {
+                0
+            };
+            push(out, ' ');
+            let ft: i64 = dump_texpr(out, f, 0 - 1, src, c, gb);
+            mir_collect(c);
+            cg_collect(c, ft);
+            let param_ty: i64 = if ft < tbase() {
+                0
+            } else if (*c).tk[ft - tbase()] == 16 {
+                (*c).ta[ft - tbase()]
+            } else {
+                0
+            };
+            let ret_ty: i64 = if ft < tbase() {
+                0
+            } else if (*c).tk[ft - tbase()] == 16 {
+                (*c).tb[ft - tbase()]
+            } else {
+                0
+            };
+            match rest {
+                Args::Cell(x, rest2) => {
+                    push(out, ' ');
+                    let xt: i64 = dump_texpr(out, x, param_ty, src, c, gb);
+                    mir_collect(c);
+                    cg_collect(c, xt);
+                    dump_targs(out, rest2, src, c, gb);
+                    0
+                },
+                Args::End => 0,
+            };
+            // (ADR 0070) codegen: emit the indirect call — scg's first `call`
+            // through a computed function-pointer VALUE rather than a named
+            // `@symbol`. `cg_emit_call`'s own subsequent (unconditional) call for
+            // this FnId matches none of its dispatch arms and falls to a no-op,
+            // but still runs its mandatory arg-stack cleanup — harmless, since it
+            // never touches `cglk`/`cglv`, so this call's result register survives.
+            if cg_on(c) {
+                let fk: i64 = (*c).cgak[cg_snap];
+                let fv: i64 = (*c).cgav[cg_snap];
+                let xk: i64 = (*c).cgak[cg_snap + 1];
+                let xv: i64 = (*c).cgav[cg_snap + 1];
+                let d: i64 = cg_dst(c);
+                cgo_str(c, "call ");
+                cgo_ty(c, ret_ty);
+                cg_putc(c, ' ');
+                cgo_operand(c, fk, fv);
+                cg_putc(c, '(');
+                cgo_ty(c, param_ty);
+                cg_putc(c, ' ');
+                cgo_operand(c, xk, xv);
+                cgo_str(c, ")\n");
+                cg_reg(c, d);
+                0
+            } else {
+                0
+            };
+            ret_ty
+        },
+    }
+}
+
 // Dump all call args into `out`, returning the FIRST arg's type (-1 if none).
 // (ADR 0034 D8) `consume_rest` forces a CONSUMING walk of the args AFTER the first —
 // `push`'s by-value element (its 2nd arg) is moved INTO the Vec, which then owns and

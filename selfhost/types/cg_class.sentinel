@@ -144,7 +144,7 @@ fn cg_emit_method(c: &mut TyCtx, src: &[u8], rty: i64, is_void: bool, is_init: b
         cgo_str(c, "  %v");
         cgo_int(c, asl);
         cgo_str(c, " = alloca ");
-        if aty < 0 {
+        if aty == 0 - 2 {
             cgo_str(c, "ptr")
         } else {
             cgo_ty(c, aty)

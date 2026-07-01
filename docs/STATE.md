@@ -14,7 +14,120 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
-**Latest (2026-07-01) — scg self-host mirror: `sealed_channel`/`sealed_process` bridge (ADR 0066
+**Latest (2026-07-02) — `pass_c5d4_file_io` fixed; the "runtime crash" was a misread `abort()` exit
+code, not a memory bug.** A background task flagged this file-I/O test as a Windows runtime crash
+(exits `0xC0000409`, whose NTSTATUS name is `STATUS_STACK_BUFFER_OVERRUN`, so the suspicion was
+unsafe buffer handling in `sentinel_write_file` on an I/O failure). **Disproven by a minimal repro:**
+a 2-line Rust program that only calls `std::process::abort()` produces the identical exit code on
+this MSVC toolchain — Windows `abort()` terminates via `__fastfail`, which reports `0xC0000409`
+whether or not any stack cookie was involved. The runtime was aborting *cleanly and by design* (ADR
+0035 D5: file I/O is panic-on-failure), and `crates/sentinel-runtime/src/lib.rs`'s file builtins have
+no unsafe buffer bug — every raw-pointer deref is length-guarded, the failure path is a plain
+`eprintln! + abort()`. Left untouched. **The real bug: two hardcoded Unix `/tmp` paths** — the
+fixture `tests/pass/c5d4_file_io.sentinel`'s own `write_file` argument AND the `pass_c5d4_file_io`
+test's Rust-side path both used `/tmp/...`, which on Windows resolves to a nonexistent `G:\tmp` →
+`write_file` correctly aborted → the test read the abort's exit code as a crash. Fixed both: the
+fixture uses a plain relative filename (Sentinel has no portable-temp-dir builtin), and the test now
+inlines the build+run steps (the shared `build_and_run` helper doesn't control the child's CWD) to
+spawn the binary with `.current_dir(std::env::temp_dir())`. The fixture is in the self-host corpus, so
+the string-literal change was re-verified byte-identical across all 9 differential stages. Four-check
+green; the known pre-existing Windows-only failure count drops 19→18. **Record correction:**
+`0xC0000409` on Windows means "a Rust `abort()`/panic-abort fired," not "memory was corrupted."
+
+**Earlier (2026-07-02) — scg self-host mirror: `Type::Fn`/`apply` CODEGEN closed too — the
+codegen-stage oracle is ported and scg's first indirect-call codegen shape is byte-identical.** The
+prior session's scope cut (resolve/types/borrow/effects/mir only, codegen "structurally excluded")
+is now fully closed: the codegen-stage oracle (`crates/sentinel-driver/src/llvm_dump.rs`, the
+hand-maintained text-IR emitter `selfhost_codegen.rs`'s differential diffs against) previously
+errored on `FnRef`/`apply` outright, so nothing scg did there could ever be checked. Ported it in 3
+places: `llvm_ty` gained `Type::Fn(_) => Ok("ptr".to_string())` (matching `Process`/`Channel`/
+`SealedChannel`'s own one-line arms); `TypedExprKind::FnRef`'s lowering became `Ok(format!("@{}",
+sig.name))` (a bare function-pointer constant, no instruction — mirrors `VEC_NEW_FN_ID`'s "return a
+constant literal" shape); `lower_call` gained an `APPLY_FN_ID` special case emitting `%v{v} = call
+{ret_ty} {f_op}({param_ty} {x_op})` (`f` lowered before `x`, matching the real inkwell `lower_apply`'s
+own evaluation order exactly — confirmed empirically against LLVM 18's own `opt -passes=verify` that
+an indirect call through a register uses identical surface syntax to a call through a bare `@name`
+constant, no separate function-pointer-type annotation needed under opaque pointers).
+**scg's own side — its first codegen shape with no existing pattern to copy:** rendering a `Fn`
+value's operand needs the function's source-level name, but the shared `cgo_operand` (94 call sites)
+has no `src` parameter; mirrored the SAME "cache name bytes in a dedicated TyCtx blob at registration
+time" trick this exact codebase already uses for struct names (`snb`/`sts`/`ste`, whose own comment
+says *"so `render_type` needs no `src`"*) — new `ufnb`/`ufns`/`ufne` fields populated at the existing
+Pass-1 top-level scan, a new `cg_fn_name_to` helper mirroring `cg_struct_name_to` exactly, and a new
+`cgo_operand` kind 5 (`@<name>`, `val`=FnId). **A real, would-have-shipped bug was caught before
+implementation, not after:** `cgo_operand`'s final branch was a *bare* `else` (not `else if kind ==
+3`), silently catching "anything unrecognized" — bolting kind 5 on after it would have made every Fn
+value silently misrender as a null-constant (`{ i1 0, ... }`) instead of `@name`, a wrong-output bug
+with no compiler error. Caught by an independent validation pass (a Plan-mode review agent explicitly
+tasked with stress-testing the design against live source) *before* writing any code, and confirmed
+directly against the file; fixed by making kind 5 an explicit `else if` ahead of the (now-implicit)
+kind-3 catch-all. The same validation pass also caught that **no fixture anywhere in the repo — not
+the corpus, not `examples/`— ever passes a bare fn-name directly as `apply`'s callee** (always a bound
+Var), meaning the kind-5-as-callee path would have shipped completely untested; `c70_scg_fn_apply.
+sentinel` was extended to call `use_fn(square)` alongside `use_fn(sq)` (`36 - 36 + 42 = 42`) to force
+both shapes through the same corpus fixture. `dump_apply_call` (added last session) gained the actual
+instruction emission: reads back its own just-collected operands via a locally-captured snapshot,
+emits the indirect call, and calls `cg_reg` — relying on `cg_emit_call`'s subsequent, unconditional
+call (which matches none of its dispatch arms for this FnId and falls to a no-op) to perform only its
+mandatory arg-stack cleanup without touching the result register, a pattern already implicit in how
+this codebase's other special-dispatch branches interact with `cg_emit_call`'s fallback. Verified
+three ways: the corpus differential (`sentinel_codegen_matches_oracle_on_corpus` now *compares*
+`c70_scg_fn_apply.sentinel` for the first time, rather than silently skipping it), both
+bootstrap-fixed-point tests (scg's own new source — the `infer.sentinel`/`borrow_arms.sentinel`/
+`cg.sentinel` additions — self-compiles byte-identically), and a manual byte-diff reproduction
+showing the oracle and scg's own codegen produce identical 642-byte output, including both `call i64
+%v1(i64 6)` (indirect call through a register) and `call i64 @use_fn(ptr @square)` (a bare-constant
+`Fn` operand) side by side. **This closes the full 6-gap scg-mirror effort with no remaining scope
+cuts on `Type::Fn`/`apply`** — only the D3-revisit direct-call syntax (`op(x)` instead of
+`apply(op,x)`) stays a distinct, separately-tracked follow-up. Four-check green (same known
+pre-existing Windows-only failures, zero new). See ADR 0070 + HANDOVER §0.
+
+**Earlier (2026-07-01) — scg self-host mirror: `Type::Fn`/`apply` (ADR 0070), 6 of 6 originally-tracked
+gaps now closed — scoped to resolve/types/borrow/effects/mir, codegen structurally excluded.** Research
+first surfaced that the codegen-stage oracle (`crates/sentinel-driver/src/llvm_dump.rs`, hand-maintained,
+used only by `selfhost_codegen.rs`'s differential) deliberately errors on `FnRef`/`apply` — so the
+differential framework can never reach scg's codegen for this feature regardless of what scg does;
+porting that oracle is a separate snc-side prerequisite, not a "mirror into scg" task — narrowing scope
+to the 5 verifiable stages. **New `Type::Fn` interner kind (16)**, storing `(param_ty, ret_ty)` handles
+directly via `intern_type` (`mk_fn`/`render_type`'s `"Fn<A,B>"` text) rather than Rust's arithmetic
+`FnValueSigId` scheme — simpler given scg's interner already stores two arbitrary handles uniformly. A
+new `fn_ref_sig` eligibility helper mirrors the Rust gate (non-generic, effect-free, one word-scalar
+param, word-scalar return). `borrow.sentinel`'s shared `Expr::Var` arm falls back from a failed
+`sc_lookup` to `fn_lookup` + a new `dump_te_fnref` helper (`(fnref #id)`, MIR-emits via the existing
+`mir_emit_opaque0`); `dump_te_call` gained an `fid == 37` special case (`dump_apply_call`, new in
+`infer.sentinel`) decoding `(param_ty, ret_ty)` from the first arg's `Type::Fn` handle so the call's
+own type is dynamic, not a fixed per-FnId table — mirroring `check_call`'s `apply` branch exactly.
+**Two real, previously-unmirrored gaps were found and fixed, both invisible until a genuinely
+clean-typing `apply` fixture existed:** `types/interner.sentinel`'s own separate `builtin_id` copy
+never had an `"apply"` entry (only `resolve.sentinel`'s did, added in v1 solely to keep a `tests/ui`
+rejection fixture resolve-stage-clean — a fixture that never reached the types stage, so the gap stayed
+invisible); the miss made `fn_lookup` return `-1`, and `append_int` — which has no negative-number
+handling, silently emitting zero bytes instead of a `-` sign — rendered `(call #` with the id missing
+outright. `types/mir.sentinel`'s `mir_put_callee` callee-name table also lacked an `"apply"` arm,
+silently falling through to its catch-all default (`"print_bytes"`). Both fixed with one new arm each.
+**A second, more serious bug surfaced only via the bootstrap-fixed-point tests** (which compile scg's
+OWN new source through scg's OWN codegen, not the corpus differential the fixture is structurally
+excluded from): `dump_apply_call`'s inner `match rest {...}` is used as a discarded statement — the
+first such shape anywhere in the selfhost source. Root cause, isolated to the exact diverging LLVM
+register via manual oracle-vs-self-compiled IR diffing: the match cg arm reserves its result alloca via
+`cg_alloca(c, exp)`, and a discarded statement is dumped with `exp == -1` (the pre-existing, widely-used
+"no expectation" convention) — which collided with `cg_alloca_ptr`'s OWN reservation of `-1` in the same
+alloca-type pool (meaning "force a bare `ptr`", a kont-slot convention), so the match's result alloca'd
+as `ptr` instead of `i64`. (An initial fix deferring the alloca's type-commit until the arms' true type
+was known was tried and reverted — it broke hoisted-alloca *ordering*, which must stay in strict
+reservation order to remain byte-identical with the oracle, breaking two unrelated pre-existing fixtures
+in the process.) The actual fix touches nothing order-sensitive: `cg_alloca_ptr` now reserves `-2`
+instead of `-1`, and the three render-loop copies check `== -2` instead of `< 0` — `-1` now safely falls
+through to `cgo_ty`'s own pre-existing unmatched-handle fallback (`i64`), exactly what a discarded
+match-statement needs. New fixture `tests/pass/c70_scg_fn_apply.sentinel` (`apply(op, 6)` only — never
+bare `op(x)`, the D3-revisit unification stays a distinct, unmirrored feature) confirmed byte-identical
+across all 9 self-host differential stages, **both bootstrap-fixed-point tests hold**. Four-check green
+(same 19 known pre-existing Windows-only failures, zero new; `pass.rs` 140→141). **This closes the last
+of the 6 originally-tracked scg-mirror gaps within its now-clarified scope** — codegen needs a separate
+snc-side oracle port first; the D3-revisit direct-call syntax (`op(x)`) is a distinct follow-up still
+unmirrored in scg's `dump_te_call`. See ADR 0070 + HANDOVER §0.
+
+**Earlier (2026-07-01) — scg self-host mirror: `sealed_channel`/`sealed_process` bridge (ADR 0066
 M2.4a / ADR 0069), 5 of 6 tracked gaps now closed.** Continuing the same session's scg-mirror work:
 the identity-ptr bridge builtins (`sealed_channel(Process) -> SealedChannel` / `sealed_process(
 SealedChannel) -> Process`) are now fully lowered in scg, including a **new `SealedChannel` type

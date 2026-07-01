@@ -11,13 +11,16 @@
 //
 // Every `[u8]` here is a bound variable, so all buffers (the read result
 // + the literals) drop at scope exit -> leak-free under `leaks --atExit`.
-// The pass harness removes the temp file before + after the run.
+// The path is a plain relative filename (resolves against the process's
+// own CWD on every platform — Sentinel has no portable-temp-dir builtin);
+// the pass harness spawns this binary with its CWD set to the OS temp
+// dir and removes the file before + after the run, so it's hermetic.
 //
 // stdout = "hello" (no newline; print_bytes writes exactly the bytes).
 // Exit = len(back) when the round-trip + checks pass = 5 ("hello").
 
 fn main() -> i64 {
-    let path: [u8] = "/tmp/sentinel_c5d4_io.txt";
+    let path: [u8] = "sentinel_c5d4_io.txt";
     let payload: [u8] = "hello";
 
     write_file(path, payload);

@@ -85,6 +85,13 @@ struct TyCtx {
     ufs: Vec<i64>,
     ufe: Vec<i64>,
     ufret: Vec<i64>,
+    // --- (ADR 0070) fn names ALSO live in `ufnb` (a fn-name blob, so codegen's
+    //     `cgo_operand` needs no `src` to render a Fn value as `@<name>`),
+    //     mirroring `snb`/`sts`/`ste` below; FnId = 38 + idx. `ufns`/`ufne` =
+    //     blob offsets. ---
+    ufnb: Vec<u8>,
+    ufns: Vec<i64>,
+    ufne: Vec<i64>,
     // --- struct table: names live in `snb` (a struct-name blob, so render_type
     //     needs no `src`); StructId = index. `sts`/`ste` = blob offsets. ---
     snb: Vec<u8>,
@@ -557,6 +564,19 @@ pub fn run(src: [u8], mode: i64, result: &mut Vec<u8>) -> i64 {
                 push(&mut itemkind, 3);
                 push(&mut ctx.ufs, starts[p1 + 1]);
                 push(&mut ctx.ufe, ends[p1 + 1]);
+                // (ADR 0070) also cache the name bytes into `ufnb` (mirrors the
+                // struct-name copy just below) so codegen can render a Fn value's
+                // `@<name>` without needing `src`.
+                let fns: i64 = starts[p1 + 1];
+                let fne: i64 = ends[p1 + 1];
+                let fnst: i64 = len(ctx.ufnb);
+                let mut fnbi: i64 = fns;
+                while fnbi < fne {
+                    push(&mut ctx.ufnb, src[fnbi]);
+                    fnbi = fnbi + 1;
+                }
+                push(&mut ctx.ufns, fnst);
+                push(&mut ctx.ufne, fnst + (fne - fns));
                 0
             } else if t1 == 52 {
                 push(&mut itempos, p1);

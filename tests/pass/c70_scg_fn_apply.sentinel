@@ -1,0 +1,35 @@
+// ADR 0070, scg self-host mirror: `Type::Fn<i64,i64>` + `apply(f, x)`, previously
+// completely absent in scg (no name mapping, no type-check, no codegen — not
+// even a "reserve the FnId" stub, unlike `apply` itself which scg's resolver
+// already recognized by name since ADR 0070 v1). This fixture brings ALL SIX
+// stages (resolve/types/borrow/effects/mir/codegen) into differential parity —
+// the codegen-stage oracle (`crates/sentinel-driver/src/llvm_dump.rs`, a
+// separate, hand-maintained text-IR emitter) was ported alongside this fixture
+// specifically so scg's first indirect-call codegen shape could be checked
+// byte-for-byte, not just skipped like an unported `f64`/`u128` construct.
+//
+// `use_fn(sq)` calls through a `let`-bound Fn value (an indirect call through a
+// REGISTER operand — `sq` is loaded from its alloca slot); `use_fn(square)`
+// calls through a bare fn-name passed directly as the argument (an indirect
+// call through a CONSTANT `@square` operand, with no intervening `let`) — the
+// two representations scg's codegen must both handle identically to the oracle.
+//
+// Only `apply(op, x)` is exercised here — never bare `op(x)` (the D3-revisit
+// direct-call syntax unification is a distinct, still-unmirrored feature;
+// scg's `dump_te_call` has the same unconditional "vars win over fns"
+// dispatch the Rust resolver does, untouched by this fixture).
+//
+// square(6) = 36 twice; 36 - 36 + 42 = 42.
+
+fn square(x: i64) -> i64 {
+    x * x
+}
+
+fn use_fn(op: Fn<i64, i64>) -> i64 {
+    apply(op, 6)
+}
+
+fn main() -> i64 {
+    let sq = square;
+    use_fn(sq) - use_fn(square) + 42
+}

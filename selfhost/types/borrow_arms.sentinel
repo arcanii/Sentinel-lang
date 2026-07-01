@@ -1,5 +1,50 @@
 module types;
 
+// (ADR 0070) `Expr::Var(nm)` where `nm` is NOT a bound local var: check
+// whether it names a top-level fn eligible as a `Fn<T,R>` value (mirrors the
+// Rust resolver's `ExprKind::Var` fallback to `fn_table` — resolve's own
+// mirror already exists from ADR 0070 v1; this is the TYPES-stage
+// generalization). An ineligible/undefined name (`fid < 38`, or
+// `fn_ref_sig` returns -1) is left unhandled, matching this project's
+// "error parity is out of scope" convention (ADR 0044 D7) — the oracle
+// rejects these cases too, so the differential never compares scg's
+// behavior for them.
+fn dump_te_fnref(out: &mut Vec<u8>, nm: [u8], exp: i64, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
+    let fid: i64 = fn_lookup(c, src, &nm);
+    let fty: i64 = if fid >= 38 {
+        fn_ref_sig(c, fid)
+    } else {
+        0 - 1
+    };
+    sink_name(gb, nm);
+    let w: bool = widen_pre(out, exp, fty, c);
+    append_str(out, "(fnref #");
+    append_int(out, fid);
+    close_ty(out, fty, c);
+    if mir_on(c) {
+        let mc: i64 = (*c).mir_cur;
+        let dv: i64 = mir_emit_opaque0(c, mc, fty);
+        (*c).lastval = dv;
+        (*c).mir_lastvid = 0 - 1;
+        0
+    } else {
+        0
+    };
+    // (ADR 0070) codegen: a Fn value is a constant — no instruction, just the
+    // (kind 5, FnId) operand pair, consumed by whatever wraps this expression
+    // (a `let`'s store, or a call-arg collection).
+    if cg_on(c) {
+        (*c).cglk = 5;
+        (*c).cglv = fid;
+        0
+    } else {
+        0
+    };
+    mir_widen(c, w, exp);
+    cg_widen(c, w, exp);
+    widen_post(out, w, exp, fty, c)
+}
+
 fn dump_te_binary(out: &mut Vec<u8>, bop: i64, l: Expr, r: Expr, exp: i64, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
             // The result type is known only AFTER the operands synthesize, but a
             // `(widen-null …)` wrapper must PRECEDE the node — so build the binop into
@@ -907,6 +952,10 @@ fn dump_te_call(out: &mut Vec<u8>, cn: [u8], ca: Args, exp: i64, src: &[u8], c: 
                     dump_gcall(out, fid, ca, exp, src, c, gb)
                 } else if isgenfn {
                     dump_generic_call(out, fid, ca, src, c, gb)
+                } else if fid == 37 {
+                    // (ADR 0070) apply: the return type depends on the concrete
+                    // Fn<T,R> passed as the first arg, not a fixed per-FnId table.
+                    dump_apply_call(out, ca, src, c, gb)
                 } else {
                     dump_targs(out, ca, src, c, gb);
                     fn_ret(c, fid)

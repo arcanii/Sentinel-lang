@@ -411,6 +411,8 @@ fn mir_put_callee(out: &mut Vec<u8>, c: &mut TyCtx, src: &[u8], fid: i64) -> i64
             "arg_count"
         } else if fid == 36 {
             "arg"
+        } else if fid == 37 {
+            "apply"
         } else {
             "print_bytes"
         };

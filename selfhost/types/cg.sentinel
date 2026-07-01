@@ -110,6 +110,16 @@ fn cg_is_sealed_channel(c: &mut TyCtx, h: i64) -> bool {
     }
 }
 
+// (ADR 0070) is `h` a `Fn<T,R>` (interner kind 16)? Lowers to a bare `ptr`
+// (a non-capturing function value is a plain function pointer).
+fn cg_is_fn(c: &mut TyCtx, h: i64) -> bool {
+    if h < tbase() {
+        false
+    } else {
+        (*c).tk[h - tbase()] == 16
+    }
+}
+
 // (Bar B) true iff `h` is a nullable `?T` (interner kind 4).
 fn cg_is_nullable(c: &mut TyCtx, h: i64) -> bool {
     if h < tbase() {
@@ -126,6 +136,19 @@ fn cg_struct_name_to(out: &mut Vec<u8>, c: &mut TyCtx, sid: i64) -> i64 {
     let mut bi: i64 = bs;
     while bi < be {
         push(out, (*c).snb[bi]);
+        bi = bi + 1;
+    }
+    0
+}
+
+// (ADR 0070) append a user fn's name (from the fn-name blob `ufnb`) to `out` —
+// the `Fn` value's `@<name>` operand text. `fid` is a user FnId (>= 38).
+fn cg_fn_name_to(out: &mut Vec<u8>, c: &mut TyCtx, fid: i64) -> i64 {
+    let bs: i64 = (*c).ufns[fid - 38];
+    let be: i64 = (*c).ufne[fid - 38];
+    let mut bi: i64 = bs;
+    while bi < be {
+        push(out, (*c).ufnb[bi]);
         bi = bi + 1;
     }
     0
@@ -308,6 +331,9 @@ fn cgo_ty(c: &mut TyCtx, h: i64) -> i64 {
         } else if cg_is_sealed_channel(c, hs) {
             // (ADR 0066 M2.4a / ADR 0069) a `SealedChannel` is the same opaque
             // ptr as `Process` (the bridge builtins are identity passthroughs).
+            cgo_str(c, "ptr")
+        } else if cg_is_fn(c, hs) {
+            // (ADR 0070) a `Fn<T,R>` value is a bare function pointer.
             cgo_str(c, "ptr")
         } else {
             cgo_str(c, "i64")
@@ -654,8 +680,10 @@ fn cg_pass0(out: &mut Vec<u8>, c: &mut TyCtx) -> i64 {
 }
 
 // an operand: a register `%vN` (kind 0), an integer literal (kind 1), (8d-Vec) the
-// empty-`Vec` constant (kind 2 — `vec_new()`'s value, the same for every elem), or
-// (Bar B) a `null` constant (kind 3 — `{ i1 0, <zero> }`, `val` = the inner type).
+// empty-`Vec` constant (kind 2 — `vec_new()`'s value, the same for every elem),
+// (Bar B) a `null` constant (kind 3 — `{ i1 0, <zero> }`, `val` = the inner type),
+// `%arg0` the self pointer (kind 4), or (ADR 0070) a `Fn` value — a bare
+// function-pointer constant `@<name>` (kind 5, `val` = FnId).
 fn cgo_operand(c: &mut TyCtx, kind: i64, val: i64) -> i64 {
     if kind == 0 {
         cgo_str(c, "%v");
@@ -667,6 +695,13 @@ fn cgo_operand(c: &mut TyCtx, kind: i64, val: i64) -> i64 {
         cgo_int(c, val)
     } else if kind == 2 {
         cgo_str(c, "{ i64 0, i64 0, ptr null }")
+    } else if kind == 5 {
+        // (ADR 0070) a Fn value: `val` = FnId; the name is cached in `ufnb` at
+        // Pass 1 (`cg_fn_name_to`), so no `src` is needed here.
+        cgo_str(c, "@");
+        let mut fnb: Vec<u8> = vec_new();
+        cg_fn_name_to(&mut fnb, c, val);
+        cgo_str(c, vec_to_array(fnb))
     } else {
         // kind 3: `null` = `{ i1 0, <zero payload> }`. `?Struct` zeroes a pointer;
         // `?primitive` zeroes its inline scalar.
@@ -831,12 +866,17 @@ fn cg_alloca(c: &mut TyCtx, ty: i64) -> i64 {
     slot
 }
 
-// (Bar B / effects) hoist an `alloca ptr` (a kont slot) — `-1` marks a raw pointer in
-// the alloca-type pool (the hoist loop renders it as `ptr`, not via `cgo_ty`).
+// (Bar B / effects) hoist an `alloca ptr` (a kont slot) — `-2` marks a raw pointer in
+// the alloca-type pool (the hoist loop renders it as `ptr`, not via `cgo_ty`). Must be
+// distinct from `-1`: `-1` is the pre-existing, widely-used "no expectation" `exp`
+// value (e.g. `Stmt::SExpr`'s discarded expression-statements), which reaches this same
+// pool via a plain `cg_alloca(c, exp)` call (e.g. a `match` used as a statement) and
+// must fall through to `cgo_ty`'s own `i64` fallback for unmatched handles, not collide
+// with this sentinel.
 fn cg_alloca_ptr(c: &mut TyCtx) -> i64 {
     let slot: i64 = cg_fresh(c);
     push(&mut (*c).cgalloca_sl, slot);
-    push(&mut (*c).cgalloca_ty, 0 - 1);
+    push(&mut (*c).cgalloca_ty, 0 - 2);
     slot
 }
 
