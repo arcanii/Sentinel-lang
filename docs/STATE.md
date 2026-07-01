@@ -14,7 +14,32 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
-**Latest (2026-07-01) — scg self-host mirror: `stdin_recv`/`stdout_send`/`arg_count`/`arg` (ADR 0066
+**Latest (2026-07-01) — scg self-host mirror: `sealed_channel`/`sealed_process` bridge (ADR 0066
+M2.4a / ADR 0069), 5 of 6 tracked gaps now closed.** Continuing the same session's scg-mirror work:
+the identity-ptr bridge builtins (`sealed_channel(Process) -> SealedChannel` / `sealed_process(
+SealedChannel) -> Process`) are now fully lowered in scg, including a **new `SealedChannel` type
+interner kind (15)** — the first new scg type kind added this session, mirrored from `Process`
+(kind 14) across every touchpoint found by grepping `Process`'s own: `mk_sealed_channel` (interner),
+`render_type`'s dump-text arm, `is_move_type` (Copy), `cg_is_sealed_channel` + its use in the
+handle-to-LLVM-type dispatch, `builtin_id`/`builtin_ret` in both files, and the MIR callee-name
+table. **Codegen is a true no-op** (confirmed against the Rust oracle's `return
+self.lower_expr(&args[0])`): both `Process` and `SealedChannel` lower to the same opaque `ptr`, so
+re-typing needs no new instruction — scg achieves this by directly re-threading the argument's own
+`(kind, value)` operand pair (`(*c).cglk`/`(*c).cglv`) rather than allocating a fresh register,
+mirroring how `declassify` is already a value-level no-op in this codebase. **A real divergence was
+caught and fixed, not missed:** the new `tests/pass/c70_scg_sealed_bridge.sentinel` fixture initially
+diverged at the MIR stage (`SealedChannel` vs oracle's `SealedChannel<secret i64>`) — the Rust
+oracle's *dump*-text renderer (`type_display`, used for MIR/differential output) hardcodes the
+`<secret i64>` suffix for this unit type as a fixed string, distinct from its ordinary `Display` impl
+(used for diagnostics), which renders plain `"SealedChannel"`. Confirmed via a `--no-fail-fast` re-run
+that this was the *only* divergence — all 9 self-host differential stages now byte-identical,
+including both bootstrap-fixed-point tests. Four-check green (same 19 known pre-existing Windows-only
+failures, zero new; `pass.rs` 139→140). **Only 1 gap remains:** `Type::Fn`/`apply`/the direct-call
+unification (FnId 37) — needs scg's first indirect-call codegen shape, genuinely novel, saved for
+last as planned. (Generalizing `Channel<T>`/`process_send`/`process_recv` beyond `i64` stays
+low-urgency: scg's `i64`-only paths are correct and differential-clean today.)
+
+**Earlier (2026-07-01) — scg self-host mirror: `stdin_recv`/`stdout_send`/`arg_count`/`arg` (ADR 0066
 M2.4b/M2.4-follow-on).** The fresh-session pick off the decision menu: bring 4 of the 6 tracked
 "snc-only, scg mirror deferred" builtins into `scg`'s own type-check + codegen, closing part of a
 gap that had been repeatedly flagged "rush-dangerous — do in a fresh session" across several past

@@ -1,0 +1,26 @@
+// ADR 0066 M2.4a / ADR 0069, scg self-host mirror: sealed_channel(Process) ->
+// SealedChannel / sealed_process(SealedChannel) -> Process, the identity-ptr
+// bridge builtins (both types lower to the same opaque ptr; re-typing is a
+// pure value-level no-op). scg previously had no SealedChannel type kind and
+// no dispatch for FnIds 31/32 at all. This fixture brings the new type kind
+// + the bridge lowering into the self-host differential for the first time.
+// The real spawn is GUARDED behind a runtime-false flag for cross-platform
+// determinism (mirrors c66_process.sentinel); both IR branches still lower.
+// Exit 42.
+
+fn spawner(argv: [[u8]]) -> i64 ! { Subprocess } {
+    let p = process_spawn("cmd", argv);
+    let sc = sealed_channel(p);
+    let p2 = sealed_process(sc);
+    process_wait(p2)
+}
+
+fn main() -> i64 {
+    let probe: bool = false;
+    if probe {
+        let argv: [[u8]] = ["/c", "exit 7"];
+        spawner(argv)
+    } else {
+        42
+    }
+}

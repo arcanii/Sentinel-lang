@@ -285,6 +285,12 @@ fn builtin_id(q: &[u8]) -> i64 {
         29
     } else if name_eq_lit(q, "process_recv") {
         30
+    } else if name_eq_lit(q, "sealed_channel") {
+        // ADR 0066 M2.4a / ADR 0069: the SealedChannel bridge builtins
+        // (identity-ptr passthroughs, see cg_emit_call for why).
+        31
+    } else if name_eq_lit(q, "sealed_process") {
+        32
     } else if name_eq_lit(q, "stdin_recv") {
         // ADR 0066 M2.4b: the self-stdin/stdout framed builtins (child-side
         // twins of process_recv/send — no Process handle argument).
@@ -298,9 +304,8 @@ fn builtin_id(q: &[u8]) -> i64 {
         36
     } else if name_eq_lit(q, "apply") {
         // ADR 0070: the indirect-call builtin for non-capturing function
-        // values. Needed here (unlike sealed_channel, 31..=32, never added
-        // — no tests/pass or tests/ui fixture calls them by name) because a
-        // tests/ui fixture DOES call `apply`.
+        // values. A tests/ui fixture calls `apply` by name (needed here for
+        // that reason alone — the actual Type::Fn lowering stays deferred).
         37
     } else {
         0 - 1

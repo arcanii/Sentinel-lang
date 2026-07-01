@@ -100,6 +100,16 @@ fn cg_is_process(c: &mut TyCtx, h: i64) -> bool {
     }
 }
 
+// (ADR 0066 M2.4a / ADR 0069) is `h` a `SealedChannel` (interner kind 15)?
+// Lowers to `ptr`, same as `Process`.
+fn cg_is_sealed_channel(c: &mut TyCtx, h: i64) -> bool {
+    if h < tbase() {
+        false
+    } else {
+        (*c).tk[h - tbase()] == 15
+    }
+}
+
 // (Bar B) true iff `h` is a nullable `?T` (interner kind 4).
 fn cg_is_nullable(c: &mut TyCtx, h: i64) -> bool {
     if h < tbase() {
@@ -294,6 +304,10 @@ fn cgo_ty(c: &mut TyCtx, h: i64) -> i64 {
             cgo_str(c, "ptr")
         } else if cg_is_process(c, hs) {
             // (ADR 0066 M2.1) a `Process` is an opaque `*SentinelProcess`.
+            cgo_str(c, "ptr")
+        } else if cg_is_sealed_channel(c, hs) {
+            // (ADR 0066 M2.4a / ADR 0069) a `SealedChannel` is the same opaque
+            // ptr as `Process` (the bridge builtins are identity passthroughs).
             cgo_str(c, "ptr")
         } else {
             cgo_str(c, "i64")

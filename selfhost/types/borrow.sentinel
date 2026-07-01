@@ -24,6 +24,9 @@ fn is_move_type(c: &mut TyCtx, h: i64) -> bool {
         } else if k == 14 {
             // (ADR 0066 M2.1) a Process handle is Copy (pointer-like, runtime-owned).
             false
+        } else if k == 15 {
+            // (ADR 0066 M2.4a / ADR 0069) a SealedChannel handle is Copy, same as Process.
+            false
         } else if k == 3 {
             is_move_type(c, (*c).ta[idx])
         } else if k == 4 {

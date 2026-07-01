@@ -62,6 +62,11 @@ fn mk_channel(c: &mut TyCtx, elem: i64) -> i64 { intern_type(c, 13, elem, 0) }
 // (ADR 0066 M2.1) a `Process` handle (interner kind 14; a plain handle, no
 // element); renders `Process`. Lowers to an opaque `ptr` (*SentinelProcess).
 fn mk_process(c: &mut TyCtx) -> i64 { intern_type(c, 14, 0, 0) }
+// (ADR 0066 M2.4a / ADR 0069) a `SealedChannel` handle (interner kind 15; a
+// plain handle, no element — same shape as `Process`); renders
+// `SealedChannel`. Lowers to the same opaque `ptr` as `Process` (the bridge
+// builtins `sealed_channel`/`sealed_process` are identity-ptr passthroughs).
+fn mk_sealed_channel(c: &mut TyCtx) -> i64 { intern_type(c, 15, 0, 0) }
 
 // --- (4h) type-param scope --------------------------------------------------
 
@@ -427,6 +432,13 @@ fn render_type(out: &mut Vec<u8>, h: i64, c: &mut TyCtx) -> i64 {
         } else if k == 14 {
             // (ADR 0066 M2.1) Process: a plain handle (no element).
             append_str(out, "Process")
+        } else if k == 15 {
+            // (ADR 0066 M2.4a / ADR 0069) SealedChannel is a unit variant on the Rust
+            // side (no interner, fixed at `secret i64` until M2.4c-2 generalizes it),
+            // but its DUMP text is a hardcoded "SealedChannel<secret i64>" (mirrors
+            // Rust `type_display`'s special case — NOT the plain "SealedChannel" its
+            // ordinary `Display` impl uses for diagnostics).
+            append_str(out, "SealedChannel<secret i64>")
         } else {
             append_str(out, "??")
         }
@@ -1279,6 +1291,12 @@ fn builtin_id(q: &[u8]) -> i64 {
         29
     } else if name_eq_lit(q, "process_recv") {
         30
+    } else if name_eq_lit(q, "sealed_channel") {
+        // ADR 0066 M2.4a / ADR 0069: the SealedChannel bridge builtins
+        // (identity-ptr passthroughs, see cg_emit_call for why).
+        31
+    } else if name_eq_lit(q, "sealed_process") {
+        32
     } else if name_eq_lit(q, "stdin_recv") {
         // ADR 0066 M2.4b: the self-stdin/stdout framed builtins (child-side
         // twins of process_recv/send — no Process handle argument).
@@ -1324,6 +1342,13 @@ fn builtin_ret(c: &mut TyCtx, fid: i64) -> i64 {
         // (ADR 0066 M2.3) process_recv(p) -> ?i64 (process_send (29) -> i64 via
         // the default 0=i64 below, like send/channel_close).
         mk_nullable(c, 0)
+    } else if fid == 31 {
+        // (ADR 0066 M2.4a / ADR 0069) sealed_channel(Process) -> SealedChannel.
+        mk_sealed_channel(c)
+    } else if fid == 32 {
+        // (ADR 0066 M2.4a / ADR 0069) sealed_process(SealedChannel) -> Process
+        // (the reverse bridge).
+        mk_process(c)
     } else if fid == 33 {
         // (ADR 0066 M2.4b) stdin_recv() -> ?i64 (stdout_send (34) -> i64 via
         // the default 0=i64 below, like recv/process_recv).

@@ -1149,6 +1149,19 @@ fn pass_c70_scg_stdio_arg() {
 }
 
 #[test]
+fn pass_c70_scg_sealed_bridge() {
+    // ADR 0066 M2.4a / ADR 0069, scg self-host mirror: sealed_channel/
+    // sealed_process, the identity-ptr bridge builtins (scg previously had
+    // no SealedChannel type kind and no dispatch for FnIds 31/32 at all).
+    // The real spawn is guarded behind a runtime-false flag for
+    // cross-platform determinism; the IR is still emitted for the
+    // differential. Exit 42.
+    let r = build_and_run("c70_scg_sealed_bridge.sentinel");
+    assert_eq!(r.exit, 42);
+    assert_eq!(r.stdout, "");
+}
+
+#[test]
 fn pass_c66_process_channel() {
     // ADR 0066 M2.3: process_send/process_recv lowering — frame an i64 to the
     // child's stdin (process_send) + read one i64 frame back as a ?i64

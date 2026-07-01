@@ -716,6 +716,21 @@ fn cg_emit_call(c: &mut TyCtx, src: &[u8], fid: i64, snap: i64, rty: i64) -> i64
         cgo_str(c, ", 1\n");
         cg_reg(c, prc_o1);
         0
+    } else if fid == 31 {
+        // (ADR 0066 M2.4a / ADR 0069) sealed_channel(p) -> SealedChannel: an
+        // identity-ptr passthrough — both Process and SealedChannel lower to
+        // the same opaque ptr, so re-typing is a pure value-level no-op (no
+        // new instruction; mirrors the oracle's `return self.lower_expr(&args[0])`).
+        // Re-thread the argument's own (kind, value) operand directly.
+        (*c).cglk = (*c).cgak[snap];
+        (*c).cglv = (*c).cgav[snap];
+        0
+    } else if fid == 32 {
+        // (ADR 0066 M2.4a / ADR 0069) sealed_process(sc) -> Process: the
+        // reverse bridge, same identity-ptr passthrough as fid 31.
+        (*c).cglk = (*c).cgak[snap];
+        (*c).cglv = (*c).cgav[snap];
+        0
     } else if fid == 33 {
         // (ADR 0066 M2.4b) stdin_recv() -> ?i64: read one i64 frame from this
         // process's own stdin to a stack slot; build { i1 valid, i64 value }
