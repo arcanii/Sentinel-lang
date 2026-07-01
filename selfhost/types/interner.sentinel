@@ -1331,7 +1331,7 @@ fn fn_lookup(c: &mut TyCtx, src: &[u8], q: &[u8]) -> i64 {
         while i < n {
             if found == 0 - 1 {
                 if name_eq_src(src, (*c).ufs[i], (*c).ufe[i], q) {
-                    found = 37 + i;
+                    found = 38 + i;
                     0
                 } else {
                     0
@@ -1348,10 +1348,10 @@ fn fn_lookup(c: &mut TyCtx, src: &[u8], q: &[u8]) -> i64 {
 
 // The return-type handle for a resolved FnId.
 fn fn_ret(c: &mut TyCtx, fid: i64) -> i64 {
-    if fid < 37 {
+    if fid < 38 {
         builtin_ret(c, fid)
     } else {
-        (*c).ufret[fid - 37]
+        (*c).ufret[fid - 38]
     }
 }
 

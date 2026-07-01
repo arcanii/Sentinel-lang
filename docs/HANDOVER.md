@@ -51,14 +51,47 @@ reference as you work through the milestones.
 
 ---
 
-### ▶ RESUME HERE (2026-06-30 — ADR 0066 M2.4 DONE (real pipe transport + variable-length records + argv) + GENERIC word-scalar in-process channels → NEXT: a fresh-session DECISION, see the menu below)
+### ▶ RESUME HERE (2026-07-01 — ADR 0070 DONE: non-capturing first-class function values (`Fn<i64,i64>` v1) → NEXT: a fresh-session DECISION, see the menu below)
 
-> **▶ NEXT DECISION (fresh session) — the high-value ADR 0066 concurrency + M2.4 SealedChannel work is COMPLETE & pushed (M2.4a → M2.4b-crypto → M2.4b real-pipe transport → M2.4c-1 variable-length records → argv → generic channels). HANDOFF STATE: four-check green (`cargo build` + `cargo test` + doctests + `clippy -D warnings`, all under the vcvars MSVC shell), all 6 selfhost differentials byte-identical (both bootstrap fixed points hold), working tree CLEAN. Known pre-existing Windows-only failures (NOT regressions): `pass_c5d4_file_io` (`/tmp`), `tests/modules.rs` `separate_*_linkonce_*` (MSVC link / `nm`), `tests/llvm.rs`'s `llvm_behaviour_matches_inkwell_*` (hardcodes the Unix runtime). Pick a direction:**
-> 1. **Closures / first-class functions** — the biggest, most foundational rock: unblocks the reusable worker-pool LIBRARY (M1.3's only gap) AND is broadly enabling (callbacks, higher-order fns). ADR-first; a real language-feature design. *The most impactful but largest.*
-> 2. **M1.4 Mutex (gated)** — the last M1 concurrency piece (Mutex + the D5a runtime deadlock-detection → typed error). Gated on a `Shared<T>` shared-ownership story Sentinel lacks; ADR-first. Large.
-> 3. **scg self-host mirror** — bring the M2.x sealed/stdio/arg/generic-channel builtins into scg parity (the DIFFERENTIAL-CRITICAL hardening I flagged for a fresh session — this is now that fresh point). The FnId BASES are already mirrored (corpus green); what's missing = the per-builtin LOWERING in `selfhost/types/cg*.sentinel` (mirror `process_read`/`channel_recv`/`channel_send` arms) + a `SealedChannel` type kind (like `Process` k14) + a guarded `tests/pass` fixture (NO crypto stack). Medium effort, project-identity value, rush-dangerous (do carefully).
-> 4. **Switch areas** — BACKLOG §11.6 (`return value;` as a fn terminator) / §11.7 (cross-module `pub class`), the ADR-0067 self-host-modularization tails, or the standing macOS verification.
-> Also still pending (older, lower-priority): **M2.4c-2** (generic word-scalar `Type::SealedChannel` — cosmetic, low value, do BEFORE the scg mirror if at all); the scg mirror of M2.3b. See the two-items-deferred note below for the M2.4 tails' ROI/risk.
+> **▶ NEXT DECISION (fresh session) — ADR 0070's v1 slice (non-capturing `Fn<i64,i64>` + the `apply` indirect-call builtin) is DONE & landed. HANDOFF STATE: four-check green (`cargo build` + `cargo test` + doctests + `clippy -D warnings`, all under the vcvars MSVC shell), all 9 selfhost differential stages byte-identical (both bootstrap fixed points hold), working tree CLEAN. Known pre-existing Windows-only failures (NOT regressions): `pass_c5d4_file_io` (`/tmp`), `tests/modules.rs` `separate_*_linkonce_*` (MSVC link / `nm`), `tests/llvm.rs`'s `llvm_behaviour_matches_inkwell_*` (hardcodes the Unix runtime), the `export --shared` tests (DLL export unsupported on Windows), the POSIX-FFI + socket `examples/` (macOS-only). Pick a direction:**
+> 1. **Generalize `Fn<T,R>`** — the natural M1.2b-cont-style follow-up: word-scalar params/return (today fixed at `i64→i64`), maybe arity > 1. Small-medium, high value (the worker-pool motivation wants more than one shape).
+> 2. **Unify `apply(f,x)` with ordinary `f(x)` call syntax** — ADR 0070's own-flagged deferral: `ident(args)` where `ident` is a local var unconditionally resolves to a kont resume-call today (ADR 0020 D5); generalizing that dispatch to disambiguate kont-vs-Fn by the var's TYPE is differential-critical (touches the effect-handler resume-call path) — do carefully, in a focused session. Medium effort, ergonomics payoff.
+> 3. **Full capturing closures** — ADR 0024 D10's original deferral, still not done: environment capture + lifetime tracking interacting with the lexical borrow checker. The biggest, most foundational rock still on the table; ADR-first, a real language-feature design. *Most impactful but largest — ADR 0070 was the SAFE SLICE of this, not the whole thing.*
+> 4. **M1.4 Mutex (gated)** — the last M1 concurrency piece (Mutex + the D5a runtime deadlock-detection → typed error). Gated on a `Shared<T>` shared-ownership story Sentinel lacks; ADR-first. Large.
+> 5. **scg self-host mirror** — bring the M2.x sealed/stdio/arg/generic-channel builtins (AND now ADR 0070's `Type::Fn`/`apply` type-check+codegen lowering) into scg parity. The FnId BASES are already mirrored (corpus green); what's missing = the per-builtin LOWERING in `selfhost/types/cg*.sentinel` + (for ADR 0070) a `Type::Fn` interner-or-unit kind. Medium effort, project-identity value, rush-dangerous (do carefully).
+> 6. **Switch areas** — BACKLOG §11.6 (`return value;` as a fn terminator) / §11.7 (cross-module `pub class`), the ADR-0067 self-host-modularization tails, or the standing macOS verification.
+> Also still pending (older, lower-priority): **M2.4c-2** (generic word-scalar `Type::SealedChannel` — cosmetic, low value, do BEFORE the scg mirror if at all); the scg mirror of M2.3b. See the two-items-deferred note below (superseded by item 5 above, which now also covers ADR 0070) for the M2.4 tails' ROI/risk.
+
+**▶ DONE (2026-07-01) — ADR 0070: non-capturing first-class function values (`Fn<i64,i64>` v1).** The
+foundational-rock item from the prior menu, scoped DOWN to the safe slice: not full closures (ADR 0024
+D10 stays deferred), just a non-capturing function VALUE — a top-level, non-generic, non-builtin,
+effect-free `(i64) -> i64` fn referenced by bare name (`let op = square;` → `ResolvedExprKind::FnRef` /
+`TypedExprKind::FnRef`, typed `Type::Fn` — a plain **unit** variant, Copy, lowering to a bare LLVM
+function pointer; no interner table at v1, mirroring the `Type::SealedChannel`-at-M2.4a precedent rather
+than `Channel`'s interned-from-day-one). Invoked **indirectly** via a new builtin **`apply(f: Fn<i64,i64>,
+x: i64) -> i64`** (FnId 37, user-fn base 37→38) — deliberately NOT ordinary `f(x)` syntax: `ident(args)`
+over a bound local var already unconditionally resolves to a kont resume-call (ADR 0020 D5, "vars win
+over fns"), and touching that dispatch to disambiguate kont-vs-Fn is exactly the differential-critical,
+security-relevant surface this session chose not to rush. `apply` resolves through the *existing*
+`fn_table` lookup, never the `vars`-shadowing branch — zero overlap. Unblocks the worker-pool motivation:
+a pool/worker body can take `op: Fn<i64,i64>` instead of one hand-written worker per operation
+(`spawn` of an indirect target stays deferred — `Type::Fn` isn't a spawn-word-scalar yet). No new runtime
+symbol, no ABI change, **zero borrow-checker capture machinery**. Demonstrator
+`examples/lang/fn_value.sentinel` (two distinct fns through one `apply_to` param, 36+6=42, both
+`--separate` and merged); ui rejections `c70_fn_value_ineligible` (wrong arity) + `c70_fn_type_args_unsupported`
+(`Fn<T,R>` fixed at `Fn<i64,i64>` for v1). **GOTCHA (a genuine surprise, corrected mid-session): "keep the
+demonstrator in `examples/`" does NOT fully shield the differential** — `selfhost_resolve.rs`'s corpus
+check sweeps EVERY `tests/pass` + `tests/ui` fixture that resolves cleanly into the resolve-stage
+byte-parity requirement, regardless of which LATER stage rejects it. A ui fixture demonstrating D4
+eligibility inherently resolves cleanly (eligibility is a types-stage check), so it landed in that corpus
+and diverged. Fixed with two small, resolve-stage-ONLY additions to `selfhost/resolve.sentinel`:
+`builtin_id("apply") → 37`, and the `Expr::Var` dump arm's `sc_lookup`→`fn_lookup` fallback (mirroring the
+Rust resolver's `ExprKind::Var` fix) so `(fnref #N)` renders identically. The type-check/codegen lowering
+mirror (an interner-or-unit kind for `Type::Fn` + cg arms in `selfhost/types/cg*.sentinel`) is STILL
+genuinely deferred — no `tests/pass` fixture exercises it — folded into the existing tracked scg-mirror
+follow-up (now item 5 above). Four-check green; **all 9 selfhost differential stages byte-identical**,
+both bootstrap fixed points hold. See ADR 0070 (its D7 has the full "lesson learned" writeup for whoever
+next tries the "ship snc-only, demonstrator in examples/" deferral pattern).
 
 **▶ DONE (2026-06-30) — ADR 0066 M1.2b-cont: GENERIC word-scalar in-process channels (`Channel<u8>`/`<bool>`/`<i32>`/`<f64>`/`<ptr>`).** The in-process twin of the M2.3b process-channel generalization. The element is encoded into / decoded from the channel's i64 slot (the M1.1 spawn encode: zext narrow int / bitcast f64 / ptrtoint ptr) — runtime stays i64-based, **NO new symbol, NO FnId change**. The word-scalar `Channel<T>` types are **pre-interned at FIXED ChanIds 0..=5** at sig setup (`channel_chanid_for`/`channel_elem_for` — so a `Channel<T>` annotation maps to a stable ChanId WITHOUT threading the `channels` interner through the checker, the snag the design avoids), and the 4 builtins are **special-cased in `check_call`** (the M2.3b pattern): `channel_new()` context-typed (element from the expected type), `send` encodes (by value kind, no type_args), `recv -> ?T` decodes (element from the channel arg's ChanId, type_args for non-i64), `channel_close` accepts any `Channel`. Codegen `lower_channel_send`/`_recv` + the `snc llvm` arms gained the encode/decode (mirror `lower_process_send`/`_recv`). **The `i64` case is BYTE-IDENTICAL to M1.2** → all 6 selfhost differentials green with **NO scg change** (snc-side, like M2.3b; generic elements live in `examples/lang/channel_generic.sentinel` → 42). **GOTCHA: this surfaced the `c66_channel_element_unsupported` ui fixture** — it used `Channel<bool>` (now ACCEPTED), so it stopped rejecting → the MIR differential picked it up + diverged (snc's pre-interned ChanId 3 for bool vs scg's on-demand ChanId 1); FIXED by pointing it at `Channel<u128>` (a non-word-scalar — doesn't fit the i64 slot — still `ChannelElementNotSupported`) + re-blessing the snapshot. (`unwrap_or(m, 0)` on a `?u8` needs `0 as u8` — the default literal else infers `i64` → a type-arg-inference conflict.) Four-check green. **The reusable worker-pool LIBRARY stays BLOCKED on a first-class-function/closure mechanism (Sentinel has none)** — M1.3 remains the demonstrator examples; closures would be their own ADR-bearing rock.
 

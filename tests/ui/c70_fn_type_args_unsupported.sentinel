@@ -1,0 +1,10 @@
+// ADR 0070 D1: `Fn<T, R>` is fixed at the v1 minimum `Fn<i64, i64>` — any
+// other parameter/return shape is a type error (generalizing to word-scalar
+// params/return is a follow-on). Surfaces FnTypeArgsNotSupported.
+fn apply_to(op: Fn<i32, i64>, x: i32) -> i64 {
+    0
+}
+
+fn main() -> i64 {
+    0
+}

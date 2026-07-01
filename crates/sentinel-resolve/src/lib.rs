@@ -224,6 +224,18 @@ pub const ARG_COUNT_FN_ID: FnId = FnId(35);
 /// `arg(i: i64) -> [u8]` — the `i`-th command-line arg as bytes (empty if out of range).
 pub const ARG_FN_ID: FnId = FnId(36);
 
+// ADR 0070: `apply` — the indirect-call builtin for non-capturing first-class
+// function values (`Type::Fn`, v1 fixed at `Fn<i64,i64>`). A dedicated builtin
+// rather than ordinary `f(x)` call syntax (D3): `ident(args)` where `ident` is
+// a bound local var already unconditionally resolves to a kont resume-call
+// (ADR 0020 D5, `vars.get(callee)` wins over `fn_table` at the Call-callee
+// site) — `apply` resolves through the *existing* `fn_table` lookup instead,
+// so it never touches that dispatch. Appending this shifts the user-fn FnId
+// base 37 → 38.
+/// `apply(f: Fn<i64,i64>, x: i64) -> i64` — invoke a non-capturing function
+/// value indirectly (an LLVM indirect call through `f`'s code pointer).
+pub const APPLY_FN_ID: FnId = FnId(37);
+
 /// Identifier for a struct declaration. Added at C1.4 per ADR 0013
 /// D4 / D5; unique per-program, assigned in source order starting
 /// at 0.
@@ -791,6 +803,14 @@ pub enum ResolvedExprKind {
         callee_span: Span,
         args: Vec<ResolvedExpr>,
     },
+    /// ADR 0070: a bare top-level fn name used as a *value* (not applied) —
+    /// `let op = square;`. Resolved from `ExprKind::Var(name)` when `name`
+    /// has no local-binding match but does match `fn_table` (a different
+    /// lookup site than `Call`'s callee, which always goes through
+    /// `fn_table` directly — see the resolve_expr `Var` arm). Type-check
+    /// validates the referenced fn is eligible (non-generic, non-builtin,
+    /// `(i64) -> i64`, effect-free) and produces `Type::Fn`.
+    FnRef(FnId),
     /// Struct literal per ADR 0013 D3. The struct's [`StructId`] is
     /// resolved here; field names stay as strings (the type checker
     /// validates them at C1.4.5).
@@ -2878,6 +2898,11 @@ pub fn resolve_module(
     next_fn_id += 1;
     let arg_sig = mk_socket_sig(next_fn_id, "arg", 1);
     next_fn_id += 1;
+    // ADR 0070: the indirect-call builtin. `apply(f, x)` (arity 2) -> i64.
+    // Concrete signature special-cased in sentinel-types (the callee must
+    // type to `Type::Fn`); codegen lowers it to an indirect `call`.
+    let apply_sig = mk_socket_sig(next_fn_id, "apply", 2);
+    next_fn_id += 1;
 
     let mut fn_table: HashMap<String, FnId> = HashMap::new();
     let mut signatures: Vec<FnSignature> = vec![
@@ -2891,6 +2916,7 @@ pub fn resolve_module(
         sealed_channel_sig, sealed_process_sig,
         stdin_recv_sig, stdout_send_sig,
         arg_count_sig, arg_sig,
+        apply_sig,
     ];
     fn_table.insert("print".to_string(), PRINT_FN_ID);
     fn_table.insert("unwrap_or".to_string(), UNWRAP_OR_FN_ID);
@@ -2929,6 +2955,7 @@ pub fn resolve_module(
     fn_table.insert("stdout_send".to_string(), STDOUT_SEND_FN_ID);
     fn_table.insert("arg_count".to_string(), ARG_COUNT_FN_ID);
     fn_table.insert("arg".to_string(), ARG_FN_ID);
+    fn_table.insert("apply".to_string(), APPLY_FN_ID);
 
     // Phase D.6 / ADR 0037 D5.1: register each imported `pub fn` as an
     // EXTERN in this module's FnId space — after builtins, before own fns.
@@ -3829,7 +3856,19 @@ fn resolve_expr(
                         span: to_source_span(&expr.span),
                     });
                 }
+                // ADR 0070: no local binding named `name` — before giving
+                // up, check whether it names a top-level fn (a non-applied
+                // fn name used as a *value*, `let op = square;`). Type-check
+                // validates eligibility (non-generic / non-builtin /
+                // `(i64) -> i64` / effect-free); resolve only needs to know
+                // the name exists.
                 None => {
+                    if let Some(&fid) = fn_table.get(name) {
+                        return Ok(ResolvedExpr {
+                            kind: ResolvedExprKind::FnRef(fid),
+                            span: expr.span.clone(),
+                        });
+                    }
                     return Err(ResolveError::UndefinedVariable {
                         name: name.clone(),
                         span: to_source_span(&expr.span),
@@ -5124,14 +5163,14 @@ mod tests {
         }];
         let rp = resolve_module(&main, &imports).expect("resolve_module");
 
-        // Extern `add` = FnId(37) (right after the 37 builtins 0..=36: ADR
+        // Extern `add` = FnId(38) (right after the 38 builtins 0..=37: ADR
         // 0066 M1.2 channels 21..=24, M2.1 process_spawn/wait 25..=26, M2.2
         // process_write/read 27..=28, M2.3 process_send/recv 29..=30, M2.4a
         // sealed_channel/sealed_process 31..=32, M2.4b stdin_recv/stdout_send
-        // 33..=34, arg_count/arg 35..=36 → base 37), marked extern; own `main`
-        // follows at FnId(38).
+        // 33..=34, arg_count/arg 35..=36, ADR 0070 apply 37 → base 38), marked
+        // extern; own `main` follows at FnId(39).
         let add_sig = rp.fn_signatures.iter().find(|s| s.name == "add").expect("add sig");
-        assert_eq!(add_sig.id, FnId(37));
+        assert_eq!(add_sig.id, FnId(38));
         assert_eq!(add_sig.arity, 2);
         assert!(!add_sig.is_runtime);
         assert_eq!(
@@ -5139,7 +5178,7 @@ mod tests {
             Some(vec!["util".to_string(), "math".to_string()])
         );
         let main_sig = rp.fn_signatures.iter().find(|s| s.name == "main").expect("main sig");
-        assert_eq!(main_sig.id, FnId(38));
+        assert_eq!(main_sig.id, FnId(39));
         assert_eq!(main_sig.extern_origin, None);
 
         // The extern has NO body — only the one own fn (`main`) is resolved.
@@ -5416,8 +5455,9 @@ mod tests {
         // FnId(27..=28) = subprocess write/read (M2.2); FnId(29..=30) =
         // subprocess send/recv (M2.3); FnId(31..=32) = the M2.4a sealed bridge
         // builtins; FnId(33..=34) = M2.4b stdin_recv/stdout_send; FnId(35..=36) =
-        // arg_count/arg; FnId(37) = main (the first user fn).
-        assert_eq!(p.main().id, FnId(37));
+        // arg_count/arg; FnId(37) = apply (ADR 0070); FnId(38) = main (the
+        // first user fn).
+        assert_eq!(p.main().id, FnId(38));
         assert_eq!(p.fn_signatures[0].name, "print");
         assert!(p.fn_signatures[0].is_runtime);
     }
@@ -5457,15 +5497,15 @@ mod tests {
             },
             other => panic!("expected Binary, got {other:?}"),
         }
-        // FnId(0..=32) = the runtime builtins (0..=13 original, 14..=20
+        // FnId(0..=37) = the runtime builtins (0..=13 original, 14..=20
         // sockets, 21..=24 channels per ADR 0066 M1.2, 25..=26 subprocess
         // spawn/wait per M2.1, 27..=28 subprocess write/read per M2.2, 29..=30
         // subprocess send/recv per M2.3, 31..=32 sealed bridge per M2.4a, 33..=34
-        // stdin_recv/stdout_send per M2.4b, 35..=36 arg_count/arg); FnId(37) =
-        // double (first user fn), FnId(38) = main.
+        // stdin_recv/stdout_send per M2.4b, 35..=36 arg_count/arg, 37 apply per
+        // ADR 0070); FnId(38) = double (first user fn), FnId(39) = main.
         let main = p.main();
         match &main.body.tail.kind {
-            ResolvedExprKind::Call { id, .. } => assert_eq!(*id, FnId(37)),
+            ResolvedExprKind::Call { id, .. } => assert_eq!(*id, FnId(38)),
             other => panic!("expected Call, got {other:?}"),
         }
     }

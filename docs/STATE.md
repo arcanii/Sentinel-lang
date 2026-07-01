@@ -5,7 +5,7 @@ HANDOVER.md, STATE.md is the source of truth. New contributors (or
 new chat sessions) should be able to read this file and understand
 the current state of the workspace without re-reading every commit.
 
-## Current State (2026-06-30)
+## Current State (2026-07-01)
 
 > **Phase C closed at Sentinel 1.0 (2026-05-30); Phase D self-hosts; the
 > per-unit separate-compilation back end is functionally complete.**
@@ -14,7 +14,39 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
-**Latest (2026-06-30) — GENERIC word-scalar in-process channels (ADR 0066 M1.2b-cont).** `Channel<T>`
+**Latest (2026-07-01) — non-capturing first-class function values (ADR 0070, `Fn<i64,i64>` v1).**
+The first fresh-session pick off the post-ADR-0066-M2.4 decision menu: a top-level, non-generic,
+non-builtin, effect-free fn with signature `(i64) -> i64` can now be referenced by bare name as a
+**value** (`let op = square;`, `ResolvedExprKind::FnRef`/`TypedExprKind::FnRef`, typed `Type::Fn` —
+a plain unit variant, Copy, lowering to a bare LLVM function pointer, no captured environment —
+mirroring the `Type::SealedChannel`-at-M2.4a precedent rather than interning from day one). It is
+invoked **indirectly** via a new builtin **`apply(f: Fn<i64,i64>, x: i64) -> i64`** (FnId 37, user-fn
+base 37→38) rather than ordinary `f(x)` call syntax — a deliberate scope cut (ADR 0070 D3): `ident(args)`
+where `ident` is a bound local var already unconditionally resolves to a kont resume-call (ADR 0020 D5,
+"vars win over fns"), and unifying that dispatch to also support `Fn`-typed vars would touch the
+differential-critical, security-relevant effect-handler resume-call path — exactly the "rush-dangerous"
+category this project avoids without a focused session. `apply` sidesteps it entirely (resolves through
+the *existing* `fn_table` lookup, never the `vars`-shadowing branch). This directly unblocks the
+worker-pool motivation flagged after ADR 0066 M1.3: a worker/pool body can now take an `op: Fn<i64,i64>`
+parameter instead of every pool needing a hand-written, differently-named worker per operation (`spawn`
+of an indirect target stays deferred — `Type::Fn` is not yet a spawn-word-scalar). No new runtime symbol,
+no ABI change; **zero borrow-checker capture machinery** (the explicit scope boundary vs. full closures,
+which ADR 0024 D10 continues to defer). Demonstrator `examples/lang/fn_value.sentinel` (two distinct fns,
+`square`/`double`, through the same `apply_to` parameter — runtime-verified, 36+6=42, both `--separate`
+and merged); two `tests/ui/` rejections (`c70_fn_value_ineligible` — wrong arity; `c70_fn_type_args_unsupported`
+— `Fn<T,R>` fixed at `Fn<i64,i64>` for v1). **Self-host mirror — narrower than the usual "FnId-base sed
+only" pattern:** the mechanical FnId-base sed (37→38, `selfhost/{resolve,types,effects}.sentinel`) is
+differential-critical as always, but this session also discovered (and fixed) that `tests/ui/` fixtures
+are swept into the **resolve-stage** differential corpus whenever they resolve cleanly — regardless of
+which later stage rejects them — so `selfhost/resolve.sentinel` additionally needed `builtin_id("apply")
+→ 37` and the `Expr::Var` dump arm's `sc_lookup`→`fn_lookup` fallback (mirroring the Rust resolver's
+`ExprKind::Var` fix) to keep the resolve-stage byte-identical. The **type-check/codegen lowering mirror**
+(an interner kind for `Type::Fn`, cg arms in `selfhost/types/cg*.sentinel`) stays genuinely deferred — no
+`tests/pass` fixture exercises it — bundled into the existing tracked "scg mirror of the M2.x builtins"
+follow-up. Four-check green; **all 9 selfhost differential stages byte-identical**, both bootstrap fixed
+points hold. See ADR 0070 + HANDOVER §0.
+
+**Earlier (2026-06-30) — GENERIC word-scalar in-process channels (ADR 0066 M1.2b-cont).** `Channel<T>`
 generalizes from `Channel<i64>` to any **word-scalar element** {i64,i32,u8,bool,f64,ptr} — the in-process
 twin of the M2.3b process-channel generalization. The element is **encoded into / decoded from** the
 channel's i64 slot (the M1.1 spawn encode: zext a narrow int / bitcast `f64` / ptrtoint `ptr`), so the

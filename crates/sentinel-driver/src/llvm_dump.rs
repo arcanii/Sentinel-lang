@@ -68,11 +68,13 @@ const TARGET_TRIPLE: &str = "arm64-apple-darwin";
 // (25..=26); M2.2 added subprocess write/read (27..=28); M2.3 added subprocess
 // send/recv (29..=30); M2.4a added the SealedChannel bridge builtins (31..=32);
 // M2.4b added the self-stdin/stdout framed builtins (33..=34); the M2.4 follow-on
-// added arg_count/arg (35..=36), shifting the user-fn base to 37. A call to a
-// builtin FnId not caught by a special lowering arm above returns Err (the fixture
-// is skipped); the channel + subprocess + sealed-bridge + self-stdin/stdout + arg
-// builtins ARE specially lowered.
-const FIRST_USER_FN: u32 = 37;
+// added arg_count/arg (35..=36); ADR 0070 added the `apply` indirect-call builtin
+// (37), shifting the user-fn base to 38. A call to a builtin FnId not caught by a
+// special lowering arm above returns Err (the fixture is skipped); the channel +
+// subprocess + sealed-bridge + self-stdin/stdout + arg builtins ARE specially
+// lowered — `apply` deliberately is NOT (ADR 0070 snc-only; it falls through to
+// this same Err fallback, like an unported builtin).
+const FIRST_USER_FN: u32 = 38;
 
 /// Bar B / effects (ADR 0020): the reserved kont op_id for a PURE_RETURN wrap
 /// (`u32::MAX`) — the handle dispatch + `k(v)` pure-check compare against it.
@@ -1598,6 +1600,11 @@ impl Emit<'_> {
             // corpus codegen differential SKIPS any f64 fixture (the skip is
             // keyed on the oracle erroring) — scg stays untouched.
             TypedExprKind::FloatLit(_) => Err("float literal not ported (ADR 0058 snc-only)".into()),
+            // ADR 0070: a Fn value is snc-only at v1 (the demonstrator lives in
+            // `examples/`, never `tests/pass`) — Err cleanly so the selfhost
+            // differential SKIPS any fixture using it, mirroring the `f64` /
+            // `FloatLit` deferral above (NOT a stub — a deliberate scope cut).
+            TypedExprKind::FnRef(_) => Err("Fn value not ported to the snc llvm oracle (ADR 0070 snc-only)".into()),
             TypedExprKind::BoolLit(b) => Ok(if *b { "1".into() } else { "0".into() }),
             TypedExprKind::CharLit(b) => Ok(b.to_string()),
             // `secret T` lowers identically to `T` (ADR 0019 D12); declassify
@@ -3737,7 +3744,8 @@ fn expr_performs(expr: &TypedExpr) -> bool {
         | TypedExprKind::NullLit
         | TypedExprKind::CharLit(_)
         | TypedExprKind::StringLit(_)
-        | TypedExprKind::Var(_) => false,
+        | TypedExprKind::Var(_)
+        | TypedExprKind::FnRef(_) => false,
         TypedExprKind::Unary(_, inner)
         | TypedExprKind::WidenToNullable(inner)
         | TypedExprKind::WidenToSecret(inner)
@@ -3881,7 +3889,8 @@ fn collect_performs<'a>(expr: &'a TypedExpr, acc: &mut Vec<&'a TypedExpr>) {
         | TypedExprKind::NullLit
         | TypedExprKind::CharLit(_)
         | TypedExprKind::StringLit(_)
-        | TypedExprKind::Var(_) => {}
+        | TypedExprKind::Var(_)
+        | TypedExprKind::FnRef(_) => {}
         TypedExprKind::Unary(_, inner)
         | TypedExprKind::WidenToNullable(inner)
         | TypedExprKind::WidenToSecret(inner)

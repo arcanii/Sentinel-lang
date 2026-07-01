@@ -438,6 +438,10 @@ impl FnBuilder {
             TypedExprKind::FloatLit(_)
             | TypedExprKind::CharLit(_)
             | TypedExprKind::StringLit(_) => self.emit(MirOp::Opaque(Vec::new()), ty, span),
+            // ADR 0070: a `Fn` value is a constant function-pointer reference
+            // (no sub-expression to lower) — public, non-secret, like the
+            // literal group above. Joins the same zero-operand Opaque shape.
+            TypedExprKind::FnRef(_) => self.emit(MirOp::Opaque(Vec::new()), ty, span),
             TypedExprKind::Var(id) => self.lookup_var(*id, ty, span),
 
             // ---- secret-relevant arithmetic / comparison -------------

@@ -900,7 +900,11 @@ fn walk_expr(
         // (the bytes are literal — no variable is read/moved). A string's
         // owned `[u8]` is dropped via its binding's type, like any array.
         | TypedExprKind::CharLit(_)
-        | TypedExprKind::StringLit(_) => {}
+        | TypedExprKind::StringLit(_)
+        // ADR 0070: a bare fn name used as a value references a top-level fn,
+        // not a local binding — no `VarId` to track (`FnId` is a disjoint
+        // namespace), so it's a leaf like any other literal.
+        | TypedExprKind::FnRef(_) => {}
 
         // Ref-typed Var reads trigger the C2.1 use-after-scope
         // check. Non-ref Var reads trigger the C2.2 read-while-
@@ -1480,6 +1484,10 @@ fn is_copy_type(ty: Type, program: &TypedProgram) -> bool {
         Type::Process => true,
         // ADR 0066 M2.4a: a SealedChannel wraps a Process pipe — pointer-like + Copy.
         Type::SealedChannel => true,
+        // ADR 0070: a Fn value is a bare LLVM function pointer — pointer-like +
+        // Copy, owns nothing (no captured environment at the v1 non-capturing
+        // minimum).
+        Type::Fn => true,
     }
 }
 

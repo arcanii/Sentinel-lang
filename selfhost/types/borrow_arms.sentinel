@@ -861,15 +861,15 @@ fn dump_te_call(out: &mut Vec<u8>, cn: [u8], ca: Args, exp: i64, src: &[u8], c: 
                 // `(targs …)` then substitutes its return type; a generic BUILTIN
                 // (len/unwrap_or/is_some) uses the existing first-arg `dump_gcall`;
                 // everything else dumps args straight with the declared return type.
-                let isgenfn: bool = if fid >= 37 {
-                    (*c).uftp[fid - 37] > 0
+                let isgenfn: bool = if fid >= 38 {
+                    (*c).uftp[fid - 38] > 0
                 } else {
                     false
                 };
                 // (6/N) USER-fn (FnId >= 14) args are CONSUMING (moved into the callee);
                 // BUILTIN args (len/push/vec_to_array/print/…) are NON-consuming (the
                 // builtins borrow / don't move). `argcons` gates the args' move-recording.
-                let argcons: bool = fid >= 37;
+                let argcons: bool = fid >= 38;
                 let svf: bool = (*c).consuming;
                 (*c).consuming = argcons;
                 // (7c) MIR: ALL calls — plain, generic-builtin (len/push/vec_new/…), and

@@ -252,6 +252,12 @@ fn dump_expr(e: &ResolvedExpr, out: &mut String) {
             push_id(out, id.0);
             out.push(')');
         }
+        // ADR 0070: a bare fn name used as a value.
+        ResolvedExprKind::FnRef(fid) => {
+            out.push_str("(fnref ");
+            push_id(out, fid.0);
+            out.push(')');
+        }
         ResolvedExprKind::Unary(op, inner) => {
             out.push_str("(unary ");
             out.push_str(op.symbol());

@@ -126,6 +126,12 @@ ui_snapshot!(c66_process_channel_secret_fence, "c66_process_channel_secret_fence
 // public element is pointless). Surfaces SealedChannelElementNotSupported.
 ui_snapshot!(c66_sealed_channel_public_element, "c66_sealed_channel_public_element.sentinel");
 
+// ---- ADR 0070: non-capturing function values (types) ----
+// D4: a wrong-arity fn is not eligible as a `Fn<i64,i64>` value.
+ui_snapshot!(c70_fn_value_ineligible, "c70_fn_value_ineligible.sentinel");
+// D1: `Fn<T, R>` is fixed at `Fn<i64,i64>` for v1 — any other shape is rejected.
+ui_snapshot!(c70_fn_type_args_unsupported, "c70_fn_type_args_unsupported.sentinel");
+
 // ---- C5.2 constant-time verification rejection (the MIR D5 pass) ----
 ui_snapshot!(c52_secret_leak, "c52_secret_leak.sentinel");
 

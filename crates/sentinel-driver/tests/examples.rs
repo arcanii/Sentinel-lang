@@ -507,6 +507,14 @@ const EXAMPLES: &[(&str, i32)] = &[
     // `std::math::rect`. The class crosses the module / separate-compilation
     // boundary. 6 × 7 = 42.
     ("examples/modules/rect_demo.sentinel", 42),
+    // ADR 0070: non-capturing first-class function values — `Fn<i64,i64>`. A
+    // bare top-level fn name used as a value (`let op = square;`), invoked
+    // indirectly via the `apply(f, x)` builtin. Unblocks parameterizing a
+    // worker body by its operation instead of hardcoding it (the worker_pool
+    // motivation). Two different fns through the same `apply_to`: square(6) +
+    // double(3) = 36 + 6 = 42. snc-only (the scg mirror is deferred, like
+    // task_generic / f64 / process_channel_typed — see ADR 0070 D7).
+    ("examples/lang/fn_value.sentinel", 42),
 ];
 
 #[test]
@@ -819,6 +827,14 @@ fn modules_rect_demo() {
     // std::math::rect) — built --separate (the class crosses a unit boundary)
     // and merged.
     check_example("examples/modules/rect_demo.sentinel", "rect_demo", 42);
+}
+
+#[test]
+fn lang_fn_value() {
+    // ADR 0070: non-capturing first-class function values (Fn<i64,i64>) — a bare
+    // fn name used as a value, invoked indirectly via `apply(f, x)`. Two distinct
+    // fns (square, double) through the same `apply_to` parameter: 36 + 6 = 42.
+    check_example("examples/lang/fn_value.sentinel", "fn_value", 42);
 }
 
 /// Coverage guard: every `.sentinel` program under `examples/` must be

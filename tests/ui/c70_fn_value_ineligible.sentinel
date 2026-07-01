@@ -1,0 +1,17 @@
+// ADR 0070 D4: a bare fn name used as a value is eligible only if the
+// referenced fn is non-generic, non-builtin, effect-free, and has EXACTLY
+// the v1 signature `(i64) -> i64`. `add` takes two params, so it cannot be
+// used as a `Fn<i64,i64>` value — surfaces FnValueSignatureNotSupported
+// (not a silent "use the wrong arity", a typed rejection).
+fn add(a: i64, b: i64) -> i64 {
+    a + b
+}
+
+fn apply_to(op: Fn<i64, i64>, x: i64) -> i64 {
+    apply(op, x)
+}
+
+fn main() -> i64 {
+    let op = add;
+    apply_to(op, 1)
+}

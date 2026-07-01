@@ -301,7 +301,11 @@ fn walk_expr(
         // D.2 / ADR 0033: literals are pure (no effects).
         | TypedExprKind::CharLit(_)
         | TypedExprKind::StringLit(_)
-        | TypedExprKind::Var(_) => {}
+        | TypedExprKind::Var(_)
+        // ADR 0070: referencing a fn by name performs no effect itself (the
+        // FnRef eligibility check already requires an empty effect row on
+        // the referenced fn, so there is nothing to union in here either).
+        | TypedExprKind::FnRef(_) => {}
 
         TypedExprKind::Call { id, args, .. } => {
             // The substantive case: union the callee's effective

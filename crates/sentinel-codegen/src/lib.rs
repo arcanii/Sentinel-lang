@@ -45,7 +45,7 @@ use sentinel_ast::{BinOp, CmpOp, LogicOp, UnaryOp};
 use sentinel_borrow_check::DropPlan;
 use sentinel_hir::HirProgram;
 use sentinel_resolve::{
-    ClassId, EffectId, EnumId, FnId, ImplId, StructId, VarId, ARG_COUNT_FN_ID, ARG_FN_ID,
+    ClassId, EffectId, EnumId, FnId, ImplId, StructId, VarId, APPLY_FN_ID, ARG_COUNT_FN_ID, ARG_FN_ID,
     CHANNEL_CLOSE_FN_ID,
     CHANNEL_NEW_FN_ID, I64_TO_U8_FN_ID, IS_SOME_FN_ID, LEN_FN_ID, POP_FN_ID, PRINT_BYTES_FN_ID,
     PROCESS_READ_FN_ID, PROCESS_RECV_FN_ID, PROCESS_SEND_FN_ID, PROCESS_SPAWN_FN_ID,
@@ -1959,7 +1959,10 @@ fn collect_spawn_targets_expr(expr: &TypedExpr, acc: &mut Vec<FnId>) {
         | TypedExprKind::FloatLit(_)
         | TypedExprKind::CharLit(_)
         | TypedExprKind::StringLit(_)
-        | TypedExprKind::Var(_) => {}
+        | TypedExprKind::Var(_)
+        // ADR 0070: a Fn value references a top-level fn by name — no nested
+        // expression, so no spawn target to collect.
+        | TypedExprKind::FnRef(_) => {}
     }
 }
 
@@ -2081,6 +2084,9 @@ fn field_type_needs_drop_inner(
         // C4.2 / ADR 0023 D7: `Self` never reaches codegen — impl-
         // sig substitution resolves it before bodies type-check.
         Type::TraitSelf(_) => false,
+        // ADR 0070: a Fn value is a bare LLVM function pointer — no heap
+        // payload, no drop.
+        Type::Fn => false,
     }
 }
 
@@ -2216,6 +2222,11 @@ fn llvm_basic_type<'ctx>(
         // ADR 0066 M2.4a: a SealedChannel lowers to the same opaque ptr as Process
         // (bridge (iii): it wraps the child's pipe handle).
         Type::SealedChannel => context.ptr_type(inkwell::AddressSpace::default()).into(),
+        // ADR 0070: a Fn value lowers to a bare LLVM function pointer — an
+        // opaque ptr under LLVM 18's opaque-pointer model, exactly like
+        // `Process`/`Kont`/`Task`/`Channel` (no captured environment, so no
+        // struct wrapper is needed).
+        Type::Fn => context.ptr_type(inkwell::AddressSpace::default()).into(),
         // Phase D.1 / ADR 0032 D4: an enum lowers to the abi-v1
         // `{ i32 tag, ptr payload }` — a 4-byte discriminant (variant
         // index, source order) + an opaque pointer to a heap-allocated
@@ -2375,7 +2386,10 @@ fn walk_expr_for_mono(
         | TypedExprKind::FloatLit(_)
         | TypedExprKind::CharLit(_)
         | TypedExprKind::StringLit(_)
-        | TypedExprKind::Var(_) => {}
+        | TypedExprKind::Var(_)
+        // ADR 0070: a Fn value references a non-generic fn (eligibility
+        // requires zero type params) — never a generic instantiation site.
+        | TypedExprKind::FnRef(_) => {}
         TypedExprKind::WidenToNullable(inner)
         | TypedExprKind::WidenToSecret(inner)
         | TypedExprKind::Cast(inner)
@@ -2869,6 +2883,8 @@ fn mangle_type(ty: Type, program: &TypedProgram) -> String {
             .unwrap_or_else(|| format!("enum{}", id.0)),
         // C4.2: TraitSelf doesn't reach mangling.
         Type::TraitSelf(id) => format!("Self_trait{}", id.0),
+        // ADR 0070: Fn<i64,i64> carries no TypeParam; defensive mangle label.
+        Type::Fn => "fn_i64_i64".to_string(),
     }
 }
 
@@ -2922,6 +2938,8 @@ fn arg_contains_typeparam(
         Type::Process => false,
         // ADR 0066 M2.4a: SealedChannel carries no TypeParam.
         Type::SealedChannel => false,
+        // ADR 0070: Fn<i64,i64> carries no TypeParam.
+        Type::Fn => false,
     }
 }
 
@@ -2995,6 +3013,7 @@ fn llvm_int_type<'ctx>(context: &'ctx Context, ty: Type) -> IntType<'ctx> {
         Type::TraitSelf(_) => {
             panic!("llvm_int_type called on Type::TraitSelf — must be substituted before codegen")
         }
+        Type::Fn => panic!("llvm_int_type called on non-int Type::Fn"),
     }
 }
 
@@ -4764,6 +4783,11 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
             }
             Type::TraitSelf(_) => {
                 // C4.2: unreachable post-substitution; defensive.
+            }
+            Type::Fn => {
+                // ADR 0070: a Fn value is a bare LLVM function pointer (Copy,
+                // no captured environment at the v1 non-capturing minimum) —
+                // no heap data to free.
             }
         }
         Ok(())
@@ -7066,6 +7090,28 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
         })
     }
 
+    /// ADR 0070: `apply(f, x)` — invoke a non-capturing `Fn<i64,i64>` value
+    /// indirectly. `f` lowers to a bare function pointer (no wrapper struct,
+    /// unlike spawn); the call signature is the fixed v1 shape `i64 (i64)`.
+    fn lower_apply(
+        &mut self,
+        f: &TypedExpr,
+        x: &TypedExpr,
+        program: &TypedProgram,
+    ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+        let fn_ptr = self.lower_expr(f, program)?.into_pointer_value();
+        let arg_val = self.lower_expr(x, program)?;
+        let i64_ty = self.context.i64_type();
+        let fn_type = i64_ty.fn_type(&[i64_ty.into()], false);
+        let call = self
+            .builder
+            .build_indirect_call(fn_type, fn_ptr, &[arg_val.into()], "apply_call")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        call.try_as_basic_value().left().ok_or_else(|| {
+            CodegenError::Builder("indirect call via `apply` returned void unexpectedly".to_string())
+        })
+    }
+
     fn lower_expr(
         &mut self,
         expr: &TypedExpr,
@@ -7107,6 +7153,17 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                     .build_load(llvm_ty, ptr, name)
                     .map_err(|e| CodegenError::Builder(e.to_string()))?;
                 Ok(loaded)
+            }
+            // ADR 0070: a non-capturing function value — the LLVM function's
+            // address as a bare pointer constant (no wrapper, no captured
+            // state). `fid` is always a plain user fn already declared in
+            // `self.fns` (FnRef eligibility requires it).
+            TypedExprKind::FnRef(fid) => {
+                let fn_value = *self
+                    .fns
+                    .get(fid)
+                    .expect("FnRef eligibility guarantees fid is a declared user fn");
+                Ok(fn_value.as_global_value().as_pointer_value().into())
             }
             TypedExprKind::Unary(UnaryOp::Neg, inner) => {
                 // ADR 0058: `-x` on an `f64` lowers to `fneg`; integers use
@@ -7512,6 +7569,11 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                 }
                 if *id == ARG_FN_ID {
                     return self.lower_arg(&args[0], program);
+                }
+                // ADR 0070: the indirect-call builtin for non-capturing
+                // function values.
+                if *id == APPLY_FN_ID {
+                    return self.lower_apply(&args[0], &args[1], program);
                 }
                 // C1.7.5 / ADR 0016 D7: user-defined generic-fn
                 // calls route to the monomorphic instance emitted
@@ -8741,7 +8803,8 @@ fn expr_performs(expr: &TypedExpr) -> bool {
         | TypedExprKind::FloatLit(_)
         | TypedExprKind::CharLit(_)
         | TypedExprKind::StringLit(_)
-        | TypedExprKind::Var(_) => false,
+        | TypedExprKind::Var(_)
+        | TypedExprKind::FnRef(_) => false,
         TypedExprKind::Unary(_, inner)
         | TypedExprKind::WidenToNullable(inner)
         | TypedExprKind::WidenToSecret(inner)
@@ -9053,7 +9116,10 @@ fn walk_collect_var_refs(expr: &TypedExpr, acc: &mut Vec<VarId>) {
         | TypedExprKind::NullLit
         | TypedExprKind::FloatLit(_)
         | TypedExprKind::CharLit(_)
-        | TypedExprKind::StringLit(_) => {}
+        | TypedExprKind::StringLit(_)
+        // ADR 0070: a Fn value carries a FnId, not a VarId — nothing to
+        // collect.
+        | TypedExprKind::FnRef(_) => {}
         TypedExprKind::Unary(_, inner)
         | TypedExprKind::WidenToNullable(inner)
         | TypedExprKind::WidenToSecret(inner)
@@ -9200,7 +9266,8 @@ fn count_performs(expr: &TypedExpr) -> usize {
         | TypedExprKind::FloatLit(_)
         | TypedExprKind::CharLit(_)
         | TypedExprKind::StringLit(_)
-        | TypedExprKind::Var(_) => 0,
+        | TypedExprKind::Var(_)
+        | TypedExprKind::FnRef(_) => 0,
         TypedExprKind::Unary(_, inner)
         | TypedExprKind::WidenToNullable(inner)
         | TypedExprKind::WidenToSecret(inner)
@@ -9308,7 +9375,8 @@ fn find_unique_perform(expr: &TypedExpr) -> Option<&TypedExpr> {
         | TypedExprKind::FloatLit(_)
         | TypedExprKind::CharLit(_)
         | TypedExprKind::StringLit(_)
-        | TypedExprKind::Var(_) => None,
+        | TypedExprKind::Var(_)
+        | TypedExprKind::FnRef(_) => None,
         TypedExprKind::Unary(_, inner)
         | TypedExprKind::WidenToNullable(inner)
         | TypedExprKind::WidenToSecret(inner)
@@ -9425,6 +9493,8 @@ fn substitute_perform_with_var(expr: &TypedExpr, placeholder_id: VarId) -> Typed
         TypedExprKind::CharLit(b) => TypedExprKind::CharLit(*b),
         TypedExprKind::StringLit(bytes) => TypedExprKind::StringLit(bytes.clone()),
         TypedExprKind::Var(id) => TypedExprKind::Var(*id),
+        // ADR 0070: a Fn value carries no sub-expression — clone as-is.
+        TypedExprKind::FnRef(fid) => TypedExprKind::FnRef(*fid),
         TypedExprKind::Unary(op, inner) => TypedExprKind::Unary(
             *op,
             Box::new(substitute_perform_with_var(inner, placeholder_id)),
@@ -9730,7 +9800,8 @@ fn find_var_name_in_expr(expr: &TypedExpr, id: VarId) -> Option<&str> {
         | TypedExprKind::FloatLit(_)
         | TypedExprKind::CharLit(_)
         | TypedExprKind::StringLit(_)
-        | TypedExprKind::Var(_) => None,
+        | TypedExprKind::Var(_)
+        | TypedExprKind::FnRef(_) => None,
         TypedExprKind::Unary(_, inner)
         | TypedExprKind::WidenToNullable(inner)
         | TypedExprKind::WidenToSecret(inner)

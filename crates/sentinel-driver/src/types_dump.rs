@@ -306,6 +306,12 @@ fn dump_expr(e: &TypedExpr, program: &TypedProgram, out: &mut String) {
             push_id(out, id.0);
             close_ty(out, e.ty, program);
         }
+        // ADR 0070: a bare fn name used as a value.
+        TypedExprKind::FnRef(fid) => {
+            out.push_str("(fnref ");
+            push_id(out, fid.0);
+            close_ty(out, e.ty, program);
+        }
         TypedExprKind::Unary(op, inner) => {
             out.push_str("(unary ");
             out.push_str(op.symbol());

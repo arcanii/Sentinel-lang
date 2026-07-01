@@ -223,6 +223,17 @@ pub enum Type {
     /// **static** property (ADR 0069 D1/D9): a `secret` may cross the pipe only after
     /// `seal` (a cryptographic declassify), never raw.
     SealedChannel,
+    /// ADR 0070: `Fn<i64,i64>` — a non-capturing first-class function value (a bare
+    /// code pointer, no environment). A **plain** handle (no interner table, unlike
+    /// `Channel`/`Task`) — a unit variant fixed at the single shape `(i64) -> i64` at
+    /// the v1 minimum (generalizing to word-scalar params/return is the
+    /// `Channel<i64>` → `Channel<T>` style follow-up, promoting this to an interned
+    /// `Fn(FnSigId)`). `Copy` (a bare LLVM function pointer — pointer-like, owns
+    /// nothing, like `Process`/`Ptr`). Produced by referencing a non-generic,
+    /// non-builtin, effect-free top-level fn by bare name in value position
+    /// (`ResolvedExprKind::FnRef`); consumed by the `apply(f, x)` builtin (an
+    /// indirect call — NOT ordinary `f(x)` syntax, see ADR 0070 D3).
+    Fn,
 }
 
 /// Identifier for an interned reference type. C2 / ADR 0017 D11.
@@ -788,7 +799,9 @@ impl Type {
             | Type::Enum(_)
             // Phase D.3 / ADR 0034 D8: `?Vec<T>` is out of scope
             // (NullableInner gains no Vec variant).
-            | Type::Vec(_) => None,
+            | Type::Vec(_)
+            // ADR 0070: no `?Fn` (a handle, like `Process`/`SealedChannel`).
+            | Type::Fn => None,
         }
     }
 
@@ -845,7 +858,9 @@ impl Type {
             // Phase D.3 / ADR 0034 D8: `[Vec<T>]` (array-of-vec) is out
             // of scope — VecElem/ArrayElem are the flat subset, no
             // collection nesting at the MVP.
-            | Type::Vec(_) => None,
+            | Type::Vec(_)
+            // ADR 0070: no `[Fn]` (a handle, like `Process`/`SealedChannel`).
+            | Type::Fn => None,
         }
     }
 
@@ -924,7 +939,9 @@ impl Type {
             | Type::SealedChannel
             | Type::Class(_)
             | Type::TraitSelf(_)
-            | Type::Enum(_) => None,
+            | Type::Enum(_)
+            // ADR 0070: no `Vec<Fn>` (a handle, like `Process`/`SealedChannel`).
+            | Type::Fn => None,
         }
     }
 
@@ -1120,6 +1137,9 @@ impl Type {
             Type::Process => self,
             // ADR 0066 M2.4a: `SealedChannel` carries no TypeParam — pass through.
             Type::SealedChannel => self,
+            // ADR 0070: `Fn` is fixed at `Fn<i64,i64>` — no TypeParam payload to
+            // substitute. Pass through unchanged.
+            Type::Fn => self,
         }
     }
 
@@ -1482,6 +1502,8 @@ pub fn type_display(ty: Type, program: Option<&TypedProgram>) -> String {
         Type::Process => "Process".to_string(),
         // ADR 0066 M2.4a: the `secret i64`-minimum sealed endpoint (unit variant).
         Type::SealedChannel => "SealedChannel<secret i64>".to_string(),
+        // ADR 0070: the `Fn<i64,i64>`-minimum non-capturing function value (unit variant).
+        Type::Fn => "Fn<i64,i64>".to_string(),
         Type::Class(id) => match program.and_then(|p| p.class_decls.get(id.0 as usize)) {
             Some(c) => c.name.clone(),
             None => format!("<class#{}>", id.0),
@@ -1525,6 +1547,7 @@ impl std::fmt::Display for Type {
             Type::Channel(id) => write!(f, "<channel#{}>", id.0),
             Type::Process => write!(f, "Process"),
             Type::SealedChannel => write!(f, "SealedChannel"),
+            Type::Fn => write!(f, "Fn<i64,i64>"),
             Type::Class(id) => write!(f, "<class#{}>", id.0),
             Type::TraitSelf(id) => write!(f, "<Self-trait#{}>", id.0),
             Type::Enum(id) => write!(f, "<enum#{}>", id.0),
@@ -1884,6 +1907,50 @@ fn resolve_type_expr_with_scope(
                         });
                     }
                     Ok(Type::SealedChannel)
+                }
+                // ADR 0070 D1/D2: `Fn<T, R>` in type position — fixed at the v1
+                // minimum `Fn<i64, i64>` (a plain unit `Type::Fn`, no interner;
+                // generalizing is a follow-on). Both type args must resolve to
+                // exactly `i64`.
+                "Fn" => {
+                    if args.len() != 2 {
+                        return Err(TypeError::TypeArgCountMismatch {
+                            type_name: "Fn".to_string(),
+                            expected: 2,
+                            found: args.len(),
+                            span: to_source_span(&te.span),
+                        });
+                    }
+                    let param_ty = resolve_type_expr_with_scope(
+                        &args[0],
+                        struct_table,
+                        class_table,
+                        enum_table,
+                        type_param_scope,
+                        instances,
+                        refs,
+                        secrets,
+                        arrays,
+                        struct_type_param_counts,
+                    )?;
+                    let ret_ty = resolve_type_expr_with_scope(
+                        &args[1],
+                        struct_table,
+                        class_table,
+                        enum_table,
+                        type_param_scope,
+                        instances,
+                        refs,
+                        secrets,
+                        arrays,
+                        struct_type_param_counts,
+                    )?;
+                    if param_ty != Type::I64 || ret_ty != Type::I64 {
+                        return Err(TypeError::FnTypeArgsNotSupported {
+                            span: to_source_span(&te.span),
+                        });
+                    }
+                    Ok(Type::Fn)
                 }
                 other => {
                     let struct_id = match struct_table.get(other) {
@@ -2299,6 +2366,7 @@ impl TypedExpr {
                 TypedExprKind::Cast(Box::new(inner.substitute(subst, instances, refs)))
             }
             TypedExprKind::Var(id) => TypedExprKind::Var(*id),
+            TypedExprKind::FnRef(id) => TypedExprKind::FnRef(*id),
             TypedExprKind::Unary(op, inner) => TypedExprKind::Unary(
                 *op,
                 Box::new(inner.substitute(subst, instances, refs)),
@@ -2942,6 +3010,11 @@ pub enum TypedExprKind {
     /// the source width from the inner's `ty` and the target from `ty`.
     Cast(Box<TypedExpr>),
     Var(VarId),
+    /// ADR 0070: a non-capturing function value — a bare top-level fn name
+    /// used in value position. The outer node's `ty` is always
+    /// [`Type::Fn`]. Codegen lowers this to the LLVM function's address
+    /// (`@name` as a pointer constant) — no wrapper, no captured state.
+    FnRef(FnId),
     Unary(UnaryOp, Box<TypedExpr>),
     Binary(BinOp, Box<TypedExpr>, Box<TypedExpr>),
     /// Comparison. Both operands are the same numeric type; the
@@ -3413,6 +3486,33 @@ pub enum TypeError {
     )]
     SealedChannelElementNotSupported {
         #[label("unsupported SealedChannel element type here")]
+        span: miette::SourceSpan,
+    },
+
+    /// ADR 0070 D1: `Fn<T, R>` type position is fixed at the v1 minimum
+    /// `Fn<i64, i64>` — any other arity or argument types is a type error
+    /// (generalizing to word-scalar params/return is a follow-on).
+    #[error("`Fn<T, R>` is only supported as `Fn<i64, i64>` at the v1 minimum")]
+    #[diagnostic(
+        code(sentinel::types::fn_type_args_not_supported),
+        help("write `Fn<i64, i64>` — other parameter/return shapes are a follow-on")
+    )]
+    FnTypeArgsNotSupported {
+        #[label("unsupported Fn<..> shape here")]
+        span: miette::SourceSpan,
+    },
+
+    /// ADR 0070 D4: a bare fn name used as a value (`let op = name;`) must
+    /// name a non-generic, non-builtin, `(i64) -> i64`, effect-free
+    /// top-level fn to be eligible as a `Fn<i64,i64>` value.
+    #[error("`{name}` cannot be used as a function value")]
+    #[diagnostic(
+        code(sentinel::types::fn_value_signature_not_supported),
+        help("a function value must be a non-generic, non-builtin, effect-free top-level fn with signature `(i64) -> i64`")
+    )]
+    FnValueSignatureNotSupported {
+        name: String,
+        #[label("not eligible as a Fn<i64,i64> value")]
         span: miette::SourceSpan,
     },
 
@@ -4801,6 +4901,26 @@ pub fn check_module(
                 extern_origin: None,
             });
         }
+    }
+    // ADR 0070: `apply(f: Fn<i64,i64>, x: i64) -> i64` (FnId 37) — the
+    // indirect-call builtin for non-capturing function values. A fixed
+    // concrete signature (v1 is monomorphic, no generic-call path needed),
+    // effect-free (the FnRef eligibility check already requires the
+    // referenced fn to have an empty effect row, D4).
+    {
+        let apply_sig = &program.fn_signatures[37];
+        typed_signatures.push(TypedFnSignature {
+            id: apply_sig.id,
+            name: apply_sig.name.clone(),
+            name_span: apply_sig.name_span.clone(),
+            type_params: vec![],
+            param_types: vec![Type::Fn, Type::I64],
+            return_type: Type::I64,
+            effect_row: vec![],
+            is_main: false,
+            is_runtime: true,
+            extern_origin: None,
+        });
     }
 
     for fn_def in &program.fns {
@@ -6861,6 +6981,8 @@ fn try_substitute(
         Type::Process => Some(ty),
         // ADR 0066 M2.4a: `SealedChannel` carries no TypeParam.
         Type::SealedChannel => Some(ty),
+        // ADR 0070: `Fn` is fixed at `Fn<i64,i64>` — no TypeParam payload.
+        Type::Fn => Some(ty),
     }
 }
 
@@ -6916,6 +7038,8 @@ fn contains_type_param(
         Type::Process => false,
         // ADR 0066 M2.4a: `SealedChannel` carries no TypeParam.
         Type::SealedChannel => false,
+        // ADR 0070: `Fn` is fixed at `Fn<i64,i64>` — no TypeParam payload.
+        Type::Fn => false,
     }
 }
 
@@ -7584,6 +7708,29 @@ fn check_expr(
                 });
             }
             (TypedExprKind::Var(*id), ty)
+        }
+        // ADR 0070 D4: a bare top-level fn name used as a value. Eligible
+        // only if the referenced fn is non-generic, not a builtin/runtime
+        // symbol, not `main`, not a cross-module extern import, has the
+        // fixed v1 signature `(i64) -> i64`, and an EMPTY effect row (so
+        // the `apply` builtin can stay effect-free itself — see ADR 0070
+        // D4 for why effecting fn values are deferred).
+        ResolvedExprKind::FnRef(fid) => {
+            let sig = &signatures[fid.0 as usize];
+            let eligible = sig.type_params.is_empty()
+                && !sig.is_main
+                && !sig.is_runtime
+                && sig.extern_origin.is_none()
+                && sig.param_types == [Type::I64]
+                && sig.return_type == Type::I64
+                && sig.effect_row.is_empty();
+            if !eligible {
+                return Err(TypeError::FnValueSignatureNotSupported {
+                    name: sig.name.clone(),
+                    span: to_source_span(&expr.span),
+                });
+            }
+            (TypedExprKind::FnRef(*fid), Type::Fn)
         }
         ResolvedExprKind::Unary(op, inner) => {
             // C2 / ADR 0017 D3 + D4: borrow / deref need
@@ -10290,6 +10437,16 @@ fn type_error_to_diagnostic(err: &TypeError) -> Diagnostic {
             "`Channel<T>` element type is not supported yet".to_string(),
             span.offset()..(span.offset() + span.len()),
         ),
+        TypeError::FnTypeArgsNotSupported { span } => (
+            "sentinel::types::fn_type_args_not_supported",
+            "`Fn<T, R>` is only supported as `Fn<i64, i64>` at the v1 minimum".to_string(),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        TypeError::FnValueSignatureNotSupported { name, span } => (
+            "sentinel::types::fn_value_signature_not_supported",
+            format!("`{name}` cannot be used as a function value"),
+            span.offset()..(span.offset() + span.len()),
+        ),
         TypeError::GenericMain { span } => (
             "sentinel::types::generic_main",
             "`fn main` cannot have type parameters".to_string(),
@@ -10777,7 +10934,9 @@ mod tests {
         // ADR 0066 M2.4 follow-on: arg reflection occupies FnId(35..=36).
         assert_eq!(p.fn_signatures[35].name, "arg_count");
         assert_eq!(p.fn_signatures[36].name, "arg");
-        assert_eq!(p.fn_signatures[37].name, "main");
+        // ADR 0070: the `apply` indirect-call builtin occupies FnId(37).
+        assert_eq!(p.fn_signatures[37].name, "apply");
+        assert_eq!(p.fn_signatures[38].name, "main");
         assert!(p.signature(main.id).is_main);
     }
 

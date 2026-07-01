@@ -94,11 +94,24 @@ fn dump_rexpr(out: &mut Vec<u8>, ex: Expr, src: &[u8], c: &mut RCtx, gb: &mut Ve
         },
         Expr::Var(nm) => {
             let vid: i64 = sc_lookup(c, src, &nm);
-            sink_name(gb, nm);
-            append_str(out, "(var #");
-            append_int(out, vid);
-            push(out, ')');
-            0
+            if vid >= 0 {
+                sink_name(gb, nm);
+                append_str(out, "(var #");
+                append_int(out, vid);
+                push(out, ')');
+                0
+            } else {
+                // ADR 0070: no local binding named `nm` — check whether it
+                // names a top-level fn (a non-applied fn name used as a
+                // VALUE, `let op = square;`), mirroring the Rust resolver's
+                // `ExprKind::Var` fallback to `fn_table`.
+                let fid: i64 = fn_lookup(c, src, &nm);
+                sink_name(gb, nm);
+                append_str(out, "(fnref #");
+                append_int(out, fid);
+                push(out, ')');
+                0
+            }
         },
         Expr::Unary(uop, inner) => {
             append_str(out, "(unary ");
