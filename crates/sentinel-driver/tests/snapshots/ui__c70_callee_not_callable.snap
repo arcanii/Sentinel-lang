@@ -1,0 +1,15 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c70_callee_not_callable.sentinel\")"
+---
+sentinel::types::callee_not_callable
+
+  × cannot call `i64` — expected a continuation or a function value
+  │ (`Fn<T,R>`)
+   ╭─[tests/ui/c70_callee_not_callable.sentinel:8:5]
+ 7 │     let x = 5;
+ 8 │     x(3)
+   ·     ┬
+   ·     ╰── 
+ 9 │ }
+   ╰────

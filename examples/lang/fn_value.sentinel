@@ -2,20 +2,22 @@
 // smallest useful slice of "functions as values" (no captured environment,
 // no closures; ADR 0024 D10's full-closure deferral still stands). A
 // non-generic, non-effecting top-level fn's bare name is a value of type
-// `Fn<i64,i64>` (`let op = square;`); it is invoked indirectly via the
-// `apply(f, x)` builtin (a dedicated builtin rather than ordinary `f(x)`
-// call syntax — see ADR 0070 D3 for why). This directly unblocks the stated
-// worker-pool motivation (HANDOVER §0): a generic worker can now take an
-// `op: Fn<i64,i64>` parameter instead of every pool needing a hand-written,
-// differently-named worker per operation — combining this with `spawn`/
-// `Channel<T>` is the natural M-cont follow-on (today `Fn` is not a
-// spawn-word-scalar; ADR 0070's Revisit tracks that as deferred).
+// `Fn<i64,i64>` (`let op = square;`). It can be invoked two equivalent ways
+// (ADR 0070 D3-revisit unified them): the `apply(f, x)` builtin, or ordinary
+// direct-call syntax `f(x)` — both type-check to the identical shape, so
+// `apply_to` below uses the builtin and `call_direct` uses the sugar. This
+// directly unblocks the stated worker-pool motivation (HANDOVER §0): a
+// generic worker can now take an `op: Fn<i64,i64>` parameter instead of
+// every pool needing a hand-written, differently-named worker per operation
+// — combining this with `spawn`/`Channel<T>` is the natural M-cont follow-on
+// (today `Fn` is not a spawn-word-scalar; ADR 0070's Revisit tracks that as
+// deferred).
 //
-// `apply_to` is a tiny stand-in for a worker body: it takes the operation as
-// a parameter and applies it, instead of hardcoding `x * x` like
-// `examples/lang/worker_pool.sentinel` does. Two DIFFERENT top-level fns
-// (`square`, `double`) are passed through the SAME `apply_to`, proving the
-// operation is genuinely parameterized, not just renamed.
+// `apply_to`/`call_direct` are tiny stand-ins for a worker body: each takes
+// the operation as a parameter and applies it, instead of hardcoding `x * x`
+// like `examples/lang/worker_pool.sentinel` does. Two DIFFERENT top-level
+// fns (`square`, `double`) are passed through the two call spellings,
+// proving the operation is genuinely parameterized, not just renamed.
 //
 // square(6) + double(3) = 36 + 6 = 42.
 
@@ -31,10 +33,14 @@ fn apply_to(op: Fn<i64, i64>, x: i64) -> i64 {
     apply(op, x)
 }
 
+fn call_direct(op: Fn<i64, i64>, x: i64) -> i64 {
+    op(x)
+}
+
 fn main() -> i64 {
     let sq = square;
     let dbl = double;
     let a: i64 = apply_to(sq, 6);
-    let b: i64 = apply_to(dbl, 3);
+    let b: i64 = call_direct(dbl, 3);
     a + b
 }

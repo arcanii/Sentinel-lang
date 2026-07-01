@@ -1,0 +1,9 @@
+// ADR 0070 (D3-revisit): calling a bound local variable that is neither a
+// continuation (Type::Kont, inside a handler arm) nor a function value
+// (Type::Fn) is rejected. The "vars win over fns" rule (ADR 0020 D5) is
+// scope-general, not handler-arm-specific, so this is reachable from a
+// plain top-level fn body. Surfaces CalleeNotCallable.
+fn main() -> i64 {
+    let x = 5;
+    x(3)
+}

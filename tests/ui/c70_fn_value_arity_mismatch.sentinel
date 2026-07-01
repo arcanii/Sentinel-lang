@@ -1,0 +1,11 @@
+// ADR 0070 (D3-revisit): calling a Fn<T,R> value directly with the wrong
+// number of arguments — Fn<T,R> is always exactly one parameter. Surfaces
+// FnValueArityMismatch.
+fn square(x: i64) -> i64 {
+    x * x
+}
+
+fn main() -> i64 {
+    let op = square;
+    op(1, 2)
+}

@@ -3603,6 +3603,53 @@ pub enum TypeError {
         span: miette::SourceSpan,
     },
 
+    /// ADR 0070 (D3-revisit): a bound local variable was called (`f(x)`)
+    /// but is neither a continuation (`Type::Kont`, inside a handler arm)
+    /// nor a function value (`Type::Fn`) — e.g. `let x = 5; x(3);`.
+    /// Replaces the old `Mismatch{expected: Type::Kont(KontId(u32::MAX))}`
+    /// sentinel-value hack, which misleadingly implied Kont was the only
+    /// valid type now that `Fn<T,R>` is also callable this way.
+    #[error("cannot call `{got}` — expected a continuation or a function value (`Fn<T,R>`)")]
+    #[diagnostic(
+        code(sentinel::types::callee_not_callable),
+        help("only a handler arm's continuation parameter or a `Fn<T,R>`-typed value can be called directly")
+    )]
+    CalleeNotCallable {
+        got: Type,
+        #[label("not callable")]
+        span: miette::SourceSpan,
+    },
+
+    /// ADR 0070 (D3-revisit): calling a `Fn<T,R>` value directly (`f(x)`)
+    /// with the wrong number of arguments — `Fn<T,R>` is always exactly
+    /// one parameter, mirroring `KontArityMismatch`'s shape for resumes.
+    #[error("function value expects {expected} argument(s), got {got}")]
+    #[diagnostic(
+        code(sentinel::types::fn_value_arity_mismatch),
+        help("a `Fn<T,R>` value always takes exactly one argument")
+    )]
+    FnValueArityMismatch {
+        expected: usize,
+        got: usize,
+        #[label("wrong number of arguments")]
+        span: miette::SourceSpan,
+    },
+
+    /// ADR 0070 (D3-revisit): calling a `Fn<T,R>` value directly (`f(x)`)
+    /// with an argument of the wrong type — the direct-call-syntax twin of
+    /// `apply`'s own `CallArgMismatch`. Kept as a separate diagnostic
+    /// rather than reusing `CallArgMismatch` because that variant's
+    /// message names the callee (e.g. "argument 1 of `apply` expects...")
+    /// and there is no `apply` token in the source to name here.
+    #[error("function value expects an argument of type `{expected}`, got `{got}`")]
+    #[diagnostic(code(sentinel::types::fn_value_arg_mismatch))]
+    FnValueArgMismatch {
+        expected: Type,
+        got: Type,
+        #[label("wrong argument type")]
+        span: miette::SourceSpan,
+    },
+
     /// C1.7 / ADR 0016 D11: `fn main` cannot be generic (the C ABI
     /// is monomorphic; main is the program entry point).
     #[error("`fn main` cannot have type parameters")]
@@ -7455,8 +7502,17 @@ fn check_call(
             }
         };
         let (param_ty, ret_ty) = fn_value_sig_param_ret(sig_id);
+        // `None`, not `Some(param_ty)`: passing an expected type here would
+        // route through `coerce_to_expected`, which emits a generic
+        // `Mismatch` on disagreement BEFORE this function ever sees the
+        // result — silently pre-empting the more specific
+        // `CallArgMismatch` below (the same reasoning `check_handle_expr`
+        // already documents for its own arm-body check). `Fn<T,R>`'s
+        // param is always a plain word-scalar, never a `coerce_to_expected`
+        // widening target (`?T`/`secret T`/`[secret u8]`), so this loses no
+        // legitimate coercion.
         let x_typed = check_expr(
-            &args[1], Some(param_ty), env, signatures, structs, class_decls, enums,
+            &args[1], None, env, signatures, structs, class_decls, enums,
             instances, refs, secrets, arrays, struct_type_param_counts, effect_decls,
             trait_decls, impl_decls, konts, tasks,
         )?;
@@ -9606,11 +9662,14 @@ fn check_perform_expr(
     ))
 }
 
-/// C3.4 / ADR 0020 D5: type-check `k(arg)` inside a handler arm.
-/// The kont VarId must have type `Type::Kont(KontId)` in env (set
-/// up by [`check_handle_expr`] when entering the arm body). The
-/// args' types are checked against the kont's `arg_ty`; the
-/// expression's type is `ret_ty`.
+/// C3.4 / ADR 0020 D5, generalized by ADR 0070 (D3-revisit): type-check
+/// `f(arg)` where `f` is a bound local variable. Two legitimate cases:
+/// `f: Type::Kont(KontId)` (resuming a continuation inside a handler arm,
+/// set up by [`check_handle_expr`]) or `f: Type::Fn(FnValueSigId)` (calling
+/// a non-capturing function value — ADR 0070 — the direct-call twin of the
+/// `apply(f, x)` builtin, producing the identical `TypedExprKind::Call`
+/// shape so the two spellings are indistinguishable after type-check). Any
+/// other type is `TypeError::CalleeNotCallable`.
 #[allow(clippy::too_many_arguments)]
 fn check_resume_kont_expr(
     kont: VarId,
@@ -9636,70 +9695,128 @@ fn check_resume_kont_expr(
         .get(&kont)
         .copied()
         .expect("resolve guarantees the kont VarId is bound");
-    let kont_id = match kont_ty {
-        Type::Kont(id) => id,
-        other => {
-            // Caller is treating a non-kont binding as if it were
-            // one — surface a Mismatch with a synthetic Kont type
-            // so the diagnostic shows the kind of confusion. The
-            // surface error is "non-kont called like a kont".
-            // Easier: piggyback on the existing mismatch shape.
-            return Err(TypeError::Mismatch {
-                expected: Type::Kont(KontId(u32::MAX)),
-                got: other,
-                span: to_source_span(callee_span),
-            });
+    match kont_ty {
+        Type::Kont(kont_id) => {
+            let kont_data = &konts[kont_id.0 as usize];
+            let arg_ty = kont_data.arg_ty;
+            let ret_ty = kont_data.ret_ty;
+            // C3.4 minimum: konts always take exactly one arg (the value
+            // being resumed with). Multi-arg konts are a future ADR if
+            // ops grow tuple returns.
+            let expected_args: usize = 1;
+            if args.len() != expected_args {
+                return Err(TypeError::KontArityMismatch {
+                    expected: expected_args,
+                    got: args.len(),
+                    span: to_source_span(callee_span),
+                });
+            }
+            let typed_arg = check_expr(
+                &args[0],
+                Some(arg_ty),
+                env,
+                signatures,
+                structs,
+                class_decls,
+                enums,
+                instances,
+                refs,
+                secrets,
+                arrays,
+                struct_type_param_counts,
+                effect_decls,
+                trait_decls,
+                impl_decls,
+                konts,
+                tasks,
+            )?;
+            if typed_arg.ty != arg_ty {
+                return Err(TypeError::Mismatch {
+                    expected: arg_ty,
+                    got: typed_arg.ty,
+                    span: to_source_span(&args[0].span),
+                });
+            }
+            Ok((
+                TypedExprKind::ResumeKont {
+                    kont,
+                    callee_span: callee_span.clone(),
+                    args: vec![typed_arg],
+                    kont_id,
+                },
+                ret_ty,
+            ))
         }
-    };
-    let kont_data = &konts[kont_id.0 as usize];
-    let arg_ty = kont_data.arg_ty;
-    let ret_ty = kont_data.ret_ty;
-    // C3.4 minimum: konts always take exactly one arg (the value
-    // being resumed with). Multi-arg konts are a future ADR if
-    // ops grow tuple returns.
-    let expected_args: usize = 1;
-    if args.len() != expected_args {
-        return Err(TypeError::KontArityMismatch {
-            expected: expected_args,
-            got: args.len(),
+        Type::Fn(sig_id) => {
+            // ADR 0070 (D3-revisit): `f(x)` on a `Fn<T,R>`-typed local var —
+            // the direct-call twin of `apply(f, x)` (check_call's
+            // APPLY_FN_ID branch, mirrored exactly below). `Fn<T,R>` is
+            // always exactly one parameter (mirrors the kont arm's own
+            // `expected_args`).
+            let (param_ty, ret_ty) = fn_value_sig_param_ret(sig_id);
+            let expected_args: usize = 1;
+            if args.len() != expected_args {
+                return Err(TypeError::FnValueArityMismatch {
+                    expected: expected_args,
+                    got: args.len(),
+                    span: to_source_span(callee_span),
+                });
+            }
+            // `None`, not `Some(param_ty)` — see the identical note on
+            // `apply`'s own arg check in check_call: this avoids
+            // `coerce_to_expected` pre-empting `FnValueArgMismatch` with a
+            // generic `Mismatch`.
+            let x_typed = check_expr(
+                &args[0],
+                None,
+                env,
+                signatures,
+                structs,
+                class_decls,
+                enums,
+                instances,
+                refs,
+                secrets,
+                arrays,
+                struct_type_param_counts,
+                effect_decls,
+                trait_decls,
+                impl_decls,
+                konts,
+                tasks,
+            )?;
+            if x_typed.ty != param_ty {
+                return Err(TypeError::FnValueArgMismatch {
+                    expected: param_ty,
+                    got: x_typed.ty,
+                    span: to_source_span(&args[0].span),
+                });
+            }
+            // Hand-build the `Var` node from what `env.get` already gave
+            // us — do NOT re-dispatch through check_expr's general `Var`
+            // path, which has its own `Type::Kont`-smuggling guard
+            // (`TypeError::KontUsedAsValue`) that `ResumeKont` has always
+            // deliberately bypassed by hand-constructing its typed node.
+            let f_typed = TypedExpr {
+                kind: TypedExprKind::Var(kont),
+                span: callee_span.clone(),
+                ty: kont_ty,
+            };
+            Ok((
+                TypedExprKind::Call {
+                    id: APPLY_FN_ID,
+                    callee_span: callee_span.clone(),
+                    args: vec![f_typed, x_typed],
+                    type_args: vec![],
+                },
+                ret_ty,
+            ))
+        }
+        other => Err(TypeError::CalleeNotCallable {
+            got: other,
             span: to_source_span(callee_span),
-        });
+        }),
     }
-    let typed_arg = check_expr(
-        &args[0],
-        Some(arg_ty),
-        env,
-        signatures,
-        structs,
-        class_decls,
-        enums,
-        instances,
-        refs,
-        secrets,
-        arrays,
-        struct_type_param_counts,
-        effect_decls,
-        trait_decls,
-        impl_decls,
-        konts,
-        tasks,
-    )?;
-    if typed_arg.ty != arg_ty {
-        return Err(TypeError::Mismatch {
-            expected: arg_ty,
-            got: typed_arg.ty,
-            span: to_source_span(&args[0].span),
-        });
-    }
-    Ok((
-        TypedExprKind::ResumeKont {
-            kont,
-            callee_span: callee_span.clone(),
-            args: vec![typed_arg],
-            kont_id,
-        },
-        ret_ty,
-    ))
 }
 
 /// C4.1 / ADR 0022 D3 + D7: type-check a postfix `target.method(args)`
@@ -10592,6 +10709,21 @@ fn type_error_to_diagnostic(err: &TypeError) -> Diagnostic {
             format!("`apply`'s first argument must be a function value (`Fn<T,R>`), got `{got}`"),
             span.offset()..(span.offset() + span.len()),
         ),
+        TypeError::CalleeNotCallable { got, span } => (
+            "sentinel::types::callee_not_callable",
+            format!("cannot call `{got}` — expected a continuation or a function value (`Fn<T,R>`)"),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        TypeError::FnValueArityMismatch { expected, got, span } => (
+            "sentinel::types::fn_value_arity_mismatch",
+            format!("function value expects {expected} argument(s), got {got}"),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        TypeError::FnValueArgMismatch { expected, got, span } => (
+            "sentinel::types::fn_value_arg_mismatch",
+            format!("function value expects an argument of type `{expected}`, got `{got}`"),
+            span.offset()..(span.offset() + span.len()),
+        ),
         TypeError::GenericMain { span } => (
             "sentinel::types::generic_main",
             "`fn main` cannot have type parameters".to_string(),
@@ -11083,6 +11215,80 @@ mod tests {
         assert_eq!(p.fn_signatures[37].name, "apply");
         assert_eq!(p.fn_signatures[38].name, "main");
         assert!(p.signature(main.id).is_main);
+    }
+
+    #[test]
+    fn adr0070_direct_fn_value_call_matches_apply_call() {
+        // ADR 0070 (D3-revisit): `op(5)` and `apply(op, 5)` must type-check
+        // to the identical `Call{id: APPLY_FN_ID, ...}` shape — this is the
+        // drift guard in place of a shared helper between check_call's
+        // `apply` branch and check_resume_kont_expr's new `Type::Fn` arm.
+        let via_apply = check_ok(
+            "fn square(x: i64) -> i64 { x * x } \
+             fn main() -> i64 { let op = square; apply(op, 5) }",
+        );
+        let via_direct = check_ok(
+            "fn square(x: i64) -> i64 { x * x } \
+             fn main() -> i64 { let op = square; op(5) }",
+        );
+        let apply_tail = &via_apply.main().body.tail;
+        let direct_tail = &via_direct.main().body.tail;
+        match (&apply_tail.kind, &direct_tail.kind) {
+            (
+                TypedExprKind::Call { id: id_a, args: args_a, type_args: ta_a, .. },
+                TypedExprKind::Call { id: id_b, args: args_b, type_args: ta_b, .. },
+            ) => {
+                assert_eq!(*id_a, APPLY_FN_ID);
+                assert_eq!(id_a, id_b);
+                assert_eq!(ta_a, ta_b);
+                assert_eq!(args_a.len(), 2);
+                assert_eq!(args_b.len(), 2);
+                assert_eq!(args_a[0].ty, args_b[0].ty, "the Fn-value arg's type must match");
+                assert_eq!(args_a[1].ty, args_b[1].ty, "the value arg's type must match");
+            }
+            other => panic!("expected both spellings to produce Call{{APPLY_FN_ID}}, got {other:?}"),
+        }
+        assert_eq!(apply_tail.ty, direct_tail.ty);
+        assert_eq!(apply_tail.ty, Type::I64);
+    }
+
+    #[test]
+    fn adr0070_direct_call_on_non_callable_var_is_rejected() {
+        let err = check_err("fn main() -> i64 { let x = 5; x(3) }");
+        match err {
+            TypeError::CalleeNotCallable { got, .. } => assert_eq!(got, Type::I64),
+            other => panic!("expected CalleeNotCallable, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn adr0070_direct_call_wrong_arity_is_rejected() {
+        let err = check_err(
+            "fn square(x: i64) -> i64 { x * x } \
+             fn main() -> i64 { let op = square; op(1, 2) }",
+        );
+        match err {
+            TypeError::FnValueArityMismatch { expected, got, .. } => {
+                assert_eq!(expected, 1);
+                assert_eq!(got, 2);
+            }
+            other => panic!("expected FnValueArityMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn adr0070_direct_call_wrong_arg_type_is_rejected() {
+        let err = check_err(
+            "fn square(x: i64) -> i64 { x * x } \
+             fn main() -> i64 { let op = square; op(true) }",
+        );
+        match err {
+            TypeError::FnValueArgMismatch { expected, got, .. } => {
+                assert_eq!(expected, Type::I64);
+                assert_eq!(got, Type::Bool);
+            }
+            other => panic!("expected FnValueArgMismatch, got {other:?}"),
+        }
     }
 
     #[test]

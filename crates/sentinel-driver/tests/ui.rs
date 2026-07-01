@@ -131,6 +131,13 @@ ui_snapshot!(c66_sealed_channel_public_element, "c66_sealed_channel_public_eleme
 ui_snapshot!(c70_fn_value_ineligible, "c70_fn_value_ineligible.sentinel");
 // D1 (generalized): `Fn<T, R>` requires word-scalar T/R — u128 doesn't fit.
 ui_snapshot!(c70_fn_type_args_unsupported, "c70_fn_type_args_unsupported.sentinel");
+// D3-revisit: direct `f(x)` call syntax on a bound local var, generalized
+// beyond the `apply` builtin — a var that's neither Kont nor Fn is rejected
+// (CalleeNotCallable), and a Fn value called with the wrong arity/arg type
+// is rejected (FnValueArityMismatch / FnValueArgMismatch).
+ui_snapshot!(c70_callee_not_callable, "c70_callee_not_callable.sentinel");
+ui_snapshot!(c70_fn_value_arity_mismatch, "c70_fn_value_arity_mismatch.sentinel");
+ui_snapshot!(c70_fn_value_arg_mismatch, "c70_fn_value_arg_mismatch.sentinel");
 
 // ---- C5.2 constant-time verification rejection (the MIR D5 pass) ----
 ui_snapshot!(c52_secret_leak, "c52_secret_leak.sentinel");

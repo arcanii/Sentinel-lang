@@ -14,7 +14,49 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
-**Latest (2026-07-01) — `Fn<T,R>` GENERALIZED to any word-scalar pair (ADR 0070 M-cont).** The
+**Latest (2026-07-01) — unified `apply(f, x)` with ordinary `f(x)` call syntax (ADR 0070 D3-revisit).**
+The fresh-session pick off the post-M-cont decision menu, closing D3's own named follow-up: a
+`Fn<T,R>`-typed local variable can now be called directly (`let op = square; op(5)`), not only via
+the `apply` builtin — both spellings are fully interchangeable. **Disambiguation lives entirely at
+the TYPES stage; ADR 0020 D5's resolve-stage dispatch (`vars.get(callee)` unconditionally means
+"resume a continuation") is untouched, not even renamed** — resolve never had type information, and
+never needed any: it already deferred validation to types for the pre-existing Kont-only case.
+`check_resume_kont_expr` (`crates/sentinel-types/src/lib.rs`) becomes a three-way match on the
+callee var's type: `Type::Kont` keeps its exact pre-existing body; `Type::Fn(sig_id)` is new, and
+produces the **identical** `TypedExprKind::Call{id: APPLY_FN_ID, args: [f, x], type_args: []}` shape
+`apply(f, x)` already produces — so every downstream stage (borrow-check, effect-check, MIR, both
+codegen backends) needed **zero new code**, proven at runtime by the existing `fn_value*.sentinel`
+demonstrators; any other type is the new `TypeError::CalleeNotCallable`. No new runtime symbol, no
+ABI change, and — unlike almost every other change this session — **no FnId renumbering** (reuses
+the existing `APPLY_FN_ID`, not a new builtin). Two more new diagnostics: `FnValueArityMismatch`
+(calling a `Fn<T,R>` value with the wrong argument count — always exactly one) and
+`FnValueArgMismatch` (wrong argument type — the direct-call twin of `apply`'s own `CallArgMismatch`,
+kept separate since there's no `apply` token in the source to name in the message). **A genuine
+pre-existing bug was found and fixed along the way:** `apply`'s own `CallArgMismatch` on a
+wrongly-typed argument had been dead code since the M-cont amendment — `check_expr(&args[1],
+Some(param_ty), ...)` routes an `Some(expected)` hint through `coerce_to_expected`, which throws a
+generic `Mismatch` on disagreement *before* `apply`'s own manual check ever runs. Fixed at both call
+sites by passing `None` instead (mirroring `check_handle_expr`'s own arm-body check, which already
+documents exactly this reasoning) — loses no legitimate coercion, since `Fn<T,R>`'s parameter is
+always a plain word-scalar, never a `coerce_to_expected` widening target. **Self-host impact: none,
+verified.** Resolve's dump format is unchanged, so no `selfhost/resolve` mirror is needed; the three
+new `tests/ui/c70_*.sentinel` fixtures are permanent types-stage rejects, so — while they *do* sweep
+into `selfhost_resolve.rs`'s corpus test (resolve is untouched, so this is safe) — they're excluded
+from `selfhost_types.rs`'s corpus test (which skips any fixture the oracle doesn't type-check
+successfully), so a real pre-existing gap in `selfhost/types/borrow_arms.sentinel`'s `dump_te_call`
+(no gate on the resumed var's type at all) stays provably unreached. No shared helper was extracted
+between `check_call`'s `apply` branch and the new arm (this codebase's own convention: eight
+near-duplicate `check_call` builtin special-cases, none sharing a helper); drift between the two
+spellings is instead guarded by a new unit test asserting `apply(op, 5)` and `op(5)` type-check to
+the identical shape. Demonstrators: `examples/lang/fn_value.sentinel` gained a `call_direct` helper
+alongside `apply_to`; `fn_value_generic.sentinel`'s `apply_bool` switched to direct syntax (proving
+the unification holds for a non-`i64` instantiation too) — both still exit 42. Four-check green
+(the full `cargo test --workspace --no-fail-fast` run showed exactly the 19 known pre-existing
+Windows-only failures across 5 targets — `examples`/`export`/`llvm`/`modules`/`pass` — zero new
+ones); all 9 selfhost differential stages byte-identical, both bootstrap fixed points hold. See ADR
+0070's Amendment 2 (D13-D16) + HANDOVER §0.
+
+**Earlier (2026-07-01) — `Fn<T,R>` GENERALIZED to any word-scalar pair (ADR 0070 M-cont).** The
 same-day follow-up to ADR 0070 v1 (below), mirroring the `Task<i64>`→`Task<T>` / `Channel<i64>`→
 `Channel<T>` precedent (ship the smallest concrete shape, generalize next). `Type::Fn` is now
 **`Type::Fn(FnValueSigId)`**, but — unlike `Channel<T>`'s pre-interned-`ChanId` trick or a general

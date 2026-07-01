@@ -1,14 +1,19 @@
 # ADR 0070: Non-capturing first-class function values (`Fn<T,R>`)
 
-Status: **ACCEPTED — v1 IMPLEMENTED, THEN GENERALIZED same-day
-(snc-side, 2026-07-01).** Four-check green; both bootstrap fixed points
-byte-identical (all 9 selfhost differential stages) after BOTH the v1
-landing and the M-cont generalization below. v1 shipped `Fn<i64,i64>`
-only; the M-cont amendment (end of this document) generalized to any
-word-scalar `Fn<T,R>` in the same session, mirroring the
-`Task<i64>`→`Task<T>` / `Channel<i64>`→`Channel<T>` precedent.
+Status: **ACCEPTED — v1 IMPLEMENTED, GENERALIZED, THEN UNIFIED WITH `f(x)`,
+all same-day (snc-side, 2026-07-01).** Four-check green; both bootstrap
+fixed points byte-identical (all 9 selfhost differential stages) after the
+v1 landing, the M-cont generalization, and the D3-revisit unification
+below. v1 shipped `Fn<i64,i64>` only; the M-cont amendment generalized to
+any word-scalar `Fn<T,R>` in the same session, mirroring the
+`Task<i64>`→`Task<T>` / `Channel<i64>`→`Channel<T>` precedent; the
+D3-revisit amendment (end of this document) then closed D3's own named
+follow-up — `f(x)` now works directly on a `Fn`-typed variable,
+type-checking to the identical shape as `apply(f, x)`, without touching
+ADR 0020 D5's resolve-stage dispatch at all.
 
-Date: 2026-07-01 (v1); 2026-07-01 (M-cont generalization, same day)
+Date: 2026-07-01 (v1); 2026-07-01 (M-cont generalization, same day);
+2026-07-01 (D3-revisit unification, same day)
 
 ## Related
 
@@ -78,7 +83,7 @@ new kind of churn.
 ### D3. Indirect invocation is a dedicated builtin (`apply`), not `f(x)` syntax. **PINNED.**
 
 Sentinel already special-cases `ident(args)` where `ident` resolves to a
-bound **local variable**: `crates/sentinel-resolve/src/lib.rs:3999-4020`
+bound **local variable**: `crates/sentinel-resolve/src/lib.rs:4034-4100`
 (ADR 0020 D5) unconditionally treats that as a continuation resume-call
 (`k(arg)` inside a handler arm) — "vars win over fns." Until now, a callable
 local var could *only* be a kont parameter, so this was safe by absence of
@@ -100,6 +105,13 @@ branch — zero overlap with resume-kont dispatch.
 **PINNED (2026-07-01): `apply(f, x)` builtin for v1; unifying with ordinary
 `f(x)` call syntax is a named follow-up, gated on carefully generalizing the
 resume-kont dispatch — not done here.**
+
+**Superseded/extended (2026-07-01, D3-revisit):** this follow-up is now
+done — see the Amendment 2 section at the end of this document. The
+resume-kont dispatch above is generalized, not touched at the resolve
+stage: `f(x)` and `apply(f, x)` are unified at the *types* stage instead,
+leaving this D3 paragraph's resolve-stage description accurate as
+historical record of the v1 decision.
 
 ### D4. Eligibility — non-generic, non-builtin, non-method, fully effect-free. **PINNED.**
 
@@ -213,11 +225,13 @@ the existing tracked scg-mirror follow-up.**
 - ~~Generalize `Fn<i64,i64>` to word-scalar params/return (the
   `Channel<T>`-M1.2b-cont-style follow-up) once v1 is proven in real use.~~
   **DONE same-day — see the M-cont amendment at the end of this document.**
-- Unify `apply(f, x)` with ordinary `f(x)` call syntax — requires carefully
-  generalizing the `ident(args)`-over-a-local-var resolve dispatch
-  (`crates/sentinel-resolve/src/lib.rs:3999-4020`) to disambiguate kont vs.
-  Fn by the var's type, not unconditionally assume kont. Differential-
-  critical; do carefully, in a focused session.
+- ~~Unify `apply(f, x)` with ordinary `f(x)` call syntax — requires carefully
+  generalizing the `ident(args)`-over-a-local-var resolve dispatch to
+  disambiguate kont vs. Fn by the var's type, not unconditionally assume
+  kont. Differential-critical; do carefully, in a focused session.~~ **DONE
+  same-day — see the D3-revisit amendment at the end of this document. The
+  resolve-stage dispatch itself is untouched; disambiguation happens at the
+  types stage instead.**
 - Allow `Async`-effecting fns as `Fn` values once there's an effect-row
   story for indirect calls (D4).
 - Consider `spawn op(x)` for an indirect (Fn-valued) target — needs a
@@ -334,3 +348,160 @@ Demonstrator `examples/lang/fn_value_generic.sentinel` (`Fn<u8,u8>` /
 updated to `Fn<u128, i64>` (still genuinely rejected). Four-check green; all
 9 selfhost differential stages byte-identical, zero `selfhost/` changes
 beyond what v1 already required.
+
+---
+
+## Amendment 2 (D3-revisit, same day): unify `apply(f, x)` with ordinary `f(x)` call syntax
+
+**PINNED (2026-07-01):** closes D3's own named follow-up (chosen off the
+post-M-cont fresh-session decision menu). `f(x)` now works directly on a
+`Fn`-typed local variable — `apply(f, x)` remains valid too; the two
+spellings are unified, not one replacing the other.
+
+### D13. Disambiguation lives at the TYPES stage; ADR 0020 D5's resolve dispatch is untouched.
+
+D3 deferred this specifically because generalizing the *resolve-stage*
+dispatch (`vars.get(callee)` unconditionally means "resume a continuation")
+to disambiguate kont-vs-Fn looked like it required touching that
+differential-critical, security-relevant branch directly. It doesn't:
+resolve has no type information at all, and never needed any — it already
+only encodes the scoping fact "the callee names a bound local variable,"
+deferring validation to the types stage (this was already true pre-ADR-0070,
+for the Kont-only case). `check_resume_kont_expr`
+(`crates/sentinel-types/src/lib.rs`) is restructured from a two-way
+`match kont_ty { Type::Kont(id) => ..., other => Err(Mismatch) }` into a
+three-way match: `Type::Kont(kont_id)` keeps the *exact* pre-existing body
+(byte-for-byte unchanged); `Type::Fn(sig_id)` is new; any other type is
+`TypeError::CalleeNotCallable` (below). Resolve's own dispatch
+(`crates/sentinel-resolve/src/lib.rs:4034-4100`) is not modified at all —
+not even a rename — so ADR 0020 D5's "vars win over fns" security posture
+carries forward unexamined and unweakened.
+
+### D14. `f(x)` desugars to the identical `TypedExprKind::Call{id: APPLY_FN_ID, ...}` shape `apply(f, x)` already produces.
+
+The new `Type::Fn` arm decodes `(param_ty, ret_ty)` via the existing
+`fn_value_sig_param_ret(sig_id)`, type-checks the call's one argument
+against `param_ty`, hand-builds a `TypedExpr` for the callee
+(`TypedExprKind::Var(kont)` with `ty: kont_ty` — reusing what `env.get`
+already returned rather than re-dispatching through `check_expr`'s general
+`Var` arm, which carries its own `Type::Kont`-smuggling guard,
+`TypeError::KontUsedAsValue`, that resume/apply dispatch has always
+deliberately bypassed), and returns `TypedExprKind::Call{id: APPLY_FN_ID,
+args: [f, x], type_args: []}` — the *exact* node `check_call`'s `apply`
+branch produces for `apply(f, x)`. Because the shape is byte-identical,
+every downstream consumer (borrow-check, effect-check, MIR, both codegen
+backends) already handles it correctly with **zero new code** — proven at
+runtime by the existing `fn_value*.sentinel` demonstrators, which already
+exercised `apply(f, x)` producing this shape. No new runtime symbol, no ABI
+change, and — unlike almost every other change in this session's
+history — **no `FnId` renumbering**: this reuses the existing
+`APPLY_FN_ID` rather than registering a new builtin, so there is no
+user-fn base shift and no lockstep sed across `selfhost/`.
+
+### D15. Three new diagnostics, and a latent `apply` bug fixed along the way.
+
+`CalleeNotCallable { got, span }` replaces the old
+`Mismatch{expected: Type::Kont(KontId(u32::MAX)), ...}` sentinel-value hack
+(an implementation detail, not a documented contract — no fixture or
+snapshot referenced it) for "a bound local var was called but is neither
+Kont nor Fn." `FnValueArityMismatch` mirrors `KontArityMismatch` for "a
+`Fn<T,R>` value called with the wrong number of arguments" (always exactly
+one). `FnValueArgMismatch` is the direct-call twin of `apply`'s own
+`CallArgMismatch`, kept as a separate diagnostic rather than reused because
+`CallArgMismatch`'s message names the callee (e.g. "argument 1 of `apply`
+expects...") and there is no `apply` token in the source to name for
+`op(true)` — the same reasoning that motivated `ApplyTargetNotFn`'s
+original existence (D3 v1).
+
+**A genuine pre-existing bug, discovered while wiring up
+`FnValueArgMismatch` and fixed in the same diff:** the new arm's
+`check_expr(&args[0], Some(param_ty), ...)` never reached its own manual
+`if x_typed.ty != param_ty` check — `check_expr` routes an `Some(expected)`
+hint through `coerce_to_expected`, which throws a generic
+`TypeError::Mismatch` on disagreement *before* returning, exactly
+pre-empting the intended diagnostic. Tracing this down surfaced that
+`check_call`'s existing `apply` branch has the **identical** latent bug:
+`apply(f, x)` with a wrongly-typed `x` has, since the M-cont amendment,
+always raised a generic `Mismatch` rather than the intended
+`CallArgMismatch{callee: "apply", ...}` — dead code, never caught because
+no fixture exercised an `apply` argument-type mismatch. Both sites are
+fixed the same way, mirroring a precedent already in this file's own
+codebase (`check_handle_expr`'s arm-body check passes `None` instead of
+`Some(outer_ty)` for exactly this reason, documented in its own inline
+comment): pass `None` instead of `Some(param_ty)`, then let the manual
+check raise the specific diagnostic. This loses no legitimate coercion —
+`Fn<T,R>`'s parameter is always a plain concrete word-scalar, never a
+`coerce_to_expected` widening target (`?T` / `secret T` / `[secret u8]`).
+Confirmed safe via a full `tests/ui` sweep: no existing fixture exercises
+an `apply` argument-type mismatch, so nothing depended on the old
+(unreachable-diagnostic) behavior.
+
+### D16. Self-host impact: none, verified — not assumed.
+
+Resolve's dump format is unchanged (D13), so `selfhost/resolve/dump.sentinel`
+needs no mirror. The three new `tests/ui/c70_*.sentinel` fixtures are
+permanent TYPES-stage rejects: they resolve cleanly (so they *do* sweep
+into `selfhost_resolve.rs`'s corpus test — expected and safe, resolve is
+untouched) but fail at `snc types`, and `selfhost_types.rs`'s corpus test
+explicitly skips any fixture whose oracle (`snc types`) doesn't exit
+successfully. This matters because `selfhost/types/borrow_arms.sentinel`'s
+`dump_te_call` (scg's own types-stage mirror) has **no gate on the resumed
+var's type at all** today — it doesn't even implement the pre-existing
+Kont-only restriction. That gap is real but is **provably unreachable** by
+this change's own fixtures, confirmed by reading the corpus-collection code
+directly. Separately, `crates/sentinel-driver/src/llvm_dump.rs` (the
+second, independent ~4200-line codegen-differential-oracle backend, not a
+thin printer) already unconditionally rejects any `apply`/`Type::Fn` call
+via its `FIRST_USER_FN` fallthrough — confirmed zero references to
+`APPLY_FN_ID`/`Type::Fn` in that file — so it needs no change, for a
+structurally different reason than the other files (pre-existing total
+exclusion of the whole feature, not pre-existing correctness). All 9
+selfhost differential stages confirmed byte-identical, both bootstrap fixed
+points hold.
+
+### Consequences (amendment 2)
+
+- **Positive:** `f(x)` is now as ergonomic as an ordinary function call for
+  a `Fn<T,R>` value — `apply(f, x)` remains available, so nothing that used
+  it needs to change.
+- **Positive:** a real, previously-undiscovered diagnostic bug in the
+  already-shipped `apply` argument-type check is fixed as a direct side
+  effect of unifying the two spellings.
+- **Neutral:** the two spellings' happy paths are byte-identical after
+  type-check; their diagnostics on a bad argument *type* specifically use
+  different (both now-correct) messages (`CallArgMismatch` naming `apply`
+  vs. `FnValueArgMismatch` naming no callee), since there is no `apply`
+  token in the source for the direct-call spelling to name.
+
+No shared helper was extracted between `check_call`'s `apply` branch and
+the new `Type::Fn` arm — `check_call` already has eight near-duplicate
+builtin special-cases and none share a helper (each decodes its
+type/signature through a genuinely different mechanism), and the two sites
+here obtain their `f` value differently (one via `check_expr` on an
+arbitrary expression, the other by reading `env.get`'s result directly).
+Drift between the two spellings is instead guarded by a new unit test,
+`adr0070_direct_fn_value_call_matches_apply_call`
+(`crates/sentinel-types/src/lib.rs`), asserting `apply(op, 5)` and `op(5)`
+type-check to the same `Call{id: APPLY_FN_ID, ...}` shape and return type —
+an actually-exercised guarantee, not just a structural one. Demonstrators:
+`examples/lang/fn_value.sentinel` gained a `call_direct` helper alongside
+the existing `apply_to`, and `examples/lang/fn_value_generic.sentinel`'s
+`apply_bool` switched to direct-call syntax (proving the unification holds
+for a non-`i64` `Fn<T,R>` instantiation too) — both still exit 42, both
+`--separate` and merged. Three new `tests/ui/c70_*.sentinel` fixtures
+(`callee_not_callable`, `fn_value_arity_mismatch`, `fn_value_arg_mismatch`)
+pin the three new diagnostics. Four-check green; all 9 selfhost
+differential stages byte-identical, both bootstrap fixed points hold.
+
+## Revisit (amendment 2)
+- Allow `Async`-effecting fns as `Fn` values once there's an effect-row
+  story for indirect calls (D4) — unaffected by this amendment.
+- Consider `spawn op(x)` for an indirect (Fn-valued) target — unaffected by
+  this amendment; still needs a generic spawn wrapper.
+- The scg lowering mirror (D7/D12) — still bundled with the existing
+  tracked sealed/stdio/arg/generic-channel scg-mirror follow-up. This
+  amendment adds no new scg-mirror surface (D16): the new diagnostics are
+  types-stage-only and their fixtures are types-corpus-excluded by
+  construction.
+- Full capturing closures (ADR 0024 D10) remain a distinct, larger future
+  ADR — unaffected by this amendment.

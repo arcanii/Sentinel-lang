@@ -6,6 +6,10 @@
 // interners). `apply(f, x)` is context-typed from `f`'s own signature, exactly
 // like `process_recv` reads its element from the channel arg. snc-only (the
 // scg mirror is deferred, like `fn_value.sentinel`/`channel_generic.sentinel`).
+// ADR 0070 D3-revisit unified `apply(f, x)` with direct `f(x)` syntax — both
+// type-check identically, so `apply_bool` below uses direct-call sugar
+// instead of the builtin, proving the unification holds for a non-`i64`
+// `Fn<T,R>` instantiation too (`apply_u8`/`apply_f64` still use `apply`).
 //
 // Three distinct Fn<T,R> shapes: Fn<u8,u8>, Fn<f64,f64>, Fn<bool,bool>.
 // inc_u8(29) = 30; double_f64(5.0) = 10.0; flip(false) = true (contributes 2).
@@ -32,7 +36,7 @@ fn apply_f64(op: Fn<f64, f64>, x: f64) -> f64 {
 }
 
 fn apply_bool(op: Fn<bool, bool>, x: bool) -> bool {
-    apply(op, x)
+    op(x)
 }
 
 fn main() -> i64 {

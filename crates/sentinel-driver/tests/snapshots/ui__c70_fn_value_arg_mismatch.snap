@@ -1,0 +1,14 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c70_fn_value_arg_mismatch.sentinel\")"
+---
+sentinel::types::fn_value_arg_mismatch
+
+  × function value expects an argument of type `i64`, got `bool`
+    ╭─[tests/ui/c70_fn_value_arg_mismatch.sentinel:10:8]
+  9 │     let op = square;
+ 10 │     op(true)
+    ·        ──┬─
+    ·          ╰── 
+ 11 │ }
+    ╰────

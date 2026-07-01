@@ -1,0 +1,11 @@
+// ADR 0070 (D3-revisit): calling a Fn<T,R> value directly with an argument
+// of the wrong type — the direct-call-syntax twin of apply's own
+// CallArgMismatch. Surfaces FnValueArgMismatch.
+fn square(x: i64) -> i64 {
+    x * x
+}
+
+fn main() -> i64 {
+    let op = square;
+    op(true)
+}

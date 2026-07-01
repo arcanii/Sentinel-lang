@@ -1,0 +1,14 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c70_fn_value_arity_mismatch.sentinel\")"
+---
+sentinel::types::fn_value_arity_mismatch
+
+  × function value expects 1 argument(s), got 2
+    ╭─[tests/ui/c70_fn_value_arity_mismatch.sentinel:10:5]
+  9 │     let op = square;
+ 10 │     op(1, 2)
+    ·     ─┬
+    ·      ╰── 
+ 11 │ }
+    ╰────

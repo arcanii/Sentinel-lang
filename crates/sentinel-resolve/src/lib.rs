@@ -875,17 +875,19 @@ pub enum ResolvedExprKind {
         op_span: Span,
         args: Vec<ResolvedExpr>,
     },
-    /// C3.4 / ADR 0020 D5: a continuation-resume call `k(arg)`
-    /// inside a handler arm body. `kont` is the VarId of the
-    /// arm's continuation binding (last entry in the arm's
-    /// `param_var_ids`). The args' types are checked against the
-    /// op's return type + the call's result type is the outer
-    /// `handle` expression's type at type-check time.
+    /// C3.4 / ADR 0020 D5: `f(arg)` where `f` names an in-scope bound
+    /// local variable — "vars win over fns." Resolve produces this
+    /// variant purely from that scoping fact; it has no type information
+    /// yet, so `kont` names the callee generically (historically the
+    /// continuation-resume case, `k(arg)` inside a handler arm).
     ///
-    /// Resolve produces this variant whenever a `Call`'s callee
-    /// name resolves to an in-scope VarId — type-check verifies
-    /// the binding actually has a continuation type (and surfaces
-    /// `TypeError::KontCallOnNonKont` if not).
+    /// Type-check disambiguates by `kont`'s actual type: `Type::Kont`
+    /// resumes the continuation (args checked against the op's return
+    /// type; the call's result type is the outer `handle` expression's
+    /// type); `Type::Fn` (ADR 0070 D3-revisit) calls a non-capturing
+    /// function value directly, producing the same typed shape as the
+    /// `apply(f, x)` builtin. Any other type is
+    /// `TypeError::CalleeNotCallable`.
     ResumeKont {
         kont: VarId,
         callee_span: Span,
