@@ -315,6 +315,10 @@ Codegen declares these as external; `sentinel-runtime` defines them
 | `sentinel_process_read` | `(ptr p, ptr out_len) -> ptr` | subprocess IPC — read child stdout to EOF; libc-malloc'd `[u8]` (len → `out_len`) |
 | `sentinel_process_send` | `(ptr p, i64 value) -> i64` | typed framed IPC (ADR 0066 M2.3) — frame `value` (8-byte LE) to child stdin, keep open; 0 ok, -1 error |
 | `sentinel_process_recv` | `(ptr p, ptr out) -> i64` | typed framed IPC — read one 8-byte LE i64 frame from child stdout; writes `*out`, returns 0 (some) / 1 (closed). Codegen builds the `?i64` |
+| `sentinel_shared_new` | `(i64 value) -> ptr` | shared ownership (ADR 0071 M1.4a) — a new refcounted `Shared<T>` cell (rc 1) holding the word-scalar `value`; the first handle that is freed (not leaked) |
+| `sentinel_shared_clone` | `(ptr s) -> ptr` | shared ownership — register a new owner (rc++), returns the same ptr; emitted at each duplication of a named `Shared` binding |
+| `sentinel_shared_get` | `(ptr s) -> i64` | shared ownership — read the shared value out (immutable at M1.4a; mutation is `Mutex<T>`, M1.4b) |
+| `sentinel_shared_release` | `(ptr s) -> void` | shared ownership — drop one owner (rc--), free the cell at zero; emitted at each `Shared` binding's scope-exit drop |
 
 **Runtime-internal (not codegen-declared):** `sentinel_kont_panic_resumed`
 — the runtime's `sentinel_kont_resume` calls it on the consumed-twice

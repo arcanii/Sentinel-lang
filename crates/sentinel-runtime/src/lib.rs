@@ -1398,6 +1398,114 @@ pub extern "C" fn sentinel_channel_close(ch: *mut SentinelChannel) -> i64 {
 }
 
 // =============================================================================
+// ADR 0071 M1.4a: `Shared<T>` — the first REFCOUNTED runtime handle.
+//
+// Unlike every other Copy handle (Channel/Task/Process/SealedChannel), which are
+// deliberately LEAKED (no single owner to free them), a `SentinelShared` cell is
+// FREED when the last clone drops — an `Arc`'s inner reimplemented behind the
+// C-ABI. Codegen holds an opaque `*mut SentinelShared` (`Type::Shared` lowers to
+// `ptr`); `Type::Shared` is `Copy` for the borrow checker (freely duplicable) YET
+// `needs_drop` (codegen emits `sentinel_shared_release` at every scope exit) —
+// the first type to decouple those (ADR 0071 D2). The refcount accounting: `rc`
+// starts at 1 (`shared_new`); `sentinel_shared_clone` (rc++) fires at each
+// duplication of a named `Shared` binding into a new owner; `sentinel_shared_release`
+// (rc--) fires at each binding's scope-exit drop, freeing the box at zero. The
+// invariant `#clone + #new == #release` is guarded by the underflow debug-assert
+// below + a leak-checked pass fixture.
+//
+// M1.4a-minimum: the element is a word-scalar encoded into the `i64` slot (the
+// M1.1 spawn encode), so the cell is fixed-size; aggregate `T` and mutation
+// (`Mutex<T>`, M1.4b) are follow-ons.
+
+/// A heap-allocated refcounted shared cell (ADR 0071 M1.4a). `rc` is atomic so
+/// clones/releases from multiple threads are sound; `value` holds the word-scalar
+/// element (encoded into `i64` by codegen).
+pub struct SentinelShared {
+    rc: std::sync::atomic::AtomicUsize,
+    value: i64,
+}
+
+/// ADR 0071 M1.4a: allocate a shared cell holding `value`, refcount 1. Returns an
+/// opaque `*mut SentinelShared` (the codegen LLVM type for `Type::Shared` is `ptr`).
+#[no_mangle]
+pub extern "C" fn sentinel_shared_new(value: i64) -> *mut SentinelShared {
+    let cell = Box::new(SentinelShared {
+        rc: std::sync::atomic::AtomicUsize::new(1),
+        value,
+    });
+    Box::into_raw(cell)
+}
+
+/// ADR 0071 M1.4a: register a new owner — increment the refcount and return the
+/// same pointer (the handle is Copy, so the value is shared by pointer; only the
+/// count changes). Fires at each duplication of a named `Shared` binding.
+///
+/// # Safety
+/// `s` must be a `*mut SentinelShared` from `sentinel_shared_new` (or null).
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+#[no_mangle]
+pub extern "C" fn sentinel_shared_clone(s: *mut SentinelShared) -> *mut SentinelShared {
+    if s.is_null() {
+        return s;
+    }
+    // SAFETY: `s` is a live SentinelShared per the caller contract; the atomic
+    // rc makes concurrent clones from multiple owner threads sound. `Relaxed` is
+    // sufficient for an increment (no memory is published by cloning).
+    let cell = unsafe { &*s };
+    cell.rc.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    s
+}
+
+/// ADR 0071 M1.4a: read the shared value out (a copy). `Type::Shared`'s element
+/// is immutable at M1.4a (mutation is a `Mutex<T>` concern, M1.4b).
+///
+/// # Safety
+/// `s` must be a `*mut SentinelShared` from `sentinel_shared_new` (or null).
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+#[no_mangle]
+pub extern "C" fn sentinel_shared_get(s: *mut SentinelShared) -> i64 {
+    if s.is_null() {
+        return 0;
+    }
+    // SAFETY: `s` is a live SentinelShared per the caller contract.
+    let cell = unsafe { &*s };
+    cell.value
+}
+
+/// ADR 0071 M1.4a: drop one owner — decrement the refcount, freeing the cell when
+/// it reaches zero. Fires at each `Shared` binding's scope-exit drop. Debug-asserts
+/// against underflow (a double-release = a codegen accounting bug).
+///
+/// # Safety
+/// `s` must be a `*mut SentinelShared` from `sentinel_shared_new` (or null), and
+/// this call consumes exactly one refcount unit owned by the caller's binding.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+#[no_mangle]
+pub extern "C" fn sentinel_shared_release(s: *mut SentinelShared) {
+    if s.is_null() {
+        return;
+    }
+    // SAFETY: `s` is a live SentinelShared per the caller contract.
+    let cell = unsafe { &*s };
+    // `Release` so this owner's prior writes are visible to whoever frees; the
+    // standard `Arc` drop ordering.
+    let prev = cell.rc.fetch_sub(1, std::sync::atomic::Ordering::Release);
+    debug_assert!(
+        prev >= 1,
+        "sentinel_shared_release: refcount underflow (double release — codegen accounting bug)"
+    );
+    if prev == 1 {
+        // Last owner: an `Acquire` fence so all prior owners' releases are visible
+        // before we reclaim, then free the box.
+        std::sync::atomic::fence(std::sync::atomic::Ordering::Acquire);
+        // SAFETY: rc reached 0, so no other owner can observe the cell; reclaim it.
+        unsafe {
+            drop(Box::from_raw(s));
+        }
+    }
+}
+
+// =============================================================================
 // ADR 0066 M2.1: subprocess spawn — `Process` over `std::process::Command`.
 //
 // Cross-platform (std::process::Command abstracts posix_spawn/fork+exec and
@@ -2042,15 +2150,22 @@ mod tests {
             // ADR 0066 M2.4 follow-on: own command-line argument reflection.
             sentinel_arg_count as *const (),
             sentinel_arg as *const (),
+            // ADR 0071 M1.4a: the refcounted Shared<T> cell (the first handle that
+            // is actually freed, not leaked).
+            sentinel_shared_new as *const (),
+            sentinel_shared_clone as *const (),
+            sentinel_shared_get as *const (),
+            sentinel_shared_release as *const (),
         ];
-        // 38 symbols: 23 codegen-declared (incl. D.2's sentinel_str_eq,
+        // 42 symbols: 23 codegen-declared (incl. D.2's sentinel_str_eq,
         // D.3's sentinel_realloc, D.4's sentinel_read_file /
         // sentinel_write_file / sentinel_print_bytes, and ADR 0065 D6's
         // sentinel_kont_free) + sentinel_kont_panic_resumed + ADR 0066 M1.2's
         // 4 sentinel_channel_* + M2.1's 2 sentinel_process_spawn/_wait + M2.2's
         // 2 sentinel_process_write/_read + M2.3's 2 sentinel_process_send/_recv +
-        // M2.4b's 2 sentinel_stdin_recv/_stdout_send + the 2 sentinel_arg_count/_arg.
-        assert_eq!(symbols.len(), 38);
+        // M2.4b's 2 sentinel_stdin_recv/_stdout_send + the 2 sentinel_arg_count/_arg +
+        // ADR 0071 M1.4a's 4 sentinel_shared_new/_clone/_get/_release.
+        assert_eq!(symbols.len(), 42);
         assert!(symbols.iter().all(|&s| !s.is_null()), "every symbol has an address");
     }
 
@@ -2195,6 +2310,59 @@ mod tests {
         }
         producer.join().unwrap();
         assert_eq!(sum, 42);
+    }
+
+    // ---- ADR 0071 M1.4a: the refcounted Shared<T> cell ----
+
+    #[test]
+    fn sentinel_shared_refcount_lifecycle() {
+        use std::sync::atomic::Ordering;
+        // new -> rc 1, value readable.
+        let s = sentinel_shared_new(42);
+        assert!(!s.is_null());
+        // SAFETY: `s` is live (same-crate test reading the atomic directly).
+        assert_eq!(unsafe { (*s).rc.load(Ordering::Relaxed) }, 1);
+        assert_eq!(sentinel_shared_get(s), 42);
+        // clone -> rc 2, SAME pointer (shared by ptr, only the count changes).
+        let s2 = sentinel_shared_clone(s);
+        assert_eq!(s2, s);
+        assert_eq!(unsafe { (*s).rc.load(Ordering::Relaxed) }, 2);
+        // release once -> rc 1, still alive.
+        sentinel_shared_release(s);
+        assert_eq!(unsafe { (*s).rc.load(Ordering::Relaxed) }, 1);
+        assert_eq!(sentinel_shared_get(s), 42);
+        // release the last owner -> rc 0 -> freed (no read after this).
+        sentinel_shared_release(s);
+    }
+
+    #[test]
+    fn sentinel_shared_null_safe() {
+        // Null handles are inert (mirrors the other builtins' null-guards).
+        assert!(sentinel_shared_clone(std::ptr::null_mut()).is_null());
+        assert_eq!(sentinel_shared_get(std::ptr::null_mut()), 0);
+        sentinel_shared_release(std::ptr::null_mut()); // no-op, no panic
+    }
+
+    #[test]
+    fn sentinel_shared_cross_thread_last_clone_frees() {
+        use std::sync::atomic::Ordering;
+        // Two owners across threads: main keeps one, a worker takes a clone,
+        // reads the shared value, and releases. Exercises that the cell is
+        // shared by pointer across threads and the atomic refcount is sound.
+        let s = sentinel_shared_new(21);
+        let s2 = sentinel_shared_clone(s); // rc 2
+        assert_eq!(unsafe { (*s).rc.load(Ordering::Relaxed) }, 2);
+        let addr = s2 as usize; // raw ptr isn't Send; pass the address.
+        let worker = std::thread::spawn(move || {
+            let s2 = addr as *mut SentinelShared;
+            let v = sentinel_shared_get(s2);
+            sentinel_shared_release(s2); // worker drops its owner -> rc 1
+            v
+        });
+        let got = worker.join().unwrap();
+        assert_eq!(got, 21);
+        assert_eq!(unsafe { (*s).rc.load(Ordering::Relaxed) }, 1);
+        sentinel_shared_release(s); // last owner -> freed
     }
 
     // ---- ADR 0066 M2.1: the subprocess spawn runtime surface ----
