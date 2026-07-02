@@ -427,8 +427,27 @@ fn dump_tstmt(out: &mut Vec<u8>, s: Stmt, src: &[u8], c: &mut TyCtx, gb: &mut Ve
             // (8/N) codegen: the RHS instructions are already in `cgout`; bind by an
             // alloca slot + store the RHS operand. Reads of this var load from the slot.
             if cg_on(c) {
-                let rk: i64 = (*c).cglk;
-                let rv: i64 = (*c).cglv;
+                let rk0: i64 = (*c).cglk;
+                let rv0: i64 = (*c).cglv;
+                // (ADR 0071 M1.4a slice 3) rc++ a `let y = x` that duplicates a named
+                // Shared binding (mvbv >= 0, set by the RHS `Expr::Var`) into a new
+                // owner — an rvalue RHS (shared_new/call) transfers its unit, no clone.
+                let cln: bool = (*c).mvbv >= 0 && cg_is_shared(c, letty);
+                let rv: i64 = if cln {
+                    let clv: i64 = cg_dst(c);
+                    cgo_str(c, "call ptr @sentinel_shared_clone(ptr ");
+                    cgo_operand(c, rk0, rv0);
+                    cgo_str(c, ")\n");
+                    (*c).cg_used_sharedclone = true;
+                    clv
+                } else {
+                    rv0
+                };
+                let rk: i64 = if cln {
+                    0
+                } else {
+                    rk0
+                };
                 let cgslot: i64 = cg_alloca(c, letty);
                 cg_store(c, letty, rk, rv, cgslot);
                 cg_slot_set(c, lvid, cgslot);

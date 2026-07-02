@@ -1,0 +1,37 @@
+// ADR 0071 M1.4a slice 3: the `Shared<T>` refcount clone/drop accounting. This is
+// the FIRST program to exercise all three duplication sites that emit `rc++`
+// (`sentinel_shared_clone`) — a `let` binding, a by-value user-fn argument, and a
+// `spawn` capture — each balanced by an `rc--` (`sentinel_shared_release`) at the
+// owning binding's scope-exit drop (a fn param, a spawned task's param, or a local).
+//
+// The load-bearing invariant is `#new + #clone == #release`, so the cell is freed
+// EXACTLY once. A miscount would over-release → a use-after-free crash (caught by
+// the exit code here) or trip the runtime's underflow debug-assert. Trace:
+//   shared_new(7)            rc=1  (a owns)
+//   let b = a                rc=2  (clone: a named-Var duplication into a new owner)
+//   shared_get(b)            rc=2  (builtin BORROWS its arg — no clone, no release)
+//   read_twice(a)            rc=3 then 2  (clone into the param; released at fn exit) = 14
+//   spawn use_shared(b)      rc=3 then 2  (clone into the capture; released on the task) = 14
+//   main exit                release b (rc 1), release a (rc 0 → freed once)
+// #new(1) + #clone(3) == #release(4: read_twice param, use_shared param, main b, main a).
+// 7 + 14 + 14 + 7 = 42. Exit 42.
+
+fn use_shared(s: Shared<i64>) -> i64 ! { Async } {
+    shared_get(s) * 2
+}
+
+fn read_twice(s: Shared<i64>) -> i64 {
+    shared_get(s) + shared_get(s)
+}
+
+fn main() -> i64 {
+    let a = shared_new(7);
+    let b = a;
+    let viadup = shared_get(b);
+    let viafn = read_twice(a);
+    let total: i64 = scope concurrent {
+        let w = spawn use_shared(b);
+        w.await
+    };
+    viadup + viafn + total + 7
+}

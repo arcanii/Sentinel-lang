@@ -917,6 +917,10 @@ fn dump_te_call(out: &mut Vec<u8>, cn: [u8], ca: Args, exp: i64, src: &[u8], c: 
                 let argcons: bool = fid >= 40;
                 let svf: bool = (*c).consuming;
                 (*c).consuming = argcons;
+                // (ADR 0071 M1.4a slice 3) gate the Shared-arg rc++ clone to USER-fn
+                // (owning-param) calls only — a builtin borrows its Shared arg.
+                let svu: bool = (*c).cg_ufarg;
+                (*c).cg_ufarg = argcons;
                 // (7c) MIR: ALL calls — plain, generic-builtin (len/push/vec_new/…), and
                 // generic-user — lower to a `call <name> <args>` (the Rust uses the
                 // signature name for every callee). The arg-list walkers collect the
@@ -961,6 +965,7 @@ fn dump_te_call(out: &mut Vec<u8>, cn: [u8], ca: Args, exp: i64, src: &[u8], c: 
                     fn_ret(c, fid)
                 };
                 (*c).consuming = svf;
+                (*c).cg_ufarg = svu;
                 close_ty(out, rt, c);
                 if mir_on(c) {
                     (*c).mir_collecting = cl_col;

@@ -634,8 +634,10 @@ pub fn compile_to_object_for_module(
     );
     // ADR 0071 M1.4a: declare the Shared<T> refcounted-cell runtime symbols.
     // `sentinel_shared_new(i64 value) -> ptr` (rc=1), `sentinel_shared_get(ptr)
-    // -> i64` (read a copy of the value). `_clone`/`_release` (the refcount
-    // accounting) are declared at slice 3 when codegen begins emitting them.
+    // -> i64` (read a copy of the value), `sentinel_shared_clone(ptr) -> ptr`
+    // (rc++, returns the same ptr — the slice-3 refcount duplication), and
+    // `sentinel_shared_release(ptr) -> void` (rc--, frees at zero — the slice-3
+    // scope-exit drop).
     let shared_new_fn = module.add_function(
         "sentinel_shared_new",
         ptr_ty.fn_type(&[i64_ty.into()], false),
@@ -644,6 +646,16 @@ pub fn compile_to_object_for_module(
     let shared_get_fn = module.add_function(
         "sentinel_shared_get",
         i64_ty.fn_type(&[ptr_ty.into()], false),
+        None,
+    );
+    let shared_clone_fn = module.add_function(
+        "sentinel_shared_clone",
+        ptr_ty.fn_type(&[ptr_ty.into()], false),
+        None,
+    );
+    let shared_release_fn = module.add_function(
+        "sentinel_shared_release",
+        context.void_type().fn_type(&[ptr_ty.into()], false),
         None,
     );
     // ADR 0066 M2.1: declare the subprocess runtime symbols (cross-platform).
@@ -1382,6 +1394,8 @@ pub fn compile_to_object_for_module(
             channel_close_fn,
             shared_new_fn,
             shared_get_fn,
+            shared_clone_fn,
+            shared_release_fn,
             process_spawn_fn,
             process_wait_fn,
             process_write_fn,
@@ -1652,9 +1666,12 @@ struct CodegenCtx<'ctx, 'plan> {
     channel_recv_fn: FunctionValue<'ctx>,
     channel_close_fn: FunctionValue<'ctx>,
     /// ADR 0071 M1.4a: the `Shared<T>` refcounted-cell runtime symbols.
-    /// `shared_new(i64) -> ptr` (rc=1), `shared_get(ptr) -> i64`.
+    /// `shared_new(i64) -> ptr` (rc=1), `shared_get(ptr) -> i64`,
+    /// `shared_clone(ptr) -> ptr` (rc++), `shared_release(ptr)` (rc--, free at 0).
     shared_new_fn: FunctionValue<'ctx>,
     shared_get_fn: FunctionValue<'ctx>,
+    shared_clone_fn: FunctionValue<'ctx>,
+    shared_release_fn: FunctionValue<'ctx>,
     /// ADR 0066 M2.1: the subprocess runtime symbols.
     process_spawn_fn: FunctionValue<'ctx>,
     process_wait_fn: FunctionValue<'ctx>,
@@ -2067,10 +2084,10 @@ fn field_type_needs_drop_inner(
         // ADR 0066 M1.2: a Channel handle is runtime-reclaimed, not
         // codegen-dropped (like Task).
         Type::Channel(_) => false,
-        // ADR 0071 M1.4a: a `Shared<T>` handle does NOT drop at THIS slice (2b) —
-        // it leaks like `Channel` (`needs_drop == false`). Slice 3 flips this to
-        // `true` (emit `sentinel_shared_release`, the refcount `--` at scope exit).
-        Type::Shared(_) => false,
+        // ADR 0071 M1.4a slice 3: a `Shared<T>` handle IS drop-emitting — its
+        // scope-exit drop is `sentinel_shared_release` (the refcount `--`, freeing
+        // the cell at zero). The FIRST Copy-yet-needs-drop handle (D2).
+        Type::Shared(_) => true,
         Type::Process => false,
         // ADR 0066 M2.4a: a SealedChannel wraps a Process pipe — runtime-owned.
         Type::SealedChannel => false,
@@ -4232,6 +4249,10 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                     && matches!(value.kind, TypedExprKind::ArrayLit { .. });
                 let v = self.lower_expr(value, program)?;
                 self.array_route_active = false;
+                // ADR 0071 M1.4a slice 3: a `let y = x` where `x` is a named
+                // `Shared` binding duplicates it into a new owner → rc++ (a fresh
+                // `shared_new(...)`/call RHS is an rvalue transfer → no clone).
+                let v = self.clone_if_shared_var(value, v)?;
                 let llvm_ty = self.llvm_basic_type(*ty);
                 // D.5 / ADR 0036 D4: hoist to the entry block inside loops.
                 let alloca = self.binding_alloca(llvm_ty, name)?;
@@ -4761,9 +4782,20 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                 // no codegen-emitted drop (the handle is a Copy pointer).
             }
             Type::Shared(_) => {
-                // ADR 0071 M1.4a: at THIS slice (2b) a Shared handle leaks like
-                // Channel — no codegen-emitted drop (`needs_drop == false`). Slice 3
-                // makes this arm emit `sentinel_shared_release` (the refcount `--`).
+                // ADR 0071 M1.4a slice 3: the refcount `--` at scope exit. Load the
+                // handle ptr from its slot and `sentinel_shared_release` it (frees the
+                // cell when the last owner drops). The rc++ that balances this fires at
+                // each duplication of a named Shared binding (let-init / by-value
+                // user-fn arg / spawn capture); a returned Shared is exempted from this
+                // drop (tail_returned_var), transferring its unit to the caller.
+                let ptr_val = self
+                    .builder
+                    .build_load(self.context.ptr_type(inkwell::AddressSpace::default()), ptr, "shared_drop_ld")
+                    .map_err(|e| CodegenError::Builder(e.to_string()))?
+                    .into_pointer_value();
+                self.builder
+                    .build_call(self.shared_release_fn, &[ptr_val.into()], "shared_release")
+                    .map_err(|e| CodegenError::Builder(e.to_string()))?;
             }
             Type::Process => {
                 // ADR 0066 M2.1: a Process handle is a Copy pointer; the
@@ -6311,6 +6343,37 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
         Ok(value)
     }
 
+    /// ADR 0071 M1.4a slice 3: if `expr` is a bare `Var` of `Shared<T>` type, its
+    /// value is being DUPLICATED into a new owner (a `let` binding, a by-value
+    /// user-fn parameter, or a `spawn` capture) — emit `sentinel_shared_clone`
+    /// (rc++) on the just-lowered ptr, so the new owner's eventual scope-exit
+    /// `sentinel_shared_release` is balanced. An RVALUE source (a fresh
+    /// `shared_new(...)` result, or a call returning `Shared`) TRANSFERS its unit —
+    /// no clone. `lowered` is `expr`'s already-lowered value (a Var load = the
+    /// handle ptr). Non-Shared / non-Var exprs pass through unchanged.
+    fn clone_if_shared_var(
+        &mut self,
+        expr: &TypedExpr,
+        lowered: BasicValueEnum<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+        if matches!(expr.kind, TypedExprKind::Var(_)) && matches!(expr.ty, Type::Shared(_)) {
+            let cloned = self
+                .builder
+                .build_call(
+                    self.shared_clone_fn,
+                    &[lowered.into_pointer_value().into()],
+                    "shared_clone",
+                )
+                .map_err(|e| CodegenError::Builder(e.to_string()))?
+                .try_as_basic_value()
+                .left()
+                .expect("sentinel_shared_clone returns ptr");
+            Ok(cloned)
+        } else {
+            Ok(lowered)
+        }
+    }
+
     /// ADR 0066 M2.1: `process_spawn(path: [u8], args: [[u8]]) -> Process`.
     /// Decompose `path` ([u8] = `{i64 len, ptr data}`) into (data, len) and
     /// `args` ([[u8]] = `{i64 len, ptr data}`) into (data = argv element buffer,
@@ -7170,10 +7233,16 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
             .get(&id)
             .expect("FnId from a typed program is always in the fn table");
         let signature = program.signature(id);
-        let arg_values: Vec<BasicMetadataValueEnum> = args
-            .iter()
-            .map(|a| self.lower_expr(a, program).map(|v| v.into()))
-            .collect::<Result<Vec<_>, _>>()?;
+        // ADR 0071 M1.4a slice 3: a by-value `Shared` Var argument to a USER fn is
+        // duplicated into the callee's (drop-recorded) param → rc++. Builtins that
+        // take a `Shared` (`shared_get`) are dispatched before `lower_call`, so
+        // every arg reaching here is a user-fn param that the callee will release.
+        let mut arg_values: Vec<BasicMetadataValueEnum> = Vec::with_capacity(args.len());
+        for a in args {
+            let v = self.lower_expr(a, program)?;
+            let v = self.clone_if_shared_var(a, v)?;
+            arg_values.push(v.into());
+        }
         let call = self
             .builder
             .build_call(fn_value, &arg_values, &format!("call_{}", signature.name))
@@ -7211,10 +7280,16 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                 });
             }
         };
-        let arg_values: Vec<BasicMetadataValueEnum> = args
-            .iter()
-            .map(|a| self.lower_expr(a, program).map(|v| v.into()))
-            .collect::<Result<Vec<_>, _>>()?;
+        // ADR 0071 M1.4a slice 3: a by-value `Shared` Var argument to a USER fn is
+        // duplicated into the callee's (drop-recorded) param → rc++. Builtins that
+        // take a `Shared` (`shared_get`) are dispatched before `lower_call`, so
+        // every arg reaching here is a user-fn param that the callee will release.
+        let mut arg_values: Vec<BasicMetadataValueEnum> = Vec::with_capacity(args.len());
+        for a in args {
+            let v = self.lower_expr(a, program)?;
+            let v = self.clone_if_shared_var(a, v)?;
+            arg_values.push(v.into());
+        }
         let call_name = format!("call_{}", signature.name);
         let call = self
             .builder
@@ -8141,7 +8216,11 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                 // instruction, so this is unchanged from the prior order there.
                 let mut lowered = Vec::with_capacity(n);
                 for arg in call_args_exprs.iter() {
-                    lowered.push(self.lower_expr(arg, program)?);
+                    let v = self.lower_expr(arg, program)?;
+                    // ADR 0071 M1.4a slice 3: a `Shared` Var captured into a spawn is
+                    // duplicated into the spawned task's (drop-recorded) param → rc++.
+                    let v = self.clone_if_shared_var(arg, v)?;
+                    lowered.push(v);
                 }
                 let args_storage = self.alloc_call(size_v)?;
                 for (i, v) in lowered.into_iter().enumerate() {

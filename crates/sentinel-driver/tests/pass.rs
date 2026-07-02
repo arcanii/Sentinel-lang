@@ -1186,6 +1186,18 @@ fn pass_c71_shared() {
 }
 
 #[test]
+fn pass_c71_shared_rc() {
+    // ADR 0071 M1.4a slice 3: the refcount clone/drop accounting. Exercises all
+    // three rc++ duplication sites (let-binding, by-value user-fn arg, spawn
+    // capture) balanced by rc-- at each owning binding's scope-exit drop; the cell
+    // is freed exactly once (a miscount would over-release → UAF crash / underflow
+    // assert, so the clean exit 42 is the leak-check). 7 + 14 + 14 + 7 = 42.
+    let r = build_and_run("c71_shared_rc.sentinel");
+    assert_eq!(r.exit, 42);
+    assert_eq!(r.stdout, "");
+}
+
+#[test]
 fn pass_c66_process_channel() {
     // ADR 0066 M2.3: process_send/process_recv lowering — frame an i64 to the
     // child's stdin (process_send) + read one i64 frame back as a ?i64

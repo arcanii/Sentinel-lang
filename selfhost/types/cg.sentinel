@@ -965,6 +965,10 @@ fn cg_needs_drop(c: &mut TyCtx, ty: i64) -> bool {
         true
     } else if cg_is_vec(c, ty) {
         true
+    } else if cg_is_shared(c, ty) {
+        // (ADR 0071 M1.4a slice 3) a Shared<T> handle drops via
+        // sentinel_shared_release (rc--) — the first Copy-yet-needs-drop type.
+        true
     } else {
         let nsid: i64 = struct_of_handle(c, ty);
         if nsid >= 0 {
@@ -1087,6 +1091,18 @@ fn cg_emit_drop(c: &mut TyCtx, ty: i64, slot: i64, vid: i64) -> i64 {
         cgo_int(c, vdd);
         cgo_str(c, ")\n");
         (*c).cg_used_free = true;
+        0
+    } else if cg_is_shared(c, ty) {
+        // (ADR 0071 M1.4a slice 3) the refcount `--` at scope exit — load the handle
+        // ptr and sentinel_shared_release it (frees the cell at zero, the last owner).
+        let sdv: i64 = cg_dst(c);
+        cgo_str(c, "load ptr, ptr %v");
+        cgo_int(c, slot);
+        cg_putc(c, '\n');
+        cgo_str(c, "  call void @sentinel_shared_release(ptr %v");
+        cgo_int(c, sdv);
+        cgo_str(c, ")\n");
+        (*c).cg_used_sharedrelease = true;
         0
     } else {
         // (8d-drops-2) a struct: GEP each drop-needing field (declaration order) and
@@ -1289,6 +1305,30 @@ fn cg_drop_range(c: &mut TyCtx, floor: i64) -> i64 {
 }
 
 // collect one call arg (its operand + type) onto the arg stacks (gated).
+// (ADR 0071 M1.4a slice 3) rc++ a Shared arg passed by value into a USER-fn
+// owning param when its source is a named Var ((*c).mvbv >= 0, set by the just-
+// dumped `Expr::Var`). Emits `sentinel_shared_clone` and RE-THREADS the operand
+// (`cg_reg`) to the clone register BEFORE `cg_collect` pushes it — the selfhost
+// env is append-only, so we can't overwrite a collected slot. Called after
+// `mir_collect` (so the MIR operand stays the original) and before `cg_collect`.
+// Mirrors the oracle's `clone_if_shared_var` in the user-fn call-arg loop (the
+// same `%vC = call ptr @sentinel_shared_clone(ptr <op>)`, byte-identical).
+fn cg_clone_shared_arg(c: &mut TyCtx, at: i64) -> i64 {
+    if cg_on(c) && (*c).cg_ufarg && (*c).mvbv >= 0 && cg_is_shared(c, at) {
+        let ok: i64 = (*c).cglk;
+        let ov: i64 = (*c).cglv;
+        let clv: i64 = cg_dst(c);
+        cgo_str(c, "call ptr @sentinel_shared_clone(ptr ");
+        cgo_operand(c, ok, ov);
+        cgo_str(c, ")\n");
+        (*c).cg_used_sharedclone = true;
+        cg_reg(c, clv);
+        0
+    } else {
+        0
+    }
+}
+
 fn cg_collect(c: &mut TyCtx, at: i64) -> i64 {
     if cg_on(c) {
         if (*c).cg_collecting {

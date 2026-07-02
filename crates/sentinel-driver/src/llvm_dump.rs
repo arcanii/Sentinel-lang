@@ -144,9 +144,13 @@ struct RuntimeSyms {
     channel_recv: bool,
     channel_close: bool,
     /// ADR 0071 M1.4a: the `Shared<T>` refcounted-cell runtime symbols.
-    /// `sentinel_shared_new(i64) -> ptr`, `sentinel_shared_get(ptr) -> i64`.
+    /// `sentinel_shared_new(i64) -> ptr`, `sentinel_shared_get(ptr) -> i64`,
+    /// `sentinel_shared_clone(ptr) -> ptr` (rc++), `sentinel_shared_release(ptr)`
+    /// (rc--, free at 0) — the slice-3 refcount accounting.
     shared_new: bool,
     shared_get: bool,
+    shared_clone: bool,
+    shared_release: bool,
     /// ADR 0066 M2.1: the subprocess runtime symbols.
     /// `sentinel_process_spawn(ptr, i64, ptr, i64) -> ptr`, `_wait(ptr) -> i64`.
     process_spawn: bool,
@@ -197,6 +201,8 @@ impl RuntimeSyms {
         self.channel_close |= other.channel_close;
         self.shared_new |= other.shared_new;
         self.shared_get |= other.shared_get;
+        self.shared_clone |= other.shared_clone;
+        self.shared_release |= other.shared_release;
         self.process_spawn |= other.process_spawn;
         self.process_wait |= other.process_wait;
         self.process_write |= other.process_write;
@@ -292,6 +298,12 @@ impl RuntimeSyms {
         if self.shared_get {
             writeln!(out, "declare i64 @sentinel_shared_get(ptr)").unwrap();
         }
+        if self.shared_clone {
+            writeln!(out, "declare ptr @sentinel_shared_clone(ptr)").unwrap();
+        }
+        if self.shared_release {
+            writeln!(out, "declare void @sentinel_shared_release(ptr)").unwrap();
+        }
         // ADR 0066 M2.1: the subprocess runtime group.
         if self.process_spawn {
             writeln!(out, "declare ptr @sentinel_process_spawn(ptr, i64, ptr, i64)").unwrap();
@@ -355,6 +367,8 @@ impl RuntimeSyms {
             || self.channel_close
             || self.shared_new
             || self.shared_get
+            || self.shared_clone
+            || self.shared_release
             || self.process_spawn
             || self.process_wait
             || self.process_write
@@ -1521,6 +1535,10 @@ impl Emit<'_> {
         match &stmt.kind {
             TypedStmtKind::Let { id, ty, value, .. } => {
                 let v = self.lower_expr(value)?;
+                // ADR 0071 M1.4a slice 3: `let y = x` where `x` is a named `Shared`
+                // binding duplicates it into a new owner → rc++ (an rvalue RHS
+                // transfers → no clone).
+                let v = self.clone_if_shared_var(value, v)?;
                 let llty = self.lty(*ty)?;
                 let slot = self.alloca(&llty);
                 writeln!(self.body, "  store {llty} {v}, ptr %v{slot}").unwrap();
@@ -2162,6 +2180,9 @@ impl Emit<'_> {
                 let mut lowered: Vec<(String, String)> = Vec::with_capacity(n);
                 for arg in args.iter() {
                     let v = self.lower_expr(arg)?;
+                    // ADR 0071 M1.4a slice 3: a `Shared` Var captured into a spawn is
+                    // duplicated into the spawned task's drop-recorded param → rc++.
+                    let v = self.clone_if_shared_var(arg, v)?;
                     // ADR 0066 M1.1: store the arg with its real type (was i64).
                     let aty = self.lty(arg.ty)?;
                     lowered.push((aty, v));
@@ -2633,9 +2654,35 @@ impl Emit<'_> {
                 writeln!(self.body, "  br label %bb{after_b}").unwrap();
                 writeln!(self.body, "bb{after_b}:").unwrap();
             }
+            // ADR 0071 M1.4a slice 3: the refcount `--` at scope exit — load the
+            // handle ptr and `sentinel_shared_release` it (frees the cell at zero,
+            // the last owner). Mirrors the selfhost `cg_emit_drop` Shared arm.
+            Type::Shared(_) => {
+                let v = self.fresh();
+                writeln!(self.body, "  %v{v} = load ptr, ptr %v{ptr_reg}").unwrap();
+                writeln!(self.body, "  call void @sentinel_shared_release(ptr %v{v})").unwrap();
+                self.used.shared_release = true;
+            }
             _ => {}
         }
         Ok(())
+    }
+
+    /// ADR 0071 M1.4a slice 3: if `expr` is a bare `Var` of `Shared<T>` type, its
+    /// value (`op`, the just-lowered handle ptr) is being DUPLICATED into a new
+    /// owner (a `let` binding / by-value user-fn param / spawn capture) — emit
+    /// `sentinel_shared_clone` (rc++) and return the clone register. An RVALUE
+    /// source transfers its unit → no clone. Mirrors inkwell's `clone_if_shared_var`
+    /// and the selfhost clone sites (byte-identical `call ptr @sentinel_shared_clone`).
+    fn clone_if_shared_var(&mut self, expr: &TypedExpr, op: String) -> Result<String, String> {
+        if matches!(expr.kind, TypedExprKind::Var(_)) && matches!(expr.ty, Type::Shared(_)) {
+            let c = self.fresh();
+            writeln!(self.body, "  %v{c} = call ptr @sentinel_shared_clone(ptr {op})").unwrap();
+            self.used.shared_clone = true;
+            Ok(format!("%v{c}"))
+        } else {
+            Ok(op)
+        }
     }
 
     /// Emit a heap `[T]` buffer from already-rendered element operands: the
@@ -3576,6 +3623,10 @@ impl Emit<'_> {
         let mut arg_ops: Vec<(String, String)> = Vec::with_capacity(args.len());
         for a in args {
             let op = self.lower_expr(a)?;
+            // ADR 0071 M1.4a slice 3: a by-value `Shared` Var arg to this USER fn
+            // duplicates it into the callee's drop-recorded param → rc++. (Builtins
+            // taking a `Shared` are handled above, before this user-fn path.)
+            let op = self.clone_if_shared_var(a, op)?;
             arg_ops.push((self.lty(a.ty)?, op));
         }
         let v = self.fresh();
@@ -4282,6 +4333,9 @@ fn walk_collect_var_refs_stmt(kind: &TypedStmtKind, acc: &mut Vec<VarId>) {
 fn needs_drop(ty: Type, program: &TypedProgram) -> bool {
     match ty {
         Type::Array(_) | Type::Vec(_) => true,
+        // ADR 0071 M1.4a slice 3: a `Shared<T>` handle drops via
+        // `sentinel_shared_release` (rc--) — the first Copy-yet-needs-drop type.
+        Type::Shared(_) => true,
         Type::Struct(id) => program
             .struct_decl(id)
             .fields

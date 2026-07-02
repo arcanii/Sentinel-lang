@@ -1381,6 +1381,10 @@ pub fn is_spawn_word_scalar(ty: Type) -> bool {
             | Type::Process
             // ADR 0066 M2.4a: a `SealedChannel` handle is a pointer (like `Process`).
             | Type::SealedChannel
+            // ADR 0071 M1.4a: a `Shared<T>` handle is a pointer — capturing a shared
+            // cell into a spawned worker is a core use (the refcount `clone` at the
+            // spawn site + the task's own scope-exit `release` keep it balanced).
+            | Type::Shared(_)
     )
 }
 

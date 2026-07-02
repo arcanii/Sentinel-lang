@@ -1257,7 +1257,13 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
                         (*c).cg_collecting = true;
                         let svc: bool = (*c).consuming;
                         (*c).consuming = true;
+                        // (ADR 0071 M1.4a slice 3) a spawn captures its args into the
+                        // spawned task's owning params → rc++ a named Shared arg (the
+                        // target is always a user fn, so gate `cg_ufarg` on).
+                        let svu: bool = (*c).cg_ufarg;
+                        (*c).cg_ufarg = true;
                         dump_targs(out, sca, src, c, gb);
+                        (*c).cg_ufarg = svu;
                         (*c).consuming = svc;
                         (*c).cg_collecting = cg_col;
                         cg_emit_spawn(c, sfid, snap, src);
