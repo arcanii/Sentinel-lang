@@ -125,6 +125,11 @@ ui_snapshot!(c66_process_channel_secret_fence, "c66_process_channel_secret_fence
 // type error (the fence-as-type — a SealedChannel carries an encrypted secret, so a
 // public element is pointless). Surfaces SealedChannelElementNotSupported.
 ui_snapshot!(c66_sealed_channel_public_element, "c66_sealed_channel_public_element.sentinel");
+// ADR 0071 M1.4a slice 3: returning a NAMED `Shared<T>` binding (a bare Var in tail
+// or `return` position) transfers a refcount unit — guarded until the slice-3b
+// transfer exemption is mirrored into the oracle + scg. Surfaces
+// SharedReturnNotSupported (return `shared_new(...)` directly instead).
+ui_snapshot!(c71_shared_return_named, "c71_shared_return_named.sentinel");
 
 // ---- ADR 0070: non-capturing function values (types) ----
 // D4: a wrong-arity fn is not eligible as a Fn<T,R> value (any word-scalar shape).

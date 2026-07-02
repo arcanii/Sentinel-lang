@@ -1388,6 +1388,22 @@ pub fn is_spawn_word_scalar(ty: Type) -> bool {
     )
 }
 
+/// ADR 0071 M1.4a slice 3: is `expr` a bare `Var` (recursing through a trivial Block
+/// wrapper, matching how a tail is structured) of `Shared<T>` type? Such a value in
+/// return position (a fn tail or an explicit `return`) TRANSFERS a refcount unit to
+/// the caller — but the transfer exemption in the drop drain is only implemented in
+/// inkwell (via `tail_returned_var`); the byte-identical `snc llvm` oracle + scg
+/// mirror is a deferred follow-on (slice 3b), so returning a named `Shared` is
+/// guarded (rejected) to keep the emitted IR sound. An RVALUE return (a
+/// `shared_new(...)` result / any call) is not a named binding → allowed.
+fn is_named_shared_return(expr: &TypedExpr) -> bool {
+    match &expr.kind {
+        TypedExprKind::Var(_) => matches!(expr.ty, Type::Shared(_)),
+        TypedExprKind::Block(b) => is_named_shared_return(&b.tail),
+        _ => false,
+    }
+}
+
 /// ADR 0066 M2.3b: the element types a `process_send`/`process_recv` framed
 /// channel over a pipe can carry — the word-sized scalars that also have a `?T`
 /// form (so `process_recv -> ?T` is representable): `i64`/`i32`/`u8`/`bool`/
@@ -3702,6 +3718,26 @@ pub enum TypeError {
     )]
     SharedElementNotSupported {
         #[label("unsupported Shared element type here")]
+        span: miette::SourceSpan,
+    },
+
+    /// ADR 0071 M1.4a slice 3: returning a NAMED `Shared<T>` binding (a bare `Var`
+    /// in tail or `return` position) is not yet supported — the refcount TRANSFER
+    /// exemption for such a return is deferred (M1.4a slice 3b: the byte-identical
+    /// self-host mirror needs a reliable direct-Var-tail signal the append-only
+    /// dialect lacks today). Return `shared_new(...)` (or any call/expression)
+    /// DIRECTLY instead — an rvalue return transfers its refcount unit with no
+    /// exemption needed; or bind the handle in the caller. Without this guard a
+    /// returned named `Shared` would be both transferred AND dropped (a
+    /// double-release / use-after-free), since a `Shared` is `Copy` and so is never
+    /// move-recorded like the returned Move-typed bindings the drop drain skips.
+    #[error("returning a named `Shared<T>` binding is not yet supported")]
+    #[diagnostic(
+        code(sentinel::types::shared_return_not_supported),
+        help("return `shared_new(...)` (or the producing expression) directly — an rvalue return transfers the refcount unit; or bind the handle in the caller. Returning a named `Shared` local/param is a deferred follow-on (ADR 0071 M1.4a slice 3b).")
+    )]
+    SharedReturnNotSupported {
+        #[label("a named `Shared` binding returned here")]
         span: miette::SourceSpan,
     },
 
@@ -6438,6 +6474,16 @@ fn check_fn(
             name: fn_def.name.clone(),
             expected: return_type,
             got: body.ty,
+            span: to_source_span(&fn_def.body.tail.span),
+        });
+    }
+    // ADR 0071 M1.4a slice 3: a fn whose reachable TAIL is a named `Shared` binding
+    // transfers that binding's refcount unit to the caller — guarded until slice 3b
+    // mirrors the transfer exemption into the oracle + scg (return the producing
+    // expression directly instead). Early `return <named Shared>` is guarded in
+    // `check_expr`'s `Return` arm (covering method bodies too).
+    if !block_diverges(&body) && is_named_shared_return(&body.tail) {
+        return Err(TypeError::SharedReturnNotSupported {
             span: to_source_span(&fn_def.body.tail.span),
         });
     }
@@ -9267,6 +9313,14 @@ fn check_expr(
                     });
                 }
             }
+            // ADR 0071 M1.4a slice 3: an early `return <named Shared>` transfers a
+            // refcount unit — guarded until the slice-3b transfer exemption is
+            // mirrored into the oracle + scg (return `shared_new(...)` directly).
+            if is_named_shared_return(&inner_t) {
+                return Err(TypeError::SharedReturnNotSupported {
+                    span: to_source_span(&inner.span),
+                });
+            }
             let ty = inner_t.ty;
             (TypedExprKind::Return(Box::new(inner_t)), ty)
         }
@@ -10968,6 +11022,11 @@ fn type_error_to_diagnostic(err: &TypeError) -> Diagnostic {
         TypeError::SharedElementNotSupported { span } => (
             "sentinel::types::shared_element_not_supported",
             "`Shared<T>` element type is not supported yet".to_string(),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        TypeError::SharedReturnNotSupported { span } => (
+            "sentinel::types::shared_return_not_supported",
+            "returning a named `Shared<T>` binding is not yet supported".to_string(),
             span.offset()..(span.offset() + span.len()),
         ),
         TypeError::FnTypeArgsNotSupported { span } => (

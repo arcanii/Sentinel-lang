@@ -1,0 +1,17 @@
+// ADR 0071 M1.4a slice 3: returning a NAMED `Shared<T>` binding (a bare `Var` in
+// tail or `return` position) transfers a refcount unit to the caller. The transfer
+// exemption in the scope-exit drop drain is implemented in inkwell (`snc build`) but
+// its byte-identical mirror into the `snc llvm` oracle + the self-hosted `scg` is a
+// deferred follow-on (slice 3b) — so this is guarded (rejected) to keep the emitted
+// IR sound (without it, the returned `s` would be both transferred AND released — a
+// double-release, since a `Shared` is `Copy` and so is never move-recorded). The fix
+// is to return the producing expression DIRECTLY (`shared_new(...)`, an rvalue that
+// transfers with no exemption needed). Here `make`'s tail is the named local `s`.
+fn make() -> Shared<i64> {
+    let s = shared_new(7);
+    s
+}
+
+fn main() -> i64 {
+    shared_get(make())
+}
