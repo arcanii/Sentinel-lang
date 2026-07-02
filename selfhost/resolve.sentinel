@@ -234,7 +234,7 @@ fn slice_eq_src(src: &[u8], as_: i64, ae: i64, bs: i64, be: i64) -> bool {
     }
 }
 
-// The runtime builtins → their reserved FnIds (0..=13 core, 21..=39 the ADR
+// The runtime builtins → their reserved FnIds (0..=13 core, 21..=41 the ADR
 // 0056/0066/0069/0070/0071 additions), or -1 if `q` is not a builtin. Same
 // order as sentinel-resolve's pre-registration (ADR 0035 D2).
 fn builtin_id(q: &[u8]) -> i64 {
@@ -315,12 +315,19 @@ fn builtin_id(q: &[u8]) -> i64 {
         38
     } else if name_eq_lit(q, "shared_get") {
         39
+    } else if name_eq_lit(q, "mutex_new") {
+        // ADR 0071 M1.4b: the Mutex<T> builtins (reserved slots — slice 2a). No
+        // fixture calls them yet; the Type::Mutex/Type::Guard lowering + check_call
+        // dispatch land in slices 2b/3.
+        40
+    } else if name_eq_lit(q, "lock") {
+        41
     } else {
         0 - 1
     }
 }
 
-// Resolve a call name to a FnId: a builtin (0..=39), else a user fn (40 + its
+// Resolve a call name to a FnId: a builtin (0..=41), else a user fn (42 + its
 // index in the user-fn table), else -1.
 fn fn_lookup(c: &mut RCtx, src: &[u8], q: &[u8]) -> i64 {
     let b: i64 = builtin_id(q);
@@ -333,7 +340,7 @@ fn fn_lookup(c: &mut RCtx, src: &[u8], q: &[u8]) -> i64 {
         while i < n {
             if found == 0 - 1 {
                 if name_eq_src(src, (*c).ufs[i], (*c).ufe[i], q) {
-                    found = 40 + i;
+                    found = 42 + i;
                     0
                 } else {
                     0

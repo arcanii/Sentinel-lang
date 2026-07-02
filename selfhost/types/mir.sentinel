@@ -342,12 +342,12 @@ fn mir_dump_block(out: &mut Vec<u8>, c: &mut TyCtx, src: &[u8], blk: i64) -> i64
     0
 }
 
-// (7c) render a call's callee name: a USER fn (FnId >= 40) from `ufs`/`ufe` via
-// `src`; else a builtin's fixed name (FnId 0..=39 — the resolve/runtime map).
+// (7c) render a call's callee name: a USER fn (FnId >= 42) from `ufs`/`ufe` via
+// `src`; else a builtin's fixed name (FnId 0..=41 — the resolve/runtime map).
 fn mir_put_callee(out: &mut Vec<u8>, c: &mut TyCtx, src: &[u8], fid: i64) -> i64 {
-    if fid >= 40 {
-        let s: i64 = (*c).ufs[fid - 40];
-        let e: i64 = (*c).ufe[fid - 40];
+    if fid >= 42 {
+        let s: i64 = (*c).ufs[fid - 42];
+        let e: i64 = (*c).ufe[fid - 42];
         append_slice(out, src, s, e);
         0
     } else {
@@ -417,6 +417,10 @@ fn mir_put_callee(out: &mut Vec<u8>, c: &mut TyCtx, src: &[u8], fid: i64) -> i64
             "shared_new"
         } else if fid == 39 {
             "shared_get"
+        } else if fid == 40 {
+            "mutex_new"
+        } else if fid == 41 {
+            "lock"
         } else {
             "print_bytes"
         };

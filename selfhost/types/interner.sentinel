@@ -1382,6 +1382,12 @@ fn builtin_id(q: &[u8]) -> i64 {
         38
     } else if name_eq_lit(q, "shared_get") {
         39
+    } else if name_eq_lit(q, "mutex_new") {
+        // ADR 0071 M1.4b: the Mutex<T> builtins (reserved slots — slice 2a;
+        // Type::Mutex/Type::Guard + check_call land in 2b/3).
+        40
+    } else if name_eq_lit(q, "lock") {
+        41
     } else {
         0 - 1
     }
@@ -1442,7 +1448,7 @@ fn builtin_ret(c: &mut TyCtx, fid: i64) -> i64 {
     }
 }
 
-// Resolve a call name to a FnId: a builtin (0..=39), else a user fn (40 + idx),
+// Resolve a call name to a FnId: a builtin (0..=41), else a user fn (42 + idx),
 // else -1.
 fn fn_lookup(c: &mut TyCtx, src: &[u8], q: &[u8]) -> i64 {
     let b: i64 = builtin_id(q);
@@ -1455,7 +1461,7 @@ fn fn_lookup(c: &mut TyCtx, src: &[u8], q: &[u8]) -> i64 {
         while i < n {
             if found == 0 - 1 {
                 if name_eq_src(src, (*c).ufs[i], (*c).ufe[i], q) {
-                    found = 40 + i;
+                    found = 42 + i;
                     0
                 } else {
                     0
@@ -1472,14 +1478,14 @@ fn fn_lookup(c: &mut TyCtx, src: &[u8], q: &[u8]) -> i64 {
 
 // The return-type handle for a resolved FnId.
 fn fn_ret(c: &mut TyCtx, fid: i64) -> i64 {
-    if fid < 40 {
+    if fid < 42 {
         builtin_ret(c, fid)
     } else {
-        (*c).ufret[fid - 40]
+        (*c).ufret[fid - 42]
     }
 }
 
-// (ADR 0070) is user FnId `fid` (fid >= 40) eligible as a `Fn<T,R>` value —
+// (ADR 0070) is user FnId `fid` (fid >= 42) eligible as a `Fn<T,R>` value —
 // non-generic, effect-free, exactly one word-scalar param, word-scalar
 // return (mirrors the Rust eligibility gate, `crates/sentinel-types/src/
 // lib.rs:7910-7929`, using the fields scg already tracks per user fn).
@@ -1499,7 +1505,7 @@ fn fn_ret(c: &mut TyCtx, fid: i64) -> i64 {
 // separate, pre-existing gap), so a `Fn<f64,f64>`-style value can't be
 // formed here regardless.
 fn fn_ref_sig(c: &mut TyCtx, fid: i64) -> i64 {
-    let idx: i64 = fid - 40;
+    let idx: i64 = fid - 42;
     if (*c).uftp[idx] > 0 {
         0 - 1
     } else if (*c).ufeff[idx] > 0 {

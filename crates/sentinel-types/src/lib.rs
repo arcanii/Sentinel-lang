@@ -5297,6 +5297,35 @@ pub fn check_module(
             });
         }
     }
+    // ADR 0071 M1.4b: the `Mutex<T>` builtins — `mutex_new(v: T) -> Mutex<T>`
+    // (FnId 40) and `lock(m: Mutex<T>) -> ?Guard` (FnId 41). This is slice 2a
+    // (reserve the FnIds + keep `typed_signatures` FnId-aligned so the user-fn
+    // base is 42); the registered param/return types below are PLACEHOLDERS
+    // (arity 1 each, i64 -> i64), inert because no fixture calls these yet. Slice
+    // 2b adds `Type::Mutex`/`Type::Guard` + a `check_call` special-case that
+    // computes the real element/guard types, so these placeholders are never
+    // consulted.
+    {
+        let mutex_sigs: &[(usize, &[Type], Type)] = &[
+            (40, &[Type::I64], Type::I64), // mutex_new (placeholder — real: Mutex<T>)
+            (41, &[Type::I64], Type::I64), // lock (placeholder — real: ?Guard)
+        ];
+        for (idx, params, ret) in mutex_sigs {
+            let sig = &program.fn_signatures[*idx];
+            typed_signatures.push(TypedFnSignature {
+                id: sig.id,
+                name: sig.name.clone(),
+                name_span: sig.name_span.clone(),
+                type_params: vec![],
+                param_types: params.to_vec(),
+                return_type: *ret,
+                effect_row: vec![],
+                is_main: false,
+                is_runtime: true,
+                extern_origin: None,
+            });
+        }
+    }
 
     for fn_def in &program.fns {
         let resolved_sig = &program.fn_signatures[fn_def.id.0 as usize];
@@ -11499,7 +11528,8 @@ mod tests {
         // (D.3 / ADR 0034 D5), (11)=read_file, (12)=write_file,
         // (13)=print_bytes (D.4 / ADR 0035 D4), (14..=20)=tcp_* (ADR 0056);
         // channels/subprocess/sealed/stdio/arg/apply occupy (21..=37), the ADR
-        // 0071 M1.4a shared builtins (38..=39), so (40)=main (first user fn). The generic
+        // 0071 M1.4a shared builtins (38..=39), the M1.4b mutex builtins (40..=41),
+        // so (42)=main (first user fn). The generic
         // builtins occupy FnId(1..=3) per ADR 0014 D9 + ADR 0015 D4; the
         // byte-string builtins FnId(4..=6) per ADR 0033 D5; the collection
         // builtins FnId(7..=10) per ADR 0034 D5; the file-I/O builtins
@@ -11553,7 +11583,10 @@ mod tests {
         // ADR 0071 M1.4a: the Shared<T> builtins occupy FnId(38..=39).
         assert_eq!(p.fn_signatures[38].name, "shared_new");
         assert_eq!(p.fn_signatures[39].name, "shared_get");
-        assert_eq!(p.fn_signatures[40].name, "main");
+        // ADR 0071 M1.4b: the Mutex<T> builtins occupy FnId(40..=41).
+        assert_eq!(p.fn_signatures[40].name, "mutex_new");
+        assert_eq!(p.fn_signatures[41].name, "lock");
+        assert_eq!(p.fn_signatures[42].name, "main");
         assert!(p.signature(main.id).is_main);
     }
 

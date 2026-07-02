@@ -260,9 +260,9 @@ fn dump_generic_call(out: &mut Vec<u8>, fid: i64, ca: Args, src: &[u8], c: &mut 
     let mut abuf: Vec<u8> = vec_new();
     let mut atys: Vec<i64> = vec_new();
     dump_args_capture_all(&mut abuf, ca, src, c, gb, &mut atys);
-    let ntp: i64 = (*c).uftp[fid - 40];
-    let ps: i64 = (*c).ufps[fid - 40];
-    let pe: i64 = (*c).ufpe[fid - 40];
+    let ntp: i64 = (*c).uftp[fid - 42];
+    let ps: i64 = (*c).ufps[fid - 42];
+    let pe: i64 = (*c).ufpe[fid - 42];
     let np: i64 = pe - ps;
     let na: i64 = len(atys);
     let lim: i64 = if np < na {
@@ -321,7 +321,7 @@ fn dump_generic_call(out: &mut Vec<u8>, fid: i64, ca: Args, src: &[u8], c: &mut 
     push(out, ')');
     let argbytes: [u8] = vec_to_array(abuf);
     append_str(out, argbytes);
-    let rh: i64 = (*c).ufret[fid - 40];
+    let rh: i64 = (*c).ufret[fid - 42];
     subst_type(c, rh, &subst)
 }
 
