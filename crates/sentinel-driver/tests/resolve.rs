@@ -5,7 +5,7 @@
 //! `snc ast` form (see `tests/ast.rs`) extended with the resolved IDs:
 //! `(var #N)` (VarId), `(call #N …)` (FnId), `(struct-lit #N …)` (StructId),
 //! and the parser's uniform `qcall` / `class-init` disambiguated. Builtins
-//! occupy `FnId 0..=37`, so user fns start at `#38`; the auto-registered
+//! occupy `FnId 0..=39`, so user fns start at `#40`; the auto-registered
 //! built-in `Async` then `Subprocess` effects are emitted last in every program.
 
 use std::path::PathBuf;
@@ -38,18 +38,19 @@ fn resolve_dump(name: &str, contents: &str) -> String {
 #[test]
 fn resolve_dump_params_var_call() {
     // Params bind VarIds (#0, #1); a free call resolves to the callee's FnId
-    // (user fns start at #38, after the 38 builtins — 0..13 + sockets 14..20 +
+    // (user fns start at #40, after the 40 builtins — 0..13 + sockets 14..20 +
     // channels 21..24 + subprocess spawn/wait 25..26 + write/read 27..28 +
     // send/recv 29..30 + sealed bridge 31..32 + stdin/stdout 33..34 + arg 35..36 +
-    // apply 37 (ADR 0070)); `main` is #39. The built-in `Async` then `Subprocess`
+    // apply 37 (ADR 0070) + shared_new/shared_get 38..39 (ADR 0071 M1.4a)); `main`
+    // is #41. The built-in `Async` then `Subprocess`
     // (ADR 0066 M2.1) effects are emitted last.
     assert_eq!(
         resolve_dump(
             "fns",
             "fn add(a: i64, b: i64) -> i64 { a + b }\nfn main() -> i64 { add(1, 2) }\n"
         ),
-        "(fn #38 add ((param #0 a i64) (param #1 b i64)) i64 (block (binop + (var #0) (var #1))))\n\
-         (fn #39 main () i64 (block (call #38 (int 1) (int 2))))\n\
+        "(fn #40 add ((param #0 a i64) (param #1 b i64)) i64 (block (binop + (var #0) (var #1))))\n\
+         (fn #41 main () i64 (block (call #40 (int 1) (int 2))))\n\
          (effect #0 Async)\n\
          (effect #1 Subprocess)\n"
     );
@@ -60,7 +61,7 @@ fn resolve_dump_let_bindings() {
     // `let` bindings take the next VarId; a later reference resolves to it.
     assert_eq!(
         resolve_dump("lets", "fn main() -> i64 { let x: i64 = 5; let y = x + 1; y }\n"),
-        "(fn #38 main () i64 (block (let #0 i64 (int 5)) (let #1 _ (binop + (var #0) (int 1))) (var #1)))\n\
+        "(fn #40 main () i64 (block (let #0 i64 (int 5)) (let #1 _ (binop + (var #0) (int 1))) (var #1)))\n\
          (effect #0 Async)\n\
          (effect #1 Subprocess)\n"
     );
@@ -71,7 +72,7 @@ fn resolve_dump_builtin_call() {
     // A call to a runtime builtin resolves to its reserved FnId (`print` = #0).
     assert_eq!(
         resolve_dump("builtin", "fn main() -> i64 { print(42) }\n"),
-        "(fn #38 main () i64 (block (call #0 (int 42))))\n(effect #0 Async)\n(effect #1 Subprocess)\n"
+        "(fn #40 main () i64 (block (call #0 (int 42))))\n(effect #0 Async)\n(effect #1 Subprocess)\n"
     );
 }
 
@@ -85,7 +86,7 @@ fn resolve_dump_struct_lit_and_field() {
             "struct Box { v: i64 }\nfn main() -> i64 { let b = Box { v: 42 }; b.v }\n"
         ),
         "(struct #0 Box (field v i64))\n\
-         (fn #38 main () i64 (block (let #0 _ (struct-lit #0 Box (field v (int 42)))) (field (var #0) v)))\n\
+         (fn #40 main () i64 (block (let #0 _ (struct-lit #0 Box (field v (int 42)))) (field (var #0) v)))\n\
          (effect #0 Async)\n\
          (effect #1 Subprocess)\n"
     );

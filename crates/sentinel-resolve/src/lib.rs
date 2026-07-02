@@ -239,6 +239,17 @@ pub const ARG_FN_ID: FnId = FnId(36);
 /// context-typed from `f`'s own `Fn<T,R>` signature.
 pub const APPLY_FN_ID: FnId = FnId(37);
 
+// ADR 0071 M1.4a: the `Shared<T>` refcounted-handle builtins. `shared_new(v: T)
+// -> Shared<T>` allocates a refcounted cell (rc=1); `shared_get(s: Shared<T>)
+// -> T` reads a copy of the value out. Reserved here as FnId 38/39 (slice 2a —
+// name→FnId + base shift only); their `Type::Shared` plumbing + `check_call`
+// dispatch + codegen lowering land in slices 2b/3, no fixture calls them yet.
+// Appending these shifts the user-fn FnId base 38 → 40.
+/// `shared_new(v: T) -> Shared<T>` — allocate a refcounted shared cell (rc=1).
+pub const SHARED_NEW_FN_ID: FnId = FnId(38);
+/// `shared_get(s: Shared<T>) -> T` — read a copy of the shared cell's value.
+pub const SHARED_GET_FN_ID: FnId = FnId(39);
+
 /// Identifier for a struct declaration. Added at C1.4 per ADR 0013
 /// D4 / D5; unique per-program, assigned in source order starting
 /// at 0.
@@ -2908,6 +2919,14 @@ pub fn resolve_module(
     // type to `Type::Fn`); codegen lowers it to an indirect `call`.
     let apply_sig = mk_socket_sig(next_fn_id, "apply", 2);
     next_fn_id += 1;
+    // ADR 0071 M1.4a: the Shared<T> refcounted-handle builtins (reserved slots,
+    // slice 2a). Both arity 1: `shared_new(v) -> Shared<T>`; `shared_get(s) ->
+    // T`. Special-cased in sentinel-types' `check_call` at slice 2b; codegen
+    // lowers them to `sentinel_shared_new` / `sentinel_shared_get`.
+    let shared_new_sig = mk_socket_sig(next_fn_id, "shared_new", 1);
+    next_fn_id += 1;
+    let shared_get_sig = mk_socket_sig(next_fn_id, "shared_get", 1);
+    next_fn_id += 1;
 
     let mut fn_table: HashMap<String, FnId> = HashMap::new();
     let mut signatures: Vec<FnSignature> = vec![
@@ -2922,6 +2941,7 @@ pub fn resolve_module(
         stdin_recv_sig, stdout_send_sig,
         arg_count_sig, arg_sig,
         apply_sig,
+        shared_new_sig, shared_get_sig,
     ];
     fn_table.insert("print".to_string(), PRINT_FN_ID);
     fn_table.insert("unwrap_or".to_string(), UNWRAP_OR_FN_ID);
@@ -2961,6 +2981,8 @@ pub fn resolve_module(
     fn_table.insert("arg_count".to_string(), ARG_COUNT_FN_ID);
     fn_table.insert("arg".to_string(), ARG_FN_ID);
     fn_table.insert("apply".to_string(), APPLY_FN_ID);
+    fn_table.insert("shared_new".to_string(), SHARED_NEW_FN_ID);
+    fn_table.insert("shared_get".to_string(), SHARED_GET_FN_ID);
 
     // Phase D.6 / ADR 0037 D5.1: register each imported `pub fn` as an
     // EXTERN in this module's FnId space — after builtins, before own fns.
@@ -5168,14 +5190,15 @@ mod tests {
         }];
         let rp = resolve_module(&main, &imports).expect("resolve_module");
 
-        // Extern `add` = FnId(38) (right after the 38 builtins 0..=37: ADR
+        // Extern `add` = FnId(40) (right after the 40 builtins 0..=39: ADR
         // 0066 M1.2 channels 21..=24, M2.1 process_spawn/wait 25..=26, M2.2
         // process_write/read 27..=28, M2.3 process_send/recv 29..=30, M2.4a
         // sealed_channel/sealed_process 31..=32, M2.4b stdin_recv/stdout_send
-        // 33..=34, arg_count/arg 35..=36, ADR 0070 apply 37 → base 38), marked
-        // extern; own `main` follows at FnId(39).
+        // 33..=34, arg_count/arg 35..=36, ADR 0070 apply 37, ADR 0071 M1.4a
+        // shared_new/shared_get 38..=39 → base 40), marked extern; own `main`
+        // follows at FnId(41).
         let add_sig = rp.fn_signatures.iter().find(|s| s.name == "add").expect("add sig");
-        assert_eq!(add_sig.id, FnId(38));
+        assert_eq!(add_sig.id, FnId(40));
         assert_eq!(add_sig.arity, 2);
         assert!(!add_sig.is_runtime);
         assert_eq!(
@@ -5183,7 +5206,7 @@ mod tests {
             Some(vec!["util".to_string(), "math".to_string()])
         );
         let main_sig = rp.fn_signatures.iter().find(|s| s.name == "main").expect("main sig");
-        assert_eq!(main_sig.id, FnId(39));
+        assert_eq!(main_sig.id, FnId(41));
         assert_eq!(main_sig.extern_origin, None);
 
         // The extern has NO body — only the one own fn (`main`) is resolved.
@@ -5460,9 +5483,9 @@ mod tests {
         // FnId(27..=28) = subprocess write/read (M2.2); FnId(29..=30) =
         // subprocess send/recv (M2.3); FnId(31..=32) = the M2.4a sealed bridge
         // builtins; FnId(33..=34) = M2.4b stdin_recv/stdout_send; FnId(35..=36) =
-        // arg_count/arg; FnId(37) = apply (ADR 0070); FnId(38) = main (the
-        // first user fn).
-        assert_eq!(p.main().id, FnId(38));
+        // arg_count/arg; FnId(37) = apply (ADR 0070); FnId(38..=39) = shared_new/
+        // shared_get (ADR 0071 M1.4a); FnId(40) = main (the first user fn).
+        assert_eq!(p.main().id, FnId(40));
         assert_eq!(p.fn_signatures[0].name, "print");
         assert!(p.fn_signatures[0].is_runtime);
     }
@@ -5502,15 +5525,16 @@ mod tests {
             },
             other => panic!("expected Binary, got {other:?}"),
         }
-        // FnId(0..=37) = the runtime builtins (0..=13 original, 14..=20
+        // FnId(0..=39) = the runtime builtins (0..=13 original, 14..=20
         // sockets, 21..=24 channels per ADR 0066 M1.2, 25..=26 subprocess
         // spawn/wait per M2.1, 27..=28 subprocess write/read per M2.2, 29..=30
         // subprocess send/recv per M2.3, 31..=32 sealed bridge per M2.4a, 33..=34
         // stdin_recv/stdout_send per M2.4b, 35..=36 arg_count/arg, 37 apply per
-        // ADR 0070); FnId(38) = double (first user fn), FnId(39) = main.
+        // ADR 0070, 38..=39 shared_new/shared_get per ADR 0071 M1.4a); FnId(40) =
+        // double (first user fn), FnId(41) = main.
         let main = p.main();
         match &main.body.tail.kind {
-            ResolvedExprKind::Call { id, .. } => assert_eq!(*id, FnId(38)),
+            ResolvedExprKind::Call { id, .. } => assert_eq!(*id, FnId(40)),
             other => panic!("expected Call, got {other:?}"),
         }
     }

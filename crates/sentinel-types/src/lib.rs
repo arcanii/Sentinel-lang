@@ -5058,6 +5058,42 @@ pub fn check_module(
             extern_origin: None,
         });
     }
+    // ADR 0071 M1.4a: the `Shared<T>` refcounted-handle builtins — `shared_new(v)
+    // -> Shared<T>` (FnId 38) and `shared_get(s) -> T` (FnId 39). This is slice 2a
+    // (reserve the FnIds + keep `typed_signatures` FnId-aligned so the user-fn base
+    // is 40); the registered param/return types below are PLACEHOLDERS (arity 1
+    // each, like `apply`'s), inert because no fixture calls these yet. Slice 2b
+    // adds `Type::Shared` + a `check_call` special-case (the `channel_new`/`recv`
+    // context-typed pattern) that computes the real element type, so these
+    // placeholders are never consulted.
+    {
+        let shared_new_sig = &program.fn_signatures[38];
+        typed_signatures.push(TypedFnSignature {
+            id: shared_new_sig.id,
+            name: shared_new_sig.name.clone(),
+            name_span: shared_new_sig.name_span.clone(),
+            type_params: vec![],
+            param_types: vec![Type::I64],
+            return_type: Type::I64,
+            effect_row: vec![],
+            is_main: false,
+            is_runtime: true,
+            extern_origin: None,
+        });
+        let shared_get_sig = &program.fn_signatures[39];
+        typed_signatures.push(TypedFnSignature {
+            id: shared_get_sig.id,
+            name: shared_get_sig.name.clone(),
+            name_span: shared_get_sig.name_span.clone(),
+            type_params: vec![],
+            param_types: vec![Type::I64],
+            return_type: Type::I64,
+            effect_row: vec![],
+            is_main: false,
+            is_runtime: true,
+            extern_origin: None,
+        });
+    }
 
     for fn_def in &program.fns {
         let resolved_sig = &program.fn_signatures[fn_def.id.0 as usize];
@@ -11162,7 +11198,9 @@ mod tests {
         // (3)=len, (4)=str_eq, (5)=u8_to_i64, (6)=i64_to_u8 (D.2 / ADR
         // 0033 D5), (7)=vec_new, (8)=push, (9)=pop, (10)=vec_to_array
         // (D.3 / ADR 0034 D5), (11)=read_file, (12)=write_file,
-        // (13)=print_bytes (D.4 / ADR 0035 D4), (14..=20)=tcp_* (ADR 0056), (21)=main. The generic
+        // (13)=print_bytes (D.4 / ADR 0035 D4), (14..=20)=tcp_* (ADR 0056);
+        // channels/subprocess/sealed/stdio/arg/apply occupy (21..=37), the ADR
+        // 0071 M1.4a shared builtins (38..=39), so (40)=main (first user fn). The generic
         // builtins occupy FnId(1..=3) per ADR 0014 D9 + ADR 0015 D4; the
         // byte-string builtins FnId(4..=6) per ADR 0033 D5; the collection
         // builtins FnId(7..=10) per ADR 0034 D5; the file-I/O builtins
@@ -11213,7 +11251,10 @@ mod tests {
         assert_eq!(p.fn_signatures[36].name, "arg");
         // ADR 0070: the `apply` indirect-call builtin occupies FnId(37).
         assert_eq!(p.fn_signatures[37].name, "apply");
-        assert_eq!(p.fn_signatures[38].name, "main");
+        // ADR 0071 M1.4a: the Shared<T> builtins occupy FnId(38..=39).
+        assert_eq!(p.fn_signatures[38].name, "shared_new");
+        assert_eq!(p.fn_signatures[39].name, "shared_get");
+        assert_eq!(p.fn_signatures[40].name, "main");
         assert!(p.signature(main.id).is_main);
     }
 

@@ -142,10 +142,10 @@ fn cg_struct_name_to(out: &mut Vec<u8>, c: &mut TyCtx, sid: i64) -> i64 {
 }
 
 // (ADR 0070) append a user fn's name (from the fn-name blob `ufnb`) to `out` —
-// the `Fn` value's `@<name>` operand text. `fid` is a user FnId (>= 38).
+// the `Fn` value's `@<name>` operand text. `fid` is a user FnId (>= 40).
 fn cg_fn_name_to(out: &mut Vec<u8>, c: &mut TyCtx, fid: i64) -> i64 {
-    let bs: i64 = (*c).ufns[fid - 38];
-    let be: i64 = (*c).ufne[fid - 38];
+    let bs: i64 = (*c).ufns[fid - 40];
+    let be: i64 = (*c).ufne[fid - 40];
     let mut bi: i64 = bs;
     while bi < be {
         push(out, (*c).ufnb[bi]);

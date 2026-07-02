@@ -70,12 +70,14 @@ const TARGET_TRIPLE: &str = "arm64-apple-darwin";
 // send/recv (29..=30); M2.4a added the SealedChannel bridge builtins (31..=32);
 // M2.4b added the self-stdin/stdout framed builtins (33..=34); the M2.4 follow-on
 // added arg_count/arg (35..=36); ADR 0070 added the `apply` indirect-call builtin
-// (37), shifting the user-fn base to 38. A call to a builtin FnId not caught by a
+// (37); ADR 0071 M1.4a added the Shared<T> refcounted-handle builtins shared_new/
+// shared_get (38..=39, reserved slots — no lowering arm yet, slice 2a), shifting
+// the user-fn base to 40. A call to a builtin FnId not caught by a
 // special lowering arm above returns Err (the fixture is skipped); the channel +
 // subprocess + sealed-bridge + self-stdin/stdout + arg builtins ARE specially
 // lowered — `apply` deliberately is NOT (ADR 0070 snc-only; it falls through to
 // this same Err fallback, like an unported builtin).
-const FIRST_USER_FN: u32 = 38;
+const FIRST_USER_FN: u32 = 40;
 
 /// Bar B / effects (ADR 0020): the reserved kont op_id for a PURE_RETURN wrap
 /// (`u32::MAX`) — the handle dispatch + `k(v)` pure-check compare against it.

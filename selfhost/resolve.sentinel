@@ -234,8 +234,9 @@ fn slice_eq_src(src: &[u8], as_: i64, ae: i64, bs: i64, be: i64) -> bool {
     }
 }
 
-// The 14 runtime builtins → their reserved FnIds (0..=13), or -1 if `q` is not a
-// builtin. Same order as sentinel-resolve's pre-registration (ADR 0035 D2).
+// The runtime builtins → their reserved FnIds (0..=13 core, 21..=39 the ADR
+// 0056/0066/0069/0070/0071 additions), or -1 if `q` is not a builtin. Same
+// order as sentinel-resolve's pre-registration (ADR 0035 D2).
 fn builtin_id(q: &[u8]) -> i64 {
     if name_eq_lit(q, "print") {
         0
@@ -307,12 +308,19 @@ fn builtin_id(q: &[u8]) -> i64 {
         // values. A tests/ui fixture calls `apply` by name (needed here for
         // that reason alone — the actual Type::Fn lowering stays deferred).
         37
+    } else if name_eq_lit(q, "shared_new") {
+        // ADR 0071 M1.4a: the Shared<T> refcounted-handle builtins (reserved
+        // slots — slice 2a). No fixture calls them yet; the Type::Shared
+        // lowering + check_call dispatch land in slices 2b/3.
+        38
+    } else if name_eq_lit(q, "shared_get") {
+        39
     } else {
         0 - 1
     }
 }
 
-// Resolve a call name to a FnId: a builtin (0..=36), else a user fn (38 + its
+// Resolve a call name to a FnId: a builtin (0..=39), else a user fn (40 + its
 // index in the user-fn table), else -1.
 fn fn_lookup(c: &mut RCtx, src: &[u8], q: &[u8]) -> i64 {
     let b: i64 = builtin_id(q);
@@ -325,7 +333,7 @@ fn fn_lookup(c: &mut RCtx, src: &[u8], q: &[u8]) -> i64 {
         while i < n {
             if found == 0 - 1 {
                 if name_eq_src(src, (*c).ufs[i], (*c).ufe[i], q) {
-                    found = 38 + i;
+                    found = 40 + i;
                     0
                 } else {
                     0

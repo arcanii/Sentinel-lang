@@ -4,14 +4,14 @@ module types;
 // whether it names a top-level fn eligible as a `Fn<T,R>` value (mirrors the
 // Rust resolver's `ExprKind::Var` fallback to `fn_table` — resolve's own
 // mirror already exists from ADR 0070 v1; this is the TYPES-stage
-// generalization). An ineligible/undefined name (`fid < 38`, or
+// generalization). An ineligible/undefined name (`fid < 40`, or
 // `fn_ref_sig` returns -1) is left unhandled, matching this project's
 // "error parity is out of scope" convention (ADR 0044 D7) — the oracle
 // rejects these cases too, so the differential never compares scg's
 // behavior for them.
 fn dump_te_fnref(out: &mut Vec<u8>, nm: [u8], exp: i64, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
     let fid: i64 = fn_lookup(c, src, &nm);
-    let fty: i64 = if fid >= 38 {
+    let fty: i64 = if fid >= 40 {
         fn_ref_sig(c, fid)
     } else {
         0 - 1
@@ -906,15 +906,15 @@ fn dump_te_call(out: &mut Vec<u8>, cn: [u8], ca: Args, exp: i64, src: &[u8], c: 
                 // `(targs …)` then substitutes its return type; a generic BUILTIN
                 // (len/unwrap_or/is_some) uses the existing first-arg `dump_gcall`;
                 // everything else dumps args straight with the declared return type.
-                let isgenfn: bool = if fid >= 38 {
-                    (*c).uftp[fid - 38] > 0
+                let isgenfn: bool = if fid >= 40 {
+                    (*c).uftp[fid - 40] > 0
                 } else {
                     false
                 };
                 // (6/N) USER-fn (FnId >= 14) args are CONSUMING (moved into the callee);
                 // BUILTIN args (len/push/vec_to_array/print/…) are NON-consuming (the
                 // builtins borrow / don't move). `argcons` gates the args' move-recording.
-                let argcons: bool = fid >= 38;
+                let argcons: bool = fid >= 40;
                 let svf: bool = (*c).consuming;
                 (*c).consuming = argcons;
                 // (7c) MIR: ALL calls — plain, generic-builtin (len/push/vec_new/…), and

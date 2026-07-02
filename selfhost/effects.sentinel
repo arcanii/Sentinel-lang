@@ -632,7 +632,7 @@ fn dump_rows(out: &mut Vec<u8>, rows: &Vec<i64>, c: &mut ECtx, src: &[u8]) -> i6
     let mut i: i64 = 0;
     while i < nf {
         append_str(out, "(fn #");
-        append_int(out, 38 + i);
+        append_int(out, 40 + i);
         push(out, ' ');
         append_slice(out, src, (*c).ufs[i], (*c).ufe[i]);
         let row: i64 = (*rows)[i];
