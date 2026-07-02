@@ -14,7 +14,43 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
-**Latest (2026-07-02) — ADR 0071 (`Shared<T>` + `Mutex<T>`) PROPOSED+PINNED; M1.4-0 (the D5 gate)
+**Latest (2026-07-02) — ADR 0071 M1.4a: `Shared<T>` refcounted-handle DONE — the first
+`Copy`-for-the-checker YET drop-emitting type, self-hosted byte-identically.** The ADR 0066
+M1.4 shared-state escape hatch's first sub-phase is complete: `Shared<T>` over public
+word-scalar `T` is a real refcounted handle (an `Arc<T>` without the mutex). It is
+**`is_copy_type == true`** (frictionless N-way co-ownership, no move-tracking, none of the
+lexical over-rejections — like `Channel`) **YET `needs_drop == true`** (the first such type
+in the lattice) — codegen emits `sentinel_shared_release` (rc--, frees at zero) at every
+scope exit. Surface: `shared_new(v: T) -> Shared<T>` (rc=1) / `shared_get(s) -> T` (copy the
+value out; the element is encoded into the cell's i64 slot, the `Channel<T>` send/recv
+encode). The load-bearing **clone/drop accounting** (ADR 0071 D2): `rc++`
+(`sentinel_shared_clone`) fires at each duplication of a NAMED `Shared` binding into a new
+owner — exactly three sites, a `let` initializer, a by-value USER-fn argument (builtins like
+`shared_get` borrow → no clone), and a `spawn` capture; an **rvalue** source (a
+`shared_new(...)` result / a call returning `Shared`) TRANSFERS its unit (no clone). Invariant
+`#new + #clone == #release` ⇒ the cell is freed exactly once (a miscount → the runtime's
+underflow debug-assert / a UAF crash). Built in slices, each four-check-green: the
+`SentinelShared` runtime cell + 4 C-ABI symbols (`d73322c`); the coordinated FnId-base shift
+38→40 in BOTH compilers + the 4 driver golden dumps (`e1e1c9f`); `Type::Shared(SharedId)` +
+`SharedData` interner (the `Channel<T>` template) + `resolve_type_expr` + `check_call` +
+lowering, both compilers, `needs_drop` still false (`d3eafe6`); the refcount clone/drop
+accounting across all THREE codegen surfaces — inkwell (for `snc build`), the hand-maintained
+`llvm_dump.rs` oracle, and selfhost `scg` — `is_spawn_word_scalar += Shared` (`8f0a2c6`); and
+a types-stage guard rejecting a returned NAMED `Shared` binding (`c18d7be`). **Guarded gap
+(slice 3b, partial):** returning a named `Shared` binding (bare-`Var` tail / `return`)
+transfers a refcount unit and so must be exempt from the drop drain — inkwell does this via
+`tail_returned_var`, but the byte-identical oracle+scg mirror needs a reliable
+direct-`Var`-tail signal that scg's `mvbv` can't give for a compound tail, so it is rejected
+(`SharedReturnNotSupported`, ui `c71_shared_return_named`) until the follow-on lifts it;
+returning `shared_new(...)`/a call directly (an rvalue transfer) works. Verified end-to-end
+via inkwell (exit-42 leak-checked `tests/pass` fixtures `c71_shared` + `c71_shared_rc`, freed
+exactly once) AND byte-identical `snc llvm` ≡ `scg` on all 9 self-host differential stages,
+both bootstrap fixed points green; four-check clean (exactly the 18 known pre-existing
+Windows failures, zero new; `pass` 142→144). **Next: M1.4b (`Mutex<T>` = `Shared<SentinelMutex<T>>`,
+ADR 0071 D4/D5) — the co-ownership/refcount/drop is now solved once by `Shared<T>`; then
+M1.4c (secret `T`, D6, also unblocks `Channel<secret T>`).** See ADR 0071 + HANDOVER §RESUME.
+
+**Earlier (2026-07-02) — ADR 0071 (`Shared<T>` + `Mutex<T>`) PROPOSED+PINNED; M1.4-0 (the D5 gate)
 DONE — the honest finding is "channels mostly suffice, proceed on `Shared<T>`'s standalone value."**
 The ADR 0066 M1.4 concurrency milestone (the bounded shared-state escape hatch) is now designed:
 [ADR 0071](decisions/0071-shared-ownership-and-mutex.md), broken out per ADR 0066 D5 ("its own ADR"),

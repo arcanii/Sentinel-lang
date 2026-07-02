@@ -1,13 +1,26 @@
 # ADR 0071: `Shared<T>` shared ownership + `Mutex<T>` — the bounded shared-state escape hatch (ADR 0066 M1.4)
 
-Status: **PROPOSED — design PINNED (maintainer sign-off 2026-07-02); implementation not
-started (M1.4-0 next).** This is the M1.4 sub-phase of the ADR 0066 threading roadmap,
-broken out into its own ADR per **ADR 0066 D5** ("blocked on first designing a
-runtime-refcounted `Shared<T>` handle … a language feature in its own right, arguably
-bigger than the mutex it unblocks, and warranting its own ADR") and the roadmap table
-(line 866, "M1.4 … yes — likely its own ADR first"). All D-points D1–D9 below are
-PINNED; the first step is the M1.4-0 motivating example (D1), which is *also the D5 gate*
-— if it shows channels suffice, M1.4a is reconsidered before any machinery is built.
+Status: **ACCEPTED for M1.4a (`Shared<T>`) — implemented 2026-07-02; M1.4b (`Mutex<T>`)
++ M1.4c (secret) PROPOSED, design PINNED.** Design PINNED with maintainer sign-off
+2026-07-02. This is the M1.4 sub-phase of the ADR 0066 threading roadmap, broken out into
+its own ADR per **ADR 0066 D5** ("blocked on first designing a runtime-refcounted
+`Shared<T>` handle … a language feature in its own right, arguably bigger than the mutex
+it unblocks, and warranting its own ADR"). All D-points D1–D9 are PINNED.
+
+**M1.4a (`Shared<T>`, public word-scalar `T`) is DONE** (slices: runtime cell `d73322c` →
+FnId-base shift 38→40 `e1e1c9f` → `Type::Shared` + lowering `d3eafe6` → refcount clone/drop
+accounting `8f0a2c6` → named-Shared-return guard `c18d7be`). It delivers D2 (the first
+`Copy`-for-the-checker YET drop-emitting handle), D3's drop half (a hard-coded
+`sentinel_shared_release` drop arm, no `Drop` trait), D8's net-new refcount cell, and D9's
+full self-host mirror (byte-identical `snc llvm` ≡ `scg`, both bootstrap fixed points green).
+**One deliberately-guarded gap:** returning a NAMED `Shared` binding (a bare-`Var` tail /
+`return`) is rejected (`SharedReturnNotSupported`) — the drop-drain transfer exemption works
+in inkwell but its byte-identical oracle+scg mirror is a tracked follow-on (needs a reliable
+direct-`Var`-tail signal the append-only selfhost dialect's `mvbv` can't give for compound
+tails); returning `shared_new(...)`/a call directly (an rvalue transfer) works. **M1.4b
+(`Mutex<T>` = `Shared<SentinelMutex<T>>`, D4/D5) and M1.4c (secret `T`, D6) are next** — the
+co-ownership/refcount problem is now solved once by `Shared<T>`. M1.4-0 (the D5 gate,
+committed `6d39952`) was done first as designed.
 
 **Maintainer decisions taken (2026-07-02), pinned below:** the **full `Shared<T>` +
 `Mutex<T>`** path (not the leaked-atomic-cell MVP), and **secret shared state
