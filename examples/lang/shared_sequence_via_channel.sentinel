@@ -1,0 +1,110 @@
+// ADR 0071 M1.4-0 (the D5 gate) — motivating example, part 2 of 2: the shape
+// channels handle POORLY.
+//
+// A shared sequence/ID allocator: a single owning `allocator` task holds `next`
+// and hands out a fresh value per request. Seven `claimer` workers each send one
+// request and read back one value. The allocator returns the final sequence value.
+//
+// This still COMPILES and runs — but it exposes the real gap, and the gap is
+// concrete, not hand-wavy:
+//
+//   1. REPLIES ARE UNADDRESSED. `replies` is one shared mpsc channel. A claimer
+//      does `send(requests, 1); recv(replies)` — but the value it recv's may be
+//      the reply to a DIFFERENT claimer's request. There is no way to route "the
+//      answer to MY request" back to me. For a bare counter that is harmless (any
+//      claimer getting any distinct value is fine). But the moment a worker must
+//      USE its own value — write to `slot[my_id]`, seed an RNG, index a per-worker
+//      buffer — this pattern is simply WRONG, and there is no clean channel fix:
+//        - You cannot send a per-worker reply-channel handle THROUGH the request,
+//          because Sentinel channels carry only word-scalars (`Channel<i64>`), not
+//          `Channel<Channel<i64>>` (ADR 0066 M1.2b element set).
+//        - You cannot `select`/poll over N per-worker reply channels — Sentinel has
+//          no multi-channel select. So N static reply channels don't compose either.
+//      The only correct channel encodings are to SERIALIZE the claimers (one
+//      in-flight at a time — defeating the concurrency that is the whole point) or
+//      to pre-generate all IDs and hand them out work-stealing (only works when the
+//      IDs don't depend on per-worker state).
+//
+//   2. THE CRITICAL SECTION LIVES IN THE OWNER, NOT THE WORKER. Every atomic
+//      operation on the shared value must be a message type the allocator already
+//      understands. A worker cannot run an arbitrary read-modify-write in place; to
+//      add a new atomic op you extend the owner's protocol and redeploy the owner.
+//
+// Contrast the `Mutex<i64>` this ADR proposes — the worker runs its own critical
+// section in place, gets its own value, and uses it directly:
+//
+//      fn claimer(seq: Mutex<i64>) -> i64 {
+//          let g = lock(seq);           // ? -> guard on success
+//          let mine = *g;               // read
+//          *g = mine + 6;               // read-modify-write, atomic
+//          // g drops here -> unlock
+//          mine                         // MY value, correlated, usable in place
+//      }
+//
+// So M1.4-0's honest finding: channels are SUFFICIENT for commutative fan-in
+// accumulation (see `shared_counter_via_channel`), but INADEQUATE for worker-side
+// correlated read-modify-write — and in Sentinel that inadequacy is a hard wall
+// (no channel-of-channels, no select), not merely a throughput cost. See
+// `docs/decisions/0071-m14-0-analysis.md` for the full weigh-up and go/no-go.
+//
+// 7 requests, +6 each: next = 6,12,18,24,30,36,42. allocator returns 42. Exit 42.
+
+fn allocator(requests: Channel<i64>, replies: Channel<i64>) -> i64 ! { Async } {
+    let mut next: i64 = 0;
+    let mut running: bool = true;
+    while running {
+        let r = recv(requests);
+        if is_some(r) {
+            next = next + 6;
+            // Reply — but `replies` is shared, so this answer is NOT addressed to
+            // the claimer that asked. See the header (limitation 1).
+            send(replies, next);
+            0
+        } else {
+            running = false;
+            0
+        };
+    }
+    next
+}
+
+fn claimer(requests: Channel<i64>, replies: Channel<i64>) -> i64 ! { Async } {
+    send(requests, 1);
+    // May receive some OTHER claimer's value — replies are uncorrelated.
+    let mine = recv(replies);
+    unwrap_or(mine, 0)
+}
+
+fn main() -> i64 {
+    let requests = channel_new();
+    let replies = channel_new();
+    let final_seq: i64 = scope concurrent {
+        let a = spawn allocator(requests, replies);
+        let c0 = spawn claimer(requests, replies);
+        let c1 = spawn claimer(requests, replies);
+        let c2 = spawn claimer(requests, replies);
+        let c3 = spawn claimer(requests, replies);
+        let c4 = spawn claimer(requests, replies);
+        let c5 = spawn claimer(requests, replies);
+        let c6 = spawn claimer(requests, replies);
+        // Each claimer completes once it has read one (uncorrelated) reply; drain
+        // them, then close `requests` so the allocator sees EOF and returns `next`.
+        let s0: i64 = c0.await;
+        let s1: i64 = c1.await;
+        let s2: i64 = c2.await;
+        let s3: i64 = c3.await;
+        let s4: i64 = c4.await;
+        let s5: i64 = c5.await;
+        let s6: i64 = c6.await;
+        channel_close(requests);
+        // The claimers between them received exactly the 7 distinct values
+        // 6..42 (in some order), but no claimer can rely on WHICH it got —
+        // the sum is order-independent, the per-claimer identity is not.
+        let drained: i64 = s0 + s1 + s2 + s3 + s4 + s5 + s6;
+        let seq: i64 = a.await;
+        // seq is the deterministic result (42); `drained` (=168) is discarded but
+        // demonstrates the claimers did each read a value.
+        seq + drained - drained
+    };
+    final_seq
+}

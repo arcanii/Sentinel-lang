@@ -1,0 +1,72 @@
+// ADR 0071 M1.4-0 (the D5 gate) — motivating example, part 1 of 2: the shape
+// channels handle WELL.
+//
+// A shared counter, implemented the ADR 0066 D2 way: "a shared counter becomes an
+// owning task that receives increment messages and answers queries (the actor
+// pattern in miniature)." Three worker tasks concurrently send increment messages
+// into one `commands` channel; the owning `counter` task folds them into its
+// PRIVATE `total` and returns it when the channel closes (EOF). No shared mutable
+// state exists at all — `total` is owned by exactly one task; the workers never
+// touch it, they only send values that MOVE into the channel.
+//
+// This works cleanly because the operation is a COMMUTATIVE FOLD — accumulation /
+// fan-in is the actor pattern's sweet spot, and it is exactly the "shared counter"
+// D5 uses as its example of what channels already cover. There is no lock, no data
+// race possible (single owner), and no deadlock possible (no cycle of waits).
+//
+// The cost, for the record (this is the comparison M1.4-0 exists to make): every
+// increment is a channel `send` serialized through the single counter task, where
+// a `Mutex<i64>` / atomic would be an in-place `fetch_add`. For a hot counter that
+// is a real throughput gap. But correctness and clarity are fine, and for the
+// coarse-grained accumulation this example shows, channels are genuinely SUFFICIENT.
+//
+// The shape channels do NOT handle well — a worker running an arbitrary atomic
+// read-modify-write on the shared value in place — is `shared_ledger_via_channel`
+// (part 2) + the written analysis in `docs/decisions/0071-m14-0-analysis.md`.
+//
+// 3 workers * 14 increments of 1 = 42. Exit 42.
+
+fn worker(commands: Channel<i64>, n: i64) -> i64 ! { Async } {
+    let mut i: i64 = 0;
+    while i < n {
+        send(commands, 1);
+        i = i + 1;
+    }
+    0
+}
+
+fn counter(commands: Channel<i64>) -> i64 ! { Async } {
+    let mut total: i64 = 0;
+    let mut running: bool = true;
+    while running {
+        let c = recv(commands);
+        if is_some(c) {
+            total = total + unwrap_or(c, 0);
+            0
+        } else {
+            running = false;
+            0
+        };
+    }
+    total
+}
+
+fn main() -> i64 {
+    let commands = channel_new();
+    let result: i64 = scope concurrent {
+        // The single owner of the counter state.
+        let acc = spawn counter(commands);
+        // Three concurrent contributors, each sending 14 increments.
+        let w0 = spawn worker(commands, 14);
+        let w1 = spawn worker(commands, 14);
+        let w2 = spawn worker(commands, 14);
+        // Wait for every worker to finish sending, THEN close the channel so the
+        // counter drains the mpsc queue and sees EOF (null recv) -> returns total.
+        let a: i64 = w0.await;
+        let b: i64 = w1.await;
+        let c: i64 = w2.await;
+        channel_close(commands);
+        acc.await + a + b + c
+    };
+    result
+}

@@ -472,6 +472,17 @@ const EXAMPLES: &[(&str, i32)] = &[
     // shared work queue (work-stealing via the mutex'd mpsc receiver) + a
     // results fan-in channel. Squares 1/4/5 across the pool. 1+16+25 = 42.
     ("examples/lang/worker_pool.sentinel", 42),
+    // ADR 0071 M1.4-0 (the D5 gate) part 1: a shared counter as an owning task
+    // (the ADR 0066 D2 actor pattern) — three workers fan increments into one
+    // channel, the owner folds them into its private total. The shape channels
+    // handle WELL (commutative accumulation). 3*14 = 42. See
+    // docs/decisions/0071-m14-0-analysis.md.
+    ("examples/lang/shared_counter_via_channel.sentinel", 42),
+    // ADR 0071 M1.4-0 (the D5 gate) part 2: a shared sequence/ID allocator via
+    // request-reply channels — the shape channels handle POORLY (replies are
+    // unaddressed; no channel-of-channels, no select to correlate them). Runs
+    // only because the checked result is order-independent. 7 requests *+6 = 42.
+    ("examples/lang/shared_sequence_via_channel.sentinel", 42),
     // ADR 0066 M2.3b: GENERIC word-scalar elements for the typed process channel —
     // `process_send`/`process_recv` over `u8` / `i32` / `bool` (not just `i64`),
     // encoded into / decoded from the 8-byte i64 frame (the M1.1 spawn encode). The
@@ -790,6 +801,30 @@ fn lang_channel() {
 #[test]
 fn lang_worker_pool() {
     check_example("examples/lang/worker_pool.sentinel", "worker_pool", 42);
+}
+
+#[test]
+fn lang_shared_counter_via_channel() {
+    // ADR 0071 M1.4-0 (the D5 gate) part 1: a shared counter as an owning task —
+    // the shape channels handle WELL (commutative fan-in accumulation). 3*14 = 42.
+    check_example(
+        "examples/lang/shared_counter_via_channel.sentinel",
+        "shared_counter_via_channel",
+        42,
+    );
+}
+
+#[test]
+fn lang_shared_sequence_via_channel() {
+    // ADR 0071 M1.4-0 (the D5 gate) part 2: a shared sequence allocator via
+    // request-reply channels — the shape channels handle POORLY (replies
+    // uncorrelated; no channel-of-channels, no select). Runs only because the
+    // checked result is order-independent. 7 requests *+6 = 42.
+    check_example(
+        "examples/lang/shared_sequence_via_channel.sentinel",
+        "shared_sequence_via_channel",
+        42,
+    );
 }
 
 #[test]

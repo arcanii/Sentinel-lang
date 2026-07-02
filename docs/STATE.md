@@ -14,7 +14,38 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
-**Latest (2026-07-02) — `pass_c5d4_file_io` fixed; the "runtime crash" was a misread `abort()` exit
+**Latest (2026-07-02) — ADR 0071 (`Shared<T>` + `Mutex<T>`) PROPOSED+PINNED; M1.4-0 (the D5 gate)
+DONE — the honest finding is "channels mostly suffice, proceed on `Shared<T>`'s standalone value."**
+The ADR 0066 M1.4 concurrency milestone (the bounded shared-state escape hatch) is now designed:
+[ADR 0071](decisions/0071-shared-ownership-and-mutex.md), broken out per ADR 0066 D5 ("its own ADR"),
+maintainer sign-off 2026-07-02. D-points D1–D9 pinned: full `Shared<T>` + `Mutex<T>` (not the
+leaked-atomic MVP); `Shared<T>` as the first `Copy`-for-the-checker YET drop-emitting handle (the
+central mechanism — a new type category, with the refcount clone/drop accounting rule + `#++==#--`
+invariant); deterministic drop via the existing scope-exit machinery + a hard-coded drop-content arm
+(no general `Drop` trait, respecting ADR 0017 D8) + a new guard no-escape check; `Mutex<T> =
+Shared<SentinelMutex<T>>` with a fallible `lock()` (`?Guard` public / `OpenResult` secret); D5a's two
+deadlock tiers (`LockTimeout` via `parking_lot::try_lock_for`, opt-in wait-for-graph over public lock
+identity); **secret shared state IN scope for v1** (phased M1.4c — also unblocks `Channel<secret T>`);
+no in-process poisoning (Sentinel aborts on panic → `LockPoisoned` reserved for the future
+cross-process story); net-new refcount cell; full oracle-moving self-host mirror. The design was
+grounded by a 5-agent parallel research pass over the borrow checker / drop machinery / runtime+broker
+/ secret discipline / prior intent. **M1.4-0 — the D5 "prove channels insufficient" gate, done FIRST
+as the honest opening move (not skipped):** two real, compiling, deterministic examples
+([shared_counter_via_channel](../examples/lang/shared_counter_via_channel.sentinel) — the shape
+channels handle WELL, commutative fan-in accumulation; and
+[shared_sequence_via_channel](../examples/lang/shared_sequence_via_channel.sentinel) — worker-side
+correlated request-reply, which hits a HARD WALL: replies are unaddressed, and Sentinel has no
+channel-of-channels and no select to correlate them, so it's an expressiveness wall, not just a
+throughput cost) + a written weigh-up ([0071-m14-0-analysis.md](decisions/0071-m14-0-analysis.md)).
+Honest verdict: the gap is real but its incidence in Sentinel's mostly-embarrassingly-parallel
+crypto/security domain is low — no in-domain example needed it; proceeding to M1.4a is justified
+primarily on `Shared<T>`'s standalone value (shared read-only data + atomics + the secret-container
+unblock), with the correlated-RMW `Mutex` case as the pinning motivation. Both examples registered in
+`examples.rs` (both `--separate` and merge paths green); clippy clean; no compiler change yet (the
+self-host differential is untouched). **Next: M1.4a — the `Shared<T>` refcounted handle (the hard
+part: the Copy-yet-drop machinery + full selfhost mirror).**
+
+**Earlier (2026-07-02) — `pass_c5d4_file_io` fixed; the "runtime crash" was a misread `abort()` exit
 code, not a memory bug.** A background task flagged this file-I/O test as a Windows runtime crash
 (exits `0xC0000409`, whose NTSTATUS name is `STATUS_STACK_BUFFER_OVERRUN`, so the suspicion was
 unsafe buffer handling in `sentinel_write_file` on an I/O failure). **Disproven by a minimal repro:**
