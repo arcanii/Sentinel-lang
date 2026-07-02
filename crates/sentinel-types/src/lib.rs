@@ -1465,6 +1465,10 @@ pub fn is_spawn_word_scalar(ty: Type) -> bool {
             // cell into a spawned worker is a core use (the refcount `clone` at the
             // spawn site + the task's own scope-exit `release` keep it balanced).
             | Type::Shared(_)
+            // ADR 0071 M1.4b slice 3a: a `Mutex<T>` handle is a pointer — capturing a
+            // mutex into a spawned worker is a core use (the shared-counter pattern);
+            // the spawn-site `clone` + the task's scope-exit `release` stay balanced.
+            | Type::Mutex(_)
     )
 }
 
@@ -1480,6 +1484,20 @@ fn is_named_shared_return(expr: &TypedExpr) -> bool {
     match &expr.kind {
         TypedExprKind::Var(_) => matches!(expr.ty, Type::Shared(_)),
         TypedExprKind::Block(b) => is_named_shared_return(&b.tail),
+        _ => false,
+    }
+}
+
+/// ADR 0071 M1.4b slice 3a: the `Mutex` analog of [`is_named_shared_return`].
+/// Returning a NAMED `Mutex<T>` binding (a bare `Var` in tail / `return` position)
+/// transfers its refcount unit to the caller — but the transfer exemption in the
+/// drop drain is only implemented in inkwell (`tail_returned_var`), not the
+/// byte-identical oracle + scg, so it is guarded (rejected) exactly like a named
+/// `Shared` return. Return `mutex_new(...)` (an rvalue) directly instead.
+fn is_named_mutex_return(expr: &TypedExpr) -> bool {
+    match &expr.kind {
+        TypedExprKind::Var(_) => matches!(expr.ty, Type::Mutex(_)),
+        TypedExprKind::Block(b) => is_named_mutex_return(&b.tail),
         _ => false,
     }
 }
@@ -3996,6 +4014,22 @@ pub enum TypeError {
     )]
     SharedReturnNotSupported {
         #[label("a named `Shared` binding returned here")]
+        span: miette::SourceSpan,
+    },
+
+    /// ADR 0071 M1.4b slice 3a: the `Mutex` analog of [`SharedReturnNotSupported`].
+    /// Returning a NAMED `Mutex<T>` binding transfers its refcount unit; the drop-
+    /// drain transfer exemption is only in inkwell, not the byte-identical oracle +
+    /// scg — so it is guarded. Return `mutex_new(...)` (an rvalue) directly, or bind
+    /// the handle in the caller. Without this guard a returned named `Mutex` would be
+    /// both transferred AND dropped (a double-release / use-after-free).
+    #[error("returning a named `Mutex<T>` binding is not yet supported")]
+    #[diagnostic(
+        code(sentinel::types::mutex_return_not_supported),
+        help("return `mutex_new(...)` (or the producing expression) directly — an rvalue return transfers the refcount unit; or bind the handle in the caller. Returning a named `Mutex` local/param is a deferred follow-on (ADR 0071 M1.4b).")
+    )]
+    MutexReturnNotSupported {
+        #[label("a named `Mutex` binding returned here")]
         span: miette::SourceSpan,
     },
 
@@ -6796,6 +6830,13 @@ fn check_fn(
     // `check_expr`'s `Return` arm (covering method bodies too).
     if !block_diverges(&body) && is_named_shared_return(&body.tail) {
         return Err(TypeError::SharedReturnNotSupported {
+            span: to_source_span(&fn_def.body.tail.span),
+        });
+    }
+    // ADR 0071 M1.4b slice 3a: the `Mutex` analog — a reachable tail that is a named
+    // `Mutex` binding transfers its refcount unit (guarded, mirrors the Shared case).
+    if !block_diverges(&body) && is_named_mutex_return(&body.tail) {
+        return Err(TypeError::MutexReturnNotSupported {
             span: to_source_span(&fn_def.body.tail.span),
         });
     }
@@ -9705,6 +9746,12 @@ fn check_expr(
                     span: to_source_span(&inner.span),
                 });
             }
+            // ADR 0071 M1.4b slice 3a: the `Mutex` analog of the guard above.
+            if is_named_mutex_return(&inner_t) {
+                return Err(TypeError::MutexReturnNotSupported {
+                    span: to_source_span(&inner.span),
+                });
+            }
             let ty = inner_t.ty;
             (TypedExprKind::Return(Box::new(inner_t)), ty)
         }
@@ -11416,6 +11463,11 @@ fn type_error_to_diagnostic(err: &TypeError) -> Diagnostic {
         TypeError::SharedReturnNotSupported { span } => (
             "sentinel::types::shared_return_not_supported",
             "returning a named `Shared<T>` binding is not yet supported".to_string(),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        TypeError::MutexReturnNotSupported { span } => (
+            "sentinel::types::mutex_return_not_supported",
+            "returning a named `Mutex<T>` binding is not yet supported".to_string(),
             span.offset()..(span.offset() + span.len()),
         ),
         TypeError::FnTypeArgsNotSupported { span } => (

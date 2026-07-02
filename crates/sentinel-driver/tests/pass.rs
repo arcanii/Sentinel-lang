@@ -1200,6 +1200,18 @@ fn pass_c71_mutex_lock() {
 }
 
 #[test]
+fn pass_c71_mutex_rc() {
+    // ADR 0071 M1.4b slice 3a: the Mutex<T> handle refcount clone/drop accounting.
+    // Exercises all three rc++ duplication sites (let-binding, by-value user-fn arg,
+    // spawn capture) balanced by rc-- at each owning binding's scope-exit drop; the
+    // cell is freed exactly once (a miscount would over-release → UAF crash /
+    // underflow assert, so the clean exit 42 is the leak-check). 14 + 21 + 7 = 42.
+    let r = build_and_run("c71_mutex_rc.sentinel");
+    assert_eq!(r.exit, 42);
+    assert_eq!(r.stdout, "");
+}
+
+#[test]
 fn pass_c71_shared() {
     // ADR 0071 M1.4a slice 2b: Shared<T> type + shared_new/shared_get lowering
     // (both compilers). A refcounted cell holding 20 is read back through a Copy

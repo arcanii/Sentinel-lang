@@ -429,17 +429,27 @@ fn dump_tstmt(out: &mut Vec<u8>, s: Stmt, src: &[u8], c: &mut TyCtx, gb: &mut Ve
             if cg_on(c) {
                 let rk0: i64 = (*c).cglk;
                 let rv0: i64 = (*c).cglv;
-                // (ADR 0071 M1.4a slice 3) rc++ a `let y = x` that duplicates a named
-                // Shared binding (mvbv >= 0, set by the RHS `Expr::Var`) into a new
-                // owner — an rvalue RHS (shared_new/call) transfers its unit, no clone.
-                let cln: bool = (*c).mvbv >= 0 && cg_is_shared(c, letty);
-                let rv: i64 = if cln {
+                // (ADR 0071 M1.4a slice 3 / M1.4b slice 3a) rc++ a `let y = x` that
+                // duplicates a named Shared/Mutex binding (mvbv >= 0, set by the RHS
+                // `Expr::Var`) into a new owner — an rvalue RHS (shared_new/mutex_new/
+                // call) transfers its unit, no clone.
+                let cln_shared: bool = (*c).mvbv >= 0 && cg_is_shared(c, letty);
+                let cln_mutex: bool = (*c).mvbv >= 0 && cg_is_mutex(c, letty);
+                let cln: bool = cln_shared || cln_mutex;
+                let rv: i64 = if cln_shared {
                     let clv: i64 = cg_dst(c);
                     cgo_str(c, "call ptr @sentinel_shared_clone(ptr ");
                     cgo_operand(c, rk0, rv0);
                     cgo_str(c, ")\n");
                     (*c).cg_used_sharedclone = true;
                     clv
+                } else if cln_mutex {
+                    let mclv: i64 = cg_dst(c);
+                    cgo_str(c, "call ptr @sentinel_mutex_clone(ptr ");
+                    cgo_operand(c, rk0, rv0);
+                    cgo_str(c, ")\n");
+                    (*c).cg_used_mutexclone = true;
+                    mclv
                 } else {
                     rv0
                 };

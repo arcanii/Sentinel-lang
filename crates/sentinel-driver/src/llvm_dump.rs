@@ -155,9 +155,13 @@ struct RuntimeSyms {
     shared_release: bool,
     /// ADR 0071 M1.4b: the `Mutex<T>` refcounted-cell runtime symbols.
     /// `sentinel_mutex_new(i64) -> ptr` (rc=1, unlocked), `sentinel_mutex_lock(ptr,
-    /// ptr) -> i64` (0 acquired / 1 timeout, writes the guard slot ptr to `*out`).
+    /// ptr) -> i64` (0 acquired / 1 timeout, writes the guard slot ptr to `*out`),
+    /// `sentinel_mutex_clone(ptr) -> ptr` (rc++), `sentinel_mutex_release(ptr)`
+    /// (rc--, free at 0) — the slice-3a refcount accounting.
     mutex_new: bool,
     mutex_lock: bool,
+    mutex_clone: bool,
+    mutex_release: bool,
     /// ADR 0066 M2.1: the subprocess runtime symbols.
     /// `sentinel_process_spawn(ptr, i64, ptr, i64) -> ptr`, `_wait(ptr) -> i64`.
     process_spawn: bool,
@@ -212,6 +216,8 @@ impl RuntimeSyms {
         self.shared_release |= other.shared_release;
         self.mutex_new |= other.mutex_new;
         self.mutex_lock |= other.mutex_lock;
+        self.mutex_clone |= other.mutex_clone;
+        self.mutex_release |= other.mutex_release;
         self.process_spawn |= other.process_spawn;
         self.process_wait |= other.process_wait;
         self.process_write |= other.process_write;
@@ -320,6 +326,12 @@ impl RuntimeSyms {
         if self.mutex_lock {
             writeln!(out, "declare i64 @sentinel_mutex_lock(ptr, ptr)").unwrap();
         }
+        if self.mutex_clone {
+            writeln!(out, "declare ptr @sentinel_mutex_clone(ptr)").unwrap();
+        }
+        if self.mutex_release {
+            writeln!(out, "declare void @sentinel_mutex_release(ptr)").unwrap();
+        }
         // ADR 0066 M2.1: the subprocess runtime group.
         if self.process_spawn {
             writeln!(out, "declare ptr @sentinel_process_spawn(ptr, i64, ptr, i64)").unwrap();
@@ -387,6 +399,8 @@ impl RuntimeSyms {
             || self.shared_release
             || self.mutex_new
             || self.mutex_lock
+            || self.mutex_clone
+            || self.mutex_release
             || self.process_spawn
             || self.process_wait
             || self.process_write
@@ -2681,6 +2695,14 @@ impl Emit<'_> {
                 writeln!(self.body, "  call void @sentinel_shared_release(ptr %v{v})").unwrap();
                 self.used.shared_release = true;
             }
+            // ADR 0071 M1.4b slice 3a: the Mutex refcount `--` at scope exit — mirrors
+            // the Shared arm with `sentinel_mutex_release`.
+            Type::Mutex(_) => {
+                let v = self.fresh();
+                writeln!(self.body, "  %v{v} = load ptr, ptr %v{ptr_reg}").unwrap();
+                writeln!(self.body, "  call void @sentinel_mutex_release(ptr %v{v})").unwrap();
+                self.used.mutex_release = true;
+            }
             _ => {}
         }
         Ok(())
@@ -2693,14 +2715,24 @@ impl Emit<'_> {
     /// source transfers its unit → no clone. Mirrors inkwell's `clone_if_shared_var`
     /// and the selfhost clone sites (byte-identical `call ptr @sentinel_shared_clone`).
     fn clone_if_shared_var(&mut self, expr: &TypedExpr, op: String) -> Result<String, String> {
-        if matches!(expr.kind, TypedExprKind::Var(_)) && matches!(expr.ty, Type::Shared(_)) {
-            let c = self.fresh();
-            writeln!(self.body, "  %v{c} = call ptr @sentinel_shared_clone(ptr {op})").unwrap();
-            self.used.shared_clone = true;
-            Ok(format!("%v{c}"))
-        } else {
-            Ok(op)
+        if !matches!(expr.kind, TypedExprKind::Var(_)) {
+            return Ok(op);
         }
+        // ADR 0071 M1.4b slice 3a: a named `Mutex` binding clones via
+        // `sentinel_mutex_clone` (the same rc++ pattern as Shared).
+        let sym = match expr.ty {
+            Type::Shared(_) => "sentinel_shared_clone",
+            Type::Mutex(_) => "sentinel_mutex_clone",
+            _ => return Ok(op),
+        };
+        let c = self.fresh();
+        writeln!(self.body, "  %v{c} = call ptr @{sym}(ptr {op})").unwrap();
+        if matches!(expr.ty, Type::Shared(_)) {
+            self.used.shared_clone = true;
+        } else {
+            self.used.mutex_clone = true;
+        }
+        Ok(format!("%v{c}"))
     }
 
     /// Emit a heap `[T]` buffer from already-rendered element operands: the
@@ -4408,6 +4440,9 @@ fn needs_drop(ty: Type, program: &TypedProgram) -> bool {
         // ADR 0071 M1.4a slice 3: a `Shared<T>` handle drops via
         // `sentinel_shared_release` (rc--) — the first Copy-yet-needs-drop type.
         Type::Shared(_) => true,
+        // ADR 0071 M1.4b slice 3a: a `Mutex<T>` handle drops via
+        // `sentinel_mutex_release` (rc--), mirroring `Shared`.
+        Type::Mutex(_) => true,
         Type::Struct(id) => program
             .struct_decl(id)
             .fields

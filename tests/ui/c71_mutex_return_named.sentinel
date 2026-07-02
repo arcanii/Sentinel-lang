@@ -1,0 +1,17 @@
+// ADR 0071 M1.4b slice 3a: returning a NAMED `Mutex<T>` binding (a bare `Var` in
+// tail or `return` position) transfers a refcount unit to the caller. The transfer
+// exemption in the scope-exit drop drain is implemented in inkwell (`snc build`) but
+// its byte-identical mirror into the `snc llvm` oracle + the self-hosted `scg` is a
+// deferred follow-on — so this is guarded (rejected) to keep the emitted IR sound
+// (without it, the returned `m` would be both transferred AND released — a
+// double-release, since a `Mutex` is `Copy` and so is never move-recorded). The fix
+// is to return the producing expression DIRECTLY (`mutex_new(...)`, an rvalue that
+// transfers with no exemption needed). Here `make`'s tail is the named local `m`.
+fn make() -> Mutex<i64> {
+    let m = mutex_new(7);
+    m
+}
+
+fn main() -> i64 {
+    if is_some(lock(make())) { 42 } else { 0 }
+}

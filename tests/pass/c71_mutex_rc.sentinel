@@ -1,0 +1,38 @@
+// ADR 0071 M1.4b slice 3a: the `Mutex<T>` handle refcount clone/drop accounting
+// (`Mutex<T> = Shared<SentinelMutex<T>>`, D4 — the same rc machinery as Shared).
+// This exercises all three duplication sites that emit `rc++`
+// (`sentinel_mutex_clone`) — a `let` binding, a by-value user-fn argument, and a
+// `spawn` capture — each balanced by an `rc--` (`sentinel_mutex_release`) at the
+// owning binding's scope-exit drop.
+//
+// The load-bearing invariant is `#new + #clone == #release`, so the cell is freed
+// EXACTLY once. A miscount would over-release → a use-after-free crash (caught by
+// the exit code) or trip the runtime's underflow debug-assert. (The guard's `*g`
+// deref + unlock-on-drop are slice 3b, so the value is not read here — this fixture
+// isolates the HANDLE refcount.) Trace:
+//   mutex_new(7)             rc=1  (a owns)
+//   let b = a                rc=2  (clone: a named-Var duplication into a new owner)
+//   read_it(a)               rc=3 then 2  (clone into the param; released at fn exit) = 14
+//   spawn use_mutex(b)       rc=3 then 2  (clone into the capture; released on the task) = 21
+//   main exit                release b (rc 1), release a (rc 0 → freed once)
+// #new(1) + #clone(3) == #release(4: read_it param, use_mutex param, main b, main a).
+// 14 + 21 + 7 = 42. Exit 42.
+
+fn use_mutex(m: Mutex<i64>) -> i64 ! { Async } {
+    21
+}
+
+fn read_it(m: Mutex<i64>) -> i64 {
+    14
+}
+
+fn main() -> i64 {
+    let a = mutex_new(7);
+    let b = a;
+    let viafn = read_it(a);
+    let total: i64 = scope concurrent {
+        let w = spawn use_mutex(b);
+        w.await
+    };
+    viafn + total + 7
+}

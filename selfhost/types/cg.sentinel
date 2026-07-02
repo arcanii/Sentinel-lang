@@ -1001,6 +1001,10 @@ fn cg_needs_drop(c: &mut TyCtx, ty: i64) -> bool {
         // (ADR 0071 M1.4a slice 3) a Shared<T> handle drops via
         // sentinel_shared_release (rc--) — the first Copy-yet-needs-drop type.
         true
+    } else if cg_is_mutex(c, ty) {
+        // (ADR 0071 M1.4b slice 3a) a Mutex<T> handle drops via
+        // sentinel_mutex_release (rc--), mirroring Shared.
+        true
     } else {
         let nsid: i64 = struct_of_handle(c, ty);
         if nsid >= 0 {
@@ -1135,6 +1139,18 @@ fn cg_emit_drop(c: &mut TyCtx, ty: i64, slot: i64, vid: i64) -> i64 {
         cgo_int(c, sdv);
         cgo_str(c, ")\n");
         (*c).cg_used_sharedrelease = true;
+        0
+    } else if cg_is_mutex(c, ty) {
+        // (ADR 0071 M1.4b slice 3a) the Mutex refcount `--` at scope exit — mirrors
+        // the Shared arm with sentinel_mutex_release.
+        let mdv: i64 = cg_dst(c);
+        cgo_str(c, "load ptr, ptr %v");
+        cgo_int(c, slot);
+        cg_putc(c, '\n');
+        cgo_str(c, "  call void @sentinel_mutex_release(ptr %v");
+        cgo_int(c, mdv);
+        cgo_str(c, ")\n");
+        (*c).cg_used_mutexrelease = true;
         0
     } else {
         // (8d-drops-2) a struct: GEP each drop-needing field (declaration order) and
@@ -1355,6 +1371,18 @@ fn cg_clone_shared_arg(c: &mut TyCtx, at: i64) -> i64 {
         cgo_str(c, ")\n");
         (*c).cg_used_sharedclone = true;
         cg_reg(c, clv);
+        0
+    } else if cg_on(c) && (*c).cg_ufarg && (*c).mvbv >= 0 && cg_is_mutex(c, at) {
+        // (ADR 0071 M1.4b slice 3a) the Mutex analog — rc++ a named Mutex arg into a
+        // user-fn owning param via sentinel_mutex_clone (mirrors the Shared branch).
+        let mok: i64 = (*c).cglk;
+        let mov: i64 = (*c).cglv;
+        let mclv: i64 = cg_dst(c);
+        cgo_str(c, "call ptr @sentinel_mutex_clone(ptr ");
+        cgo_operand(c, mok, mov);
+        cgo_str(c, ")\n");
+        (*c).cg_used_mutexclone = true;
+        cg_reg(c, mclv);
         0
     } else {
         0

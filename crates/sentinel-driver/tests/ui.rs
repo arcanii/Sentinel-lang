@@ -130,6 +130,9 @@ ui_snapshot!(c66_sealed_channel_public_element, "c66_sealed_channel_public_eleme
 // transfer exemption is mirrored into the oracle + scg. Surfaces
 // SharedReturnNotSupported (return `shared_new(...)` directly instead).
 ui_snapshot!(c71_shared_return_named, "c71_shared_return_named.sentinel");
+// ADR 0071 M1.4b slice 3a: returning a NAMED `Mutex<T>` binding — guarded like the
+// Shared case. Surfaces MutexReturnNotSupported (return `mutex_new(...)` directly).
+ui_snapshot!(c71_mutex_return_named, "c71_mutex_return_named.sentinel");
 
 // ---- ADR 0070: non-capturing function values (types) ----
 // D4: a wrong-arity fn is not eligible as a Fn<T,R> value (any word-scalar shape).

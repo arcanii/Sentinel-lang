@@ -1,18 +1,25 @@
 // ADR 0071 M1.4b slice 2b-ii: `lock(m) -> ?Guard<T>` reaches TYPE + LOWERING in
 // both compilers. `lock` acquires the mutex with the always-on LockTimeout tier
 // and returns `?Guard` — a guard on success, None on timeout (the `recv` `?T`
-// shape, D4 fallible). This brings `Type::Guard` + the NEW `NullableInner::Guard`
+// shape, D4 fallible). This brings `Type::Guard` + the `NullableInner::Guard`
 // (`?Guard` lowers to `{ i1, ptr }`, like `?ptr`) + `is_some` over a `?Guard` into
 // every self-host differential stage.
 //
-// At THIS slice the guard AND the mutex deliberately LEAK (`needs_drop == false`):
-// the `*g` deref (read/write the protected `T`), the guard's unlock-on-drop, the
-// refcount clone/`--`, and the D3 guard-no-escape rule are all slice 3.
+// DELIBERATE LEAK (slice-3a soundness): the mutex is created as an UNBOUND rvalue
+// temporary passed straight to `lock`, so it is never scope-exit-dropped (no
+// `sentinel_mutex_release`). That is required until slice 3b wires the guard's
+// unlock-on-drop: `lock` holds the lock (the runtime guard is forgotten across the
+// C-ABI boundary), and releasing a still-locked cell would trip the runtime's
+// free-while-locked debug-assert. Binding the mutex + dropping it (the refcount
+// path) is covered separately by `c71_mutex_rc.sentinel`; the `*g` deref + the
+// guard's unlock-on-drop that make a bound-and-locked mutex sound are slice 3b.
 //
-// `m` holds 42; the (uncontended) lock succeeds → `is_some(g)` is true → 42. Exit 42.
+// The (uncontended) lock succeeds → `is_some` is true → 42. Exit 42.
 
 fn main() -> i64 {
-    let m = mutex_new(42);
-    let g = lock(m);
-    if is_some(g) { 42 } else { 0 }
+    if is_some(lock(mutex_new(42))) {
+        42
+    } else {
+        0
+    }
 }

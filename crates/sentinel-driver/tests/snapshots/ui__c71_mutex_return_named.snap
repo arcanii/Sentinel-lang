@@ -1,0 +1,14 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c71_mutex_return_named.sentinel\")"
+---
+sentinel::types::mutex_return_not_supported
+
+  × returning a named `Mutex<T>` binding is not yet supported
+    ╭─[tests/ui/c71_mutex_return_named.sentinel:12:5]
+ 11 │     let m = mutex_new(7);
+ 12 │     m
+    ·     ┬
+    ·     ╰── 
+ 13 │ }
+    ╰────

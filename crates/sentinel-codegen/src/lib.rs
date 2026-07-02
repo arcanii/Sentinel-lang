@@ -676,6 +676,20 @@ pub fn compile_to_object_for_module(
         i64_ty.fn_type(&[ptr_ty.into(), ptr_ty.into()], false),
         None,
     );
+    // ADR 0071 M1.4b slice 3a: the Mutex<T> refcount accounting symbols —
+    // `sentinel_mutex_clone(ptr) -> ptr` (rc++, returns the same ptr) and
+    // `sentinel_mutex_release(ptr) -> void` (rc--, frees at zero). Mirror the
+    // Shared refcount half (`Mutex<T> = Shared<SentinelMutex<T>>`, D4).
+    let mutex_clone_fn = module.add_function(
+        "sentinel_mutex_clone",
+        ptr_ty.fn_type(&[ptr_ty.into()], false),
+        None,
+    );
+    let mutex_release_fn = module.add_function(
+        "sentinel_mutex_release",
+        context.void_type().fn_type(&[ptr_ty.into()], false),
+        None,
+    );
     // ADR 0066 M2.1: declare the subprocess runtime symbols (cross-platform).
     // `sentinel_process_spawn(path, path_len, argv, argc) -> ptr` (null on
     // failure), `sentinel_process_wait(ptr) -> i64` (exit code / -1).
@@ -1416,6 +1430,8 @@ pub fn compile_to_object_for_module(
             shared_release_fn,
             mutex_new_fn,
             mutex_lock_fn,
+            mutex_clone_fn,
+            mutex_release_fn,
             process_spawn_fn,
             process_wait_fn,
             process_write_fn,
@@ -1698,6 +1714,10 @@ struct CodegenCtx<'ctx, 'plan> {
     mutex_new_fn: FunctionValue<'ctx>,
     /// ADR 0071 M1.4b: `sentinel_mutex_lock(m, out) -> i64` (0 acquired / 1 timeout).
     mutex_lock_fn: FunctionValue<'ctx>,
+    /// ADR 0071 M1.4b slice 3a: `sentinel_mutex_clone(ptr) -> ptr` (rc++),
+    /// `sentinel_mutex_release(ptr)` (rc--, free at 0).
+    mutex_clone_fn: FunctionValue<'ctx>,
+    mutex_release_fn: FunctionValue<'ctx>,
     /// ADR 0066 M2.1: the subprocess runtime symbols.
     process_spawn_fn: FunctionValue<'ctx>,
     process_wait_fn: FunctionValue<'ctx>,
@@ -2114,10 +2134,10 @@ fn field_type_needs_drop_inner(
         // scope-exit drop is `sentinel_shared_release` (the refcount `--`, freeing
         // the cell at zero). The FIRST Copy-yet-needs-drop handle (D2).
         Type::Shared(_) => true,
-        // ADR 0071 M1.4b: at THIS slice (2b-i) a `Mutex<T>` handle does NOT drop —
-        // it leaks like `Channel` (`needs_drop == false`). Slice 3 flips this to
-        // emit `sentinel_mutex_release` (rc--) + the guard's `sentinel_mutex_unlock`.
-        Type::Mutex(_) => false,
+        // ADR 0071 M1.4b slice 3a: a `Mutex<T>` handle IS drop-emitting — its
+        // scope-exit drop is `sentinel_mutex_release` (rc--, freeing the cell at
+        // zero), mirroring `Shared`. (The guard's unlock-on-drop is slice 3b.)
+        Type::Mutex(_) => true,
         // ADR 0071 M1.4b: a `Guard<T>` does NOT drop at 2b-ii (leaks; slice 3 makes
         // its scope-exit drop `sentinel_mutex_unlock`).
         Type::Guard(_) => false,
@@ -4846,10 +4866,19 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                     .map_err(|e| CodegenError::Builder(e.to_string()))?;
             }
             Type::Mutex(_) => {
-                // ADR 0071 M1.4b: at THIS slice (2b-i) a Mutex handle leaks like
-                // Channel — no codegen-emitted drop (`needs_drop == false`). Slice 3
-                // makes this arm emit `sentinel_mutex_release` (rc--) and the guard's
-                // scope-exit `sentinel_mutex_unlock`.
+                // ADR 0071 M1.4b slice 3a: the refcount `--` at scope exit — load the
+                // handle ptr and `sentinel_mutex_release` it (frees the cell when the
+                // last owner drops), mirroring the Shared arm. The rc++ that balances
+                // it fires at each duplication of a named Mutex binding (let-init /
+                // by-value user-fn arg / spawn capture) via `clone_if_shared_var`.
+                let ptr_val = self
+                    .builder
+                    .build_load(self.context.ptr_type(inkwell::AddressSpace::default()), ptr, "mutex_drop_ld")
+                    .map_err(|e| CodegenError::Builder(e.to_string()))?
+                    .into_pointer_value();
+                self.builder
+                    .build_call(self.mutex_release_fn, &[ptr_val.into()], "mutex_release")
+                    .map_err(|e| CodegenError::Builder(e.to_string()))?;
             }
             Type::Guard(_) => {
                 // ADR 0071 M1.4b: at THIS slice (2b-ii) a Guard leaks — no
@@ -6508,28 +6537,30 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
     /// `sentinel_shared_release` is balanced. An RVALUE source (a fresh
     /// `shared_new(...)` result, or a call returning `Shared`) TRANSFERS its unit —
     /// no clone. `lowered` is `expr`'s already-lowered value (a Var load = the
-    /// handle ptr). Non-Shared / non-Var exprs pass through unchanged.
+    /// handle ptr). Non-Shared/Mutex / non-Var exprs pass through unchanged. ADR
+    /// 0071 M1.4b slice 3a: a named `Mutex` binding clones via `sentinel_mutex_clone`
+    /// (the same rc++ pattern — `Mutex<T> = Shared<SentinelMutex<T>>`).
     fn clone_if_shared_var(
         &mut self,
         expr: &TypedExpr,
         lowered: BasicValueEnum<'ctx>,
     ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
-        if matches!(expr.kind, TypedExprKind::Var(_)) && matches!(expr.ty, Type::Shared(_)) {
-            let cloned = self
-                .builder
-                .build_call(
-                    self.shared_clone_fn,
-                    &[lowered.into_pointer_value().into()],
-                    "shared_clone",
-                )
-                .map_err(|e| CodegenError::Builder(e.to_string()))?
-                .try_as_basic_value()
-                .left()
-                .expect("sentinel_shared_clone returns ptr");
-            Ok(cloned)
-        } else {
-            Ok(lowered)
+        if !matches!(expr.kind, TypedExprKind::Var(_)) {
+            return Ok(lowered);
         }
+        let (clone_fn, name) = match expr.ty {
+            Type::Shared(_) => (self.shared_clone_fn, "shared_clone"),
+            Type::Mutex(_) => (self.mutex_clone_fn, "mutex_clone"),
+            _ => return Ok(lowered),
+        };
+        let cloned = self
+            .builder
+            .build_call(clone_fn, &[lowered.into_pointer_value().into()], name)
+            .map_err(|e| CodegenError::Builder(e.to_string()))?
+            .try_as_basic_value()
+            .left()
+            .expect("shared/mutex clone returns ptr");
+        Ok(cloned)
     }
 
     /// ADR 0066 M2.1: `process_spawn(path: [u8], args: [[u8]]) -> Process`.
