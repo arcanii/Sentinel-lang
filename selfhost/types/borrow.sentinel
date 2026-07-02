@@ -40,6 +40,10 @@ fn is_move_type(c: &mut TyCtx, h: i64) -> bool {
             // (ADR 0071 M1.4b) a Mutex<T> handle is Copy (like Shared). At slice
             // 2b-i it leaks (no drop); the refcount/unlock-on-drop is slice 3.
             false
+        } else if k == 19 {
+            // (ADR 0071 M1.4b) a Guard<T> is Copy at slice 2b-ii (leaks). Slice 3
+            // adds the unlock-on-drop + the D3 no-escape rule.
+            false
         } else if k == 3 {
             is_move_type(c, (*c).ta[idx])
         } else if k == 4 {

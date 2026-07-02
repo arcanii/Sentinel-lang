@@ -206,6 +206,7 @@ fn new_tyctx(mode: i64) -> TyCtx {
         cg_used_sharedclone: false,
         cg_used_sharedrelease: false,
         cg_used_mutexnew: false,
+        cg_used_mutexlock: false,
         cg_used_procspawn: false,
         cg_used_procwait: false,
         cg_used_procwrite: false,

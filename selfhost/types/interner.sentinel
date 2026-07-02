@@ -85,6 +85,11 @@ fn mk_shared(c: &mut TyCtx, elem: i64) -> i64 { intern_type(c, 17, elem, 0) }
 // to an opaque `ptr` (*SentinelMutex). Copy for the borrow checker; at slice 2b-i
 // it leaks (no drop) like `Shared` — the refcount/unlock-on-drop is slice 3.
 fn mk_mutex(c: &mut TyCtx, elem: i64) -> i64 { intern_type(c, 18, elem, 0) }
+// (ADR 0071 M1.4b) a `Guard<T>` scope-bound lock guard (interner kind 19; a = the
+// protected element handle); renders `Guard<T>`. Lowers to a single opaque `ptr`.
+// Produced by `lock(m) -> ?Guard<T>`. NOT writable in type position. Copy at slice
+// 2b-ii (leaks) — the unlock-on-drop + D3 no-escape rule are slice 3.
+fn mk_guard(c: &mut TyCtx, elem: i64) -> i64 { intern_type(c, 19, elem, 0) }
 
 // --- (4h) type-param scope --------------------------------------------------
 
@@ -474,6 +479,11 @@ fn render_type(out: &mut Vec<u8>, h: i64, c: &mut TyCtx) -> i64 {
         } else if k == 18 {
             // (ADR 0071 M1.4b) Mutex<T>: `Mutex<` + element + `>` (mirrors Shared).
             append_str(out, "Mutex<");
+            render_type(out, a, c);
+            push(out, '>')
+        } else if k == 19 {
+            // (ADR 0071 M1.4b) Guard<T>: `Guard<` + element + `>` (mirrors Mutex).
+            append_str(out, "Guard<");
             render_type(out, a, c);
             push(out, '>')
         } else {
@@ -1465,10 +1475,13 @@ fn builtin_ret(c: &mut TyCtx, fid: i64) -> i64 {
         // the i64 case (the differential fixture) byte-identical.
         mk_shared(c, 0)
     } else if fid == 40 {
-        // (ADR 0071 M1.4b) mutex_new(v) -> Mutex<i64> (lock (41) -> ?Guard is
-        // slice 2b-ii). The check_call special-case computes the real element;
-        // this default keeps the i64 case byte-identical.
+        // (ADR 0071 M1.4b) mutex_new(v) -> Mutex<i64>. The check_call special-case
+        // computes the real element; this default keeps the i64 case byte-identical.
         mk_mutex(c, 0)
+    } else if fid == 41 {
+        // (ADR 0071 M1.4b) lock(m) -> ?Guard<i64> — a nullable over the guard handle
+        // (the recv `?T` pattern; default i64 element = handle 0).
+        mk_nullable(c, mk_guard(c, 0))
     } else {
         0
     }

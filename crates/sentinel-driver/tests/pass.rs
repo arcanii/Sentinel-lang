@@ -1187,6 +1187,19 @@ fn pass_c71_mutex() {
 }
 
 #[test]
+fn pass_c71_mutex_lock() {
+    // ADR 0071 M1.4b slice 2b-ii: lock(m) -> ?Guard + Type::Guard +
+    // NullableInner::Guard (both compilers). A mutex holding 42 is locked; the
+    // uncontended acquire succeeds so is_some(?Guard) is true -> 42. Exercises the
+    // `recv`-shaped ?Guard build ({i1, ptr}) + is_some over ?Guard. needs_drop is
+    // still false at this slice (guard + mutex leak; *g deref / unlock / refcount /
+    // the D3 no-escape rule are slice 3). Exit 42.
+    let r = build_and_run("c71_mutex_lock.sentinel");
+    assert_eq!(r.exit, 42);
+    assert_eq!(r.stdout, "");
+}
+
+#[test]
 fn pass_c71_shared() {
     // ADR 0071 M1.4a slice 2b: Shared<T> type + shared_new/shared_get lowering
     // (both compilers). A refcounted cell holding 20 is read back through a Copy

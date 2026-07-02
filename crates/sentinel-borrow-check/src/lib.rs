@@ -1498,6 +1498,10 @@ fn is_copy_type(ty: Type, program: &TypedProgram) -> bool {
         // (like `Shared`). At slice 2b it still leaks (`needs_drop == false`);
         // slice 3 adds the scope-exit drop (`sentinel_mutex_release`, rc--).
         Type::Mutex(_) => true,
+        // ADR 0071 M1.4b: a `Guard<T>` is Copy for the borrow checker at this
+        // slice (leaks; needs_drop == false). Slice 3 adds the unlock-on-drop +
+        // the D3 no-escape rule (the guard must not outlive its critical section).
+        Type::Guard(_) => true,
     }
 }
 
@@ -1512,6 +1516,8 @@ fn is_copy_nullable_inner(inner: NullableInner) -> bool {
         | NullableInner::F64
         | NullableInner::Ptr => true,
         NullableInner::Ref(_) => true,
+        // ADR 0071 M1.4b: `?Guard<T>`'s payload is a bare `ptr` — Copy (like `?ptr`).
+        NullableInner::Guard(_) => true,
         NullableInner::Struct(_)
         | NullableInner::GenericInstance(_)
         | NullableInner::TypeParam(_) => false,

@@ -140,6 +140,16 @@ fn cg_is_mutex(c: &mut TyCtx, h: i64) -> bool {
     }
 }
 
+// (ADR 0071 M1.4b) is `h` a `Guard<T>` (interner kind 19)? Lowers to a single
+// opaque `ptr` (the runtime guard handle). `?Guard` is `{ i1, ptr }`.
+fn cg_is_guard(c: &mut TyCtx, h: i64) -> bool {
+    if h < tbase() {
+        false
+    } else {
+        (*c).tk[h - tbase()] == 19
+    }
+}
+
 // (Bar B) true iff `h` is a nullable `?T` (interner kind 4).
 fn cg_is_nullable(c: &mut TyCtx, h: i64) -> bool {
     if h < tbase() {
@@ -361,6 +371,9 @@ fn cgo_ty(c: &mut TyCtx, h: i64) -> i64 {
         } else if cg_is_mutex(c, hs) {
             // (ADR 0071 M1.4b) a `Mutex<T>` is an opaque `*SentinelMutex`.
             cgo_str(c, "ptr")
+        } else if cg_is_guard(c, hs) {
+            // (ADR 0071 M1.4b) a `Guard<T>` lowers to a single opaque ptr.
+            cgo_str(c, "ptr")
         } else {
             cgo_str(c, "i64")
         }
@@ -426,6 +439,9 @@ fn ll_type_to(out: &mut Vec<u8>, c: &mut TyCtx, h: i64) -> i64 {
             append_str(out, "ptr")
         } else if cg_is_mutex(c, hs) {
             // (ADR 0071 M1.4b) a `Mutex<T>` is an opaque `*SentinelMutex`.
+            append_str(out, "ptr")
+        } else if cg_is_guard(c, hs) {
+            // (ADR 0071 M1.4b) a `Guard<T>` lowers to a single opaque ptr.
             append_str(out, "ptr")
         } else {
             append_str(out, "i64")

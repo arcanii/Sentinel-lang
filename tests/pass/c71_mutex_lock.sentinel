@@ -1,0 +1,18 @@
+// ADR 0071 M1.4b slice 2b-ii: `lock(m) -> ?Guard<T>` reaches TYPE + LOWERING in
+// both compilers. `lock` acquires the mutex with the always-on LockTimeout tier
+// and returns `?Guard` — a guard on success, None on timeout (the `recv` `?T`
+// shape, D4 fallible). This brings `Type::Guard` + the NEW `NullableInner::Guard`
+// (`?Guard` lowers to `{ i1, ptr }`, like `?ptr`) + `is_some` over a `?Guard` into
+// every self-host differential stage.
+//
+// At THIS slice the guard AND the mutex deliberately LEAK (`needs_drop == false`):
+// the `*g` deref (read/write the protected `T`), the guard's unlock-on-drop, the
+// refcount clone/`--`, and the D3 guard-no-escape rule are all slice 3.
+//
+// `m` holds 42; the (uncontended) lock succeeds → `is_some(g)` is true → 42. Exit 42.
+
+fn main() -> i64 {
+    let m = mutex_new(42);
+    let g = lock(m);
+    if is_some(g) { 42 } else { 0 }
+}

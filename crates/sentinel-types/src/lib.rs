@@ -31,7 +31,7 @@ use sentinel_resolve::{
     ResolvedExprKind, ResolvedFnDef, ResolvedPattern, ResolvedProgram, ResolvedStmt,
     ResolvedStmtKind, StructId, TraitId, TypeParamId, VarId, APPLY_FN_ID, CHANNEL_CLOSE_FN_ID,
     CHANNEL_NEW_FN_ID, LEN_FN_ID, PROCESS_RECV_FN_ID, PROCESS_SEND_FN_ID, RECV_FN_ID, SEND_FN_ID,
-    MUTEX_NEW_FN_ID, SHARED_GET_FN_ID, SHARED_NEW_FN_ID,
+    LOCK_FN_ID, MUTEX_NEW_FN_ID, SHARED_GET_FN_ID, SHARED_NEW_FN_ID,
 };
 use sentinel_ast::SelfKind;
 
@@ -263,6 +263,15 @@ pub enum Type {
     /// `elem_ty` is a word-sized scalar (encoded into the cell's i64 slot).
     /// Produced by `mutex_new(v)`; `lock(m)` yields a `?Guard<T>` (slice 2b-ii).
     Mutex(MutexId),
+    /// ADR 0071 M1.4b: `Guard<T>` — the scope-bound lock guard produced by
+    /// `lock(m)`'s success arm (`lock(m) -> ?Guard<T>`). The [`GuardId`] indexes
+    /// into `TypedProgram.guards` (`GuardData { elem_ty }`). Lowers to a single
+    /// opaque `ptr`. NOT writable in type position (no `resolve_type_expr` arm) —
+    /// it only arises as `lock`'s `?Guard` result. Copy for the borrow checker; at
+    /// slice 2b-ii it LEAKS (`needs_drop == false`) — slice 3 makes the guard's
+    /// scope-exit drop `sentinel_mutex_unlock` and adds the D3 no-escape rule +
+    /// the `*g` deref that reads/writes the protected `T`.
+    Guard(GuardId),
 }
 
 /// Identifier for an interned reference type. C2 / ADR 0017 D11.
@@ -376,6 +385,22 @@ pub struct MutexId(pub u32);
 /// i64 slot. Mirrors [`SharedData`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct MutexData {
+    pub elem_ty: Type,
+}
+
+/// ADR 0071 M1.4b: identifier for an interned `Guard<T>` type. Assigned like
+/// [`MutexId`] — the 6 word-scalar `Guard<T>` types are pre-interned at FIXED ids
+/// 0..=5 during builtin signature setup (see [`guard_id_for`]), so `lock`'s
+/// `?Guard<T>` result maps to a stable id WITHOUT threading the `guards` interner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct GuardId(pub u32);
+
+/// The underlying data of a [`Type::Guard`] per ADR 0071 M1.4b. `elem_ty` = the
+/// protected value type the guard reads/writes (via `*g`, slice 3); it matches the
+/// element of the `Mutex<T>` that `lock` was called on. Owned by
+/// [`TypedProgram::guards`]. Mirrors [`MutexData`].
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct GuardData {
     pub elem_ty: Type,
 }
 
@@ -518,6 +543,11 @@ pub enum NullableInner {
     /// D1 + D11. The matching `&?T` (ref of nullable) goes through
     /// [`Type::Ref`] with `inner: Type::Nullable(_)`.
     Ref(RefId),
+    /// ADR 0071 M1.4b: `?Guard<T>` — the fallible result of `lock(m)`. Inline
+    /// `{ i1 valid, ptr }` (a [`Type::Guard`] lowers to a single `ptr`, like
+    /// `?ptr`). The ONLY handle with a `?` form (you never write `?Mutex` /
+    /// `?Channel`), because `lock` is fallible (D4/D5).
+    Guard(GuardId),
 }
 
 impl NullableInner {
@@ -536,6 +566,8 @@ impl NullableInner {
             NullableInner::TypeParam(id) => Type::TypeParam(id),
             NullableInner::GenericInstance(id) => Type::GenericInstance(id),
             NullableInner::Ref(id) => Type::Ref(id),
+            // ADR 0071 M1.4b: `?Guard<T>`'s inner is the guard handle.
+            NullableInner::Guard(id) => Type::Guard(id),
         }
     }
 
@@ -850,6 +882,10 @@ impl Type {
             Type::U128 => Some(NullableInner::U128),
             Type::F64 => Some(NullableInner::F64),
             Type::Ptr => Some(NullableInner::Ptr),
+            // ADR 0071 M1.4b: `?Guard<T>` IS representable — the fallible `lock`
+            // result (the ONLY handle with a `?` form). Unlike `Mutex`/`Shared`
+            // (in the None group below), a Guard can be a nullable payload.
+            Type::Guard(id) => Some(NullableInner::Guard(id)),
             // C3 / ADR 0019 D5: `?(secret T)` is not yet
             // representable — NullableInner has no Secret variant
             // at C3.1 (depth-1 composition limit). Caller surfaces
@@ -946,7 +982,9 @@ impl Type {
             // ADR 0071 M1.4a: no `[Shared]` (a handle).
             | Type::Shared(_)
             // ADR 0071 M1.4b: no `[Mutex]` (a handle).
-            | Type::Mutex(_) => None,
+            | Type::Mutex(_)
+            // ADR 0071 M1.4b: no `[Guard]` (a scope-bound handle).
+            | Type::Guard(_) => None,
         }
     }
 
@@ -1031,7 +1069,9 @@ impl Type {
             // ADR 0071 M1.4a: no `Vec<Shared>` (a handle).
             | Type::Shared(_)
             // ADR 0071 M1.4b: no `Vec<Mutex>` (a handle).
-            | Type::Mutex(_) => None,
+            | Type::Mutex(_)
+            // ADR 0071 M1.4b: no `Vec<Guard>` (a scope-bound handle).
+            | Type::Guard(_) => None,
         }
     }
 
@@ -1229,6 +1269,8 @@ impl Type {
             // ADR 0071 M1.4b: `Mutex<T>`'s word-scalar element carries no
             // TypeParam — pass through unchanged.
             Type::Mutex(_) => self,
+            // ADR 0071 M1.4b: `Guard<T>`'s element carries no TypeParam.
+            Type::Guard(_) => self,
             // ADR 0066 M2.1: `Process` carries no TypeParam — pass through.
             Type::Process => self,
             // ADR 0066 M2.4a: `SealedChannel` carries no TypeParam — pass through.
@@ -1608,6 +1650,50 @@ pub fn intern_mutex(mutexes: &mut Vec<MutexData>, elem_ty: Type) -> MutexId {
     id
 }
 
+/// ADR 0071 M1.4b: the `Guard<T>` word-scalar element types are pre-interned at
+/// FIXED [`GuardId`]s 0..=5 during builtin signature setup (mirroring
+/// [`mutex_id_for`]), so `lock`'s `?Guard<T>` result maps to a stable `GuardId`
+/// WITHOUT threading the `guards` interner. Returns the fixed index for a
+/// word-scalar `elem`, else `None`.
+pub fn guard_id_for(elem: Type) -> Option<u32> {
+    match elem {
+        Type::I64 => Some(0),
+        Type::I32 => Some(1),
+        Type::U8 => Some(2),
+        Type::Bool => Some(3),
+        Type::F64 => Some(4),
+        Type::Ptr => Some(5),
+        _ => None,
+    }
+}
+
+/// The inverse of [`guard_id_for`]: the protected element type of a pre-interned
+/// `Guard<T>` `GuardId` (the `*g` deref result type, slice 3). `i64` for an
+/// unknown id (defensive). Mirrors [`mutex_elem_for`].
+pub fn guard_elem_for(id: GuardId) -> Type {
+    match id.0 {
+        1 => Type::I32,
+        2 => Type::U8,
+        3 => Type::Bool,
+        4 => Type::F64,
+        5 => Type::Ptr,
+        _ => Type::I64,
+    }
+}
+
+/// Intern an `elem_ty` into `guards`, returning its [`GuardId`] per ADR 0071
+/// M1.4b. Linear search, dedup by structural equality; mirrors [`intern_mutex`].
+pub fn intern_guard(guards: &mut Vec<GuardData>, elem_ty: Type) -> GuardId {
+    for (idx, existing) in guards.iter().enumerate() {
+        if existing.elem_ty == elem_ty {
+            return GuardId(idx as u32);
+        }
+    }
+    let id = GuardId(guards.len() as u32);
+    guards.push(GuardData { elem_ty });
+    id
+}
+
 /// ADR 0068: intern a nested array's inner [`ArrayElem`] into `arrays`,
 /// returning its [`ArrayId`]. Linear search, dedup by structural equality;
 /// mirrors [`intern_channel`]'s shape. `Type::Array(ArrayElem::Array(id))` is
@@ -1767,6 +1853,15 @@ pub fn type_display(ty: Type, program: Option<&TypedProgram>) -> String {
             }
             format!("<mutex#{}>", id.0)
         }
+        // ADR 0071 M1.4b: render `Guard<elem>` (mirrors `Mutex<…>`).
+        Type::Guard(id) => {
+            if let Some(p) = program {
+                if let Some(data) = p.guards.get(id.0 as usize) {
+                    return format!("Guard<{}>", type_display(data.elem_ty, program));
+                }
+            }
+            format!("<guard#{}>", id.0)
+        }
         // ADR 0066 M2.1: a plain `Process` handle (no element type).
         Type::Process => "Process".to_string(),
         // ADR 0066 M2.4a: the `secret i64`-minimum sealed endpoint (unit variant).
@@ -1823,6 +1918,7 @@ impl std::fmt::Display for Type {
             Type::Channel(id) => write!(f, "<channel#{}>", id.0),
             Type::Shared(id) => write!(f, "<shared#{}>", id.0),
             Type::Mutex(id) => write!(f, "<mutex#{}>", id.0),
+            Type::Guard(id) => write!(f, "<guard#{}>", id.0),
             Type::Process => write!(f, "Process"),
             Type::SealedChannel => write!(f, "SealedChannel"),
             Type::Fn(id) => {
@@ -2457,6 +2553,11 @@ pub struct TypedProgram {
     /// elements at fixed ids 0..=5 during builtin signature setup (see
     /// [`mutex_id_for`]). Mirrors [`shared`].
     pub mutexes: Vec<MutexData>,
+    /// ADR 0071 M1.4b: interned `Guard<T>` types. Each `Type::Guard(id)` (and
+    /// `NullableInner::Guard(id)`) indexes this vector to recover `(elem_ty)`.
+    /// Pre-populated with the 6 word-scalar elements at fixed ids 0..=5 during
+    /// builtin signature setup (see [`guard_id_for`]). Mirrors [`mutexes`].
+    pub guards: Vec<GuardData>,
     /// ADR 0068: interned NESTED-array elements. Each
     /// `Type::Array(ArrayElem::Array(id))` (`[[T]]`) indexes this vector to
     /// recover the *inner* array's [`ArrayElem`]. Populated when a `[[T]]` type
@@ -2551,6 +2652,12 @@ impl TypedProgram {
     /// Panics on out-of-range — IDs only come from [`intern_mutex`].
     pub fn mutex_data(&self, id: MutexId) -> &MutexData {
         &self.mutexes[id.0 as usize]
+    }
+
+    /// Look up the `(elem_ty)` for a `Guard<T>` type per ADR 0071 M1.4b.
+    /// Panics on out-of-range — IDs only come from [`intern_guard`].
+    pub fn guard_data(&self, id: GuardId) -> &GuardData {
+        &self.guards[id.0 as usize]
     }
 
     /// ADR 0068: the inner [`ArrayElem`] of a nested-array element. Panics on
@@ -4837,6 +4944,10 @@ pub fn check_module(
     // word-scalar elements at fixed MutexIds 0..=5 while building the mutex
     // builtin signatures below (mirrors `shared`).
     let mut mutexes: Vec<MutexData> = Vec::new();
+    // ADR 0071 M1.4b: the `Guard<T>`-type interner. Pre-populated with the 6
+    // word-scalar elements at fixed GuardIds 0..=5 while building the `lock`
+    // signature below (mirrors `mutexes`).
+    let mut guards: Vec<GuardData> = Vec::new();
     // ADR 0068: the nested-array element interner — populated when a `[[T]]` type
     // annotation / literal is resolved (threaded through resolve_type_expr +
     // the check pipeline, like `secrets`/`refs`).
@@ -5453,13 +5564,12 @@ pub fn check_module(
         }
     }
     // ADR 0071 M1.4b: the `Mutex<T>` builtins — `mutex_new(v: T) -> Mutex<T>`
-    // (FnId 40) and `lock(m: Mutex<T>) -> ?Guard` (FnId 41). Pre-intern the 6
-    // word-scalar element types at FIXED MutexIds 0..=5 (matching `mutex_id_for`),
-    // so a `Mutex<T>` annotation / `mutex_new(v)` result resolves to a stable
-    // MutexId without threading the `mutexes` interner (mirrors `shared`). At THIS
-    // slice (2b-i) `mutex_new` gets its real `Mutex<i64>` return + a `check_call`
-    // special-case; `lock`'s return stays a PLACEHOLDER (`i64`) until slice 2b-ii
-    // adds `Type::Guard` + `?Guard` — no fixture calls `lock` yet, so it is inert.
+    // (FnId 40) and `lock(m: Mutex<T>) -> ?Guard<T>` (FnId 41). Pre-intern the 6
+    // word-scalar element types at FIXED MutexIds AND GuardIds 0..=5 (matching
+    // `mutex_id_for`/`guard_id_for`), so a `Mutex<T>` annotation / `mutex_new(v)`
+    // result / `lock`'s `?Guard<T>` resolves to a stable id without threading the
+    // interners. `check_call` special-cases both builtins for the generic element;
+    // these concrete sigs (Mutex<i64> / ?Guard<i64>) are the i64-default fallback.
     {
         let mutex_i64 = Type::Mutex(intern_mutex(&mut mutexes, Type::I64));
         intern_mutex(&mut mutexes, Type::I32);
@@ -5467,9 +5577,15 @@ pub fn check_module(
         intern_mutex(&mut mutexes, Type::Bool);
         intern_mutex(&mut mutexes, Type::F64);
         intern_mutex(&mut mutexes, Type::Ptr);
+        let guard_i64 = Type::Nullable(NullableInner::Guard(intern_guard(&mut guards, Type::I64)));
+        intern_guard(&mut guards, Type::I32);
+        intern_guard(&mut guards, Type::U8);
+        intern_guard(&mut guards, Type::Bool);
+        intern_guard(&mut guards, Type::F64);
+        intern_guard(&mut guards, Type::Ptr);
         let mutex_sigs: &[(usize, &[Type], Type)] = &[
-            (40, &[Type::I64], mutex_i64), // mutex_new(i64) -> Mutex<i64>
-            (41, &[mutex_i64], Type::I64), // lock (placeholder — real ?Guard is 2b-ii)
+            (40, &[Type::I64], mutex_i64),   // mutex_new(i64) -> Mutex<i64>
+            (41, &[mutex_i64], guard_i64),   // lock(Mutex<i64>) -> ?Guard<i64>
         ];
         for (idx, params, ret) in mutex_sigs {
             let sig = &program.fn_signatures[*idx];
@@ -6379,6 +6495,9 @@ pub fn check_module(
         // ADR 0071 M1.4b: pre-populated with the 6 word-scalar `Mutex<T>`
         // elements at fixed MutexIds 0..=5 (matching `mutex_id_for`).
         mutexes,
+        // ADR 0071 M1.4b: pre-populated with the 6 word-scalar `Guard<T>`
+        // elements at fixed GuardIds 0..=5 (matching `guard_id_for`).
+        guards,
         class_decls: typed_class_decls,
         trait_decls: typed_trait_decls,
         impl_decls: typed_impl_decls,
@@ -7562,6 +7681,8 @@ fn try_substitute(
         Type::Shared(_) => Some(ty),
         // ADR 0071 M1.4b: `Mutex<T>`'s word-scalar element carries no TypeParam.
         Type::Mutex(_) => Some(ty),
+        // ADR 0071 M1.4b: `Guard<T>`'s element carries no TypeParam.
+        Type::Guard(_) => Some(ty),
         // ADR 0066 M2.1: `Process` carries no TypeParam.
         Type::Process => Some(ty),
         // ADR 0066 M2.4a: `SealedChannel` carries no TypeParam.
@@ -7625,6 +7746,8 @@ fn contains_type_param(
         Type::Shared(_) => false,
         // ADR 0071 M1.4b: `Mutex<T>`'s word-scalar element is never a TypeParam.
         Type::Mutex(_) => false,
+        // ADR 0071 M1.4b: `Guard<T>`'s element is never a TypeParam.
+        Type::Guard(_) => false,
         Type::Process => false,
         // ADR 0066 M2.4a: `SealedChannel` carries no TypeParam.
         Type::SealedChannel => false,
@@ -8203,6 +8326,41 @@ fn check_call(
                 type_args: vec![],
             },
             Type::Mutex(MutexId(mid)),
+        ));
+    }
+    // ADR 0071 M1.4b: `lock(m: Mutex<T>) -> ?Guard<T>` (fallible, D4/D5 — the recv
+    // `?T` shape). The guard element = the Mutex arg's element (from its MutexId);
+    // the result is `?Guard<T>` (a guard on the success arm / None on timeout).
+    // `type_args=[elem]` when non-i64 (recorded for the slice-3 `*g` deref; the
+    // i64 case emits no type_args, byte-identical).
+    if id == LOCK_FN_ID {
+        let m_typed = check_expr(
+            &args[0], None, env, signatures, structs, class_decls, enums, instances, refs,
+            secrets, arrays, struct_type_param_counts, effect_decls, trait_decls, impl_decls,
+            konts, tasks,
+        )?;
+        let elem = match m_typed.ty {
+            Type::Mutex(mid) => mutex_elem_for(mid),
+            _ => {
+                return Err(TypeError::CallArgMismatch {
+                    callee: "lock".to_string(),
+                    arg_index: 0,
+                    expected: Type::Mutex(MutexId(0)),
+                    got: m_typed.ty,
+                    span: to_source_span(&args[0].span),
+                })
+            }
+        };
+        let gid = guard_id_for(elem).unwrap_or(0);
+        let type_args = if elem == Type::I64 { vec![] } else { vec![elem] };
+        return Ok((
+            TypedExprKind::Call {
+                id,
+                callee_span: callee_span.clone(),
+                args: vec![m_typed],
+                type_args,
+            },
+            Type::Nullable(NullableInner::Guard(GuardId(gid))),
         ));
     }
 

@@ -47,8 +47,8 @@ use sentinel_resolve::{
     IS_SOME_FN_ID, LEN_FN_ID,
     CHANNEL_CLOSE_FN_ID, CHANNEL_NEW_FN_ID, POP_FN_ID, PRINT_BYTES_FN_ID, PRINT_FN_ID,
     PROCESS_READ_FN_ID, PROCESS_RECV_FN_ID, PROCESS_SEND_FN_ID, PROCESS_SPAWN_FN_ID,
-    MUTEX_NEW_FN_ID, PROCESS_WAIT_FN_ID, PROCESS_WRITE_FN_ID, PUSH_FN_ID, SEALED_CHANNEL_FN_ID,
-    SEALED_PROCESS_FN_ID,
+    LOCK_FN_ID, MUTEX_NEW_FN_ID, PROCESS_WAIT_FN_ID, PROCESS_WRITE_FN_ID, PUSH_FN_ID,
+    SEALED_CHANNEL_FN_ID, SEALED_PROCESS_FN_ID,
     SHARED_GET_FN_ID, SHARED_NEW_FN_ID, STDIN_RECV_FN_ID, STDOUT_SEND_FN_ID,
     READ_FILE_FN_ID, RECV_FN_ID, SEND_FN_ID, STR_EQ_FN_ID, U8_TO_I64_FN_ID, UNWRAP_OR_FN_ID,
     VEC_NEW_FN_ID, VEC_TO_ARRAY_FN_ID, WRITE_FILE_FN_ID,
@@ -153,9 +153,11 @@ struct RuntimeSyms {
     shared_get: bool,
     shared_clone: bool,
     shared_release: bool,
-    /// ADR 0071 M1.4b: the `Mutex<T>` refcounted-cell runtime symbols. At slice
-    /// 2b-i only `sentinel_mutex_new(i64) -> ptr` (rc=1, unlocked) is emitted.
+    /// ADR 0071 M1.4b: the `Mutex<T>` refcounted-cell runtime symbols.
+    /// `sentinel_mutex_new(i64) -> ptr` (rc=1, unlocked), `sentinel_mutex_lock(ptr,
+    /// ptr) -> i64` (0 acquired / 1 timeout, writes the guard slot ptr to `*out`).
     mutex_new: bool,
+    mutex_lock: bool,
     /// ADR 0066 M2.1: the subprocess runtime symbols.
     /// `sentinel_process_spawn(ptr, i64, ptr, i64) -> ptr`, `_wait(ptr) -> i64`.
     process_spawn: bool,
@@ -209,6 +211,7 @@ impl RuntimeSyms {
         self.shared_clone |= other.shared_clone;
         self.shared_release |= other.shared_release;
         self.mutex_new |= other.mutex_new;
+        self.mutex_lock |= other.mutex_lock;
         self.process_spawn |= other.process_spawn;
         self.process_wait |= other.process_wait;
         self.process_write |= other.process_write;
@@ -314,6 +317,9 @@ impl RuntimeSyms {
         if self.mutex_new {
             writeln!(out, "declare ptr @sentinel_mutex_new(i64)").unwrap();
         }
+        if self.mutex_lock {
+            writeln!(out, "declare i64 @sentinel_mutex_lock(ptr, ptr)").unwrap();
+        }
         // ADR 0066 M2.1: the subprocess runtime group.
         if self.process_spawn {
             writeln!(out, "declare ptr @sentinel_process_spawn(ptr, i64, ptr, i64)").unwrap();
@@ -380,6 +386,7 @@ impl RuntimeSyms {
             || self.shared_clone
             || self.shared_release
             || self.mutex_new
+            || self.mutex_lock
             || self.process_spawn
             || self.process_wait
             || self.process_write
@@ -3352,6 +3359,26 @@ impl Emit<'_> {
             self.used.mutex_new = true;
             return Ok(format!("%v{v}"));
         }
+        // ADR 0071 M1.4b: lock(m) -> ?Guard: call sentinel_mutex_lock(m, out) (writes
+        // the guard slot ptr to *out, returns 0 acquired / 1 timeout), then build
+        // `{ i1 valid, ptr guard }` (valid = status == 0) — the recv `?T` shape with a
+        // ptr payload (a Guard lowers to a single ptr).
+        if id == LOCK_FN_ID {
+            let m = self.lower_expr(&args[0])?;
+            let out = self.alloca("ptr");
+            let status = self.fresh();
+            writeln!(self.body, "  %v{status} = call i64 @sentinel_mutex_lock(ptr {m}, ptr %v{out})").unwrap();
+            self.used.mutex_lock = true;
+            let valid = self.fresh();
+            writeln!(self.body, "  %v{valid} = icmp eq i64 %v{status}, 0").unwrap();
+            let guard = self.fresh();
+            writeln!(self.body, "  %v{guard} = load ptr, ptr %v{out}").unwrap();
+            let a0 = self.fresh();
+            writeln!(self.body, "  %v{a0} = insertvalue {{ i1, ptr }} undef, i1 %v{valid}, 0").unwrap();
+            let a1 = self.fresh();
+            writeln!(self.body, "  %v{a1} = insertvalue {{ i1, ptr }} %v{a0}, ptr %v{guard}, 1").unwrap();
+            return Ok(format!("%v{a1}"));
+        }
         if id == SHARED_GET_FN_ID {
             // shared_get(s) -> T: read the cell's i64 slot, DECODE into T (returned
             // DIRECTLY — no `?T` wrapper, unlike recv). Element from `type_args[0]`
@@ -3750,6 +3777,8 @@ fn llvm_ty(ty: Type, program: &TypedProgram) -> Result<String, String> {
         Type::Shared(_) => Ok("ptr".to_string()),
         // ADR 0071 M1.4b: a `Mutex<T>` is an opaque `*SentinelMutex`.
         Type::Mutex(_) => Ok("ptr".to_string()),
+        // ADR 0071 M1.4b: a `Guard<T>` lowers to a single opaque ptr.
+        Type::Guard(_) => Ok("ptr".to_string()),
         // ADR 0066 M2.1: a Process handle lowers to an opaque ptr.
         Type::Process => Ok("ptr".to_string()),
         // ADR 0066 M2.4a: a SealedChannel lowers to the same opaque ptr as Process.
