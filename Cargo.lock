@@ -1265,6 +1265,7 @@ name = "sentinel-runtime"
 version = "0.0.1"
 dependencies = [
  "libc",
+ "parking_lot",
  "sentinel-broker",
  "thiserror",
  "tracing",

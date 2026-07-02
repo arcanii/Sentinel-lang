@@ -20,6 +20,10 @@ crate-type = ["lib", "staticlib"]
 [dependencies]
 tracing    = { workspace = true }
 thiserror  = { workspace = true }
+# ADR 0071 M1.4b: the `Mutex<T>` runtime cell uses `parking_lot::Mutex::try_lock_for`
+# for the always-on `LockTimeout` deadlock tier (D5). Workspace-pinned; already a
+# workspace dep (the broker uses it).
+parking_lot = { workspace = true }
 # C1.6 / ADR 0015 D9: wraps libc malloc for sentinel_alloc.
 # Sentinel programs link with the C runtime, so using libc malloc
 # directly (rather than Rust's allocator) avoids mixing allocators.

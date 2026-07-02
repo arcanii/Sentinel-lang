@@ -1506,6 +1506,210 @@ pub extern "C" fn sentinel_shared_release(s: *mut SentinelShared) {
 }
 
 // =============================================================================
+// ADR 0071 M1.4b: `Mutex<T>` — a refcounted, lock-protected shared cell.
+//
+// `Mutex<T>` reuses the `Shared<T>` co-ownership pattern (D4): its own atomic
+// refcount + clone/release, freed on the last drop — the Copy-yet-drop handle, so
+// several tasks hold the same lock. On top of that it adds a lock over the protected
+// word-scalar `value` (encoded into the `i64` slot like `Shared`). The lock is a
+// `parking_lot::Mutex` so the always-on `LockTimeout` tier (D5) is a
+// `try_lock_for(deadline)` — a bounded wait that returns a typed error instead of
+// hanging forever. The lock is acquired/released ACROSS the C-ABI boundary: `lock`
+// forgets the RAII guard (keeping the lock held) and hands back a `*mut i64` to the
+// protected slot; the language-level `Guard`'s scope-exit drop calls `unlock`
+// (`force_unlock`). The Rust RAII guard never crosses the boundary — dormant until
+// codegen wires them at M1.4b's later slices.
+//
+// M1.4b-minimum: the element is a word-scalar in the `i64` slot; `secret T` (M1.4c),
+// the wait-for-graph `Deadlock` tier (D5), and the lock-free atomics (D4) are
+// follow-ons.
+
+/// The default `lock()` deadline for the always-on `LockTimeout` tier (D5) — a
+/// generous bound that never spuriously fires in normal use but guarantees a
+/// hung/deadlocked `lock()` eventually returns the typed error instead of blocking
+/// forever. `sentinel_mutex_try_lock_for` takes an explicit timeout for a tighter
+/// bound. (A runtime-configurable deadline is a follow-on.)
+const MUTEX_DEFAULT_DEADLINE_NANOS: i64 = 10_000_000_000; // 10s
+
+/// ADR 0071 M1.4b: a heap-allocated refcounted, lock-protected cell. `rc` is the
+/// `Shared`-pattern atomic refcount (clone/release, freed on last drop); `lock`
+/// guards the word-scalar `value` (encoded into `i64` by codegen). `Sync` via
+/// `parking_lot::Mutex`, so the Copy handle can be shared across tasks.
+pub struct SentinelMutex {
+    rc: std::sync::atomic::AtomicUsize,
+    lock: parking_lot::Mutex<i64>,
+}
+
+/// ADR 0071 M1.4b: allocate a mutex cell holding `value` (unlocked), refcount 1.
+/// Returns an opaque `*mut SentinelMutex` (the codegen LLVM type for `Type::Mutex`
+/// is `ptr`).
+#[no_mangle]
+pub extern "C" fn sentinel_mutex_new(value: i64) -> *mut SentinelMutex {
+    let cell = Box::new(SentinelMutex {
+        rc: std::sync::atomic::AtomicUsize::new(1),
+        lock: parking_lot::Mutex::new(value),
+    });
+    Box::into_raw(cell)
+}
+
+/// ADR 0071 M1.4b: register a new owner — increment the refcount, return the same
+/// pointer (the handle is Copy; only the count changes). Mirrors
+/// `sentinel_shared_clone`.
+///
+/// # Safety
+/// `m` must be a `*mut SentinelMutex` from `sentinel_mutex_new` (or null).
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+#[no_mangle]
+pub extern "C" fn sentinel_mutex_clone(m: *mut SentinelMutex) -> *mut SentinelMutex {
+    if m.is_null() {
+        return m;
+    }
+    // SAFETY: `m` is a live SentinelMutex per the caller contract; `Relaxed` is
+    // sufficient for an increment (no memory is published by cloning).
+    let cell = unsafe { &*m };
+    cell.rc.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    m
+}
+
+/// ADR 0071 M1.4b: drop one owner — decrement the refcount, freeing the cell when it
+/// reaches zero. Fires at each `Mutex` binding's scope-exit drop. Debug-asserts
+/// against underflow (a double-release = a codegen accounting bug). Mirrors
+/// `sentinel_shared_release`.
+///
+/// # Safety
+/// `m` must be a `*mut SentinelMutex` from `sentinel_mutex_new` (or null); this call
+/// consumes exactly one refcount unit owned by the caller's binding. The cell must
+/// not be locked when it is freed — a guard's scope-exit `unlock` always precedes
+/// the enclosing handle's `release` by the reverse-declaration drop order.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+#[no_mangle]
+pub extern "C" fn sentinel_mutex_release(m: *mut SentinelMutex) {
+    if m.is_null() {
+        return;
+    }
+    // SAFETY: `m` is a live SentinelMutex per the caller contract.
+    let cell = unsafe { &*m };
+    // `Release` so this owner's prior writes are visible to whoever frees; the
+    // standard `Arc` drop ordering (mirrors `sentinel_shared_release`).
+    let prev = cell.rc.fetch_sub(1, std::sync::atomic::Ordering::Release);
+    debug_assert!(
+        prev >= 1,
+        "sentinel_mutex_release: refcount underflow (double release — codegen accounting bug)"
+    );
+    if prev == 1 {
+        std::sync::atomic::fence(std::sync::atomic::Ordering::Acquire);
+        // Defense-in-depth (debug-only, mirrors the underflow assert above): the
+        // caller contract guarantees a guard's `unlock` precedes the enclosing
+        // handle's `release` (reverse-declaration drop order), so the last owner
+        // must find the lock unheld. If a future codegen bug drops the handle
+        // before its guard's unlock, this fires loudly in tests rather than
+        // silently freeing a still-locked cell. rc is 0 (we are the sole owner
+        // past the Acquire fence), so this `try_lock` is uncontended; the guard
+        // temporary unlocks again immediately. Compiled out in release.
+        debug_assert!(
+            cell.lock.try_lock().is_some(),
+            "sentinel_mutex_release: freeing a still-locked SentinelMutex \
+             (codegen dropped the handle before its guard's unlock)"
+        );
+        // SAFETY: rc reached 0, so no other owner can observe the cell; reclaim it.
+        unsafe {
+            drop(Box::from_raw(m));
+        }
+    }
+}
+
+/// ADR 0071 M1.4b: acquire the lock with the always-on `LockTimeout` deadline (D5).
+/// On success writes a `*mut i64` to the protected slot into `*out` and returns 0
+/// (the language-level `Guard` reads/writes through it, then calls
+/// `sentinel_mutex_unlock` at scope exit); on the deadline expiring, returns 1
+/// (`LockTimeout`) and leaves `*out` untouched. The `(status, out-ptr)` shape mirrors
+/// `sentinel_channel_recv`, so codegen builds the `?Guard` exactly as it builds
+/// `recv`'s `?T`. The RAII guard is forgotten so the lock stays held across the C-ABI
+/// boundary until `unlock`.
+///
+/// # Safety
+/// `m` must be a `*mut SentinelMutex` from `sentinel_mutex_new` (or null); a null
+/// `m` or `out` returns 1 (LockTimeout) without acquiring. Otherwise `out` must be
+/// a valid `*mut *mut i64` — the acquire (return 0) writes the protected-slot
+/// pointer through it.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+#[no_mangle]
+pub extern "C" fn sentinel_mutex_lock(m: *mut SentinelMutex, out: *mut *mut i64) -> i64 {
+    sentinel_mutex_try_lock_for(m, MUTEX_DEFAULT_DEADLINE_NANOS, out)
+}
+
+/// ADR 0071 M1.4b: acquire the lock, waiting at most `timeout_nanos` (≤ 0 = a
+/// non-blocking `try_lock`). Same `(status, out-ptr)` contract as
+/// `sentinel_mutex_lock`: 0 = acquired (`*out` = the protected slot), 1 =
+/// `LockTimeout`. The success path forgets the RAII guard so the lock is held until
+/// `sentinel_mutex_unlock`.
+///
+/// # Safety
+/// `m` must be a `*mut SentinelMutex` from `sentinel_mutex_new` (or null); a null
+/// `m` or `out` returns 1 (LockTimeout) without acquiring. Otherwise `out` must be
+/// a valid `*mut *mut i64` — the acquire (return 0) writes the protected-slot
+/// pointer through it.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+#[no_mangle]
+pub extern "C" fn sentinel_mutex_try_lock_for(
+    m: *mut SentinelMutex,
+    timeout_nanos: i64,
+    out: *mut *mut i64,
+) -> i64 {
+    // A null handle OR a null `out` slot returns 1 (LockTimeout) WITHOUT taking
+    // the lock — mirrors `sentinel_process_recv`'s up-front out-null bail. Bailing
+    // *before* `try_lock_for` is load-bearing: the success arm acquires the lock
+    // and forgets its RAII guard, so if we discovered a null `out` only after
+    // acquiring we would strand a physically-held, un-releasable lock. Checking
+    // here means the lock is never taken when the caller cannot receive the slot.
+    if m.is_null() || out.is_null() {
+        return 1;
+    }
+    // SAFETY: `m` is a live SentinelMutex per the caller contract.
+    let cell = unsafe { &*m };
+    let dur = std::time::Duration::from_nanos(timeout_nanos.max(0) as u64);
+    match cell.lock.try_lock_for(dur) {
+        Some(guard) => {
+            // Keep the lock held across the C-ABI boundary: hand back a raw pointer to
+            // the protected slot and forget the RAII guard (the language-level Guard's
+            // scope-exit drop calls `sentinel_mutex_unlock`).
+            let data: *mut i64 = cell.lock.data_ptr();
+            std::mem::forget(guard);
+            // SAFETY: `out` is non-null (checked at entry) and a valid `*mut *mut i64`
+            // per the caller contract.
+            unsafe {
+                *out = data;
+            }
+            0
+        }
+        None => 1,
+    }
+}
+
+/// ADR 0071 M1.4b: release the lock previously acquired by `sentinel_mutex_lock` /
+/// `_try_lock_for` on this cell (the language-level `Guard`'s scope-exit drop). No
+/// refcount change — that is `sentinel_mutex_release`.
+///
+/// # Safety
+/// `m` must be a `*mut SentinelMutex` from `sentinel_mutex_new` (or null) that is
+/// currently LOCKED (a guard from a successful lock is live, its RAII guard having
+/// been forgotten by the acquiring call); calling it otherwise is undefined. Null is
+/// a no-op.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+#[no_mangle]
+pub extern "C" fn sentinel_mutex_unlock(m: *mut SentinelMutex) {
+    if m.is_null() {
+        return;
+    }
+    // SAFETY: `m` is a live, currently-locked SentinelMutex per the caller contract;
+    // the matching RAII guard was forgotten by the acquiring `_lock`/`_try_lock_for`.
+    let cell = unsafe { &*m };
+    unsafe {
+        cell.lock.force_unlock();
+    }
+}
+
+// =============================================================================
 // ADR 0066 M2.1: subprocess spawn — `Process` over `std::process::Command`.
 //
 // Cross-platform (std::process::Command abstracts posix_spawn/fork+exec and
@@ -2156,6 +2360,12 @@ mod tests {
             sentinel_shared_clone as *const (),
             sentinel_shared_get as *const (),
             sentinel_shared_release as *const (),
+            sentinel_mutex_new as *const (),
+            sentinel_mutex_clone as *const (),
+            sentinel_mutex_release as *const (),
+            sentinel_mutex_lock as *const (),
+            sentinel_mutex_try_lock_for as *const (),
+            sentinel_mutex_unlock as *const (),
         ];
         // 42 symbols: 23 codegen-declared (incl. D.2's sentinel_str_eq,
         // D.3's sentinel_realloc, D.4's sentinel_read_file /
@@ -2164,8 +2374,9 @@ mod tests {
         // 4 sentinel_channel_* + M2.1's 2 sentinel_process_spawn/_wait + M2.2's
         // 2 sentinel_process_write/_read + M2.3's 2 sentinel_process_send/_recv +
         // M2.4b's 2 sentinel_stdin_recv/_stdout_send + the 2 sentinel_arg_count/_arg +
-        // ADR 0071 M1.4a's 4 sentinel_shared_new/_clone/_get/_release.
-        assert_eq!(symbols.len(), 42);
+        // ADR 0071 M1.4a's 4 sentinel_shared_new/_clone/_get/_release + M1.4b's 6
+        // sentinel_mutex_new/_clone/_release/_lock/_try_lock_for/_unlock.
+        assert_eq!(symbols.len(), 48);
         assert!(symbols.iter().all(|&s| !s.is_null()), "every symbol has an address");
     }
 
@@ -2363,6 +2574,186 @@ mod tests {
         assert_eq!(got, 21);
         assert_eq!(unsafe { (*s).rc.load(Ordering::Relaxed) }, 1);
         sentinel_shared_release(s); // last owner -> freed
+    }
+
+    // ---- ADR 0071 M1.4b: the Mutex<T> runtime cell ----
+
+    #[test]
+    fn sentinel_mutex_refcount_lifecycle() {
+        use std::sync::atomic::Ordering;
+        // new -> rc 1; clone -> rc 2 (same ptr); release twice -> freed. Mirrors
+        // the Shared refcount lifecycle (Mutex reuses the pattern, D4).
+        let m = sentinel_mutex_new(7);
+        assert!(!m.is_null());
+        // SAFETY: `m` is live (same-crate test reading the atomic directly).
+        assert_eq!(unsafe { (*m).rc.load(Ordering::Relaxed) }, 1);
+        let m2 = sentinel_mutex_clone(m);
+        assert_eq!(m2, m);
+        assert_eq!(unsafe { (*m).rc.load(Ordering::Relaxed) }, 2);
+        sentinel_mutex_release(m);
+        assert_eq!(unsafe { (*m).rc.load(Ordering::Relaxed) }, 1);
+        sentinel_mutex_release(m); // last owner -> freed (no read after this)
+    }
+
+    #[test]
+    fn sentinel_mutex_null_safe() {
+        // Null handles are inert (mirrors the other builtins' null-guards).
+        assert!(sentinel_mutex_clone(std::ptr::null_mut()).is_null());
+        let mut slot: *mut i64 = std::ptr::null_mut();
+        // A null lock target "times out" (returns 1) rather than dereferencing null.
+        assert_eq!(sentinel_mutex_lock(std::ptr::null_mut(), &mut slot as *mut *mut i64), 1);
+        sentinel_mutex_unlock(std::ptr::null_mut()); // no-op, no panic
+        sentinel_mutex_release(std::ptr::null_mut()); // no-op, no panic
+
+        // A null `out` slot on a LIVE, unlocked mutex returns 1 (LockTimeout)
+        // WITHOUT taking the lock — mirrors sentinel_process_recv's up-front bail,
+        // so a codegen bug that forwards a null slot can't strand a held lock.
+        let live = sentinel_mutex_new(5);
+        assert_eq!(sentinel_mutex_lock(live, std::ptr::null_mut()), 1);
+        // Proof the lock was never taken: a real acquire immediately succeeds.
+        let mut real: *mut i64 = std::ptr::null_mut();
+        assert_eq!(sentinel_mutex_lock(live, &mut real as *mut *mut i64), 0);
+        // SAFETY: the lock is held; `real` points at the protected value.
+        unsafe {
+            assert_eq!(*real, 5);
+        }
+        sentinel_mutex_unlock(live);
+        sentinel_mutex_release(live);
+    }
+
+    #[test]
+    fn sentinel_mutex_lock_read_write_unlock() {
+        // lock -> a ptr to the protected slot; read + mutate under the lock; unlock;
+        // a re-lock observes the mutation (the value lives in the cell, not the guard).
+        let m = sentinel_mutex_new(10);
+        let mut slot: *mut i64 = std::ptr::null_mut();
+        assert_eq!(sentinel_mutex_lock(m, &mut slot as *mut *mut i64), 0);
+        assert!(!slot.is_null());
+        // SAFETY: the lock is held; `slot` points at the protected value.
+        unsafe {
+            assert_eq!(*slot, 10);
+            *slot = 32;
+        }
+        sentinel_mutex_unlock(m);
+        let mut slot2: *mut i64 = std::ptr::null_mut();
+        assert_eq!(sentinel_mutex_lock(m, &mut slot2 as *mut *mut i64), 0);
+        // SAFETY: the lock is held again.
+        unsafe {
+            assert_eq!(*slot2, 32);
+        }
+        sentinel_mutex_unlock(m);
+        sentinel_mutex_release(m);
+    }
+
+    #[test]
+    fn sentinel_mutex_try_lock_for_times_out_when_held() {
+        // While the lock is held, a bounded acquire from ANOTHER thread returns the
+        // LockTimeout status (1) instead of blocking forever (parking_lot::Mutex is
+        // not reentrant, so it must be a different thread). After unlock, it succeeds.
+        let m = sentinel_mutex_new(1);
+        let mut slot: *mut i64 = std::ptr::null_mut();
+        assert_eq!(sentinel_mutex_lock(m, &mut slot as *mut *mut i64), 0);
+        let addr = m as usize; // raw ptr isn't Send; pass the address.
+        let status = std::thread::spawn(move || {
+            let m = addr as *mut SentinelMutex;
+            let mut s2: *mut i64 = std::ptr::null_mut();
+            sentinel_mutex_try_lock_for(m, 1_000_000, &mut s2 as *mut *mut i64) // 1ms
+        })
+        .join()
+        .unwrap();
+        assert_eq!(status, 1); // LockTimeout
+        sentinel_mutex_unlock(m);
+        // Now a bounded acquire succeeds.
+        let mut s3: *mut i64 = std::ptr::null_mut();
+        assert_eq!(sentinel_mutex_try_lock_for(m, 1_000_000, &mut s3 as *mut *mut i64), 0);
+        sentinel_mutex_unlock(m);
+        sentinel_mutex_release(m);
+    }
+
+    #[test]
+    fn sentinel_mutex_cross_thread_mutual_exclusion() {
+        // Two threads (main + a worker holding a clone) each increment the protected
+        // value 1000× under the lock. No lost updates → the final value is exactly
+        // 2000: real mutual exclusion + a sound shared-by-ptr atomic refcount.
+        let m = sentinel_mutex_new(0);
+        let m2 = sentinel_mutex_clone(m); // rc 2 — one owner per thread
+        let addr = m2 as usize;
+        let worker = std::thread::spawn(move || {
+            let mw = addr as *mut SentinelMutex;
+            let mut i = 0;
+            while i < 1000 {
+                let mut s: *mut i64 = std::ptr::null_mut();
+                assert_eq!(sentinel_mutex_lock(mw, &mut s as *mut *mut i64), 0);
+                // SAFETY: the lock is held.
+                unsafe {
+                    *s += 1;
+                }
+                sentinel_mutex_unlock(mw);
+                i += 1;
+            }
+            sentinel_mutex_release(mw); // worker drops its owner -> rc 1
+        });
+        let mut i = 0;
+        while i < 1000 {
+            let mut s: *mut i64 = std::ptr::null_mut();
+            assert_eq!(sentinel_mutex_lock(m, &mut s as *mut *mut i64), 0);
+            // SAFETY: the lock is held.
+            unsafe {
+                *s += 1;
+            }
+            sentinel_mutex_unlock(m);
+            i += 1;
+        }
+        worker.join().unwrap();
+        let mut s: *mut i64 = std::ptr::null_mut();
+        assert_eq!(sentinel_mutex_lock(m, &mut s as *mut *mut i64), 0);
+        // SAFETY: the lock is held.
+        unsafe {
+            assert_eq!(*s, 2000);
+        }
+        sentinel_mutex_unlock(m);
+        sentinel_mutex_release(m); // last owner -> freed
+    }
+
+    #[test]
+    fn sentinel_mutex_concurrent_clone_release_frees_once() {
+        use std::sync::atomic::Ordering;
+        // Freed-exactly-once under concurrency: N worker threads each do K BALANCED
+        // clone/release rounds on a shared handle while main holds the original
+        // owner throughout (rc never reaches 0 mid-flight). After all join, the
+        // count must be back to exactly 1 — no lost increments/decrements — then
+        // the final release frees exactly once. Deterministic (no timing
+        // assumptions); it hammers the atomic rc under real contention.
+        //
+        // Scope: this catches a GROSS refcount regression (a non-atomic rc, a plain
+        // double-free/UAF, or a panic) — under a debug build the free-while-locked
+        // and underflow debug_asserts also participate. It does NOT prove memory
+        // ORDERING (Release/Acquire) correctness: on x86 TSO a weakened ordering
+        // lowers identically, so only a loom/Miri model would catch that — deferred
+        // (both are gated by the no-new-deps + stable-only rules).
+        const N: usize = 8;
+        const K: usize = 5000;
+        let m = sentinel_mutex_new(0);
+        let addr = m as usize; // raw ptr isn't Send; pass the address.
+        let workers: Vec<_> = (0..N)
+            .map(|_| {
+                std::thread::spawn(move || {
+                    let mw = addr as *mut SentinelMutex;
+                    for _ in 0..K {
+                        let c = sentinel_mutex_clone(mw); // rc++
+                        assert_eq!(c, mw);
+                        sentinel_mutex_release(mw); // rc-- (balanced)
+                    }
+                })
+            })
+            .collect();
+        for w in workers {
+            w.join().unwrap();
+        }
+        // Every clone was released; only main's original owner remains.
+        // SAFETY: `m` is live (main holds the last owner).
+        assert_eq!(unsafe { (*m).rc.load(Ordering::Relaxed) }, 1);
+        sentinel_mutex_release(m); // last owner -> freed exactly once
     }
 
     // ---- ADR 0066 M2.1: the subprocess spawn runtime surface ----

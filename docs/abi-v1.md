@@ -319,6 +319,12 @@ Codegen declares these as external; `sentinel-runtime` defines them
 | `sentinel_shared_clone` | `(ptr s) -> ptr` | shared ownership — register a new owner (rc++), returns the same ptr; emitted at each duplication of a named `Shared` binding |
 | `sentinel_shared_get` | `(ptr s) -> i64` | shared ownership — read the shared value out (immutable at M1.4a; mutation is `Mutex<T>`, M1.4b) |
 | `sentinel_shared_release` | `(ptr s) -> void` | shared ownership — drop one owner (rc--), free the cell at zero; emitted at each `Shared` binding's scope-exit drop |
+| `sentinel_mutex_new` | `(i64 value) -> ptr` | mutex (ADR 0071 M1.4b) — a new refcounted, lock-protected `Mutex<T>` cell (rc 1, unlocked) holding the word-scalar `value`; reuses the `Shared` co-ownership pattern (freed on the last drop) |
+| `sentinel_mutex_clone` | `(ptr m) -> ptr` | mutex — register a new owner (rc++), returns the same ptr; emitted at each duplication of a named `Mutex` binding (mirrors `sentinel_shared_clone`) |
+| `sentinel_mutex_release` | `(ptr m) -> void` | mutex — drop one owner (rc--), free the cell at zero; emitted at each `Mutex` binding's scope-exit drop (mirrors `sentinel_shared_release`) |
+| `sentinel_mutex_lock` | `(ptr m, ptr out) -> i64` | mutex — acquire with the always-on `LockTimeout` deadline (D5); writes a `*mut i64` to the protected slot into `*out`, returns 0 (acquired) / 1 (timeout, or null `m`/`out`). Codegen builds the `?Guard` like `recv`'s `?i64` |
+| `sentinel_mutex_try_lock_for` | `(ptr m, i64 timeout_nanos, ptr out) -> i64` | mutex — bounded acquire (`timeout_nanos ≤ 0` = a non-blocking `try_lock`); same `(status, out-ptr)` contract as `sentinel_mutex_lock` |
+| `sentinel_mutex_unlock` | `(ptr m) -> void` | mutex — release the lock held by a prior `lock`/`try_lock_for` (the `Guard`'s scope-exit drop); no refcount change |
 
 **Runtime-internal (not codegen-declared):** `sentinel_kont_panic_resumed`
 — the runtime's `sentinel_kont_resume` calls it on the consumed-twice
