@@ -1174,6 +1174,18 @@ fn pass_c70_scg_fn_apply() {
 }
 
 #[test]
+fn pass_c71_shared() {
+    // ADR 0071 M1.4a slice 2b: Shared<T> type + shared_new/shared_get lowering
+    // (both compilers). A refcounted cell holding 20 is read back through a Copy
+    // duplicate (the `read_it` param, a Shared<i64>) and again directly: 20 + 20 +
+    // 2 = 42. needs_drop is still false at this slice (leaks like Channel; the
+    // refcount clone/drop accounting is slice 3). Exit 42.
+    let r = build_and_run("c71_shared.sentinel");
+    assert_eq!(r.exit, 42);
+    assert_eq!(r.stdout, "");
+}
+
+#[test]
 fn pass_c66_process_channel() {
     // ADR 0066 M2.3: process_send/process_recv lowering — frame an i64 to the
     // child's stdin (process_send) + read one i64 frame back as a ?i64

@@ -200,6 +200,8 @@ fn new_tyctx(mode: i64) -> TyCtx {
         cg_used_channelsend: false,
         cg_used_channelrecv: false,
         cg_used_channelclose: false,
+        cg_used_sharednew: false,
+        cg_used_sharedget: false,
         cg_used_procspawn: false,
         cg_used_procwait: false,
         cg_used_procwrite: false,

@@ -1,0 +1,23 @@
+// ADR 0071 M1.4a slice 2b: `Shared<T>` reaches TYPE + LOWERING in both compilers.
+// `shared_new(v)` allocates a refcounted cell (rc=1) holding a word-scalar `v`;
+// `shared_get(s)` reads a copy of the value back out (an `Arc<T>` without the
+// mutex). The handle is Copy (freely duplicated — `read_it` gets its own copy of
+// `s` while `main` keeps using it, with NO borrow-checker move), and at THIS slice
+// it deliberately LEAKS (`needs_drop == false`, like `Channel`) — the refcount
+// clone/drop accounting (rc++/rc--) is slice 3. This brings the two builtins + the
+// `Shared<i64>` type (incl. the `resolve_type_expr` "Shared" arm, exercised by
+// `read_it`'s parameter) into every self-host differential stage (types / resolve /
+// mir / borrow / effects / codegen — `snc llvm` == `scg`).
+//
+// `s` holds 20; `read_it` copies the handle and reads 20; `main` reads 20 again and
+// adds 2 → 42. Exit 42.
+
+fn read_it(s: Shared<i64>) -> i64 {
+    shared_get(s)
+}
+
+fn main() -> i64 {
+    let s = shared_new(20);
+    let a = read_it(s);
+    a + shared_get(s) + 2
+}

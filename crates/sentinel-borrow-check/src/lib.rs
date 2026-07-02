@@ -1488,6 +1488,12 @@ fn is_copy_type(ty: Type, program: &TypedProgram) -> bool {
         // pointer-like + Copy, owns nothing (no captured environment; the
         // signature id doesn't change the runtime representation).
         Type::Fn(_) => true,
+        // ADR 0071 M1.4a: a `Shared<T>` handle is Copy for the borrow checker
+        // (frictionless N-way co-ownership, no move-tracking — like `Channel`).
+        // Unlike the other handles it will ALSO emit a scope-exit drop starting
+        // at slice 3 (the refcount `--`); at this slice (2b) it still leaks
+        // (`needs_drop == false`), so Copy is all the checker needs today.
+        Type::Shared(_) => true,
     }
 }
 

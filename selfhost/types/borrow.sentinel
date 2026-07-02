@@ -31,6 +31,11 @@ fn is_move_type(c: &mut TyCtx, h: i64) -> bool {
             // (ADR 0070) a Fn<T,R> value is Copy (a bare, non-capturing LLVM function
             // pointer — no owned state, like Process/Channel).
             false
+        } else if k == 17 {
+            // (ADR 0071 M1.4a) a Shared<T> handle is Copy for the borrow checker
+            // (frictionless co-ownership, no move-tracking — like Channel). At slice
+            // 2b it also leaks (no drop); the refcount --on-drop is slice 3.
+            false
         } else if k == 3 {
             is_move_type(c, (*c).ta[idx])
         } else if k == 4 {

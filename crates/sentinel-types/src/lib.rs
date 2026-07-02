@@ -31,6 +31,7 @@ use sentinel_resolve::{
     ResolvedExprKind, ResolvedFnDef, ResolvedPattern, ResolvedProgram, ResolvedStmt,
     ResolvedStmtKind, StructId, TraitId, TypeParamId, VarId, APPLY_FN_ID, CHANNEL_CLOSE_FN_ID,
     CHANNEL_NEW_FN_ID, LEN_FN_ID, PROCESS_RECV_FN_ID, PROCESS_SEND_FN_ID, RECV_FN_ID, SEND_FN_ID,
+    SHARED_GET_FN_ID, SHARED_NEW_FN_ID,
 };
 use sentinel_ast::SelfKind;
 
@@ -237,6 +238,20 @@ pub enum Type {
     /// ADR 0070 D3), context-typed from `f`'s own `FnValueSigId` (the
     /// `Channel<T>` `recv`-style pattern).
     Fn(FnValueSigId),
+    /// ADR 0071 M1.4a: `Shared<T>` — a runtime-refcounted shared-ownership
+    /// handle (an `Arc<T>`-shaped cell behind the C-ABI). The [`SharedId`]
+    /// indexes into `TypedProgram.shared`, where `SharedData { elem_ty }`
+    /// lives — mirroring `Channel<T>`'s interner-table shape (preserves
+    /// `Copy + Hash`; a `SharedId` is just a `u32`). The handle is **`Copy`**
+    /// for the borrow checker (frictionless N-way co-ownership, no
+    /// move-tracking, like `Channel`), and — starting at slice 3 — the first
+    /// such handle that ALSO emits a scope-exit drop (`sentinel_shared_release`,
+    /// rc--); at THIS slice (2b) it still leaks (`needs_drop == false`, like
+    /// `Channel`), the refcount accounting being deferred to slice 3. At the
+    /// M1.4a minimum `elem_ty` is a word-sized scalar (encoded into the cell's
+    /// i64 slot, reusing the `Channel<T>` send/recv encode/decode). Produced by
+    /// `shared_new(v)`; the value is read back by `shared_get(s)`.
+    Shared(SharedId),
 }
 
 /// Identifier for an interned reference type. C2 / ADR 0017 D11.
@@ -314,6 +329,24 @@ pub struct ChanId(pub u32);
 /// scalar (see [`is_spawn_word_scalar`]).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ChannelData {
+    pub elem_ty: Type,
+}
+
+/// ADR 0071 M1.4a: identifier for an interned `Shared<T>` type. Assigned like
+/// [`ChanId`] — the 6 word-scalar `Shared<T>` types are pre-interned at FIXED
+/// ids 0..=5 during builtin signature setup (see [`shared_id_for`]), so a
+/// `Shared<T>` annotation / `shared_new(v)` result maps to a stable id WITHOUT
+/// threading the `shared` interner through the checker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SharedId(pub u32);
+
+/// The underlying data of a [`Type::Shared`] per ADR 0071 M1.4a. `elem_ty` =
+/// the value type the cell holds (`shared_new` wraps a value of this type;
+/// `shared_get` yields it). Owned by [`TypedProgram::shared`]. At the M1.4a
+/// minimum `elem_ty` is a word-sized scalar (see [`is_spawn_word_scalar`]),
+/// encoded into the cell's i64 slot. Mirrors [`ChannelData`].
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SharedData {
     pub elem_ty: Type,
 }
 
@@ -817,7 +850,9 @@ impl Type {
             // (NullableInner gains no Vec variant).
             | Type::Vec(_)
             // ADR 0070: no `?Fn` (a handle, like `Process`/`SealedChannel`).
-            | Type::Fn(_) => None,
+            | Type::Fn(_)
+            // ADR 0071 M1.4a: no `?Shared` (a handle).
+            | Type::Shared(_) => None,
         }
     }
 
@@ -876,7 +911,9 @@ impl Type {
             // collection nesting at the MVP.
             | Type::Vec(_)
             // ADR 0070: no `[Fn]` (a handle, like `Process`/`SealedChannel`).
-            | Type::Fn(_) => None,
+            | Type::Fn(_)
+            // ADR 0071 M1.4a: no `[Shared]` (a handle).
+            | Type::Shared(_) => None,
         }
     }
 
@@ -957,7 +994,9 @@ impl Type {
             | Type::TraitSelf(_)
             | Type::Enum(_)
             // ADR 0070: no `Vec<Fn>` (a handle, like `Process`/`SealedChannel`).
-            | Type::Fn(_) => None,
+            | Type::Fn(_)
+            // ADR 0071 M1.4a: no `Vec<Shared>` (a handle).
+            | Type::Shared(_) => None,
         }
     }
 
@@ -1149,6 +1188,9 @@ impl Type {
             // ADR 0066 M1.2: `Channel<i64>` carries no TypeParam at the
             // minimum — pass through unchanged.
             Type::Channel(_) => self,
+            // ADR 0071 M1.4a: `Shared<T>`'s word-scalar element carries no
+            // TypeParam — pass through unchanged.
+            Type::Shared(_) => self,
             // ADR 0066 M2.1: `Process` carries no TypeParam — pass through.
             Type::Process => self,
             // ADR 0066 M2.4a: `SealedChannel` carries no TypeParam — pass through.
@@ -1418,6 +1460,51 @@ pub fn intern_channel(channels: &mut Vec<ChannelData>, elem_ty: Type) -> ChanId 
     id
 }
 
+/// ADR 0071 M1.4a: the `Shared<T>` word-scalar element types are pre-interned at
+/// FIXED [`SharedId`]s 0..=5 during builtin signature setup (mirroring
+/// [`channel_chanid_for`]), so a `Shared<T>` annotation / `shared_new(v)` result
+/// maps to a stable `SharedId` WITHOUT threading the `shared` interner through the
+/// checker. Returns the fixed index for a word-scalar `elem`, else `None`.
+pub fn shared_id_for(elem: Type) -> Option<u32> {
+    match elem {
+        Type::I64 => Some(0),
+        Type::I32 => Some(1),
+        Type::U8 => Some(2),
+        Type::Bool => Some(3),
+        Type::F64 => Some(4),
+        Type::Ptr => Some(5),
+        _ => None,
+    }
+}
+
+/// The inverse of [`shared_id_for`]: the element type of a pre-interned
+/// `Shared<T>` `SharedId`. Lets `shared_get` read a shared arg's element from its
+/// `Type::Shared(id)` alone (no `shared`-table access in the checker). `i64` for
+/// an unknown id (defensive). Mirrors [`channel_elem_for`].
+pub fn shared_elem_for(id: SharedId) -> Type {
+    match id.0 {
+        1 => Type::I32,
+        2 => Type::U8,
+        3 => Type::Bool,
+        4 => Type::F64,
+        5 => Type::Ptr,
+        _ => Type::I64,
+    }
+}
+
+/// Intern an `elem_ty` into `shared`, returning its [`SharedId`] per ADR 0071
+/// M1.4a. Linear search, dedup by structural equality; mirrors [`intern_channel`].
+pub fn intern_shared(shared: &mut Vec<SharedData>, elem_ty: Type) -> SharedId {
+    for (idx, existing) in shared.iter().enumerate() {
+        if existing.elem_ty == elem_ty {
+            return SharedId(idx as u32);
+        }
+    }
+    let id = SharedId(shared.len() as u32);
+    shared.push(SharedData { elem_ty });
+    id
+}
+
 /// ADR 0068: intern a nested array's inner [`ArrayElem`] into `arrays`,
 /// returning its [`ArrayId`]. Linear search, dedup by structural equality;
 /// mirrors [`intern_channel`]'s shape. `Type::Array(ArrayElem::Array(id))` is
@@ -1559,6 +1646,15 @@ pub fn type_display(ty: Type, program: Option<&TypedProgram>) -> String {
             }
             format!("<channel#{}>", id.0)
         }
+        // ADR 0071 M1.4a: render `Shared<elem>` (mirrors `Channel<…>`).
+        Type::Shared(id) => {
+            if let Some(p) = program {
+                if let Some(data) = p.shared.get(id.0 as usize) {
+                    return format!("Shared<{}>", type_display(data.elem_ty, program));
+                }
+            }
+            format!("<shared#{}>", id.0)
+        }
         // ADR 0066 M2.1: a plain `Process` handle (no element type).
         Type::Process => "Process".to_string(),
         // ADR 0066 M2.4a: the `secret i64`-minimum sealed endpoint (unit variant).
@@ -1613,6 +1709,7 @@ impl std::fmt::Display for Type {
             Type::Kont(id) => write!(f, "<kont#{}>", id.0),
             Type::Task(id) => write!(f, "<task#{}>", id.0),
             Type::Channel(id) => write!(f, "<channel#{}>", id.0),
+            Type::Shared(id) => write!(f, "<shared#{}>", id.0),
             Type::Process => write!(f, "Process"),
             Type::SealedChannel => write!(f, "SealedChannel"),
             Type::Fn(id) => {
@@ -1941,6 +2038,38 @@ fn resolve_type_expr_with_scope(
                         }),
                     }
                 }
+                // ADR 0071 M1.4a: `Shared<T>` in type position — so a fn can take a
+                // shared handle as a parameter (mirrors the `Channel<T>` arm). Any
+                // word-scalar element resolves to its pre-interned SharedId (i64 →
+                // SharedId(0)); a non-word-scalar is rejected (SharedElementNotSupported).
+                "Shared" => {
+                    if args.len() != 1 {
+                        return Err(TypeError::TypeArgCountMismatch {
+                            type_name: "Shared".to_string(),
+                            expected: 1,
+                            found: args.len(),
+                            span: to_source_span(&te.span),
+                        });
+                    }
+                    let elem_ty = resolve_type_expr_with_scope(
+                        &args[0],
+                        struct_table,
+                        class_table,
+                        enum_table,
+                        type_param_scope,
+                        instances,
+                        refs,
+                        secrets,
+                        arrays,
+                        struct_type_param_counts,
+                    )?;
+                    match shared_id_for(elem_ty) {
+                        Some(sid) => Ok(Type::Shared(SharedId(sid))),
+                        None => Err(TypeError::SharedElementNotSupported {
+                            span: to_source_span(&te.span),
+                        }),
+                    }
+                }
                 // ADR 0066 M2.4a / ADR 0069: `SealedChannel<secret i64>` in type
                 // position — so the stdlib `seal`/`open` framing fns can take a
                 // sealed endpoint as a parameter. The element MUST be `secret i64`
@@ -2173,6 +2302,11 @@ pub struct TypedProgram {
     /// indexes this vector to recover `(elem_ty)`. Populated during
     /// type-check of `channel_new` calls.
     pub channels: Vec<ChannelData>,
+    /// ADR 0071 M1.4a: interned `Shared<T>` types. Each `Type::Shared(id)`
+    /// indexes this vector to recover `(elem_ty)`. Pre-populated with the 6
+    /// word-scalar elements at fixed ids 0..=5 during builtin signature setup
+    /// (see [`shared_id_for`]). Mirrors [`channels`].
+    pub shared: Vec<SharedData>,
     /// ADR 0068: interned NESTED-array elements. Each
     /// `Type::Array(ArrayElem::Array(id))` (`[[T]]`) indexes this vector to
     /// recover the *inner* array's [`ArrayElem`]. Populated when a `[[T]]` type
@@ -2255,6 +2389,12 @@ impl TypedProgram {
     /// Panics on out-of-range — IDs only come from [`intern_channel`].
     pub fn channel_data(&self, id: ChanId) -> &ChannelData {
         &self.channels[id.0 as usize]
+    }
+
+    /// Look up the `(elem_ty)` for a `Shared<T>` type per ADR 0071 M1.4a.
+    /// Panics on out-of-range — IDs only come from [`intern_shared`].
+    pub fn shared_data(&self, id: SharedId) -> &SharedData {
+        &self.shared[id.0 as usize]
     }
 
     /// ADR 0068: the inner [`ArrayElem`] of a nested-array element. Panics on
@@ -3546,6 +3686,21 @@ pub enum TypeError {
         span: miette::SourceSpan,
     },
 
+    /// ADR 0071 M1.4a: a `Shared<T>` element (from a `Shared<T>` annotation or
+    /// the `shared_new(v)` argument) must be a word-scalar {i64,i32,u8,bool,
+    /// f64,ptr} at the M1.4a minimum (it is encoded into the cell's i64 slot).
+    /// A non-word-scalar (an aggregate, `secret`, `u128`) is rejected — generic
+    /// `Shared<secret T>` is M1.4c. Mirrors [`ChannelElementNotSupported`].
+    #[error("`Shared<T>` element type is not supported yet")]
+    #[diagnostic(
+        code(sentinel::types::shared_element_not_supported),
+        help("at the M1.4a minimum a `Shared<T>` holds a word-scalar (i64/i32/u8/bool/f64/ptr); aggregates and `secret` are a follow-on (M1.4c)")
+    )]
+    SharedElementNotSupported {
+        #[label("unsupported Shared element type here")]
+        span: miette::SourceSpan,
+    },
+
     /// ADR 0066 M2.4a / ADR 0069 D1: a `SealedChannel<…>` type annotation's
     /// element must be `secret i64` at the M2.4a minimum. A *non-secret* element
     /// (`SealedChannel<i64>`) is a type error — sealing a public value is
@@ -4483,6 +4638,10 @@ pub fn check_module(
     // ADR 0066 M1.2: the channel-type interner. M1.2 minimum interns a single
     // `Channel<i64>` while building the channel-builtin signatures below.
     let mut channels: Vec<ChannelData> = Vec::new();
+    // ADR 0071 M1.4a: the `Shared<T>`-type interner. Pre-populated with the 6
+    // word-scalar elements at fixed SharedIds 0..=5 while building the shared
+    // builtin signatures below (mirrors `channels`).
+    let mut shared: Vec<SharedData> = Vec::new();
     // ADR 0068: the nested-array element interner — populated when a `[[T]]` type
     // annotation / literal is resolved (threaded through resolve_type_expr +
     // the check pipeline, like `secrets`/`refs`).
@@ -5058,41 +5217,45 @@ pub fn check_module(
             extern_origin: None,
         });
     }
-    // ADR 0071 M1.4a: the `Shared<T>` refcounted-handle builtins — `shared_new(v)
-    // -> Shared<T>` (FnId 38) and `shared_get(s) -> T` (FnId 39). This is slice 2a
-    // (reserve the FnIds + keep `typed_signatures` FnId-aligned so the user-fn base
-    // is 40); the registered param/return types below are PLACEHOLDERS (arity 1
-    // each, like `apply`'s), inert because no fixture calls these yet. Slice 2b
-    // adds `Type::Shared` + a `check_call` special-case (the `channel_new`/`recv`
-    // context-typed pattern) that computes the real element type, so these
-    // placeholders are never consulted.
+    // ADR 0071 M1.4a: the `Shared<T>` refcounted-handle builtins — `shared_new(v:
+    // T) -> Shared<T>` (FnId 38) and `shared_get(s: Shared<T>) -> T` (FnId 39).
+    // Pre-intern the 6 word-scalar element types at FIXED SharedIds 0..=5 (i64,
+    // i32, u8, bool, f64, ptr — matching `shared_id_for`), so a `Shared<T>`
+    // annotation / `shared_new(v)` result resolves to a stable SharedId without
+    // threading the `shared` interner. The concrete sigs below stay `Shared<i64>`
+    // (the default); `check_call` special-cases both builtins for the generic
+    // element (the `send`/`recv` pattern — `shared_new`'s element from its arg,
+    // `shared_get`'s from the handle's SharedId). The extra SharedIds are
+    // snc-internal (the i64-only differential corpus never references them —
+    // byte-identical). `shared_new` returns the handle; codegen calls
+    // `sentinel_shared_new`; the handle is Copy + (at this slice) leaked
+    // (`needs_drop == false`), the refcount accounting being slice 3.
     {
-        let shared_new_sig = &program.fn_signatures[38];
-        typed_signatures.push(TypedFnSignature {
-            id: shared_new_sig.id,
-            name: shared_new_sig.name.clone(),
-            name_span: shared_new_sig.name_span.clone(),
-            type_params: vec![],
-            param_types: vec![Type::I64],
-            return_type: Type::I64,
-            effect_row: vec![],
-            is_main: false,
-            is_runtime: true,
-            extern_origin: None,
-        });
-        let shared_get_sig = &program.fn_signatures[39];
-        typed_signatures.push(TypedFnSignature {
-            id: shared_get_sig.id,
-            name: shared_get_sig.name.clone(),
-            name_span: shared_get_sig.name_span.clone(),
-            type_params: vec![],
-            param_types: vec![Type::I64],
-            return_type: Type::I64,
-            effect_row: vec![],
-            is_main: false,
-            is_runtime: true,
-            extern_origin: None,
-        });
+        let shared_i64 = Type::Shared(intern_shared(&mut shared, Type::I64));
+        intern_shared(&mut shared, Type::I32);
+        intern_shared(&mut shared, Type::U8);
+        intern_shared(&mut shared, Type::Bool);
+        intern_shared(&mut shared, Type::F64);
+        intern_shared(&mut shared, Type::Ptr);
+        let shared_sigs: &[(usize, &[Type], Type)] = &[
+            (38, &[Type::I64], shared_i64),   // shared_new(i64) -> Shared<i64>
+            (39, &[shared_i64], Type::I64),   // shared_get(Shared<i64>) -> i64
+        ];
+        for (idx, params, ret) in shared_sigs {
+            let sig = &program.fn_signatures[*idx];
+            typed_signatures.push(TypedFnSignature {
+                id: sig.id,
+                name: sig.name.clone(),
+                name_span: sig.name_span.clone(),
+                type_params: vec![],
+                param_types: params.to_vec(),
+                return_type: *ret,
+                effect_row: vec![],
+                is_main: false,
+                is_runtime: true,
+                extern_origin: None,
+            });
+        }
     }
 
     for fn_def in &program.fns {
@@ -5980,6 +6143,9 @@ pub fn check_module(
         // ADR 0066 M1.2: populated when the channel builtins are typed
         // (their `Channel<i64>` return/param interns here). Empty until then.
         channels,
+        // ADR 0071 M1.4a: pre-populated with the 6 word-scalar `Shared<T>`
+        // elements at fixed SharedIds 0..=5 (matching `shared_id_for`).
+        shared,
         class_decls: typed_class_decls,
         trait_decls: typed_trait_decls,
         impl_decls: typed_impl_decls,
@@ -7149,6 +7315,8 @@ fn try_substitute(
         Type::Task(_) => Some(ty),
         // ADR 0066 M1.2: `Channel<i64>` carries no TypeParam.
         Type::Channel(_) => Some(ty),
+        // ADR 0071 M1.4a: `Shared<T>`'s word-scalar element carries no TypeParam.
+        Type::Shared(_) => Some(ty),
         // ADR 0066 M2.1: `Process` carries no TypeParam.
         Type::Process => Some(ty),
         // ADR 0066 M2.4a: `SealedChannel` carries no TypeParam.
@@ -7208,6 +7376,8 @@ fn contains_type_param(
         Type::Task(_) => false,
         // ADR 0066 M1.2: `Channel<i64>` carries no TypeParam.
         Type::Channel(_) => false,
+        // ADR 0071 M1.4a: `Shared<T>`'s word-scalar element is never a TypeParam.
+        Type::Shared(_) => false,
         Type::Process => false,
         // ADR 0066 M2.4a: `SealedChannel` carries no TypeParam.
         Type::SealedChannel => false,
@@ -7696,6 +7866,67 @@ fn check_call(
                 type_args: vec![],
             },
             Type::I64,
+        ));
+    }
+    // ADR 0071 M1.4a: the `Shared<T>` builtins (the `send`/`recv` element pattern).
+    if id == SHARED_NEW_FN_ID {
+        // `shared_new(v: T) -> Shared<T>`: `T` is the word-scalar element read from
+        // the VALUE arg (like `send`). Codegen encodes it into the cell's i64 slot
+        // by LLVM value kind (no `type_args`); the `i64` case emits no encode.
+        let v_typed = check_expr(
+            &args[0], None, env, signatures, structs, class_decls, enums, instances, refs,
+            secrets, arrays, struct_type_param_counts, effect_decls, trait_decls, impl_decls,
+            konts, tasks,
+        )?;
+        let sid = match shared_id_for(v_typed.ty) {
+            Some(sid) => sid,
+            None => {
+                return Err(TypeError::SharedElementNotSupported {
+                    span: to_source_span(&args[0].span),
+                })
+            }
+        };
+        return Ok((
+            TypedExprKind::Call {
+                id,
+                callee_span: callee_span.clone(),
+                args: vec![v_typed],
+                type_args: vec![],
+            },
+            Type::Shared(SharedId(sid)),
+        ));
+    }
+    if id == SHARED_GET_FN_ID {
+        // `shared_get(s: Shared<T>) -> T`: the element from the handle's `SharedId`
+        // (like `recv`), returned DIRECTLY (a `Shared` is always valid — no `?T`).
+        // Codegen decodes the i64 slot into `T`; `type_args=[elem]` when non-i64
+        // (the `i64` case emits no decode, byte-identical).
+        let s_typed = check_expr(
+            &args[0], None, env, signatures, structs, class_decls, enums, instances, refs,
+            secrets, arrays, struct_type_param_counts, effect_decls, trait_decls, impl_decls,
+            konts, tasks,
+        )?;
+        let elem = match s_typed.ty {
+            Type::Shared(sid) => shared_elem_for(sid),
+            _ => {
+                return Err(TypeError::CallArgMismatch {
+                    callee: "shared_get".to_string(),
+                    arg_index: 0,
+                    expected: Type::Shared(SharedId(0)),
+                    got: s_typed.ty,
+                    span: to_source_span(&args[0].span),
+                })
+            }
+        };
+        let type_args = if elem == Type::I64 { vec![] } else { vec![elem] };
+        return Ok((
+            TypedExprKind::Call {
+                id,
+                callee_span: callee_span.clone(),
+                args: vec![s_typed],
+                type_args,
+            },
+            elem,
         ));
     }
 
@@ -10728,6 +10959,11 @@ fn type_error_to_diagnostic(err: &TypeError) -> Diagnostic {
         TypeError::ChannelElementNotSupported { span } => (
             "sentinel::types::channel_element_not_supported",
             "`Channel<T>` element type is not supported yet".to_string(),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        TypeError::SharedElementNotSupported { span } => (
+            "sentinel::types::shared_element_not_supported",
+            "`Shared<T>` element type is not supported yet".to_string(),
             span.offset()..(span.offset() + span.len()),
         ),
         TypeError::FnTypeArgsNotSupported { span } => (

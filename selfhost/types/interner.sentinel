@@ -75,6 +75,11 @@ fn mk_sealed_channel(c: &mut TyCtx) -> i64 { intern_type(c, 15, 0, 0) }
 // internal numbering never has to match Rust's (only the rendered dump text
 // does, and that's decoded fresh from (a, b) either way).
 fn mk_fn(c: &mut TyCtx, param_ty: i64, ret_ty: i64) -> i64 { intern_type(c, 16, param_ty, ret_ty) }
+// (ADR 0071 M1.4a) a `Shared<T>` refcounted-handle (interner kind 17; a = the
+// element type handle, like `Channel<T>`); renders `Shared<T>`. Lowers to an
+// opaque `ptr` (*SentinelShared). Copy for the borrow checker; at slice 2b it
+// leaks (no drop) like `Channel` — the refcount `--`-on-drop is slice 3.
+fn mk_shared(c: &mut TyCtx, elem: i64) -> i64 { intern_type(c, 17, elem, 0) }
 
 // --- (4h) type-param scope --------------------------------------------------
 
@@ -455,6 +460,11 @@ fn render_type(out: &mut Vec<u8>, h: i64, c: &mut TyCtx) -> i64 {
             render_type(out, a, c);
             push(out, ',');
             render_type(out, b, c);
+            push(out, '>')
+        } else if k == 17 {
+            // (ADR 0071 M1.4a) Shared<T>: `Shared<` + element + `>` (mirrors Channel).
+            append_str(out, "Shared<");
+            render_type(out, a, c);
             push(out, '>')
         } else {
             append_str(out, "??")
@@ -1202,11 +1212,17 @@ fn type_of_typeexpr(c: &mut TyCtx, t: TypeE, gb: &mut Vec<u8>) -> i64 {
             // fixture the oracle rejects never reaches here, per the corpus's own
             // skip-on-oracle-error rule, so `mk_fn` need not itself validate).
             let is_fn: bool = name_eq_lit(&gn, "Fn");
+            // (ADR 0071 M1.4a) `Shared<T>` in type position → the kind-17 Shared
+            // type (mirrors the Channel arm), so a fn can take a shared handle as a
+            // parameter. Element `i64` (handle 0) at the M1.4a minimum.
+            let is_shared: bool = name_eq_lit(&gn, "Shared");
             let gsid: i64 = if is_vec {
                 0 - 1
             } else if is_channel {
                 0 - 1
             } else if is_fn {
+                0 - 1
+            } else if is_shared {
                 0 - 1
             } else {
                 struct_lookup(c, &gn)
@@ -1241,6 +1257,12 @@ fn type_of_typeexpr(c: &mut TyCtx, t: TypeE, gb: &mut Vec<u8>) -> i64 {
                     0
                 };
                 mk_fn(c, fparam, fret)
+            } else if is_shared {
+                // resolve (and free) the type args like `Channel`; the element
+                // type is `i64` (handle 0) at the M1.4a minimum.
+                let mut sav: Vec<i64> = vec_new();
+                collect_tyargs(c, ga, gb, &mut sav);
+                mk_shared(c, 0)
             } else if gsid >= 0 {
                 let mut gav: Vec<i64> = vec_new();
                 collect_tyargs(c, ga, gb, &mut gav);
@@ -1409,6 +1431,12 @@ fn builtin_ret(c: &mut TyCtx, fid: i64) -> i64 {
         // (ADR 0066 M2.4 follow-on) arg(i) -> [u8] (arg_count (35) -> i64 via
         // the default 0=i64 below, like read_file/process_read).
         mk_array(c, 3)
+    } else if fid == 38 {
+        // (ADR 0071 M1.4a) shared_new(v) -> Shared<i64> (shared_get (39) -> i64
+        // via the default 0=i64 below, like recv reading its element). The
+        // check_call special-case computes the real element; this default keeps
+        // the i64 case (the differential fixture) byte-identical.
+        mk_shared(c, 0)
     } else {
         0
     }
