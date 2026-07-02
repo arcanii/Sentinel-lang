@@ -31,7 +31,7 @@ use sentinel_resolve::{
     ResolvedExprKind, ResolvedFnDef, ResolvedPattern, ResolvedProgram, ResolvedStmt,
     ResolvedStmtKind, StructId, TraitId, TypeParamId, VarId, APPLY_FN_ID, CHANNEL_CLOSE_FN_ID,
     CHANNEL_NEW_FN_ID, LEN_FN_ID, PROCESS_RECV_FN_ID, PROCESS_SEND_FN_ID, RECV_FN_ID, SEND_FN_ID,
-    SHARED_GET_FN_ID, SHARED_NEW_FN_ID,
+    MUTEX_NEW_FN_ID, SHARED_GET_FN_ID, SHARED_NEW_FN_ID,
 };
 use sentinel_ast::SelfKind;
 
@@ -252,6 +252,17 @@ pub enum Type {
     /// i64 slot, reusing the `Channel<T>` send/recv encode/decode). Produced by
     /// `shared_new(v)`; the value is read back by `shared_get(s)`.
     Shared(SharedId),
+    /// ADR 0071 M1.4b: `Mutex<T>` — a runtime-refcounted, lock-protected shared
+    /// cell (`Mutex<T> = Shared<SentinelMutex<T>>`, D4). The [`MutexId`] indexes
+    /// into `TypedProgram.mutexes`, where `MutexData { elem_ty }` lives —
+    /// mirroring [`Type::Shared`]'s interner-table shape (preserves `Copy + Hash`;
+    /// a `MutexId` is just a `u32`). Like `Shared`, the handle is **`Copy`** for
+    /// the borrow checker (frictionless N-way co-ownership) and — starting at
+    /// slice 3 — emits a scope-exit drop (`sentinel_mutex_release`, rc--); at THIS
+    /// slice (2b) it still leaks (`needs_drop == false`). At the M1.4b minimum
+    /// `elem_ty` is a word-sized scalar (encoded into the cell's i64 slot).
+    /// Produced by `mutex_new(v)`; `lock(m)` yields a `?Guard<T>` (slice 2b-ii).
+    Mutex(MutexId),
 }
 
 /// Identifier for an interned reference type. C2 / ADR 0017 D11.
@@ -347,6 +358,24 @@ pub struct SharedId(pub u32);
 /// encoded into the cell's i64 slot. Mirrors [`ChannelData`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SharedData {
+    pub elem_ty: Type,
+}
+
+/// ADR 0071 M1.4b: identifier for an interned `Mutex<T>` type. Assigned like
+/// [`SharedId`] — the 6 word-scalar `Mutex<T>` types are pre-interned at FIXED
+/// ids 0..=5 during builtin signature setup (see [`mutex_id_for`]), so a
+/// `Mutex<T>` annotation / `mutex_new(v)` result maps to a stable id WITHOUT
+/// threading the `mutexes` interner through the checker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct MutexId(pub u32);
+
+/// The underlying data of a [`Type::Mutex`] per ADR 0071 M1.4b. `elem_ty` = the
+/// value type the lock-protected cell holds (`mutex_new` wraps a value of this
+/// type; `lock`'s guard reads/writes it). Owned by [`TypedProgram::mutexes`]. At
+/// the M1.4b minimum `elem_ty` is a word-sized scalar, encoded into the cell's
+/// i64 slot. Mirrors [`SharedData`].
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct MutexData {
     pub elem_ty: Type,
 }
 
@@ -852,7 +881,9 @@ impl Type {
             // ADR 0070: no `?Fn` (a handle, like `Process`/`SealedChannel`).
             | Type::Fn(_)
             // ADR 0071 M1.4a: no `?Shared` (a handle).
-            | Type::Shared(_) => None,
+            | Type::Shared(_)
+            // ADR 0071 M1.4b: no `?Mutex` (a handle).
+            | Type::Mutex(_) => None,
         }
     }
 
@@ -913,7 +944,9 @@ impl Type {
             // ADR 0070: no `[Fn]` (a handle, like `Process`/`SealedChannel`).
             | Type::Fn(_)
             // ADR 0071 M1.4a: no `[Shared]` (a handle).
-            | Type::Shared(_) => None,
+            | Type::Shared(_)
+            // ADR 0071 M1.4b: no `[Mutex]` (a handle).
+            | Type::Mutex(_) => None,
         }
     }
 
@@ -996,7 +1029,9 @@ impl Type {
             // ADR 0070: no `Vec<Fn>` (a handle, like `Process`/`SealedChannel`).
             | Type::Fn(_)
             // ADR 0071 M1.4a: no `Vec<Shared>` (a handle).
-            | Type::Shared(_) => None,
+            | Type::Shared(_)
+            // ADR 0071 M1.4b: no `Vec<Mutex>` (a handle).
+            | Type::Mutex(_) => None,
         }
     }
 
@@ -1191,6 +1226,9 @@ impl Type {
             // ADR 0071 M1.4a: `Shared<T>`'s word-scalar element carries no
             // TypeParam — pass through unchanged.
             Type::Shared(_) => self,
+            // ADR 0071 M1.4b: `Mutex<T>`'s word-scalar element carries no
+            // TypeParam — pass through unchanged.
+            Type::Mutex(_) => self,
             // ADR 0066 M2.1: `Process` carries no TypeParam — pass through.
             Type::Process => self,
             // ADR 0066 M2.4a: `SealedChannel` carries no TypeParam — pass through.
@@ -1525,6 +1563,51 @@ pub fn intern_shared(shared: &mut Vec<SharedData>, elem_ty: Type) -> SharedId {
     id
 }
 
+/// ADR 0071 M1.4b: the `Mutex<T>` word-scalar element types are pre-interned at
+/// FIXED [`MutexId`]s 0..=5 during builtin signature setup (mirroring
+/// [`shared_id_for`]), so a `Mutex<T>` annotation / `mutex_new(v)` result maps to
+/// a stable `MutexId` WITHOUT threading the `mutexes` interner. Returns the fixed
+/// index for a word-scalar `elem`, else `None`.
+pub fn mutex_id_for(elem: Type) -> Option<u32> {
+    match elem {
+        Type::I64 => Some(0),
+        Type::I32 => Some(1),
+        Type::U8 => Some(2),
+        Type::Bool => Some(3),
+        Type::F64 => Some(4),
+        Type::Ptr => Some(5),
+        _ => None,
+    }
+}
+
+/// The inverse of [`mutex_id_for`]: the element type of a pre-interned `Mutex<T>`
+/// `MutexId`. Lets `lock` read a mutex arg's element from its `Type::Mutex(id)`
+/// alone (no `mutexes`-table access in the checker). `i64` for an unknown id
+/// (defensive). Mirrors [`shared_elem_for`].
+pub fn mutex_elem_for(id: MutexId) -> Type {
+    match id.0 {
+        1 => Type::I32,
+        2 => Type::U8,
+        3 => Type::Bool,
+        4 => Type::F64,
+        5 => Type::Ptr,
+        _ => Type::I64,
+    }
+}
+
+/// Intern an `elem_ty` into `mutexes`, returning its [`MutexId`] per ADR 0071
+/// M1.4b. Linear search, dedup by structural equality; mirrors [`intern_shared`].
+pub fn intern_mutex(mutexes: &mut Vec<MutexData>, elem_ty: Type) -> MutexId {
+    for (idx, existing) in mutexes.iter().enumerate() {
+        if existing.elem_ty == elem_ty {
+            return MutexId(idx as u32);
+        }
+    }
+    let id = MutexId(mutexes.len() as u32);
+    mutexes.push(MutexData { elem_ty });
+    id
+}
+
 /// ADR 0068: intern a nested array's inner [`ArrayElem`] into `arrays`,
 /// returning its [`ArrayId`]. Linear search, dedup by structural equality;
 /// mirrors [`intern_channel`]'s shape. `Type::Array(ArrayElem::Array(id))` is
@@ -1675,6 +1758,15 @@ pub fn type_display(ty: Type, program: Option<&TypedProgram>) -> String {
             }
             format!("<shared#{}>", id.0)
         }
+        // ADR 0071 M1.4b: render `Mutex<elem>` (mirrors `Shared<…>`).
+        Type::Mutex(id) => {
+            if let Some(p) = program {
+                if let Some(data) = p.mutexes.get(id.0 as usize) {
+                    return format!("Mutex<{}>", type_display(data.elem_ty, program));
+                }
+            }
+            format!("<mutex#{}>", id.0)
+        }
         // ADR 0066 M2.1: a plain `Process` handle (no element type).
         Type::Process => "Process".to_string(),
         // ADR 0066 M2.4a: the `secret i64`-minimum sealed endpoint (unit variant).
@@ -1730,6 +1822,7 @@ impl std::fmt::Display for Type {
             Type::Task(id) => write!(f, "<task#{}>", id.0),
             Type::Channel(id) => write!(f, "<channel#{}>", id.0),
             Type::Shared(id) => write!(f, "<shared#{}>", id.0),
+            Type::Mutex(id) => write!(f, "<mutex#{}>", id.0),
             Type::Process => write!(f, "Process"),
             Type::SealedChannel => write!(f, "SealedChannel"),
             Type::Fn(id) => {
@@ -2090,6 +2183,38 @@ fn resolve_type_expr_with_scope(
                         }),
                     }
                 }
+                // ADR 0071 M1.4b: `Mutex<T>` in type position — so a fn can take a
+                // mutex handle as a parameter (mirrors the `Shared<T>` arm). Any
+                // word-scalar element resolves to its pre-interned MutexId (i64 →
+                // MutexId(0)); a non-word-scalar is rejected (MutexElementNotSupported).
+                "Mutex" => {
+                    if args.len() != 1 {
+                        return Err(TypeError::TypeArgCountMismatch {
+                            type_name: "Mutex".to_string(),
+                            expected: 1,
+                            found: args.len(),
+                            span: to_source_span(&te.span),
+                        });
+                    }
+                    let elem_ty = resolve_type_expr_with_scope(
+                        &args[0],
+                        struct_table,
+                        class_table,
+                        enum_table,
+                        type_param_scope,
+                        instances,
+                        refs,
+                        secrets,
+                        arrays,
+                        struct_type_param_counts,
+                    )?;
+                    match mutex_id_for(elem_ty) {
+                        Some(mid) => Ok(Type::Mutex(MutexId(mid))),
+                        None => Err(TypeError::MutexElementNotSupported {
+                            span: to_source_span(&te.span),
+                        }),
+                    }
+                }
                 // ADR 0066 M2.4a / ADR 0069: `SealedChannel<secret i64>` in type
                 // position — so the stdlib `seal`/`open` framing fns can take a
                 // sealed endpoint as a parameter. The element MUST be `secret i64`
@@ -2327,6 +2452,11 @@ pub struct TypedProgram {
     /// word-scalar elements at fixed ids 0..=5 during builtin signature setup
     /// (see [`shared_id_for`]). Mirrors [`channels`].
     pub shared: Vec<SharedData>,
+    /// ADR 0071 M1.4b: interned `Mutex<T>` types. Each `Type::Mutex(id)` indexes
+    /// this vector to recover `(elem_ty)`. Pre-populated with the 6 word-scalar
+    /// elements at fixed ids 0..=5 during builtin signature setup (see
+    /// [`mutex_id_for`]). Mirrors [`shared`].
+    pub mutexes: Vec<MutexData>,
     /// ADR 0068: interned NESTED-array elements. Each
     /// `Type::Array(ArrayElem::Array(id))` (`[[T]]`) indexes this vector to
     /// recover the *inner* array's [`ArrayElem`]. Populated when a `[[T]]` type
@@ -2415,6 +2545,12 @@ impl TypedProgram {
     /// Panics on out-of-range — IDs only come from [`intern_shared`].
     pub fn shared_data(&self, id: SharedId) -> &SharedData {
         &self.shared[id.0 as usize]
+    }
+
+    /// Look up the `(elem_ty)` for a `Mutex<T>` type per ADR 0071 M1.4b.
+    /// Panics on out-of-range — IDs only come from [`intern_mutex`].
+    pub fn mutex_data(&self, id: MutexId) -> &MutexData {
+        &self.mutexes[id.0 as usize]
     }
 
     /// ADR 0068: the inner [`ArrayElem`] of a nested-array element. Panics on
@@ -3721,6 +3857,21 @@ pub enum TypeError {
         span: miette::SourceSpan,
     },
 
+    /// ADR 0071 M1.4b: a `Mutex<T>` element (from a `Mutex<T>` annotation or the
+    /// `mutex_new(v)` argument) must be a word-scalar {i64,i32,u8,bool,f64,ptr} at
+    /// the M1.4b minimum (it is encoded into the cell's i64 slot). A non-word-scalar
+    /// (an aggregate, `secret`, `u128`) is rejected — generic `Mutex<secret T>` is
+    /// M1.4c. Mirrors [`SharedElementNotSupported`].
+    #[error("`Mutex<T>` element type is not supported yet")]
+    #[diagnostic(
+        code(sentinel::types::mutex_element_not_supported),
+        help("at the M1.4b minimum a `Mutex<T>` holds a word-scalar (i64/i32/u8/bool/f64/ptr); aggregates and `secret` are a follow-on (M1.4c)")
+    )]
+    MutexElementNotSupported {
+        #[label("unsupported Mutex element type here")]
+        span: miette::SourceSpan,
+    },
+
     /// ADR 0071 M1.4a slice 3: returning a NAMED `Shared<T>` binding (a bare `Var`
     /// in tail or `return` position) is not yet supported — the refcount TRANSFER
     /// exemption for such a return is deferred (M1.4a slice 3b: the byte-identical
@@ -4682,6 +4833,10 @@ pub fn check_module(
     // word-scalar elements at fixed SharedIds 0..=5 while building the shared
     // builtin signatures below (mirrors `channels`).
     let mut shared: Vec<SharedData> = Vec::new();
+    // ADR 0071 M1.4b: the `Mutex<T>`-type interner. Pre-populated with the 6
+    // word-scalar elements at fixed MutexIds 0..=5 while building the mutex
+    // builtin signatures below (mirrors `shared`).
+    let mut mutexes: Vec<MutexData> = Vec::new();
     // ADR 0068: the nested-array element interner — populated when a `[[T]]` type
     // annotation / literal is resolved (threaded through resolve_type_expr +
     // the check pipeline, like `secrets`/`refs`).
@@ -5298,17 +5453,23 @@ pub fn check_module(
         }
     }
     // ADR 0071 M1.4b: the `Mutex<T>` builtins — `mutex_new(v: T) -> Mutex<T>`
-    // (FnId 40) and `lock(m: Mutex<T>) -> ?Guard` (FnId 41). This is slice 2a
-    // (reserve the FnIds + keep `typed_signatures` FnId-aligned so the user-fn
-    // base is 42); the registered param/return types below are PLACEHOLDERS
-    // (arity 1 each, i64 -> i64), inert because no fixture calls these yet. Slice
-    // 2b adds `Type::Mutex`/`Type::Guard` + a `check_call` special-case that
-    // computes the real element/guard types, so these placeholders are never
-    // consulted.
+    // (FnId 40) and `lock(m: Mutex<T>) -> ?Guard` (FnId 41). Pre-intern the 6
+    // word-scalar element types at FIXED MutexIds 0..=5 (matching `mutex_id_for`),
+    // so a `Mutex<T>` annotation / `mutex_new(v)` result resolves to a stable
+    // MutexId without threading the `mutexes` interner (mirrors `shared`). At THIS
+    // slice (2b-i) `mutex_new` gets its real `Mutex<i64>` return + a `check_call`
+    // special-case; `lock`'s return stays a PLACEHOLDER (`i64`) until slice 2b-ii
+    // adds `Type::Guard` + `?Guard` — no fixture calls `lock` yet, so it is inert.
     {
+        let mutex_i64 = Type::Mutex(intern_mutex(&mut mutexes, Type::I64));
+        intern_mutex(&mut mutexes, Type::I32);
+        intern_mutex(&mut mutexes, Type::U8);
+        intern_mutex(&mut mutexes, Type::Bool);
+        intern_mutex(&mut mutexes, Type::F64);
+        intern_mutex(&mut mutexes, Type::Ptr);
         let mutex_sigs: &[(usize, &[Type], Type)] = &[
-            (40, &[Type::I64], Type::I64), // mutex_new (placeholder — real: Mutex<T>)
-            (41, &[Type::I64], Type::I64), // lock (placeholder — real: ?Guard)
+            (40, &[Type::I64], mutex_i64), // mutex_new(i64) -> Mutex<i64>
+            (41, &[mutex_i64], Type::I64), // lock (placeholder — real ?Guard is 2b-ii)
         ];
         for (idx, params, ret) in mutex_sigs {
             let sig = &program.fn_signatures[*idx];
@@ -6215,6 +6376,9 @@ pub fn check_module(
         // ADR 0071 M1.4a: pre-populated with the 6 word-scalar `Shared<T>`
         // elements at fixed SharedIds 0..=5 (matching `shared_id_for`).
         shared,
+        // ADR 0071 M1.4b: pre-populated with the 6 word-scalar `Mutex<T>`
+        // elements at fixed MutexIds 0..=5 (matching `mutex_id_for`).
+        mutexes,
         class_decls: typed_class_decls,
         trait_decls: typed_trait_decls,
         impl_decls: typed_impl_decls,
@@ -7396,6 +7560,8 @@ fn try_substitute(
         Type::Channel(_) => Some(ty),
         // ADR 0071 M1.4a: `Shared<T>`'s word-scalar element carries no TypeParam.
         Type::Shared(_) => Some(ty),
+        // ADR 0071 M1.4b: `Mutex<T>`'s word-scalar element carries no TypeParam.
+        Type::Mutex(_) => Some(ty),
         // ADR 0066 M2.1: `Process` carries no TypeParam.
         Type::Process => Some(ty),
         // ADR 0066 M2.4a: `SealedChannel` carries no TypeParam.
@@ -7457,6 +7623,8 @@ fn contains_type_param(
         Type::Channel(_) => false,
         // ADR 0071 M1.4a: `Shared<T>`'s word-scalar element is never a TypeParam.
         Type::Shared(_) => false,
+        // ADR 0071 M1.4b: `Mutex<T>`'s word-scalar element is never a TypeParam.
+        Type::Mutex(_) => false,
         Type::Process => false,
         // ADR 0066 M2.4a: `SealedChannel` carries no TypeParam.
         Type::SealedChannel => false,
@@ -8006,6 +8174,35 @@ fn check_call(
                 type_args,
             },
             elem,
+        ));
+    }
+    // ADR 0071 M1.4b: the `Mutex<T>` constructor (mirrors `shared_new`).
+    if id == MUTEX_NEW_FN_ID {
+        // `mutex_new(v: T) -> Mutex<T>`: `T` is the word-scalar element read from
+        // the VALUE arg. Codegen encodes it into the cell's i64 slot by LLVM value
+        // kind (no `type_args`); the `i64` case emits no encode. `lock(m)` (2b-ii)
+        // reads/writes it through a guard.
+        let v_typed = check_expr(
+            &args[0], None, env, signatures, structs, class_decls, enums, instances, refs,
+            secrets, arrays, struct_type_param_counts, effect_decls, trait_decls, impl_decls,
+            konts, tasks,
+        )?;
+        let mid = match mutex_id_for(v_typed.ty) {
+            Some(mid) => mid,
+            None => {
+                return Err(TypeError::MutexElementNotSupported {
+                    span: to_source_span(&args[0].span),
+                })
+            }
+        };
+        return Ok((
+            TypedExprKind::Call {
+                id,
+                callee_span: callee_span.clone(),
+                args: vec![v_typed],
+                type_args: vec![],
+            },
+            Type::Mutex(MutexId(mid)),
         ));
     }
 
@@ -11051,6 +11248,11 @@ fn type_error_to_diagnostic(err: &TypeError) -> Diagnostic {
         TypeError::SharedElementNotSupported { span } => (
             "sentinel::types::shared_element_not_supported",
             "`Shared<T>` element type is not supported yet".to_string(),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        TypeError::MutexElementNotSupported { span } => (
+            "sentinel::types::mutex_element_not_supported",
+            "`Mutex<T>` element type is not supported yet".to_string(),
             span.offset()..(span.offset() + span.len()),
         ),
         TypeError::SharedReturnNotSupported { span } => (

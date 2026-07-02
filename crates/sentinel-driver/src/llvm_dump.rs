@@ -47,7 +47,8 @@ use sentinel_resolve::{
     IS_SOME_FN_ID, LEN_FN_ID,
     CHANNEL_CLOSE_FN_ID, CHANNEL_NEW_FN_ID, POP_FN_ID, PRINT_BYTES_FN_ID, PRINT_FN_ID,
     PROCESS_READ_FN_ID, PROCESS_RECV_FN_ID, PROCESS_SEND_FN_ID, PROCESS_SPAWN_FN_ID,
-    PROCESS_WAIT_FN_ID, PROCESS_WRITE_FN_ID, PUSH_FN_ID, SEALED_CHANNEL_FN_ID, SEALED_PROCESS_FN_ID,
+    MUTEX_NEW_FN_ID, PROCESS_WAIT_FN_ID, PROCESS_WRITE_FN_ID, PUSH_FN_ID, SEALED_CHANNEL_FN_ID,
+    SEALED_PROCESS_FN_ID,
     SHARED_GET_FN_ID, SHARED_NEW_FN_ID, STDIN_RECV_FN_ID, STDOUT_SEND_FN_ID,
     READ_FILE_FN_ID, RECV_FN_ID, SEND_FN_ID, STR_EQ_FN_ID, U8_TO_I64_FN_ID, UNWRAP_OR_FN_ID,
     VEC_NEW_FN_ID, VEC_TO_ARRAY_FN_ID, WRITE_FILE_FN_ID,
@@ -152,6 +153,9 @@ struct RuntimeSyms {
     shared_get: bool,
     shared_clone: bool,
     shared_release: bool,
+    /// ADR 0071 M1.4b: the `Mutex<T>` refcounted-cell runtime symbols. At slice
+    /// 2b-i only `sentinel_mutex_new(i64) -> ptr` (rc=1, unlocked) is emitted.
+    mutex_new: bool,
     /// ADR 0066 M2.1: the subprocess runtime symbols.
     /// `sentinel_process_spawn(ptr, i64, ptr, i64) -> ptr`, `_wait(ptr) -> i64`.
     process_spawn: bool,
@@ -204,6 +208,7 @@ impl RuntimeSyms {
         self.shared_get |= other.shared_get;
         self.shared_clone |= other.shared_clone;
         self.shared_release |= other.shared_release;
+        self.mutex_new |= other.mutex_new;
         self.process_spawn |= other.process_spawn;
         self.process_wait |= other.process_wait;
         self.process_write |= other.process_write;
@@ -305,6 +310,10 @@ impl RuntimeSyms {
         if self.shared_release {
             writeln!(out, "declare void @sentinel_shared_release(ptr)").unwrap();
         }
+        // ADR 0071 M1.4b: the Mutex<T> refcounted-cell runtime group.
+        if self.mutex_new {
+            writeln!(out, "declare ptr @sentinel_mutex_new(i64)").unwrap();
+        }
         // ADR 0066 M2.1: the subprocess runtime group.
         if self.process_spawn {
             writeln!(out, "declare ptr @sentinel_process_spawn(ptr, i64, ptr, i64)").unwrap();
@@ -370,6 +379,7 @@ impl RuntimeSyms {
             || self.shared_get
             || self.shared_clone
             || self.shared_release
+            || self.mutex_new
             || self.process_spawn
             || self.process_wait
             || self.process_write
@@ -3312,6 +3322,36 @@ impl Emit<'_> {
             self.used.shared_new = true;
             return Ok(format!("%v{v}"));
         }
+        // ADR 0071 M1.4b: mutex_new(v: T) -> Mutex<T> (a ptr): ENCODE the word-scalar
+        // element into the cell's i64 slot (the shared_new encode; `i64` byte-identical),
+        // then allocate the refcounted, lock-protected cell (rc=1, unlocked).
+        if id == MUTEX_NEW_FN_ID {
+            let val = self.lower_expr(&args[0])?;
+            let enc = match args[0].ty {
+                Type::I64 => val,
+                Type::I32 | Type::U8 | Type::Bool => {
+                    let ety = self.lty(args[0].ty)?;
+                    let e = self.fresh();
+                    writeln!(self.body, "  %v{e} = zext {ety} {val} to i64").unwrap();
+                    format!("%v{e}")
+                }
+                Type::F64 => {
+                    let e = self.fresh();
+                    writeln!(self.body, "  %v{e} = bitcast double {val} to i64").unwrap();
+                    format!("%v{e}")
+                }
+                Type::Ptr => {
+                    let e = self.fresh();
+                    writeln!(self.body, "  %v{e} = ptrtoint ptr {val} to i64").unwrap();
+                    format!("%v{e}")
+                }
+                other => return Err(format!("mutex_new element not ported (word-scalar): {other:?}")),
+            };
+            let v = self.fresh();
+            writeln!(self.body, "  %v{v} = call ptr @sentinel_mutex_new(i64 {enc})").unwrap();
+            self.used.mutex_new = true;
+            return Ok(format!("%v{v}"));
+        }
         if id == SHARED_GET_FN_ID {
             // shared_get(s) -> T: read the cell's i64 slot, DECODE into T (returned
             // DIRECTLY — no `?T` wrapper, unlike recv). Element from `type_args[0]`
@@ -3708,6 +3748,8 @@ fn llvm_ty(ty: Type, program: &TypedProgram) -> Result<String, String> {
         Type::Channel(_) => Ok("ptr".to_string()),
         // ADR 0071 M1.4a: a `Shared<T>` is an opaque `*SentinelShared`.
         Type::Shared(_) => Ok("ptr".to_string()),
+        // ADR 0071 M1.4b: a `Mutex<T>` is an opaque `*SentinelMutex`.
+        Type::Mutex(_) => Ok("ptr".to_string()),
         // ADR 0066 M2.1: a Process handle lowers to an opaque ptr.
         Type::Process => Ok("ptr".to_string()),
         // ADR 0066 M2.4a: a SealedChannel lowers to the same opaque ptr as Process.

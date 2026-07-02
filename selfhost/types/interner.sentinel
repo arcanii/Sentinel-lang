@@ -80,6 +80,11 @@ fn mk_fn(c: &mut TyCtx, param_ty: i64, ret_ty: i64) -> i64 { intern_type(c, 16, 
 // opaque `ptr` (*SentinelShared). Copy for the borrow checker; at slice 2b it
 // leaks (no drop) like `Channel` — the refcount `--`-on-drop is slice 3.
 fn mk_shared(c: &mut TyCtx, elem: i64) -> i64 { intern_type(c, 17, elem, 0) }
+// (ADR 0071 M1.4b) a `Mutex<T>` refcounted, lock-protected handle (interner kind
+// 18; a = the element type handle, like `Shared<T>`); renders `Mutex<T>`. Lowers
+// to an opaque `ptr` (*SentinelMutex). Copy for the borrow checker; at slice 2b-i
+// it leaks (no drop) like `Shared` — the refcount/unlock-on-drop is slice 3.
+fn mk_mutex(c: &mut TyCtx, elem: i64) -> i64 { intern_type(c, 18, elem, 0) }
 
 // --- (4h) type-param scope --------------------------------------------------
 
@@ -464,6 +469,11 @@ fn render_type(out: &mut Vec<u8>, h: i64, c: &mut TyCtx) -> i64 {
         } else if k == 17 {
             // (ADR 0071 M1.4a) Shared<T>: `Shared<` + element + `>` (mirrors Channel).
             append_str(out, "Shared<");
+            render_type(out, a, c);
+            push(out, '>')
+        } else if k == 18 {
+            // (ADR 0071 M1.4b) Mutex<T>: `Mutex<` + element + `>` (mirrors Shared).
+            append_str(out, "Mutex<");
             render_type(out, a, c);
             push(out, '>')
         } else {
@@ -1216,6 +1226,9 @@ fn type_of_typeexpr(c: &mut TyCtx, t: TypeE, gb: &mut Vec<u8>) -> i64 {
             // type (mirrors the Channel arm), so a fn can take a shared handle as a
             // parameter. Element `i64` (handle 0) at the M1.4a minimum.
             let is_shared: bool = name_eq_lit(&gn, "Shared");
+            // (ADR 0071 M1.4b) `Mutex<T>` in type position → the kind-18 Mutex type
+            // (mirrors the Shared arm). Element `i64` (handle 0) at the M1.4b minimum.
+            let is_mutex: bool = name_eq_lit(&gn, "Mutex");
             let gsid: i64 = if is_vec {
                 0 - 1
             } else if is_channel {
@@ -1223,6 +1236,8 @@ fn type_of_typeexpr(c: &mut TyCtx, t: TypeE, gb: &mut Vec<u8>) -> i64 {
             } else if is_fn {
                 0 - 1
             } else if is_shared {
+                0 - 1
+            } else if is_mutex {
                 0 - 1
             } else {
                 struct_lookup(c, &gn)
@@ -1263,6 +1278,12 @@ fn type_of_typeexpr(c: &mut TyCtx, t: TypeE, gb: &mut Vec<u8>) -> i64 {
                 let mut sav: Vec<i64> = vec_new();
                 collect_tyargs(c, ga, gb, &mut sav);
                 mk_shared(c, 0)
+            } else if is_mutex {
+                // resolve (and free) the type args like `Shared`; the element
+                // type is `i64` (handle 0) at the M1.4b minimum.
+                let mut mav: Vec<i64> = vec_new();
+                collect_tyargs(c, ga, gb, &mut mav);
+                mk_mutex(c, 0)
             } else if gsid >= 0 {
                 let mut gav: Vec<i64> = vec_new();
                 collect_tyargs(c, ga, gb, &mut gav);
@@ -1443,6 +1464,11 @@ fn builtin_ret(c: &mut TyCtx, fid: i64) -> i64 {
         // check_call special-case computes the real element; this default keeps
         // the i64 case (the differential fixture) byte-identical.
         mk_shared(c, 0)
+    } else if fid == 40 {
+        // (ADR 0071 M1.4b) mutex_new(v) -> Mutex<i64> (lock (41) -> ?Guard is
+        // slice 2b-ii). The check_call special-case computes the real element;
+        // this default keeps the i64 case byte-identical.
+        mk_mutex(c, 0)
     } else {
         0
     }

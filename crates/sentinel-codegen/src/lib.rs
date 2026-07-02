@@ -49,7 +49,8 @@ use sentinel_resolve::{
     CHANNEL_CLOSE_FN_ID,
     CHANNEL_NEW_FN_ID, I64_TO_U8_FN_ID, IS_SOME_FN_ID, LEN_FN_ID, POP_FN_ID, PRINT_BYTES_FN_ID,
     PROCESS_READ_FN_ID, PROCESS_RECV_FN_ID, PROCESS_SEND_FN_ID, PROCESS_SPAWN_FN_ID,
-    PROCESS_WAIT_FN_ID, PROCESS_WRITE_FN_ID, SEALED_CHANNEL_FN_ID, SEALED_PROCESS_FN_ID,
+    MUTEX_NEW_FN_ID, PROCESS_WAIT_FN_ID, PROCESS_WRITE_FN_ID, SEALED_CHANNEL_FN_ID,
+    SEALED_PROCESS_FN_ID,
     SHARED_GET_FN_ID, SHARED_NEW_FN_ID, STDIN_RECV_FN_ID, STDOUT_SEND_FN_ID,
     PUSH_FN_ID, READ_FILE_FN_ID, RECV_FN_ID, SEND_FN_ID, STR_EQ_FN_ID, TCP_ACCEPT_FN_ID,
     TCP_CLOSE_FN_ID, TCP_CONNECT_FN_ID, TCP_LISTEN_FN_ID, TCP_LOCAL_PORT_FN_ID, TCP_READ_FN_ID,
@@ -656,6 +657,15 @@ pub fn compile_to_object_for_module(
     let shared_release_fn = module.add_function(
         "sentinel_shared_release",
         context.void_type().fn_type(&[ptr_ty.into()], false),
+        None,
+    );
+    // ADR 0071 M1.4b: declare the Mutex<T> refcounted-cell runtime symbols. At
+    // this slice (2b-i) codegen only emits `sentinel_mutex_new(i64 value) -> ptr`
+    // (rc=1, unlocked); `_lock`/`_unlock`/`_clone`/`_release` are declared when
+    // codegen begins emitting them (lock in 2b-ii, the refcount/unlock in 3).
+    let mutex_new_fn = module.add_function(
+        "sentinel_mutex_new",
+        ptr_ty.fn_type(&[i64_ty.into()], false),
         None,
     );
     // ADR 0066 M2.1: declare the subprocess runtime symbols (cross-platform).
@@ -1396,6 +1406,7 @@ pub fn compile_to_object_for_module(
             shared_get_fn,
             shared_clone_fn,
             shared_release_fn,
+            mutex_new_fn,
             process_spawn_fn,
             process_wait_fn,
             process_write_fn,
@@ -1672,6 +1683,10 @@ struct CodegenCtx<'ctx, 'plan> {
     shared_get_fn: FunctionValue<'ctx>,
     shared_clone_fn: FunctionValue<'ctx>,
     shared_release_fn: FunctionValue<'ctx>,
+    /// ADR 0071 M1.4b: the `Mutex<T>` refcounted-cell runtime symbols. At slice
+    /// 2b-i only `mutex_new(i64) -> ptr` (rc=1, unlocked) is emitted; lock/unlock/
+    /// clone/release are added as codegen begins emitting them.
+    mutex_new_fn: FunctionValue<'ctx>,
     /// ADR 0066 M2.1: the subprocess runtime symbols.
     process_spawn_fn: FunctionValue<'ctx>,
     process_wait_fn: FunctionValue<'ctx>,
@@ -2088,6 +2103,10 @@ fn field_type_needs_drop_inner(
         // scope-exit drop is `sentinel_shared_release` (the refcount `--`, freeing
         // the cell at zero). The FIRST Copy-yet-needs-drop handle (D2).
         Type::Shared(_) => true,
+        // ADR 0071 M1.4b: at THIS slice (2b-i) a `Mutex<T>` handle does NOT drop —
+        // it leaks like `Channel` (`needs_drop == false`). Slice 3 flips this to
+        // emit `sentinel_mutex_release` (rc--) + the guard's `sentinel_mutex_unlock`.
+        Type::Mutex(_) => false,
         Type::Process => false,
         // ADR 0066 M2.4a: a SealedChannel wraps a Process pipe — runtime-owned.
         Type::SealedChannel => false,
@@ -2260,6 +2279,8 @@ fn llvm_basic_type<'ctx>(
         Type::Channel(_) => context.ptr_type(inkwell::AddressSpace::default()).into(),
         // ADR 0071 M1.4a: a `Shared<T>` lowers to an opaque ptr (*SentinelShared).
         Type::Shared(_) => context.ptr_type(inkwell::AddressSpace::default()).into(),
+        // ADR 0071 M1.4b: a `Mutex<T>` lowers to an opaque ptr (*SentinelMutex).
+        Type::Mutex(_) => context.ptr_type(inkwell::AddressSpace::default()).into(),
         // ADR 0066 M2.1: a Process handle lowers to an opaque ptr (*SentinelProcess).
         Type::Process => context.ptr_type(inkwell::AddressSpace::default()).into(),
         // ADR 0066 M2.4a: a SealedChannel lowers to the same opaque ptr as Process
@@ -2907,6 +2928,8 @@ fn mangle_type(ty: Type, program: &TypedProgram) -> String {
         Type::Channel(id) => format!("chan{}", id.0),
         // ADR 0071 M1.4a: Shared<T> carries no TypeParam; defensive mangle label.
         Type::Shared(id) => format!("shared{}", id.0),
+        // ADR 0071 M1.4b: Mutex<T> carries no TypeParam; defensive mangle label.
+        Type::Mutex(id) => format!("mutex{}", id.0),
         // ADR 0066 M2.1: Process carries no TypeParam; defensive mangle label.
         Type::Process => "process".to_string(),
         // ADR 0066 M2.4a: SealedChannel carries no TypeParam; defensive mangle label.
@@ -2985,6 +3008,8 @@ fn arg_contains_typeparam(
         Type::Channel(_) => false,
         // ADR 0071 M1.4a: Shared<T>'s word-scalar element carries no TypeParam.
         Type::Shared(_) => false,
+        // ADR 0071 M1.4b: Mutex<T>'s word-scalar element carries no TypeParam.
+        Type::Mutex(_) => false,
         Type::Process => false,
         // ADR 0066 M2.4a: SealedChannel carries no TypeParam.
         Type::SealedChannel => false,
@@ -3057,6 +3082,7 @@ fn llvm_int_type<'ctx>(context: &'ctx Context, ty: Type) -> IntType<'ctx> {
         Type::Task(_) => panic!("llvm_int_type called on non-int Type::Task"),
         Type::Channel(_) => panic!("llvm_int_type called on non-int Type::Channel"),
         Type::Shared(_) => panic!("llvm_int_type called on non-int Type::Shared"),
+        Type::Mutex(_) => panic!("llvm_int_type called on non-int Type::Mutex"),
         Type::Process => panic!("llvm_int_type called on non-int Type::Process"),
         Type::SealedChannel => panic!("llvm_int_type called on non-int Type::SealedChannel"),
         Type::Class(_) => panic!("llvm_int_type called on non-int Type::Class"),
@@ -4797,6 +4823,12 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                     .build_call(self.shared_release_fn, &[ptr_val.into()], "shared_release")
                     .map_err(|e| CodegenError::Builder(e.to_string()))?;
             }
+            Type::Mutex(_) => {
+                // ADR 0071 M1.4b: at THIS slice (2b-i) a Mutex handle leaks like
+                // Channel — no codegen-emitted drop (`needs_drop == false`). Slice 3
+                // makes this arm emit `sentinel_mutex_release` (rc--) and the guard's
+                // scope-exit `sentinel_mutex_unlock`.
+            }
             Type::Process => {
                 // ADR 0066 M2.1: a Process handle is a Copy pointer; the
                 // SentinelProcess is runtime-owned (freed when the program
@@ -6292,6 +6324,54 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
             .expect("sentinel_shared_new returns ptr"))
     }
 
+    /// ADR 0071 M1.4b: `mutex_new(v: T) -> Mutex<T>` — ENCODE the word-scalar
+    /// element `v` into the cell's i64 slot (the `shared_new` encode: zext / bitcast
+    /// / ptrtoint; `i64` = no-op), allocate a refcounted, lock-protected cell (rc=1,
+    /// unlocked) via `sentinel_mutex_new`, and return the opaque `*SentinelMutex`
+    /// handle. Copy + (at this slice) leaked — the refcount `--`/unlock-on-drop is
+    /// slice 3; `lock(m)` (2b-ii) yields a guard reading/writing the value.
+    fn lower_mutex_new(
+        &mut self,
+        value: &TypedExpr,
+        program: &TypedProgram,
+    ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+        let i64_ty = self.context.i64_type();
+        let raw = self.lower_expr(value, program)?;
+        let encoded: IntValue = match raw {
+            BasicValueEnum::IntValue(iv) => {
+                if iv.get_type().get_bit_width() == 64 {
+                    iv
+                } else {
+                    self.builder
+                        .build_int_z_extend(iv, i64_ty, "mnew_enc")
+                        .map_err(|e| CodegenError::Builder(e.to_string()))?
+                }
+            }
+            BasicValueEnum::FloatValue(fv) => self
+                .builder
+                .build_bit_cast(fv, i64_ty, "mnew_enc")
+                .map_err(|e| CodegenError::Builder(e.to_string()))?
+                .into_int_value(),
+            BasicValueEnum::PointerValue(pv) => self
+                .builder
+                .build_ptr_to_int(pv, i64_ty, "mnew_enc")
+                .map_err(|e| CodegenError::Builder(e.to_string()))?,
+            other => {
+                return Err(CodegenError::Builder(format!(
+                    "mutex_new element unsupported (word-scalar only): {other:?}"
+                )));
+            }
+        };
+        let call = self
+            .builder
+            .build_call(self.mutex_new_fn, &[encoded.into()], "mutex_new")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        Ok(call
+            .try_as_basic_value()
+            .left()
+            .expect("sentinel_mutex_new returns ptr"))
+    }
+
     /// ADR 0071 M1.4a: `shared_get(s: Shared<T>) -> T` — read a copy of the cell's
     /// value via `sentinel_shared_get(s) -> i64`, then DECODE the i64 into the
     /// element `T` (the inverse of the `shared_new` encode: trunc / bitcast /
@@ -7749,6 +7829,10 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                 if *id == SHARED_GET_FN_ID {
                     let elem = type_args.first().copied().unwrap_or(Type::I64);
                     return self.lower_shared_get(&args[0], elem, program);
+                }
+                // ADR 0071 M1.4b: the Mutex<T> constructor (`lock` is slice 2b-ii).
+                if *id == MUTEX_NEW_FN_ID {
+                    return self.lower_mutex_new(&args[0], program);
                 }
                 // ADR 0066 M2.1: the subprocess builtins.
                 if *id == PROCESS_SPAWN_FN_ID {

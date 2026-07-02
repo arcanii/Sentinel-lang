@@ -1494,6 +1494,10 @@ fn is_copy_type(ty: Type, program: &TypedProgram) -> bool {
         // at slice 3 (the refcount `--`); at this slice (2b) it still leaks
         // (`needs_drop == false`), so Copy is all the checker needs today.
         Type::Shared(_) => true,
+        // ADR 0071 M1.4b: a `Mutex<T>` handle is Copy for the borrow checker
+        // (like `Shared`). At slice 2b it still leaks (`needs_drop == false`);
+        // slice 3 adds the scope-exit drop (`sentinel_mutex_release`, rc--).
+        Type::Mutex(_) => true,
     }
 }
 

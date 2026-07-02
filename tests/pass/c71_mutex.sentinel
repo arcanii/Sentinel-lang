@@ -1,0 +1,21 @@
+// ADR 0071 M1.4b slice 2b-i: `Mutex<T>` reaches TYPE + `mutex_new` LOWERING in
+// both compilers. `mutex_new(v)` allocates a refcounted, lock-protected cell
+// (rc=1, unlocked) holding a word-scalar `v` (mirrors `shared_new`). The handle
+// is Copy (freely duplicated — `take` gets its own copy of the handle with NO
+// borrow-checker move), and at THIS slice it deliberately LEAKS (`needs_drop ==
+// false`, like `Channel`): the `lock(m) -> ?Guard` builtin is slice 2b-ii, and
+// the refcount clone/`--`-on-drop + the guard's unlock-on-drop are slice 3.
+//
+// Exercises `Type::Mutex` (incl. the `resolve_type_expr` "Mutex" arm, via `take`'s
+// parameter) + the `mutex_new` builtin across every self-host differential stage
+// (types / resolve / mir / borrow / effects / codegen — `snc llvm` == `scg`).
+// Exit 42.
+
+fn take(m: Mutex<i64>) -> i64 {
+    42
+}
+
+fn main() -> i64 {
+    let m = mutex_new(42);
+    take(m)
+}

@@ -1174,6 +1174,19 @@ fn pass_c70_scg_fn_apply() {
 }
 
 #[test]
+fn pass_c71_mutex() {
+    // ADR 0071 M1.4b slice 2b-i: Mutex<T> type + mutex_new lowering (both
+    // compilers). A refcounted, lock-protected cell holding 42 is created and
+    // passed by Copy into `take` (a Mutex<i64> param — the resolve_type_expr
+    // "Mutex" arm); `take` returns 42. needs_drop is still false at this slice
+    // (leaks like Channel; lock/?Guard is 2b-ii, the refcount/unlock is slice 3).
+    // Exit 42.
+    let r = build_and_run("c71_mutex.sentinel");
+    assert_eq!(r.exit, 42);
+    assert_eq!(r.stdout, "");
+}
+
+#[test]
 fn pass_c71_shared() {
     // ADR 0071 M1.4a slice 2b: Shared<T> type + shared_new/shared_get lowering
     // (both compilers). A refcounted cell holding 20 is read back through a Copy

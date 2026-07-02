@@ -836,6 +836,20 @@ fn cg_emit_call(c: &mut TyCtx, src: &[u8], fid: i64, snap: i64, rty: i64) -> i64
         (*c).cg_used_sharedget = true;
         cg_reg(c, sg_d);
         0
+    } else if fid == 40 {
+        // (ADR 0071 M1.4b) mutex_new(v: i64) -> Mutex<i64> (ptr): allocate the
+        // refcounted, lock-protected cell (rc=1, unlocked). The i64 element rides
+        // directly (no encode — the i64 differential case, byte-identical; scg is
+        // i64-only, like Shared). `lock` (41) lands in slice 2b-ii.
+        let mn_vk: i64 = (*c).cgak[snap];
+        let mn_vv: i64 = (*c).cgav[snap];
+        let mn_d: i64 = cg_dst(c);
+        cgo_str(c, "call ptr @sentinel_mutex_new(i64 ");
+        cgo_operand(c, mn_vk, mn_vv);
+        cgo_str(c, ")\n");
+        (*c).cg_used_mutexnew = true;
+        cg_reg(c, mn_d);
+        0
     } else if fid == 12 {
         // (8d) write_file(path, data) -> i64.
         let w_pk: i64 = (*c).cgak[snap];
