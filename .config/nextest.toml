@@ -17,6 +17,18 @@ slow-timeout = { period = "45s", terminate-after = 4 }
 # end so the cause is not buried in the run.
 failure-output = "immediate-final"
 
+# The LLVM behavioural differential (`snc llvm` textual oracle vs the inkwell
+# back end, over every emitted corpus fixture) is by far the slowest test: it
+# builds and RUNS each fixture through both back ends. Standalone it takes ~98s;
+# under full-suite parallel contention it drifts past the global 180s
+# (4 × 45s) runaway cap and gets killed — a false failure, not a hang. Give this
+# one test its own headroom (6 × 60s = 360s) rather than loosening the global
+# guard, which exists to catch genuine runaways. Overrides are inherited by
+# `profile.ci`, so CI gets the same headroom.
+[[profile.default.overrides]]
+filter = 'test(=llvm_behaviour_matches_inkwell_over_emitted_subset)'
+slow-timeout = { period = "60s", terminate-after = 6 }
+
 [profile.ci]
 # Deterministic CI: no flaky-retry masking; run the whole suite before
 # reporting failure so every break is visible in one pass.
