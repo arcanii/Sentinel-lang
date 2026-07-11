@@ -22,6 +22,11 @@
 # Test snapshots that are pending review
 *.snap.new
 
+# The `c5d4_file_io` pass-fixture round-trips a file through `write_file` /
+# `read_file` at a RELATIVE path, so a full `cargo nextest` run drops this
+# beside whatever cwd the driver test used (e.g. crates/sentinel-driver/).
+sentinel_c5d4_io.txt
+
 # Local environment overrides
 .env
 .env.local
