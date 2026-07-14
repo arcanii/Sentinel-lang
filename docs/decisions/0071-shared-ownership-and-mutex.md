@@ -378,3 +378,61 @@ worked examples: Task/Channel/Process/SealedChannel/Fn):
 | M1.4a `Shared<T>` (public) | ~600+ LOC across both compilers | the hard part: refcount cell + clone/drop accounting + the new `needs_drop` handle category + full selfhost mirror |
 | M1.4b `Mutex<T>` (public) | ~400+ | lock/unlock + fallible `lock()` + guard no-escape + D5a two tiers |
 | M1.4c secret `T` | ~300+ | container-interner secret fix (also unblocks `Channel<secret T>`) + broker-backed secret alloc + `OpenResult` lock shape + adversarial verification |
+
+## M1.4b implementation log (slices)
+
+`Mutex<T>` (public `T`) is being built in the same slice rhythm as M1.4a, each landing
+four-check-green with both bootstrap fixed points byte-identical. Status: **in progress**
+(the ADR stays PROPOSED for M1.4b until slice 3c + the D5a deadlock tiers close).
+
+- **slice 1** — the `SentinelMutex<T>` runtime cell (a `parking_lot`-backed near-clone of
+  `SentinelChannel`) + the 5 C-ABI symbols (`sentinel_mutex_new`/`_lock`/`_try_lock_for`/
+  `_clone`/`_release`/`_unlock`).
+- **slice 2a** — the coordinated FnId-base shift 40→42 in both compilers (`mutex_new` = 40,
+  `lock` = 41).
+- **slice 2b-i** — `Type::Mutex` + `mutex_new(v) -> Mutex<T>` (interner kind 18), lowering to
+  the refcounted cell handle.
+- **slice 2b-ii** — `lock(m) -> ?Guard<T>` (`Type::Guard` interner kind 19; `?Guard` lowers
+  to `{ i1, ptr }`, the `recv` `?T` shape). At this slice the guard + a bound mutex still
+  **leak** — a bound-and-locked mutex was unsound (freeing a still-locked cell trips the
+  runtime free-while-locked `debug_assert!`), so the fixture used an unbound rvalue.
+- **slice 3a** — the `Mutex<T>` handle refcount clone/drop accounting (`Mutex<T> =
+  Shared<SentinelMutex<T>>`, D4), mirroring `Shared`'s `#new + #clone == #release` invariant.
+
+### slice 3b — the guard's unlock-on-drop (D3 drop-content + the conservative no-escape pin)
+
+Makes a **bound** `let g = lock(m)` sound. Decisions taken (all pinned by the maintainer):
+
+1. **Guard payload = the mutex cell handle `m`** (not the protected-slot ptr the runtime
+   writes to `*out`). Keeps `Type::Guard` a single `ptr` / `?Guard = { i1, ptr }`; the guard's
+   drop needs `m` for `sentinel_mutex_unlock`. (Reading the protected value via `*g` is
+   deferred to **slice 3c** — it needs a runtime `sentinel_mutex_data_ptr(m)` accessor.)
+2. **The `?Guard` conditionally unlocks on drop.** A bound `?Guard`'s scope-exit drop, on the
+   VALID arm (a `lock()` success), calls `sentinel_mutex_unlock(m)` (`force_unlock`, no
+   refcount change); on the timeout arm nothing is held → nothing unlocks. It reuses the
+   existing null-guarded conditional-drop shape (the enum box-free arm). Drops fire in
+   reverse-declaration order, so `g`'s unlock precedes the owning `Mutex`'s
+   `sentinel_mutex_release` — the cell is unlocked before it can be freed.
+3. **`Guard`/`?Guard` are MOVE, not Copy** (unlike `Shared`/`Mutex`/`Channel`). A guard has no
+   refcount, so a duplicated guard would double-`force_unlock` a cell locked once. Move-tracking
+   makes `let g2 = g` consume `g` → exactly one unlock.
+4. **Guard no-escape = the CONSERVATIVE PIN: `lock()` may only be the direct RHS of an
+   IMMUTABLE `let`** (`TypeError::GuardNotLetBound`, ui fixture `c71_guard_not_let_bound`).
+   Blocks the fresh-`lock()` escapes — a block tail, a call argument, a `return`, a
+   reassignment, a `let mut`. The FULL D3 no-escape (guard-VAR reshuffles into an outer scope)
+   is a documented **deferred hardening** — those residual escapes are contrived and caught by
+   the runtime free-while-locked assert (⚠ which is `debug_assert!`, compiled out in release —
+   the reason the static pin rule is needed).
+
+**Where the change lands (four backends, in lockstep):** the borrow-check crate flips
+`Guard`/`?Guard` to Move + adds the `GuardNotLetBound` pin (shared by inkwell + the oracle);
+the inkwell backend + the `snc llvm` **oracle** (`llvm_dump.rs`) both grow the
+`sentinel_mutex_unlock` decl, the `lock()` payload-is-`m` change, and the `Guard` / `?Guard`
+drop arms; the self-hosted **scg** (`selfhost/types/*.sentinel`) mirrors the codegen +
+drop + Move byte-identically. **The types-stage pin rule is snc-only** — scg is a dump-only
+port with no rejection machinery and only ever runs on oracle-accepted programs (the ui
+rejection fixture is auto-skipped by every self-host differential), exactly as the peer
+`SharedReturnNotSupported` / `MutexReturnNotSupported` guards are snc-only. The differential
+fixture `tests/pass/c71_mutex_lock` was rewritten from the old unbound rvalue (now rejected by
+the pin) to the sound bound form `let m = mutex_new(42); let g = lock(m); is_some(g)` (exit 42,
+the clean exit being the unlock/leak proof).

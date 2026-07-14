@@ -14,7 +14,37 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
-**Latest (2026-07-02) — ADR 0071 M1.4a: `Shared<T>` refcounted-handle DONE — the first
+**Latest (2026-07-15) — ADR 0071 M1.4b (`Mutex<T>`): the guard's unlock-on-drop (slice 3b,
+feat `f15c16a`) — a bound-and-locked mutex is now sound, self-hosted byte-identically.** `Mutex<T> =
+Shared<SentinelMutex<T>>` (public word-scalar `T`) is being built in the M1.4a slice rhythm,
+layering on `Shared`'s solved co-ownership: a `parking_lot`-backed `SentinelMutex` runtime
+cell + C-ABI symbols (slice 1); the FnId-base shift 40→42 (slice 2a); `Type::Mutex` +
+`mutex_new(v) -> Mutex<T>` (slice 2b-i, interner kind 18); the fallible `lock(m) -> ?Guard<T>`
+(`Type::Guard` kind 19; `?Guard = { i1, ptr }`, the `recv` `?T` shape; slice 2b-ii); and the
+`Mutex` handle refcount clone/drop accounting mirroring `Shared` (slice 3a). **Slice 3b closes
+the guard drop:** a bound `let g = lock(m)` now UNLOCKS on scope exit. The `?Guard`'s payload
+is the mutex cell handle `m`; its scope-exit drop, on the valid arm, calls
+`sentinel_mutex_unlock(m)` (`force_unlock`, no refcount change), firing in reverse-declaration
+order BEFORE the owning `Mutex`'s `sentinel_mutex_release` — so the cell is unlocked before it
+is freed (a still-locked free would trip the runtime's free-while-locked `debug_assert!`).
+`Guard`/`?Guard` are **MOVE, not Copy** (no refcount → a duplicated guard would double-unlock),
+and a **conservative no-escape pin** (`lock()` only as the direct RHS of an immutable `let`;
+`GuardNotLetBound`, ui `c71_guard_not_let_bound`) keeps the guard from outliving its mutex (the
+full ADR-D3 no-escape is a deferred hardening — the residual escapes are contrived and caught
+by the runtime assert, which is `debug_assert!`, hence the static pin). Landed in lockstep
+across the four backends — the borrow-check crate (Move + pin, shared by inkwell + oracle), the
+inkwell backend + the `snc llvm` oracle (`llvm_dump.rs`), and self-hosted `scg`
+(`selfhost/types/*.sentinel`, byte-identical); the pin rule is **snc-only** (scg is a dump-only
+port with no rejection path — the ui fixture is auto-skipped by every self-host differential —
+matching the peer `SharedReturnNotSupported`/`MutexReturnNotSupported` guards). Verified via
+inkwell (`tests/pass/c71_mutex_lock` rewritten from the old unbound rvalue, now pin-rejected, to
+the sound bound form `let m = mutex_new(42); let g = lock(m); is_some(g)`, exit 42), the oracle
+`.ll`, and the `scg` `.ll` (all exit 42), byte-identical `snc llvm` ≡ `scg` on the self-host
+differential + both bootstrap fixed points green. **Next: slice 3c (the `*g` deref value read,
+needs a runtime `sentinel_mutex_data_ptr`) + the D5a deadlock tiers; then M1.4c (secret `T`).**
+See ADR 0071 (M1.4b implementation log) + HANDOVER §RESUME.
+
+**(2026-07-02) — ADR 0071 M1.4a: `Shared<T>` refcounted-handle DONE — the first
 `Copy`-for-the-checker YET drop-emitting type, self-hosted byte-identically.** The ADR 0066
 M1.4 shared-state escape hatch's first sub-phase is complete: `Shared<T>` over public
 word-scalar `T` is a real refcounted handle (an `Arc<T>` without the mutex). It is
