@@ -133,6 +133,11 @@ ui_snapshot!(c71_shared_return_named, "c71_shared_return_named.sentinel");
 // ADR 0071 M1.4b slice 3a: returning a NAMED `Mutex<T>` binding — guarded like the
 // Shared case. Surfaces MutexReturnNotSupported (return `mutex_new(...)` directly).
 ui_snapshot!(c71_mutex_return_named, "c71_mutex_return_named.sentinel");
+// ADR 0071 M1.4b slice 3b: the guard no-escape conservative pin — a `lock()` must be
+// the direct RHS of an immutable `let`. A `lock()` in an argument position (here
+// `is_some(lock(m))`) is rejected with GuardNotLetBound so the unlock-on-drop guard
+// cannot outlive its mutex.
+ui_snapshot!(c71_guard_not_let_bound, "c71_guard_not_let_bound.sentinel");
 
 // ---- ADR 0070: non-capturing function values (types) ----
 // D4: a wrong-arity fn is not eligible as a Fn<T,R> value (any word-scalar shape).

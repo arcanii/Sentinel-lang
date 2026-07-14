@@ -1,0 +1,14 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c71_guard_not_let_bound.sentinel\")"
+---
+sentinel::types::guard_not_let_bound
+
+  × `lock()` must be bound directly by an immutable `let`
+    ╭─[tests/ui/c71_guard_not_let_bound.sentinel:13:16]
+ 12 │     let m = mutex_new(42);
+ 13 │     if is_some(lock(m)) {
+    ·                ───┬───
+    ·                   ╰── 
+ 14 │         42
+    ╰────

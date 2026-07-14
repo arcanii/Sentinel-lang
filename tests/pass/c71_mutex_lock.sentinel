@@ -1,23 +1,27 @@
-// ADR 0071 M1.4b slice 2b-ii: `lock(m) -> ?Guard<T>` reaches TYPE + LOWERING in
-// both compilers. `lock` acquires the mutex with the always-on LockTimeout tier
-// and returns `?Guard` — a guard on success, None on timeout (the `recv` `?T`
-// shape, D4 fallible). This brings `Type::Guard` + the `NullableInner::Guard`
-// (`?Guard` lowers to `{ i1, ptr }`, like `?ptr`) + `is_some` over a `?Guard` into
-// every self-host differential stage.
+// ADR 0071 M1.4b slice 3b: a BOUND `let g = lock(m)` is now SOUND — the `?Guard`
+// unlocks the mutex on its scope-exit drop, BEFORE the owning `Mutex`'s
+// `sentinel_mutex_release`, so the cell is unlocked before it is freed.
 //
-// DELIBERATE LEAK (slice-3a soundness): the mutex is created as an UNBOUND rvalue
-// temporary passed straight to `lock`, so it is never scope-exit-dropped (no
-// `sentinel_mutex_release`). That is required until slice 3b wires the guard's
-// unlock-on-drop: `lock` holds the lock (the runtime guard is forgotten across the
-// C-ABI boundary), and releasing a still-locked cell would trip the runtime's
-// free-while-locked debug-assert. Binding the mutex + dropping it (the refcount
-// path) is covered separately by `c71_mutex_rc.sentinel`; the `*g` deref + the
-// guard's unlock-on-drop that make a bound-and-locked mutex sound are slice 3b.
+// This is the slice-3b replacement for the prior slice-2b-ii fixture, which
+// deliberately leaked (`is_some(lock(mutex_new(42)))`, an unbound rvalue) because
+// binding + dropping a still-locked mutex tripped the runtime's free-while-locked
+// debug-assert. The guard no-escape pin rule (a `lock()` may only be the direct RHS
+// of an immutable `let`) also REJECTS that old unbound form, so the sound bound form
+// is now the only spelling — see `tests/ui/c71_guard_not_let_bound.sentinel`.
 //
-// The (uncontended) lock succeeds → `is_some` is true → 42. Exit 42.
+// Trace: `mutex_new(42)` (rc=1, m owns); `lock(m)` acquires (uncontended → success)
+// and yields a `?Guard` whose payload is the cell handle `m`; `is_some(g)` reads the
+// valid bit (true) → 42. At main's scope exit the drops fire in reverse-declaration
+// order: `g` first (`sentinel_mutex_unlock(m)` on the valid arm), then `m`
+// (`sentinel_mutex_release`, rc→0, freed once). A clean exit 42 IS the leak/unlock
+// check — a missed unlock would trip the runtime's free-while-locked debug-assert,
+// and a miscounted refcount a use-after-free crash. (The `*g` deref that reads the
+// protected value is slice 3c.) Exit 42.
 
 fn main() -> i64 {
-    if is_some(lock(mutex_new(42))) {
+    let m = mutex_new(42);
+    let g = lock(m);
+    if is_some(g) {
         42
     } else {
         0

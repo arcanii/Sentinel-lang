@@ -855,6 +855,11 @@ fn cg_emit_call(c: &mut TyCtx, src: &[u8], fid: i64, snap: i64, rty: i64) -> i64
         // tier), write the guard slot ptr to a stack out-slot, build `{ i1 valid,
         // ptr guard }` from the i64 status (valid = status == 0). The recv `?T`
         // shape with a ptr payload (a Guard lowers to a single ptr).
+        //
+        // slice 3b: the `?Guard` payload (field 1) is the mutex cell handle `m`, NOT
+        // the loaded out-slot — the guard's scope-exit drop unlocks via that handle
+        // (`sentinel_mutex_unlock`). The out-slot is still passed to the runtime (ABI),
+        // but no longer LOADED here.
         let lk_mk: i64 = (*c).cgak[snap];
         let lk_mv: i64 = (*c).cgav[snap];
         let lk_slot: i64 = cg_alloca_ptr(c);
@@ -869,10 +874,6 @@ fn cg_emit_call(c: &mut TyCtx, src: &[u8], fid: i64, snap: i64, rty: i64) -> i64
         cgo_str(c, "icmp eq i64 %v");
         cgo_int(c, lk_status);
         cgo_str(c, ", 0\n");
-        let lk_guard: i64 = cg_dst(c);
-        cgo_str(c, "load ptr, ptr %v");
-        cgo_int(c, lk_slot);
-        cg_putc(c, '\n');
         let lk_o0: i64 = cg_dst(c);
         cgo_str(c, "insertvalue { i1, ptr } undef, i1 %v");
         cgo_int(c, lk_valid);
@@ -880,8 +881,8 @@ fn cg_emit_call(c: &mut TyCtx, src: &[u8], fid: i64, snap: i64, rty: i64) -> i64
         let lk_o1: i64 = cg_dst(c);
         cgo_str(c, "insertvalue { i1, ptr } %v");
         cgo_int(c, lk_o0);
-        cgo_str(c, ", ptr %v");
-        cgo_int(c, lk_guard);
+        cgo_str(c, ", ptr ");
+        cgo_operand(c, lk_mk, lk_mv);
         cgo_str(c, ", 1\n");
         cg_reg(c, lk_o1);
         0

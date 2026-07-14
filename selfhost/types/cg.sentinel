@@ -1005,6 +1005,15 @@ fn cg_needs_drop(c: &mut TyCtx, ty: i64) -> bool {
         // (ADR 0071 M1.4b slice 3a) a Mutex<T> handle drops via
         // sentinel_mutex_release (rc--), mirroring Shared.
         true
+    } else if cg_is_guard(c, ty) {
+        // (ADR 0071 M1.4b slice 3b) a Guard<T> drops via sentinel_mutex_unlock (the
+        // scope-exit unlock). Only ?Guard is spellable; the bare-Guard case is for
+        // completeness.
+        true
+    } else if cg_is_nullable(c, ty) {
+        // (ADR 0071 M1.4b slice 3b) a ?Guard unlocks on its valid arm at scope exit.
+        // Gate on the inner type == Guard so ?i64 / ?Struct / ... stay drop-free here.
+        cg_is_guard(c, nullable_inner_of(c, ty))
     } else {
         let nsid: i64 = struct_of_handle(c, ty);
         if nsid >= 0 {
@@ -1151,6 +1160,61 @@ fn cg_emit_drop(c: &mut TyCtx, ty: i64, slot: i64, vid: i64) -> i64 {
         cgo_int(c, mdv);
         cgo_str(c, ")\n");
         (*c).cg_used_mutexrelease = true;
+        0
+    } else if cg_is_guard(c, ty) {
+        // (ADR 0071 M1.4b slice 3b) a bare Guard unlocks unconditionally — mirrors the
+        // Mutex-release arm with sentinel_mutex_unlock. Unreachable in practice (Guard
+        // is unspellable; lock() yields ?Guard) but kept for parity.
+        let gdv: i64 = cg_dst(c);
+        cgo_str(c, "load ptr, ptr %v");
+        cgo_int(c, slot);
+        cg_putc(c, '\n');
+        cgo_str(c, "  call void @sentinel_mutex_unlock(ptr %v");
+        cgo_int(c, gdv);
+        cgo_str(c, ")\n");
+        (*c).cg_used_mutexunlock = true;
+        0
+    } else if cg_is_nullable(c, ty) && cg_is_guard(c, nullable_inner_of(c, ty)) {
+        // (ADR 0071 M1.4b slice 3b) a ?Guard unlocks on its VALID arm at scope exit:
+        // load { i1, ptr }, extract the valid bit + the handle, branch on valid, and on
+        // the present arm sentinel_mutex_unlock the handle (the mutex cell `m`). Mirrors
+        // the enum box-free arm's null-guarded shape. Gated on inner == Guard so a plain
+        // ?i64 / ?u8 / ?Struct falls through to the struct/enum no-op fallback below
+        // (cg_emit_drop is called on every recorded binding, not only needs_drop ones).
+        let ogv: i64 = cg_dst(c);
+        cgo_str(c, "load { i1, ptr }, ptr %v");
+        cgo_int(c, slot);
+        cg_putc(c, '\n');
+        let ogb: i64 = cg_dst(c);
+        cgo_str(c, "extractvalue { i1, ptr } %v");
+        cgo_int(c, ogv);
+        cgo_str(c, ", 0\n");
+        let ogh: i64 = cg_dst(c);
+        cgo_str(c, "extractvalue { i1, ptr } %v");
+        cgo_int(c, ogv);
+        cgo_str(c, ", 1\n");
+        let ogu: i64 = cg_fresh_block(c);
+        let oga: i64 = cg_fresh_block(c);
+        cgo_str(c, "  br i1 %v");
+        cgo_int(c, ogb);
+        cgo_str(c, ", label %bb");
+        cgo_int(c, ogu);
+        cgo_str(c, ", label %bb");
+        cgo_int(c, oga);
+        cg_putc(c, '\n');
+        cgo_str(c, "bb");
+        cgo_int(c, ogu);
+        cgo_str(c, ":\n");
+        cgo_str(c, "  call void @sentinel_mutex_unlock(ptr %v");
+        cgo_int(c, ogh);
+        cgo_str(c, ")\n");
+        (*c).cg_used_mutexunlock = true;
+        cgo_str(c, "  br label %bb");
+        cgo_int(c, oga);
+        cg_putc(c, '\n');
+        cgo_str(c, "bb");
+        cgo_int(c, oga);
+        cgo_str(c, ":\n");
         0
     } else {
         // (8d-drops-2) a struct: GEP each drop-needing field (declaration order) and

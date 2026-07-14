@@ -41,9 +41,12 @@ fn is_move_type(c: &mut TyCtx, h: i64) -> bool {
             // 2b-i it leaks (no drop); the refcount/unlock-on-drop is slice 3.
             false
         } else if k == 19 {
-            // (ADR 0071 M1.4b) a Guard<T> is Copy at slice 2b-ii (leaks). Slice 3
-            // adds the unlock-on-drop + the D3 no-escape rule.
-            false
+            // (ADR 0071 M1.4b slice 3b) a Guard<T> (and its ?Guard, via the k == 4
+            // recursion below) is MOVE, not Copy — unlike Shared/Mutex/Channel. Its
+            // scope-exit drop is sentinel_mutex_unlock, with no clone accounting;
+            // duplicating a guard (`let g2 = g`) would double-unlock a cell locked once.
+            // Move-tracking makes the duplication CONSUME g, so exactly one owner unlocks.
+            true
         } else if k == 3 {
             is_move_type(c, (*c).ta[idx])
         } else if k == 4 {

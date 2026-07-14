@@ -690,6 +690,14 @@ pub fn compile_to_object_for_module(
         context.void_type().fn_type(&[ptr_ty.into()], false),
         None,
     );
+    // ADR 0071 M1.4b slice 3b: `sentinel_mutex_unlock(m) -> void` — the Guard's
+    // scope-exit unlock (new to codegen this slice; the Guard drop was a no-op
+    // stub before).
+    let mutex_unlock_fn = module.add_function(
+        "sentinel_mutex_unlock",
+        context.void_type().fn_type(&[ptr_ty.into()], false),
+        None,
+    );
     // ADR 0066 M2.1: declare the subprocess runtime symbols (cross-platform).
     // `sentinel_process_spawn(path, path_len, argv, argc) -> ptr` (null on
     // failure), `sentinel_process_wait(ptr) -> i64` (exit code / -1).
@@ -1432,6 +1440,7 @@ pub fn compile_to_object_for_module(
             mutex_lock_fn,
             mutex_clone_fn,
             mutex_release_fn,
+            mutex_unlock_fn,
             process_spawn_fn,
             process_wait_fn,
             process_write_fn,
@@ -1718,6 +1727,9 @@ struct CodegenCtx<'ctx, 'plan> {
     /// `sentinel_mutex_release(ptr)` (rc--, free at 0).
     mutex_clone_fn: FunctionValue<'ctx>,
     mutex_release_fn: FunctionValue<'ctx>,
+    /// ADR 0071 M1.4b slice 3b: `sentinel_mutex_unlock(m)` — the Guard's scope-exit
+    /// unlock.
+    mutex_unlock_fn: FunctionValue<'ctx>,
     /// ADR 0066 M2.1: the subprocess runtime symbols.
     process_spawn_fn: FunctionValue<'ctx>,
     process_wait_fn: FunctionValue<'ctx>,
@@ -2068,6 +2080,12 @@ fn field_type_needs_drop_inner(
         Type::Vec(_) => true,
         Type::Nullable(NullableInner::Struct(_))
         | Type::Nullable(NullableInner::GenericInstance(_)) => true,
+        // ADR 0071 M1.4b slice 3b: a `?Guard` IS drop-emitting — on the VALID arm
+        // (a `lock()` success) its payload is a held Guard whose scope-exit drop
+        // must `sentinel_mutex_unlock`; on the timeout arm nothing is dropped. This
+        // is what makes a bound-and-locked mutex sound (the guard binds, and its
+        // drop unlocks before the owning `Mutex`'s `release`).
+        Type::Nullable(NullableInner::Guard(_)) => true,
         Type::Struct(id) => {
             seen.push(ty);
             let decl = program.struct_decl(id);
@@ -2138,9 +2156,11 @@ fn field_type_needs_drop_inner(
         // scope-exit drop is `sentinel_mutex_release` (rc--, freeing the cell at
         // zero), mirroring `Shared`. (The guard's unlock-on-drop is slice 3b.)
         Type::Mutex(_) => true,
-        // ADR 0071 M1.4b: a `Guard<T>` does NOT drop at 2b-ii (leaks; slice 3 makes
-        // its scope-exit drop `sentinel_mutex_unlock`).
-        Type::Guard(_) => false,
+        // ADR 0071 M1.4b slice 3b: a `Guard<T>` IS drop-emitting — its scope-exit
+        // drop is `sentinel_mutex_unlock` (release the lock the `lock()` acquired).
+        // The guard is Move + no-escape (borrow-check), so it drops exactly once
+        // within the lock scope, before the owning `Mutex`'s `release`.
+        Type::Guard(_) => true,
         Type::Process => false,
         // ADR 0066 M2.4a: a SealedChannel wraps a Process pipe — runtime-owned.
         Type::SealedChannel => false,
@@ -4806,6 +4826,51 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                     .map_err(|e| CodegenError::Builder(e.to_string()))?;
                 self.builder.position_at_end(after_block);
             }
+            Type::Nullable(NullableInner::Guard(_)) => {
+                // ADR 0071 M1.4b slice 3b: a `?Guard` is `{ i1 valid, ptr guard }`
+                // (Guard lowers to a single ptr = the mutex cell handle `m`). On the
+                // VALID arm (a `lock()` success) the guard is held, so unlock it; on
+                // the timeout arm nothing is held (the same null-guarded shape the
+                // `?Struct` arm above uses to "drop only on the present arm"). This
+                // fires in reverse-declaration order, BEFORE the owning `Mutex`'s
+                // `sentinel_mutex_release`, so the cell is unlocked before it can be
+                // freed — the whole point of the slice (a bound-and-locked mutex is
+                // now sound).
+                let llvm_ty = self.llvm_basic_type(ty);
+                let val = self
+                    .builder
+                    .build_load(llvm_ty, ptr, "drop_optg")
+                    .map_err(|e| CodegenError::Builder(e.to_string()))?
+                    .into_struct_value();
+                let valid = self
+                    .builder
+                    .build_extract_value(val, 0, "drop_optg_valid")
+                    .map_err(|e| CodegenError::Builder(e.to_string()))?
+                    .into_int_value();
+                let handle = self
+                    .builder
+                    .build_extract_value(val, 1, "drop_optg_handle")
+                    .map_err(|e| CodegenError::Builder(e.to_string()))?
+                    .into_pointer_value();
+                let current_fn = self.current_fn.expect("current_fn set");
+                let unlock_block = self
+                    .context
+                    .append_basic_block(current_fn, "drop_optg_unlock");
+                let after_block = self
+                    .context
+                    .append_basic_block(current_fn, "drop_optg_after");
+                self.builder
+                    .build_conditional_branch(valid, unlock_block, after_block)
+                    .map_err(|e| CodegenError::Builder(e.to_string()))?;
+                self.builder.position_at_end(unlock_block);
+                self.builder
+                    .build_call(self.mutex_unlock_fn, &[handle.into()], "mutex_unlock")
+                    .map_err(|e| CodegenError::Builder(e.to_string()))?;
+                self.builder
+                    .build_unconditional_branch(after_block)
+                    .map_err(|e| CodegenError::Builder(e.to_string()))?;
+                self.builder.position_at_end(after_block);
+            }
             Type::Struct(_) | Type::GenericInstance(_) => {
                 // C2.5(a): recursive field drop. Per-field GEP +
                 // dispatch on the field's type — handles Array,
@@ -4881,9 +4946,21 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                     .map_err(|e| CodegenError::Builder(e.to_string()))?;
             }
             Type::Guard(_) => {
-                // ADR 0071 M1.4b: at THIS slice (2b-ii) a Guard leaks — no
-                // codegen-emitted drop. Slice 3 makes this arm emit
-                // `sentinel_mutex_unlock` (the guard's scope-exit unlock).
+                // ADR 0071 M1.4b slice 3b: the guard's scope-exit UNLOCK — load the
+                // guard value (the mutex cell handle `m`) and `sentinel_mutex_unlock`
+                // it. The guard is Move + no-escape, so this fires exactly once, and
+                // in reverse-declaration order BEFORE the owning `Mutex`'s
+                // `sentinel_mutex_release` (drops run innermost/last-declared first),
+                // so the cell is unlocked before it can be freed (the runtime's
+                // free-while-locked debug-assert would trip otherwise).
+                let handle = self
+                    .builder
+                    .build_load(self.context.ptr_type(inkwell::AddressSpace::default()), ptr, "guard_drop_ld")
+                    .map_err(|e| CodegenError::Builder(e.to_string()))?
+                    .into_pointer_value();
+                self.builder
+                    .build_call(self.mutex_unlock_fn, &[handle.into()], "mutex_unlock")
+                    .map_err(|e| CodegenError::Builder(e.to_string()))?;
             }
             Type::Process => {
                 // ADR 0066 M2.1: a Process handle is a Copy pointer; the
@@ -6459,10 +6536,12 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
             .builder
             .build_int_compare(IntPredicate::EQ, status, i64_ty.const_zero(), "lock_valid")
             .map_err(|e| CodegenError::Builder(e.to_string()))?;
-        let guard = self
-            .builder
-            .build_load(ptr_ty, out_slot, "lock_guard")
-            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        // ADR 0071 M1.4b slice 3b: the `?Guard` payload is the mutex cell handle
+        // `m` (NOT the protected-slot ptr the runtime wrote to `*out`). The Guard's
+        // scope-exit drop needs `m` for `sentinel_mutex_unlock`, and `*g` recovers
+        // the value slot via `sentinel_mutex_data_ptr(m)`. `out_slot` is still
+        // required by the runtime ABI (it writes the slot ptr through it, and bails
+        // to timeout on a null `out`), but codegen no longer reads that value.
         // `?Guard` is `{ i1, ptr }` (Guard lowers to a single ptr).
         let opt_ty = self
             .context
@@ -6474,7 +6553,7 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
             .map_err(|e| CodegenError::Builder(e.to_string()))?;
         let with_guard = self
             .builder
-            .build_insert_value(with_valid, guard, 1, "lock_opt_guard")
+            .build_insert_value(with_valid, m_v, 1, "lock_opt_guard")
             .map_err(|e| CodegenError::Builder(e.to_string()))?;
         Ok(with_guard.into_struct_value().into())
     }

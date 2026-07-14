@@ -1188,12 +1188,14 @@ fn pass_c71_mutex() {
 
 #[test]
 fn pass_c71_mutex_lock() {
-    // ADR 0071 M1.4b slice 2b-ii: lock(m) -> ?Guard + Type::Guard +
-    // NullableInner::Guard (both compilers). A mutex holding 42 is locked; the
-    // uncontended acquire succeeds so is_some(?Guard) is true -> 42. Exercises the
-    // `recv`-shaped ?Guard build ({i1, ptr}) + is_some over ?Guard. needs_drop is
-    // still false at this slice (guard + mutex leak; *g deref / unlock / refcount /
-    // the D3 no-escape rule are slice 3). Exit 42.
+    // ADR 0071 M1.4b slice 3b: a BOUND-and-locked mutex is now sound. `let g =
+    // lock(m)` yields a ?Guard whose scope-exit drop unlocks the cell
+    // (sentinel_mutex_unlock) BEFORE the owning Mutex's release, so binding + dropping
+    // a locked mutex no longer trips the runtime's free-while-locked debug-assert. The
+    // uncontended acquire succeeds so is_some(g) -> 42; the clean exit 42 is the
+    // unlock/leak-check (a missed unlock aborts on the debug-assert). Guard/?Guard are
+    // MOVE + a no-escape pin (lock() only as an immutable-let RHS) keep the guard from
+    // outliving its mutex. (The *g deref is slice 3c.) Exit 42.
     let r = build_and_run("c71_mutex_lock.sentinel");
     assert_eq!(r.exit, 42);
     assert_eq!(r.stdout, "");

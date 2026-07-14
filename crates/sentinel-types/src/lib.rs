@@ -4033,6 +4033,24 @@ pub enum TypeError {
         span: miette::SourceSpan,
     },
 
+    /// ADR 0071 M1.4b slice 3b (guard no-escape, conservative pin): a `lock()`
+    /// call appeared somewhere other than the direct RHS of an immutable `let`.
+    /// A `?Guard` unlocks the mutex on its scope-exit drop, so it must stay
+    /// lexically pinned to the `let` where it was acquired — otherwise a guard
+    /// that outlived its mutex would unlock a freed cell (a use-after-free). So a
+    /// `lock()` in a block tail, a call argument, a `return`, a reassignment, or a
+    /// `let mut` is rejected; write `let g = lock(m);` and hold the critical
+    /// section in that scope.
+    #[error("`lock()` must be bound directly by an immutable `let` (`let g = lock(m);`)")]
+    #[diagnostic(
+        code(sentinel::types::guard_not_let_bound),
+        help("acquire the lock as `let g = lock(m);` — the guard unlocks at that scope's exit. A `lock()` in any other position (a block tail, a call argument, a `return`, a reassignment, or a `let mut`) is rejected so the guard cannot outlive its mutex (which would unlock a freed cell). The full guard no-escape rule (ADR 0071 D3) is a follow-on.")
+    )]
+    GuardNotLetBound {
+        #[label("`lock()` not in an immutable-`let` initializer")]
+        span: miette::SourceSpan,
+    },
+
     /// ADR 0066 M2.4a / ADR 0069 D1: a `SealedChannel<…>` type annotation's
     /// element must be `secret i64` at the M2.4a minimum. A *non-secret* element
     /// (`SealedChannel<i64>`) is a type error — sealing a public value is
@@ -6896,6 +6914,15 @@ struct VarTypeEnv {
     /// degenerate case of checking an expression with no enclosing fn (never
     /// happens for real bodies); the `Return` arm then skips the match.
     current_return_type: Option<Type>,
+    /// ADR 0071 M1.4b slice 3b (guard no-escape, conservative pin): `true` only
+    /// while checking the DIRECT value of an immutable `let` whose RHS is a
+    /// `lock()` call — the sole legal position for a `lock()`. `check_stmt`'s
+    /// `Let` arm sets it; `check_call` reads it (for `LOCK_FN_ID`) and clears it
+    /// immediately, so a `lock()` nested anywhere else (a block tail, a fn arg, a
+    /// reassignment, a `let mut`, a return) sees `false` and is rejected
+    /// (`GuardNotLetBound`). This keeps a guard lexically pinned to its `let`
+    /// scope so its unlock-on-drop cannot outlive the mutex (a UAF).
+    lock_allowed: bool,
 }
 
 impl VarTypeEnv {
@@ -7128,6 +7155,13 @@ fn check_stmt(
                 }
                 None => None,
             };
+            // ADR 0071 M1.4b slice 3b (guard no-escape, conservative pin): permit a
+            // `lock()` call ONLY as the DIRECT RHS of an IMMUTABLE `let`. The flag
+            // is read + cleared by the first `check_call` in the RHS, so only a
+            // directly-`lock()` value is accepted (a nested / mutable / non-let
+            // `lock()` sees `false` → `GuardNotLetBound`).
+            env.lock_allowed = !mutable
+                && matches!(&value.kind, ResolvedExprKind::Call { id, .. } if *id == LOCK_FN_ID);
             let value_typed = check_expr(
                 value,
                 expected,
@@ -7946,6 +7980,15 @@ fn check_call(
     tasks: &mut Vec<TaskData>,
     call_span: &Span,
 ) -> Result<(TypedExprKind, Type), TypeError> {
+    // ADR 0071 M1.4b slice 3b (guard no-escape, conservative pin): read + CLEAR
+    // the "this call is a direct immutable-`let` value" permission. Clearing it
+    // here means only the FIRST call in a `let`'s RHS subtree may be `lock()`; a
+    // `lock()` nested deeper (e.g. `let g = f(lock(m))`) sees `false` and is
+    // rejected below. `check_stmt` sets the flag only for a directly-`lock()`
+    // immutable-`let` RHS, so every other `lock()` position (block tail, arg,
+    // reassignment, `let mut`, return) reaches the rejection.
+    let lock_ok_here = env.lock_allowed;
+    env.lock_allowed = false;
     let signature = &signatures[id.0 as usize];
     let arity = signature.param_types.len();
     debug_assert_eq!(
@@ -8375,6 +8418,19 @@ fn check_call(
     // `type_args=[elem]` when non-i64 (recorded for the slice-3 `*g` deref; the
     // i64 case emits no type_args, byte-identical).
     if id == LOCK_FN_ID {
+        // ADR 0071 M1.4b slice 3b (guard no-escape, conservative pin): a `lock()`
+        // may ONLY be the direct RHS of an immutable `let` (`let g = lock(m);`).
+        // Anywhere else it is rejected, so the `?Guard` it yields stays lexically
+        // bound to that `let`'s scope — its unlock-on-drop cannot outlive the
+        // mutex (which would unlock a freed cell: a UAF). The full guard-pinning
+        // no-escape (ADR D3) also catches guard-VAR reshuffles; this cheap rule
+        // closes the `lock()`-position escapes (block tail / arg / return /
+        // reassignment / `let mut`).
+        if !lock_ok_here {
+            return Err(TypeError::GuardNotLetBound {
+                span: to_source_span(call_span),
+            });
+        }
         let m_typed = check_expr(
             &args[0], None, env, signatures, structs, class_decls, enums, instances, refs,
             secrets, arrays, struct_type_param_counts, effect_decls, trait_decls, impl_decls,
@@ -11468,6 +11524,11 @@ fn type_error_to_diagnostic(err: &TypeError) -> Diagnostic {
         TypeError::MutexReturnNotSupported { span } => (
             "sentinel::types::mutex_return_not_supported",
             "returning a named `Mutex<T>` binding is not yet supported".to_string(),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        TypeError::GuardNotLetBound { span } => (
+            "sentinel::types::guard_not_let_bound",
+            "`lock()` must be bound directly by an immutable `let`".to_string(),
             span.offset()..(span.offset() + span.len()),
         ),
         TypeError::FnTypeArgsNotSupported { span } => (

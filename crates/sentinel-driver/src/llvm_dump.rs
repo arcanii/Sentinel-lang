@@ -157,11 +157,13 @@ struct RuntimeSyms {
     /// `sentinel_mutex_new(i64) -> ptr` (rc=1, unlocked), `sentinel_mutex_lock(ptr,
     /// ptr) -> i64` (0 acquired / 1 timeout, writes the guard slot ptr to `*out`),
     /// `sentinel_mutex_clone(ptr) -> ptr` (rc++), `sentinel_mutex_release(ptr)`
-    /// (rc--, free at 0) — the slice-3a refcount accounting.
+    /// (rc--, free at 0) — the slice-3a refcount accounting. `sentinel_mutex_unlock(ptr)`
+    /// is the slice-3b Guard scope-exit unlock (`force_unlock`, no refcount change).
     mutex_new: bool,
     mutex_lock: bool,
     mutex_clone: bool,
     mutex_release: bool,
+    mutex_unlock: bool,
     /// ADR 0066 M2.1: the subprocess runtime symbols.
     /// `sentinel_process_spawn(ptr, i64, ptr, i64) -> ptr`, `_wait(ptr) -> i64`.
     process_spawn: bool,
@@ -218,6 +220,7 @@ impl RuntimeSyms {
         self.mutex_lock |= other.mutex_lock;
         self.mutex_clone |= other.mutex_clone;
         self.mutex_release |= other.mutex_release;
+        self.mutex_unlock |= other.mutex_unlock;
         self.process_spawn |= other.process_spawn;
         self.process_wait |= other.process_wait;
         self.process_write |= other.process_write;
@@ -332,6 +335,9 @@ impl RuntimeSyms {
         if self.mutex_release {
             writeln!(out, "declare void @sentinel_mutex_release(ptr)").unwrap();
         }
+        if self.mutex_unlock {
+            writeln!(out, "declare void @sentinel_mutex_unlock(ptr)").unwrap();
+        }
         // ADR 0066 M2.1: the subprocess runtime group.
         if self.process_spawn {
             writeln!(out, "declare ptr @sentinel_process_spawn(ptr, i64, ptr, i64)").unwrap();
@@ -401,6 +407,7 @@ impl RuntimeSyms {
             || self.mutex_lock
             || self.mutex_clone
             || self.mutex_release
+            || self.mutex_unlock
             || self.process_spawn
             || self.process_wait
             || self.process_write
@@ -2703,6 +2710,42 @@ impl Emit<'_> {
                 writeln!(self.body, "  call void @sentinel_mutex_release(ptr %v{v})").unwrap();
                 self.used.mutex_release = true;
             }
+            // ADR 0071 M1.4b slice 3b: a bare `Guard` unlocks unconditionally (mirrors
+            // the Mutex-release arm with `sentinel_mutex_unlock`). Unreachable in
+            // practice — `Guard` is unspellable and `lock()` yields `?Guard` — but kept
+            // for parity with the inkwell backend.
+            Type::Guard(_) => {
+                let v = self.fresh();
+                writeln!(self.body, "  %v{v} = load ptr, ptr %v{ptr_reg}").unwrap();
+                writeln!(self.body, "  call void @sentinel_mutex_unlock(ptr %v{v})").unwrap();
+                self.used.mutex_unlock = true;
+            }
+            // ADR 0071 M1.4b slice 3b: a bound `?Guard` unlocks on scope exit. On the
+            // VALID arm (a `lock()` success) the guard holds the cell handle `m`, so
+            // unlock it; on the timeout arm nothing is held (the null-guarded shape the
+            // enum box-free arm above uses to "drop only on the present arm"). Fires in
+            // reverse-declaration order, BEFORE the owning `Mutex`'s
+            // `sentinel_mutex_release`, so the cell is unlocked before it can be freed.
+            Type::Nullable(NullableInner::Guard(_)) => {
+                let v = self.fresh();
+                writeln!(self.body, "  %v{v} = load {{ i1, ptr }}, ptr %v{ptr_reg}").unwrap();
+                let valid = self.fresh();
+                writeln!(self.body, "  %v{valid} = extractvalue {{ i1, ptr }} %v{v}, 0").unwrap();
+                let handle = self.fresh();
+                writeln!(self.body, "  %v{handle} = extractvalue {{ i1, ptr }} %v{v}, 1").unwrap();
+                let unlock_b = self.fresh_block();
+                let after_b = self.fresh_block();
+                writeln!(
+                    self.body,
+                    "  br i1 %v{valid}, label %bb{unlock_b}, label %bb{after_b}"
+                )
+                .unwrap();
+                writeln!(self.body, "bb{unlock_b}:").unwrap();
+                writeln!(self.body, "  call void @sentinel_mutex_unlock(ptr %v{handle})").unwrap();
+                self.used.mutex_unlock = true;
+                writeln!(self.body, "  br label %bb{after_b}").unwrap();
+                writeln!(self.body, "bb{after_b}:").unwrap();
+            }
             _ => {}
         }
         Ok(())
@@ -3395,6 +3438,12 @@ impl Emit<'_> {
         // the guard slot ptr to *out, returns 0 acquired / 1 timeout), then build
         // `{ i1 valid, ptr guard }` (valid = status == 0) — the recv `?T` shape with a
         // ptr payload (a Guard lowers to a single ptr).
+        //
+        // slice 3b: the `?Guard` payload is the mutex cell handle `m` (NOT the
+        // protected-slot ptr the runtime wrote to `*out`). The Guard's scope-exit drop
+        // needs `m` for `sentinel_mutex_unlock`. `out` is still passed (the runtime ABI
+        // writes the slot ptr through it, and bails to timeout on a null `out`), but the
+        // dumped IR no longer LOADS that value.
         if id == LOCK_FN_ID {
             let m = self.lower_expr(&args[0])?;
             let out = self.alloca("ptr");
@@ -3403,12 +3452,10 @@ impl Emit<'_> {
             self.used.mutex_lock = true;
             let valid = self.fresh();
             writeln!(self.body, "  %v{valid} = icmp eq i64 %v{status}, 0").unwrap();
-            let guard = self.fresh();
-            writeln!(self.body, "  %v{guard} = load ptr, ptr %v{out}").unwrap();
             let a0 = self.fresh();
             writeln!(self.body, "  %v{a0} = insertvalue {{ i1, ptr }} undef, i1 %v{valid}, 0").unwrap();
             let a1 = self.fresh();
-            writeln!(self.body, "  %v{a1} = insertvalue {{ i1, ptr }} %v{a0}, ptr %v{guard}, 1").unwrap();
+            writeln!(self.body, "  %v{a1} = insertvalue {{ i1, ptr }} %v{a0}, ptr {m}, 1").unwrap();
             return Ok(format!("%v{a1}"));
         }
         if id == SHARED_GET_FN_ID {
@@ -4443,6 +4490,11 @@ fn needs_drop(ty: Type, program: &TypedProgram) -> bool {
         // ADR 0071 M1.4b slice 3a: a `Mutex<T>` handle drops via
         // `sentinel_mutex_release` (rc--), mirroring `Shared`.
         Type::Mutex(_) => true,
+        // ADR 0071 M1.4b slice 3b: a `Guard<T>` (and its `?Guard`) drops via
+        // `sentinel_mutex_unlock` — the scope-exit unlock. Only `?Guard` is spellable
+        // (via `lock()`); the bare-`Guard` arm is for completeness.
+        Type::Guard(_) => true,
+        Type::Nullable(NullableInner::Guard(_)) => true,
         Type::Struct(id) => program
             .struct_decl(id)
             .fields

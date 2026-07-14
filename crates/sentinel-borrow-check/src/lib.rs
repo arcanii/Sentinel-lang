@@ -1498,10 +1498,15 @@ fn is_copy_type(ty: Type, program: &TypedProgram) -> bool {
         // (like `Shared`). At slice 2b it still leaks (`needs_drop == false`);
         // slice 3 adds the scope-exit drop (`sentinel_mutex_release`, rc--).
         Type::Mutex(_) => true,
-        // ADR 0071 M1.4b: a `Guard<T>` is Copy for the borrow checker at this
-        // slice (leaks; needs_drop == false). Slice 3 adds the unlock-on-drop +
-        // the D3 no-escape rule (the guard must not outlive its critical section).
-        Type::Guard(_) => true,
+        // ADR 0071 M1.4b slice 3b: a `Guard<T>` (and its `?Guard`, below) is MOVE,
+        // NOT Copy — unlike the `Shared`/`Mutex`/`Channel` handles. Its scope-exit
+        // drop is `sentinel_mutex_unlock`, which (unlike the refcounted `release`)
+        // has no clone accounting: duplicating a guard (`let g2 = g`) would
+        // double-unlock a cell locked once. Move-tracking makes `let g2 = g`
+        // CONSUME `g`, so exactly one owner drops → exactly one unlock. The D3
+        // no-escape rule (below) additionally forbids a guard leaving its lock
+        // scope (return / store), which would let it outlive the cell (UAF).
+        Type::Guard(_) => false,
     }
 }
 
@@ -1516,8 +1521,11 @@ fn is_copy_nullable_inner(inner: NullableInner) -> bool {
         | NullableInner::F64
         | NullableInner::Ptr => true,
         NullableInner::Ref(_) => true,
-        // ADR 0071 M1.4b: `?Guard<T>`'s payload is a bare `ptr` — Copy (like `?ptr`).
-        NullableInner::Guard(_) => true,
+        // ADR 0071 M1.4b slice 3b: `?Guard<T>` is MOVE (like the bare `Guard`) —
+        // its scope-exit drop conditionally unlocks, with no clone accounting, so
+        // it must not be duplicated (a copy would double-unlock). Move-tracking
+        // makes binding it into a new owner CONSUME the source.
+        NullableInner::Guard(_) => false,
         NullableInner::Struct(_)
         | NullableInner::GenericInstance(_)
         | NullableInner::TypeParam(_) => false,

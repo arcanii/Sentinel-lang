@@ -209,6 +209,7 @@ fn new_tyctx(mode: i64) -> TyCtx {
         cg_used_mutexlock: false,
         cg_used_mutexclone: false,
         cg_used_mutexrelease: false,
+        cg_used_mutexunlock: false,
         cg_used_procspawn: false,
         cg_used_procwait: false,
         cg_used_procwrite: false,
