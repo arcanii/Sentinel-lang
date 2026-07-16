@@ -1520,9 +1520,10 @@ pub extern "C" fn sentinel_shared_release(s: *mut SentinelShared) {
 // (`force_unlock`). The Rust RAII guard never crosses the boundary — dormant until
 // codegen wires them at M1.4b's later slices.
 //
-// M1.4b-minimum: the element is a word-scalar in the `i64` slot; `secret T` (M1.4c),
-// the wait-for-graph `Deadlock` tier (D5), and the lock-free atomics (D4) are
-// follow-ons.
+// M1.4b-minimum: the element is a word-scalar in the `i64` slot; `secret T` (M1.4c)
+// and the lock-free atomics (D4) are follow-ons. The opt-in wait-for-graph
+// `Deadlock` tier (D5, slice 4) lives below — runtime-gated by
+// `SENTINEL_DEADLOCK_DETECT`, no compiler/ABI surface.
 
 /// The default `lock()` deadline for the always-on `LockTimeout` tier (D5) — a
 /// generous bound that never spuriously fires in normal use but guarantees a
@@ -1530,6 +1531,129 @@ pub extern "C" fn sentinel_shared_release(s: *mut SentinelShared) {
 /// forever. `sentinel_mutex_try_lock_for` takes an explicit timeout for a tighter
 /// bound. (A runtime-configurable deadline is a follow-on.)
 const MUTEX_DEFAULT_DEADLINE_NANOS: i64 = 10_000_000_000; // 10s
+
+// ----- ADR 0071 M1.4b slice 4: the D5a opt-in `Deadlock` wait-for-graph tier -----
+//
+// A process-wide wait-for graph over PUBLIC lock identity (the cell's raw pointer
+// address — the identity D5a pins) + OS-thread identity: which thread holds each
+// lock, which lock each blocked thread waits on. On `lock()`, BEFORE blocking, a
+// cycle check answers "would waiting here close a hold/wait cycle?" — if so the
+// acquire returns the existing `LockTimeout`/null arm IMMEDIATELY and the cycle is
+// reported on stderr (maintainer-pinned 2026-07-16: NO new source-level status —
+// in-language, both tiers surface as the `?Guard` null arm, exactly as `LockTimeout`
+// already does; the Deadlock/Timeout distinction lives in the stderr report). The
+// tier is opt-in via `SENTINEL_DEADLOCK_DETECT` (runtime-gated, read once per
+// process — no IR / driver-flag / ABI change) because the bookkeeping costs a
+// meta-lock per acquire/release; the always-on `LockTimeout` deadline stays the
+// liveness backstop for anything the graph misses. The graph is over lock identity
+// + ownership — public control data, never secret values (a secret-dependent
+// decision to lock is already a rejected secret branch) — so detection introduces
+// no secret-dependent timing channel.
+
+/// The D5a opt-in gate: `SENTINEL_DEADLOCK_DETECT` set to anything but empty/`0`
+/// enables the wait-for-graph tier. Read once at the first gated operation and
+/// frozen for the process lifetime, so the acquire/release bookkeeping is
+/// all-or-nothing — a mid-process toggle could strand graph entries.
+fn deadlock_detect_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("SENTINEL_DEADLOCK_DETECT").is_ok_and(|v| deadlock_env_value_on(&v))
+    })
+}
+
+/// The env-value parse, split out of the gate so unit tests can pin BOTH sides
+/// of it (the `OnceLock` freezes the gate per process, so the gate itself can
+/// only ever be observed in one state per test run).
+fn deadlock_env_value_on(v: &str) -> bool {
+    !v.is_empty() && v != "0"
+}
+
+/// The D5a wait-for graph: `holders` maps a lock (cell address) to the thread
+/// currently holding it; `waits` maps a blocked thread to the lock it waits on
+/// plus the instant its bounded wait EXPIRES. The deadline stamp is load-bearing
+/// (the adversarial review's finding): a timed-out waiter retires its edge only
+/// after `try_lock_for` returns, so for a moment the edge outlives the wait —
+/// following that stale edge reported cycles that no longer existed. An edge past
+/// its deadline is therefore treated as absent: `try_lock_for` cannot give up
+/// BEFORE its deadline, so an unexpired edge is always a true commitment to wait
+/// (the stamp is taken before the blocking call, so it expires no later than the
+/// physical timeout — the error direction is a benign missed detection, which the
+/// always-on `LockTimeout` backstops). Entries exist only while detection is
+/// enabled (the maps stay empty otherwise).
+#[derive(Default)]
+struct WaitForGraph {
+    holders: std::collections::HashMap<usize, std::thread::ThreadId>,
+    waits: std::collections::HashMap<std::thread::ThreadId, (usize, std::time::Instant)>,
+}
+
+impl WaitForGraph {
+    /// Would `thread` blocking on `lock` close a hold/wait cycle as of `now`?
+    /// Walks holder-of → waits-on edges from `lock`; each thread waits on at most
+    /// one lock, so the walk is linear in the number of blocked threads. Returns
+    /// the cycle as `(waiting thread, lock it waits for)` hops starting from
+    /// `(thread, lock)`, or `None`. The `seen` set bounds the walk if OTHER
+    /// threads already form a cycle among themselves (possible when two checks
+    /// race past each other): that cycle does not involve `thread`, is not ours
+    /// to report, and must not hang the walk — those threads' own `LockTimeout`
+    /// deadline is the backstop.
+    fn find_cycle(
+        &self,
+        thread: std::thread::ThreadId,
+        lock: usize,
+        now: std::time::Instant,
+    ) -> Option<Vec<(std::thread::ThreadId, usize)>> {
+        let mut path = vec![(thread, lock)];
+        let mut seen = std::collections::HashSet::new();
+        let mut cur = lock;
+        loop {
+            let holder = *self.holders.get(&cur)?;
+            if holder == thread {
+                return Some(path);
+            }
+            if !seen.insert(holder) {
+                return None;
+            }
+            let (next, deadline) = *self.waits.get(&holder)?;
+            // An expired edge is a retired-in-spirit wait: past its deadline the
+            // holder may already have given up (its retire section just hasn't
+            // run yet), and following it would report a cycle that no longer
+            // exists (the stale-wait false positive). Treat it as absent.
+            if deadline <= now {
+                return None;
+            }
+            path.push((holder, next));
+            cur = next;
+        }
+    }
+}
+
+/// The lazy process-wide graph singleton (the ADR's `OnceLock<Mutex<WaitForGraph>>`).
+/// The meta-lock is only ever held for short, non-blocking map operations — NEVER
+/// across `try_lock_for` — so the detector itself cannot deadlock.
+fn wait_for_graph() -> &'static parking_lot::Mutex<WaitForGraph> {
+    static GRAPH: std::sync::OnceLock<parking_lot::Mutex<WaitForGraph>> =
+        std::sync::OnceLock::new();
+    GRAPH.get_or_init(|| parking_lot::Mutex::new(WaitForGraph::default()))
+}
+
+/// Report a detected cycle on stderr — one line, stable `deadlock detected` prefix
+/// (asserted by the driver test). The addresses are the public lock identities the
+/// graph is keyed by; the holder closing each hop is the next hop's thread (the
+/// last lock's holder is the requesting thread itself, closing the loop).
+fn report_deadlock(cycle: &[(std::thread::ThreadId, usize)]) {
+    let mut msg = String::from("sentinel: deadlock detected: ");
+    for (i, (thread, lock)) in cycle.iter().enumerate() {
+        let holder = cycle.get(i + 1).map_or(cycle[0].0, |(t, _)| *t);
+        if i > 0 {
+            msg.push_str(", and ");
+        }
+        msg.push_str(&format!(
+            "thread {thread:?} waits for lock {lock:#x} held by thread {holder:?}"
+        ));
+    }
+    msg.push_str(" — lock() returns the LockTimeout arm");
+    eprintln!("{msg}");
+}
 
 /// ADR 0071 M1.4b: a heap-allocated refcounted, lock-protected cell. `rc` is the
 /// `Shared`-pattern atomic refcount (clone/release, freed on last drop); `lock`
@@ -1584,6 +1708,13 @@ pub extern "C" fn sentinel_mutex_clone(m: *mut SentinelMutex) -> *mut SentinelMu
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[no_mangle]
 pub extern "C" fn sentinel_mutex_release(m: *mut SentinelMutex) {
+    mutex_release_impl(m, deadlock_detect_enabled())
+}
+
+/// The shared release body. `detect` mirrors `mutex_try_lock_for_impl`'s test
+/// seam so the free-path holder-edge scrub below is unit-testable (the env gate
+/// is frozen per process).
+fn mutex_release_impl(m: *mut SentinelMutex, detect: bool) {
     if m.is_null() {
         return;
     }
@@ -1611,6 +1742,15 @@ pub extern "C" fn sentinel_mutex_release(m: *mut SentinelMutex) {
             "sentinel_mutex_release: freeing a still-locked SentinelMutex \
              (codegen dropped the handle before its guard's unlock)"
         );
+        if detect {
+            // Scrub any stale holder edge for this address before the cell is
+            // freed: the allocator may reuse the address for a NEW mutex, and a
+            // leftover edge would attribute the new lock to a stale thread (false
+            // cycles). A live edge here means a guard outlived its mutex — the
+            // free-while-locked debug_assert above fires in debug; this keeps the
+            // graph consistent in release builds too.
+            wait_for_graph().lock().holders.remove(&(m as usize));
+        }
         // SAFETY: rc reached 0, so no other owner can observe the cell; reclaim it.
         unsafe {
             drop(Box::from_raw(m));
@@ -1625,7 +1765,9 @@ pub extern "C" fn sentinel_mutex_release(m: *mut SentinelMutex) {
 /// (`LockTimeout`) and leaves `*out` untouched. The `(status, out-ptr)` shape mirrors
 /// `sentinel_channel_recv`, so codegen builds the `?Guard` exactly as it builds
 /// `recv`'s `?T`. The RAII guard is forgotten so the lock stays held across the C-ABI
-/// boundary until `unlock`.
+/// boundary until `unlock`. With the D5a `Deadlock` tier enabled
+/// (`SENTINEL_DEADLOCK_DETECT`), a wait that would close a hold/wait cycle also
+/// returns 1 — immediately, with the cycle reported on stderr.
 ///
 /// # Safety
 /// `m` must be a `*mut SentinelMutex` from `sentinel_mutex_new` (or null); a null
@@ -1641,8 +1783,9 @@ pub extern "C" fn sentinel_mutex_lock(m: *mut SentinelMutex, out: *mut *mut i64)
 /// ADR 0071 M1.4b: acquire the lock, waiting at most `timeout_nanos` (≤ 0 = a
 /// non-blocking `try_lock`). Same `(status, out-ptr)` contract as
 /// `sentinel_mutex_lock`: 0 = acquired (`*out` = the protected slot), 1 =
-/// `LockTimeout`. The success path forgets the RAII guard so the lock is held until
-/// `sentinel_mutex_unlock`.
+/// `LockTimeout` — or, with the D5a `Deadlock` tier enabled, a detected cycle
+/// (reported on stderr, returned as the same status 1). The success path forgets
+/// the RAII guard so the lock is held until `sentinel_mutex_unlock`.
 ///
 /// # Safety
 /// `m` must be a `*mut SentinelMutex` from `sentinel_mutex_new` (or null); a null
@@ -1656,6 +1799,19 @@ pub extern "C" fn sentinel_mutex_try_lock_for(
     timeout_nanos: i64,
     out: *mut *mut i64,
 ) -> i64 {
+    mutex_try_lock_for_impl(m, timeout_nanos, out, deadlock_detect_enabled())
+}
+
+/// The shared acquire body. `detect` selects the D5a wait-for-graph tier — passed
+/// explicitly (rather than reading the env gate inline) so unit tests can exercise
+/// the detection deterministically without mutating process-global env state; the
+/// C-ABI symbol passes `deadlock_detect_enabled()`.
+fn mutex_try_lock_for_impl(
+    m: *mut SentinelMutex,
+    timeout_nanos: i64,
+    out: *mut *mut i64,
+    detect: bool,
+) -> i64 {
     // A null handle OR a null `out` slot returns 1 (LockTimeout) WITHOUT taking
     // the lock — mirrors `sentinel_process_recv`'s up-front out-null bail. Bailing
     // *before* `try_lock_for` is load-bearing: the success arm acquires the lock
@@ -1668,7 +1824,41 @@ pub extern "C" fn sentinel_mutex_try_lock_for(
     // SAFETY: `m` is a live SentinelMutex per the caller contract.
     let cell = unsafe { &*m };
     let dur = std::time::Duration::from_nanos(timeout_nanos.max(0) as u64);
-    match cell.lock.try_lock_for(dur) {
+    // The check + publish only apply to a wait that can actually BLOCK: a
+    // non-positive duration is a non-blocking poll — it never waits, so it can
+    // neither deadlock nor honor a wait edge (publishing one would create the
+    // stale-edge false positive the deadline stamp exists to prevent).
+    if detect && dur > std::time::Duration::ZERO {
+        let me = std::thread::current().id();
+        let addr = m as usize;
+        let now = std::time::Instant::now();
+        let mut graph = wait_for_graph().lock();
+        if let Some(cycle) = graph.find_cycle(me, addr, now) {
+            // Blocking here would close a hold/wait cycle: fold into the existing
+            // `LockTimeout`/null arm IMMEDIATELY (in-language, a `lock()` failure
+            // is the `?Guard` null arm either way) and carry the cycle on stderr.
+            // Release the meta-lock before the stderr write.
+            drop(graph);
+            report_deadlock(&cycle);
+            return 1;
+        }
+        // Publish the wait edge BEFORE blocking so other threads' checks see it,
+        // stamped with the wait's expiry (`now` precedes the blocking call below,
+        // so the stamp expires no later than the physical timeout — see the
+        // `WaitForGraph` doc). The meta-lock releases at the end of this block,
+        // never held across the blocking acquire.
+        graph.waits.insert(me, (addr, now + dur));
+    }
+    let acquired = cell.lock.try_lock_for(dur);
+    if detect {
+        let me = std::thread::current().id();
+        let mut graph = wait_for_graph().lock();
+        graph.waits.remove(&me);
+        if acquired.is_some() {
+            graph.holders.insert(m as usize, me);
+        }
+    }
+    match acquired {
         Some(guard) => {
             // Keep the lock held across the C-ABI boundary: hand back a raw pointer to
             // the protected slot and forget the RAII guard (the language-level Guard's
@@ -1698,8 +1888,22 @@ pub extern "C" fn sentinel_mutex_try_lock_for(
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[no_mangle]
 pub extern "C" fn sentinel_mutex_unlock(m: *mut SentinelMutex) {
+    mutex_unlock_impl(m, deadlock_detect_enabled())
+}
+
+/// The shared unlock body. `detect` mirrors `mutex_try_lock_for_impl`'s test seam
+/// (unit tests that acquire with `detect = true` must retire their holder edges
+/// the same way, or stale edges would poison later cycle checks).
+fn mutex_unlock_impl(m: *mut SentinelMutex, detect: bool) {
     if m.is_null() {
         return;
+    }
+    if detect {
+        // Retire the holder edge BEFORE the physical unlock: a momentarily-stale
+        // "free" edge only costs a missed detection (the always-on `LockTimeout`
+        // deadline backstops it), whereas a stale "held" edge lingering after the
+        // unlock could report a false cycle.
+        wait_for_graph().lock().holders.remove(&(m as usize));
     }
     // SAFETY: `m` is a live, currently-locked SentinelMutex per the caller contract;
     // the matching RAII guard was forgotten by the acquiring `_lock`/`_try_lock_for`.
@@ -2816,6 +3020,308 @@ mod tests {
         }
         sentinel_mutex_unlock(m);
         sentinel_mutex_release(m);
+    }
+
+    // ---- ADR 0071 M1.4b slice 4: the D5a opt-in Deadlock wait-for-graph tier ----
+    //
+    // These call `mutex_try_lock_for_impl` / `mutex_unlock_impl` with
+    // `detect = true` directly: the env gate (`deadlock_detect_enabled`) is a
+    // process-global OnceLock that can't be toggled per-test, and mutating env
+    // vars races parallel tests. The env-var wiring itself is proven end-to-end
+    // by the driver test (sentinel-driver/tests/deadlock.rs) on a real compiled
+    // Sentinel program. Detection folds into status 1 (the LockTimeout/null arm),
+    // so "detected vs timed out" is asserted via elapsed time against a 30s
+    // deadline no passing test ever waits out.
+
+    #[test]
+    fn mutex_deadlock_self_cycle_detected_instantly() {
+        // Re-locking a lock this thread already holds waits on itself — the
+        // minimal hold/wait cycle (parking_lot is not reentrant, so without
+        // detection this blocks the whole deadline).
+        let m = sentinel_mutex_new(7);
+        let mut slot: *mut i64 = std::ptr::null_mut();
+        assert_eq!(
+            mutex_try_lock_for_impl(m, 30_000_000_000, &mut slot as *mut *mut i64, true),
+            0
+        );
+        let start = std::time::Instant::now();
+        let mut slot2: *mut i64 = std::ptr::null_mut();
+        assert_eq!(
+            mutex_try_lock_for_impl(m, 30_000_000_000, &mut slot2 as *mut *mut i64, true),
+            1
+        );
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(5),
+            "the self-cycle must be detected instantly, not via the 30s deadline"
+        );
+        {
+            // The failed attempt left no stale wait edge; the holder edge survives.
+            let graph = wait_for_graph().lock();
+            assert_eq!(graph.holders.get(&(m as usize)), Some(&std::thread::current().id()));
+            assert!(!graph.waits.contains_key(&std::thread::current().id()));
+        }
+        mutex_unlock_impl(m, true);
+        // The unlock retired the holder edge (a stale edge would poison later
+        // cycle checks if the allocator reuses this address).
+        assert!(!wait_for_graph().lock().holders.contains_key(&(m as usize)));
+        sentinel_mutex_release(m);
+    }
+
+    #[test]
+    fn mutex_deadlock_two_thread_cycle_detected() {
+        // The classic AB-BA cycle, made deterministic: main holds A; T2 holds B
+        // and PROVABLY blocks on A (main spins until T2's wait edge is published
+        // — the edge is inserted before T2's blocking acquire, so once visible,
+        // T2 is committed). Only then does main attempt B, whose cycle check must
+        // fire instantly: main→B (held by T2), T2→A (held by main).
+        let a = sentinel_mutex_new(1);
+        let b = sentinel_mutex_new(2);
+        let mut slot: *mut i64 = std::ptr::null_mut();
+        assert_eq!(
+            mutex_try_lock_for_impl(a, 30_000_000_000, &mut slot as *mut *mut i64, true),
+            0
+        );
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let a_addr = a as usize; // raw ptrs aren't Send; pass the addresses.
+        let b_addr = b as usize;
+        let t2 = std::thread::spawn(move || {
+            let a = a_addr as *mut SentinelMutex;
+            let b = b_addr as *mut SentinelMutex;
+            let mut s: *mut i64 = std::ptr::null_mut();
+            assert_eq!(
+                mutex_try_lock_for_impl(b, 30_000_000_000, &mut s as *mut *mut i64, true),
+                0
+            );
+            tx.send(std::thread::current().id()).unwrap();
+            // Blocks on A (held by main) until main — after its own attempt on B
+            // detects the cycle — unlocks A.
+            let mut s2: *mut i64 = std::ptr::null_mut();
+            let status =
+                mutex_try_lock_for_impl(a, 30_000_000_000, &mut s2 as *mut *mut i64, true);
+            if status == 0 {
+                mutex_unlock_impl(a, true);
+            }
+            mutex_unlock_impl(b, true);
+            status
+        });
+
+        let t2_id = rx.recv().unwrap();
+        // Bounded spin until T2's wait edge on A is visible.
+        let mut published = false;
+        for _ in 0..10_000 {
+            if wait_for_graph().lock().waits.get(&t2_id).map(|&(a, _)| a) == Some(a_addr) {
+                published = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(published, "T2's wait edge on A never appeared");
+
+        let start = std::time::Instant::now();
+        let mut s3: *mut i64 = std::ptr::null_mut();
+        assert_eq!(
+            mutex_try_lock_for_impl(b, 30_000_000_000, &mut s3 as *mut *mut i64, true),
+            1,
+            "main's attempt on B closes main→B(T2)→A(main): detected, not acquired"
+        );
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(5),
+            "the cycle must be detected instantly, not via the 30s deadline"
+        );
+
+        // Break the cycle: main releases A; T2's blocked acquire then succeeds.
+        mutex_unlock_impl(a, true);
+        assert_eq!(t2.join().unwrap(), 0, "T2 acquires A once main unlocks it");
+
+        // All edges retired.
+        {
+            let graph = wait_for_graph().lock();
+            assert!(!graph.holders.contains_key(&a_addr));
+            assert!(!graph.holders.contains_key(&b_addr));
+        }
+        sentinel_mutex_release(a);
+        sentinel_mutex_release(b);
+    }
+
+    #[test]
+    fn mutex_deadlock_find_cycle_walks_and_ignores_foreign_cycles() {
+        // Pure graph unit: a cycle among OTHER threads must neither hang the walk
+        // (the `seen` set bounds it) nor be reported as ours — such a cycle can
+        // form when two checks race past each other, and those threads' own
+        // LockTimeout deadline is the backstop. Real ThreadIds are minted from
+        // short-lived threads (ThreadId can't be fabricated).
+        let t_a = std::thread::spawn(|| std::thread::current().id()).join().unwrap();
+        let t_b = std::thread::spawn(|| std::thread::current().id()).join().unwrap();
+        let me = std::thread::current().id();
+        let t0 = std::time::Instant::now();
+        let live = t0 + std::time::Duration::from_secs(1000);
+        let mut g = WaitForGraph::default();
+        // Foreign 2-cycle: 0x10 held by t_a → waits 0x20 held by t_b → waits 0x10.
+        g.holders.insert(0x10, t_a);
+        g.holders.insert(0x20, t_b);
+        g.waits.insert(t_a, (0x20, live));
+        g.waits.insert(t_b, (0x10, live));
+        assert!(g.find_cycle(me, 0x10, t0).is_none(), "a foreign cycle is not ours to report");
+        // Rewire t_b to wait on a lock `me` holds: now the walk from 0x10 closes
+        // a genuine 3-hop cycle back to `me`.
+        g.waits.insert(t_b, (0x30, live));
+        g.holders.insert(0x30, me);
+        let cycle = g.find_cycle(me, 0x10, t0).expect("3-hop cycle back to the requester");
+        assert_eq!(cycle, vec![(me, 0x10), (t_a, 0x20), (t_b, 0x30)]);
+        // An uncontended lock (no holder edge) is never a cycle.
+        assert!(g.find_cycle(me, 0x99, t0).is_none());
+        // The stale-wait false-positive fix (the adversarial review's finding):
+        // an EXPIRED wait edge — a timed-out waiter whose retire section hasn't
+        // run yet — must be treated as absent, not close a phantom cycle.
+        g.waits.insert(t_a, (0x20, t0)); // deadline == now → expired
+        assert!(
+            g.find_cycle(me, 0x10, t0).is_none(),
+            "an expired wait edge must never close a cycle"
+        );
+    }
+
+    #[test]
+    fn mutex_deadlock_detection_off_touches_no_graph_state() {
+        // With detect = false the acquire/unlock paths must not touch the graph
+        // (the default: zero bookkeeping cost) — and a self-relock burns its
+        // (tiny) deadline instead of being detected.
+        let m = sentinel_mutex_new(3);
+        let mut slot: *mut i64 = std::ptr::null_mut();
+        assert_eq!(mutex_try_lock_for_impl(m, 1_000_000, &mut slot as *mut *mut i64, false), 0);
+        assert!(!wait_for_graph().lock().holders.contains_key(&(m as usize)));
+        let mut slot2: *mut i64 = std::ptr::null_mut();
+        assert_eq!(
+            mutex_try_lock_for_impl(m, 1_000_000, &mut slot2 as *mut *mut i64, false),
+            1,
+            "off-path self-relock times out (1ms) rather than detecting"
+        );
+        sentinel_mutex_unlock(m);
+        sentinel_mutex_release(m);
+    }
+
+    #[test]
+    fn mutex_deadlock_timeout_retires_wait_edge_and_never_records_holder() {
+        // The detect-on TIMEOUT arm (uncovered before this test — the review's
+        // mutation pass proved removing the `is_some` guard survived the suite):
+        // a bounded acquire that expires must retire its own wait edge and must
+        // NOT overwrite the true holder's edge.
+        let m = sentinel_mutex_new(9);
+        let m_addr = m as usize;
+        let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let w = std::thread::spawn(move || {
+            let m = m_addr as *mut SentinelMutex;
+            let mut s: *mut i64 = std::ptr::null_mut();
+            assert_eq!(
+                mutex_try_lock_for_impl(m, 30_000_000_000, &mut s as *mut *mut i64, true),
+                0
+            );
+            locked_tx.send(std::thread::current().id()).unwrap();
+            release_rx.recv().unwrap();
+            mutex_unlock_impl(m, true);
+        });
+        let w_id = locked_rx.recv().unwrap();
+        // A 100ms bounded acquire against the held lock times out (status 1).
+        let mut s: *mut i64 = std::ptr::null_mut();
+        assert_eq!(mutex_try_lock_for_impl(m, 100_000_000, &mut s as *mut *mut i64, true), 1);
+        {
+            let graph = wait_for_graph().lock();
+            assert!(
+                !graph.waits.contains_key(&std::thread::current().id()),
+                "the timed-out wait edge must be retired"
+            );
+            assert_eq!(
+                graph.holders.get(&m_addr),
+                Some(&w_id),
+                "a timeout must never overwrite the true holder's edge"
+            );
+        }
+        release_tx.send(()).unwrap();
+        w.join().unwrap();
+        sentinel_mutex_release(m);
+    }
+
+    #[test]
+    fn mutex_deadlock_contended_handoff_keeps_fresh_holder_edge() {
+        // The unlock ordering (retire the holder edge BEFORE force_unlock) is
+        // what makes the woken waiter's FRESH holder edge safe: the retire
+        // strictly precedes the waiter's acquire, so it can never delete the
+        // waiter's edge. Under the swapped order the late retire races the
+        // waiter's record and can wipe it — leaving a held lock invisible to
+        // every later cycle check (the review's mutation pass showed the swap
+        // survived the rest of the suite; this test observes the handoff).
+        let m = sentinel_mutex_new(4);
+        let m_addr = m as usize;
+        let mut s: *mut i64 = std::ptr::null_mut();
+        assert_eq!(mutex_try_lock_for_impl(m, 30_000_000_000, &mut s as *mut *mut i64, true), 0);
+        let (id_tx, id_rx) = std::sync::mpsc::channel();
+        let (acq_tx, acq_rx) = std::sync::mpsc::channel::<()>();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let w = std::thread::spawn(move || {
+            let m = m_addr as *mut SentinelMutex;
+            id_tx.send(std::thread::current().id()).unwrap();
+            let mut s: *mut i64 = std::ptr::null_mut();
+            assert_eq!(
+                mutex_try_lock_for_impl(m, 30_000_000_000, &mut s as *mut *mut i64, true),
+                0
+            );
+            acq_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            mutex_unlock_impl(m, true);
+        });
+        let w_id = id_rx.recv().unwrap();
+        // Bounded spin until W's wait edge is published — the unlock below is
+        // then a genuine contended handoff (W is inside try_lock_for).
+        let mut published = false;
+        for _ in 0..10_000 {
+            if wait_for_graph().lock().waits.get(&w_id).map(|&(a, _)| a) == Some(m_addr) {
+                published = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(published, "W's wait edge never appeared");
+        mutex_unlock_impl(m, true); // the contended handoff
+        acq_rx.recv().unwrap(); // W has acquired AND recorded its holder edge
+        assert_eq!(
+            wait_for_graph().lock().holders.get(&m_addr),
+            Some(&w_id),
+            "the handoff must leave the WAITER's fresh holder edge intact"
+        );
+        release_tx.send(()).unwrap();
+        w.join().unwrap();
+        sentinel_mutex_release(m);
+    }
+
+    #[test]
+    fn mutex_release_impl_scrubs_stale_holder_edge_on_free() {
+        // The rc==0 ABA defense: a holder edge that pathologically survives to
+        // the free (a guard outliving its mutex — the codegen-bug class the
+        // static pins guard against) must not outlive the cell, or the reused
+        // address would attribute a NEW mutex to a dead thread. The edge is
+        // planted directly — actually locking would trip the free-while-locked
+        // debug_assert first, making the scrub untestable through the lock path.
+        let m = sentinel_mutex_new(1);
+        let addr = m as usize;
+        wait_for_graph().lock().holders.insert(addr, std::thread::current().id());
+        mutex_release_impl(m, true); // rc 1 → 0: frees the cell + scrubs the edge
+        assert!(
+            !wait_for_graph().lock().holders.contains_key(&addr),
+            "the free path must scrub the stale holder edge"
+        );
+    }
+
+    #[test]
+    fn deadlock_env_value_parse_covers_both_sides() {
+        // Both sides of the gate's parse (the OnceLock freezes the gate itself
+        // per process, so only the split-out parse can pin the FALSE side — an
+        // always-enabled drift would otherwise pass the whole suite while
+        // breaking the detect-off-is-default-behavior invariant).
+        assert!(deadlock_env_value_on("1"));
+        assert!(deadlock_env_value_on("true"));
+        assert!(!deadlock_env_value_on("0"));
+        assert!(!deadlock_env_value_on(""));
     }
 
     // ---- ADR 0066 M2.1: the subprocess spawn runtime surface ----
