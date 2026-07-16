@@ -1,0 +1,12 @@
+// ADR 0071 M1.4b slice 3c: `*g` (a lock-guard deref) is only allowed on the
+// DIRECTLY `let`-bound guard binding (`GuardDerefNotVar`). A computed guard
+// operand — here `*{ g }` (a block whose tail is the guard) — is rejected: it
+// would fall to a *consuming* borrow-check walk that marks the guard moved,
+// skipping its unlock-on-drop (freeing a still-locked cell) and diverging from
+// the self-host mirror. Dereference the guard binding directly (`*g`).
+fn main() -> i64 {
+    let m = mutex_new(36);
+    let g = lock(m);
+    let v = *{ g };
+    v
+}

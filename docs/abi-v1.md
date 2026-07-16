@@ -325,6 +325,7 @@ Codegen declares these as external; `sentinel-runtime` defines them
 | `sentinel_mutex_lock` | `(ptr m, ptr out) -> i64` | mutex — acquire with the always-on `LockTimeout` deadline (D5); writes a `*mut i64` to the protected slot into `*out`, returns 0 (acquired) / 1 (timeout, or null `m`/`out`). Codegen builds the `?Guard` like `recv`'s `?i64` |
 | `sentinel_mutex_try_lock_for` | `(ptr m, i64 timeout_nanos, ptr out) -> i64` | mutex — bounded acquire (`timeout_nanos ≤ 0` = a non-blocking `try_lock`); same `(status, out-ptr)` contract as `sentinel_mutex_lock` |
 | `sentinel_mutex_unlock` | `(ptr m) -> void` | mutex — release the lock held by a prior `lock`/`try_lock_for` (the `Guard`'s scope-exit drop); no refcount change |
+| `sentinel_mutex_data` | `(ptr m, i64 valid) -> ptr` | mutex — the protected slot for `*g` reads/writes (`valid` = the `?Guard`'s valid bit). ABORTS on a timed-out/null guard (`valid == 0`) — a deref without the lock would be a data race; the `sentinel_panic_oob` posture. Only sound while the guard's lock is held |
 
 **Runtime-internal (not codegen-declared):** `sentinel_kont_panic_resumed`
 — the runtime's `sentinel_kont_resume` calls it on the consumed-twice

@@ -1202,6 +1202,18 @@ fn pass_c71_mutex_lock() {
 }
 
 #[test]
+fn pass_c71_mutex_deref() {
+    // ADR 0071 M1.4b slice 3c: the `*g` guard deref — read + write the protected
+    // value through a held lock (the motivating RMW shape: read 36, write 42, read
+    // back 42 as the tail). The deref is NON-consuming on the Move-typed ?Guard
+    // (three uses), and the scope-exit drops (g's conditional unlock BEFORE m's
+    // release) keep the clean exit as the unlock/leak proof. Exit 42.
+    let r = build_and_run("c71_mutex_deref.sentinel");
+    assert_eq!(r.exit, 42);
+    assert_eq!(r.stdout, "");
+}
+
+#[test]
 fn pass_c71_mutex_rc() {
     // ADR 0071 M1.4b slice 3a: the Mutex<T> handle refcount clone/drop accounting.
     // Exercises all three rc++ duplication sites (let-binding, by-value user-fn arg,

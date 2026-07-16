@@ -1,0 +1,14 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c71_guard_no_borrow.sentinel\")"
+---
+sentinel::types::guard_borrow_not_allowed
+
+  × cannot take a reference through a lock guard (`& *g`)
+    ╭─[tests/ui/c71_guard_no_borrow.sentinel:12:9]
+ 11 │         let g = lock(m);
+ 12 │         & *g
+    ·         ──┬─
+    ·           ╰── 
+ 13 │     };
+    ╰────

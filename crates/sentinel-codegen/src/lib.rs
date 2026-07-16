@@ -59,7 +59,8 @@ use sentinel_resolve::{
 };
 use sentinel_ast::SelfKind;
 use sentinel_types::{
-    fn_value_sig_param_ret, ArrayElem, ClassData, GenericInstanceData, GenericInstanceId, ImplData,
+    fn_value_sig_param_ret, guard_elem_for, ArrayElem, ClassData, GenericInstanceData,
+    GenericInstanceId, ImplData,
     NullableInner, RefData, SecretData, Type, TypedBlock, TypedExpr, TypedExprKind, TypedFnDef,
     TypedFnSignature, TypedHandlerArm, TypedMatchArm, TypedPattern, TypedProgram, TypedReturnArm,
     TypedStmt, TypedStmtKind, TypedStructDecl,
@@ -696,6 +697,14 @@ pub fn compile_to_object_for_module(
     let mutex_unlock_fn = module.add_function(
         "sentinel_mutex_unlock",
         context.void_type().fn_type(&[ptr_ty.into()], false),
+        None,
+    );
+    // ADR 0071 M1.4b slice 3c: `sentinel_mutex_data(m, valid) -> ptr` — the
+    // protected slot for `*g` reads/writes. Aborts inside the runtime on a
+    // timed-out guard (valid == 0), keeping codegen branch-free here.
+    let mutex_data_fn = module.add_function(
+        "sentinel_mutex_data",
+        ptr_ty.fn_type(&[ptr_ty.into(), i64_ty.into()], false),
         None,
     );
     // ADR 0066 M2.1: declare the subprocess runtime symbols (cross-platform).
@@ -1441,6 +1450,7 @@ pub fn compile_to_object_for_module(
             mutex_clone_fn,
             mutex_release_fn,
             mutex_unlock_fn,
+            mutex_data_fn,
             process_spawn_fn,
             process_wait_fn,
             process_write_fn,
@@ -1730,6 +1740,9 @@ struct CodegenCtx<'ctx, 'plan> {
     /// ADR 0071 M1.4b slice 3b: `sentinel_mutex_unlock(m)` — the Guard's scope-exit
     /// unlock.
     mutex_unlock_fn: FunctionValue<'ctx>,
+    /// ADR 0071 M1.4b slice 3c: `sentinel_mutex_data(m, valid) -> ptr` — the
+    /// protected slot for `*g` (aborts in the runtime on a timed-out guard).
+    mutex_data_fn: FunctionValue<'ctx>,
     /// ADR 0066 M2.1: the subprocess runtime symbols.
     process_spawn_fn: FunctionValue<'ctx>,
     process_wait_fn: FunctionValue<'ctx>,
@@ -4355,14 +4368,68 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                 }
             }
             TypedStmtKind::Assign { target, value } => {
-                // C2 / ADR 0017 D2: lower the RHS, compute the LHS
-                // address as a pointer, then store. Lvalue / mut
-                // gates already passed at type-check time.
-                let v = self.lower_expr(value, program)?;
-                let ptr = self.lower_lvalue_ptr(target, program)?;
-                self.builder
-                    .build_store(ptr, v)
-                    .map_err(|e| CodegenError::Builder(e.to_string()))?;
+                // ADR 0071 M1.4b slice 3c: `*g = v` — write the protected element
+                // through the lock guard. ENCODE the word-scalar into the cell's
+                // i64 slot (the `mutex_new` encode: zext / bitcast / ptrtoint;
+                // `i64` = no-op) and store through `sentinel_mutex_data(m, valid)`
+                // (which aborts on a timed-out guard).
+                let guard_target = match &target.kind {
+                    TypedExprKind::Unary(UnaryOp::Deref, inner)
+                        if matches!(inner.ty, Type::Nullable(NullableInner::Guard(_))) =>
+                    {
+                        Some(inner)
+                    }
+                    _ => None,
+                };
+                if let Some(inner) = guard_target {
+                    let i64_ty = self.context.i64_type();
+                    // ADR 0071 M1.4b slice 3c: emit the PLACE first (lower the guard
+                    // + `sentinel_mutex_data`), THEN the value — matching the
+                    // `snc llvm` oracle + scg (which walk target-then-value) so the
+                    // `sentinel_mutex_data` abort (on a timed-out guard) and any
+                    // side effects in the value expression observe the same order
+                    // across all three backends.
+                    let gv = self.lower_expr(inner, program)?;
+                    let data = self.guard_data_ptr(gv)?;
+                    let raw = self.lower_expr(value, program)?;
+                    let encoded: IntValue = match raw {
+                        BasicValueEnum::IntValue(iv) => {
+                            if iv.get_type().get_bit_width() == 64 {
+                                iv
+                            } else {
+                                self.builder
+                                    .build_int_z_extend(iv, i64_ty, "gassign_enc")
+                                    .map_err(|e| CodegenError::Builder(e.to_string()))?
+                            }
+                        }
+                        BasicValueEnum::FloatValue(fv) => self
+                            .builder
+                            .build_bit_cast(fv, i64_ty, "gassign_enc")
+                            .map_err(|e| CodegenError::Builder(e.to_string()))?
+                            .into_int_value(),
+                        BasicValueEnum::PointerValue(pv) => self
+                            .builder
+                            .build_ptr_to_int(pv, i64_ty, "gassign_enc")
+                            .map_err(|e| CodegenError::Builder(e.to_string()))?,
+                        other => {
+                            return Err(CodegenError::Builder(format!(
+                                "guard assign element unsupported (word-scalar only): {other:?}"
+                            )));
+                        }
+                    };
+                    self.builder
+                        .build_store(data, encoded)
+                        .map_err(|e| CodegenError::Builder(e.to_string()))?;
+                } else {
+                    // C2 / ADR 0017 D2: lower the RHS, compute the LHS
+                    // address as a pointer, then store. Lvalue / mut
+                    // gates already passed at type-check time.
+                    let v = self.lower_expr(value, program)?;
+                    let ptr = self.lower_lvalue_ptr(target, program)?;
+                    self.builder
+                        .build_store(ptr, v)
+                        .map_err(|e| CodegenError::Builder(e.to_string()))?;
+                }
             }
             TypedStmtKind::While { cond, body } => {
                 // Phase D.5 / ADR 0036 D4: the first backward CFG branch.
@@ -4482,6 +4549,14 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                 Ok(ptr)
             }
             TypedExprKind::Unary(UnaryOp::Deref, inner) => {
+                // ADR 0071 M1.4b slice 3c: `*g` as an lvalue — the address is the
+                // guard's protected slot (via `sentinel_mutex_data`, which aborts
+                // on a timed-out guard). Reached by `& *g`; the `*g = v` assign
+                // path is intercepted earlier (it must also ENCODE the value).
+                if matches!(inner.ty, Type::Nullable(NullableInner::Guard(_))) {
+                    let gv = self.lower_expr(inner, program)?;
+                    return self.guard_data_ptr(gv);
+                }
                 // `*r` as an lvalue: the address is the *value* of
                 // r — load r from its alloca to get the underlying
                 // pointer.
@@ -6558,6 +6633,47 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
         Ok(with_guard.into_struct_value().into())
     }
 
+    /// ADR 0071 M1.4b slice 3c: from a lowered `?Guard` value (`{ i1 valid, ptr m }`),
+    /// compute the protected-slot pointer for a `*g` read/write: extract the valid
+    /// bit + the cell handle, zext the bit to i64, and call
+    /// `sentinel_mutex_data(m, valid)` — which ABORTS on a timed-out guard (the
+    /// maintainer-pinned deref-after-timeout posture; the branch lives in the
+    /// runtime so all three backends stay branch-free here).
+    fn guard_data_ptr(
+        &mut self,
+        guard_val: BasicValueEnum<'ctx>,
+    ) -> Result<inkwell::values::PointerValue<'ctx>, CodegenError> {
+        let i64_ty = self.context.i64_type();
+        let agg = guard_val.into_struct_value();
+        let valid = self
+            .builder
+            .build_extract_value(agg, 0, "gd_valid")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?
+            .into_int_value();
+        let m_v = self
+            .builder
+            .build_extract_value(agg, 1, "gd_m")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?
+            .into_pointer_value();
+        let valid_i64 = self
+            .builder
+            .build_int_z_extend(valid, i64_ty, "gd_validz")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        let data = self
+            .builder
+            .build_call(
+                self.mutex_data_fn,
+                &[m_v.into(), valid_i64.into()],
+                "mutex_data",
+            )
+            .map_err(|e| CodegenError::Builder(e.to_string()))?
+            .try_as_basic_value()
+            .left()
+            .expect("sentinel_mutex_data returns ptr")
+            .into_pointer_value();
+        Ok(data)
+    }
+
     /// ADR 0071 M1.4a: `shared_get(s: Shared<T>) -> T` — read a copy of the cell's
     /// value via `sentinel_shared_get(s) -> i64`, then DECODE the i64 into the
     /// element `T` (the inverse of the `shared_new` encode: trunc / bitcast /
@@ -7726,6 +7842,49 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                     .map_err(|e| CodegenError::Builder(e.to_string()))
             }
             TypedExprKind::Unary(UnaryOp::Deref, inner) => {
+                // ADR 0071 M1.4b slice 3c: `*g` on a `?Guard<T>` — compute the
+                // protected-slot ptr (aborts in the runtime on a timed-out guard),
+                // load the i64 slot, and DECODE into the element `T` (the
+                // `shared_get` decode: trunc / bitcast / inttoptr; `i64` = no-op).
+                if let Type::Nullable(NullableInner::Guard(gid)) = inner.ty {
+                    let gv = self.lower_expr(inner, program)?;
+                    let data = self.guard_data_ptr(gv)?;
+                    let i64_ty = self.context.i64_type();
+                    let raw = self
+                        .builder
+                        .build_load(i64_ty, data, "gderef")
+                        .map_err(|e| CodegenError::Builder(e.to_string()))?
+                        .into_int_value();
+                    let elem = guard_elem_for(gid);
+                    let elem_llvm = self.llvm_basic_type(elem);
+                    let value: BasicValueEnum = match elem_llvm {
+                        BasicTypeEnum::IntType(it) => {
+                            if it.get_bit_width() == 64 {
+                                raw.into()
+                            } else {
+                                self.builder
+                                    .build_int_truncate(raw, it, "gderef_dec")
+                                    .map_err(|e| CodegenError::Builder(e.to_string()))?
+                                    .into()
+                            }
+                        }
+                        BasicTypeEnum::FloatType(ft) => self
+                            .builder
+                            .build_bit_cast(raw, ft, "gderef_dec")
+                            .map_err(|e| CodegenError::Builder(e.to_string()))?,
+                        BasicTypeEnum::PointerType(pt) => self
+                            .builder
+                            .build_int_to_ptr(raw, pt, "gderef_dec")
+                            .map_err(|e| CodegenError::Builder(e.to_string()))?
+                            .into(),
+                        other => {
+                            return Err(CodegenError::Builder(format!(
+                                "guard deref element unsupported (word-scalar only): {other:?}"
+                            )));
+                        }
+                    };
+                    return Ok(value);
+                }
                 // C2 / ADR 0017 D4: `*r` loads the inner type from
                 // r's pointer value. Look up the ref's pointee type
                 // from `program.refs[id]`.

@@ -138,6 +138,14 @@ ui_snapshot!(c71_mutex_return_named, "c71_mutex_return_named.sentinel");
 // `is_some(lock(m))`) is rejected with GuardNotLetBound so the unlock-on-drop guard
 // cannot outlive its mutex.
 ui_snapshot!(c71_guard_not_let_bound, "c71_guard_not_let_bound.sentinel");
+// ADR 0071 M1.4b slice 3c: taking a reference through a lock guard (`& *g`) is
+// rejected (GuardBorrowNotAllowed) — the ref would alias the mutex slot and could
+// escape the guard's unlock + the cell's release into a use-after-free.
+ui_snapshot!(c71_guard_no_borrow, "c71_guard_no_borrow.sentinel");
+// ADR 0071 M1.4b slice 3c: a computed guard deref (`*{ g }`) is rejected
+// (GuardDerefNotVar) — only the directly `let`-bound guard Var may be `*g`-derefed
+// (a computed operand would consume the guard, skipping its unlock-on-drop).
+ui_snapshot!(c71_guard_deref_computed, "c71_guard_deref_computed.sentinel");
 
 // ---- ADR 0070: non-capturing function values (types) ----
 // D4: a wrong-arity fn is not eligible as a Fn<T,R> value (any word-scalar shape).

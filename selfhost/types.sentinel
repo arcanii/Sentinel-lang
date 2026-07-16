@@ -376,6 +376,7 @@ struct TyCtx {
     cg_used_mutexclone: bool,
     cg_used_mutexrelease: bool,
     cg_used_mutexunlock: bool,
+    cg_used_mutexdata: bool,
     cg_used_procspawn: bool,
     cg_used_procwait: bool,
     cg_used_procwrite: bool,
@@ -1244,6 +1245,12 @@ pub fn run(src: [u8], mode: i64, result: &mut Vec<u8>) -> i64 {
         } else {
             0
         };
+        if ctx.cg_used_mutexdata {
+            append_str(result, "declare ptr @sentinel_mutex_data(ptr, i64)\n");
+            0
+        } else {
+            0
+        };
         // (ADR 0066 M2.1) the subprocess runtime group.
         if ctx.cg_used_procspawn {
             append_str(result, "declare ptr @sentinel_process_spawn(ptr, i64, ptr, i64)\n");
@@ -1318,7 +1325,7 @@ pub fn run(src: [u8], mode: i64, result: &mut Vec<u8>) -> i64 {
         } else {
             0
         };
-        let cg_anydecl: bool = ctx.cg_used_alloc || ctx.cg_used_realloc || ctx.cg_used_free || ctx.cg_used_panic || ctx.cg_used_streq || ctx.cg_used_rdfile || ctx.cg_used_wrfile || ctx.cg_used_print || ctx.cg_used_prbytes || ctx.cg_used_perform || ctx.cg_used_resume || ctx.cg_used_consume || ctx.cg_used_kontpure || ctx.cg_used_kontpush || ctx.cg_used_taskspawn || ctx.cg_used_taskawait || ctx.cg_used_scopeenter || ctx.cg_used_scoperegister || ctx.cg_used_scopeexit || ctx.cg_used_channelnew || ctx.cg_used_channelsend || ctx.cg_used_channelrecv || ctx.cg_used_channelclose || ctx.cg_used_sharednew || ctx.cg_used_sharedget || ctx.cg_used_sharedclone || ctx.cg_used_sharedrelease || ctx.cg_used_mutexnew || ctx.cg_used_mutexlock || ctx.cg_used_mutexclone || ctx.cg_used_mutexrelease || ctx.cg_used_mutexunlock || ctx.cg_used_procspawn || ctx.cg_used_procwait || ctx.cg_used_procwrite || ctx.cg_used_procread || ctx.cg_used_stdinrecv || ctx.cg_used_stdoutsend || ctx.cg_used_argcount || ctx.cg_used_arg || ctx.cg_used_memcpy;
+        let cg_anydecl: bool = ctx.cg_used_alloc || ctx.cg_used_realloc || ctx.cg_used_free || ctx.cg_used_panic || ctx.cg_used_streq || ctx.cg_used_rdfile || ctx.cg_used_wrfile || ctx.cg_used_print || ctx.cg_used_prbytes || ctx.cg_used_perform || ctx.cg_used_resume || ctx.cg_used_consume || ctx.cg_used_kontpure || ctx.cg_used_kontpush || ctx.cg_used_taskspawn || ctx.cg_used_taskawait || ctx.cg_used_scopeenter || ctx.cg_used_scoperegister || ctx.cg_used_scopeexit || ctx.cg_used_channelnew || ctx.cg_used_channelsend || ctx.cg_used_channelrecv || ctx.cg_used_channelclose || ctx.cg_used_sharednew || ctx.cg_used_sharedget || ctx.cg_used_sharedclone || ctx.cg_used_sharedrelease || ctx.cg_used_mutexnew || ctx.cg_used_mutexlock || ctx.cg_used_mutexclone || ctx.cg_used_mutexrelease || ctx.cg_used_mutexunlock || ctx.cg_used_mutexdata || ctx.cg_used_procspawn || ctx.cg_used_procwait || ctx.cg_used_procwrite || ctx.cg_used_procread || ctx.cg_used_stdinrecv || ctx.cg_used_stdoutsend || ctx.cg_used_argcount || ctx.cg_used_arg || ctx.cg_used_memcpy;
         if cg_anydecl {
             push(result, '\n');
             0

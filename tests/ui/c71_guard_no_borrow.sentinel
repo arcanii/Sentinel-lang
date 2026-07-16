@@ -1,0 +1,15 @@
+// ADR 0071 M1.4b slice 3c: taking a reference THROUGH a lock guard (`& *g`) is
+// rejected (`GuardBorrowNotAllowed`). The reference would alias the mutex cell's
+// protected slot; since a `?Guard` is pinned to its `let` and its scope-exit drop
+// UNLOCKS — and the owning `Mutex` is then released, freeing the cell — such a
+// reference could escape past the guard/mutex into a use-after-free. Here `& *g`
+// escapes the inner block (its source is the local mutex cell, freed at block
+// exit), so `*r` would read freed heap. Only in-place `*g` / `*g = v` are allowed.
+fn main() -> i64 {
+    let r: &i64 = {
+        let m = mutex_new(36);
+        let g = lock(m);
+        & *g
+    };
+    *r
+}

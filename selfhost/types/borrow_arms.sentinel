@@ -525,7 +525,21 @@ fn dump_te_unary(out: &mut Vec<u8>, uop: i64, inner: Expr, exp: i64, src: &[u8],
                 0
             };
             (*c).consuming = svc;
-            // `!` -> bool; `&`/`&mut` -> a ref type; `*` -> strip a ref; `-` -> operand.
+            // (ADR 0071 M1.4b slice 3c) is this `*g` — a deref THROUGH a `?Guard`
+            // (a nullable, kind 4, whose inner is the kind-19 Guard)? Its value is
+            // the guard's protected ELEMENT, not a ref strip, and its codegen goes
+            // through `sentinel_mutex_data` (below) instead of a plain load.
+            let un_g: bool = if uop == 3 {
+                if cg_is_nullable(c, it) {
+                    cg_is_guard(c, (*c).ta[it - tbase()])
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+            // `!` -> bool; `&`/`&mut` -> a ref type; `*` -> strip a ref (or the
+            // guard's element); `-` -> operand.
             let rt: i64 = if uop == 2 {
                 2
             } else if uop == 4 {
@@ -533,7 +547,11 @@ fn dump_te_unary(out: &mut Vec<u8>, uop: i64, inner: Expr, exp: i64, src: &[u8],
             } else if uop == 5 {
                 mk_ref(c, 1, it)
             } else if uop == 3 {
-                strip_ref(c, it)
+                if un_g {
+                    (*c).ta[(*c).ta[it - tbase()] - tbase()]
+                } else {
+                    strip_ref(c, it)
+                }
             } else {
                 it
             };
@@ -576,7 +594,47 @@ fn dump_te_unary(out: &mut Vec<u8>, uop: i64, inner: Expr, exp: i64, src: &[u8],
                     cg_not(c, cguk, cguv);
                     0
                 } else if uop == 3 {
-                    if un_place {
+                    if un_g {
+                        // (ADR 0071 M1.4b slice 3c) `*g`: extract the valid bit +
+                        // cell handle from the `{ i1, ptr }` ?Guard operand, zext
+                        // the (public) bit, call sentinel_mutex_data (which ABORTS
+                        // in the runtime on a timed-out guard). As a READ, load the
+                        // i64 slot; as an assign-target PLACE (`*g = v`), leave the
+                        // data ptr as the operand for the store (cg_lastvid = -1).
+                        // i64-only elements (the scg corpus), like shared_get.
+                        let gda: i64 = cg_dst(c);
+                        cgo_str(c, "extractvalue { i1, ptr } ");
+                        cgo_operand(c, cguk, cguv);
+                        cgo_str(c, ", 0\n");
+                        let gdb: i64 = cg_dst(c);
+                        cgo_str(c, "extractvalue { i1, ptr } ");
+                        cgo_operand(c, cguk, cguv);
+                        cgo_str(c, ", 1\n");
+                        let gdc: i64 = cg_dst(c);
+                        cgo_str(c, "zext i1 %v");
+                        cgo_int(c, gda);
+                        cgo_str(c, " to i64\n");
+                        let gdd: i64 = cg_dst(c);
+                        cgo_str(c, "call ptr @sentinel_mutex_data(ptr %v");
+                        cgo_int(c, gdb);
+                        cgo_str(c, ", i64 %v");
+                        cgo_int(c, gdc);
+                        cgo_str(c, ")\n");
+                        (*c).cg_used_mutexdata = true;
+                        if un_place {
+                            (*c).cg_lastvid = 0 - 1;
+                            cg_reg(c, gdd);
+                            0
+                        } else {
+                            let gde: i64 = cg_dst(c);
+                            cgo_str(c, "load i64, ptr %v");
+                            cgo_int(c, gdd);
+                            cg_putc(c, '\n');
+                            cg_reg(c, gde);
+                            0
+                        };
+                        0
+                    } else if un_place {
                         (*c).cg_lastvid = 0 - 1;
                         0
                     } else {

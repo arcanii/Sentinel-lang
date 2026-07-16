@@ -857,6 +857,19 @@ fn walk_assign_target(
             check_write_conflict(*id, &target.span, ctx, errors);
         }
         TypedExprKind::Unary(UnaryOp::Deref, inner) => {
+            // ADR 0071 M1.4b slice 3c: `*g = v;` writes THROUGH the (Move-typed)
+            // `?Guard` without consuming it — same non-consuming read as the
+            // rvalue `*g` (see walk_expr's guard-deref arm; consuming would skip
+            // the unlock drop and poison later `*g` uses with UseAfterMove).
+            if matches!(inner.ty, Type::Nullable(NullableInner::Guard(_))) {
+                if let TypedExprKind::Var(id) = &inner.kind {
+                    check_read_conflict(*id, &inner.span, ctx, errors);
+                    check_use_alive(*id, &inner.span, ctx, errors);
+                } else {
+                    walk_expr(inner, ctx, errors, program);
+                }
+                return;
+            }
             // `*r = v;` — the write goes through r (a `&mut T`
             // by type-check invariant). Walk r as a normal
             // expression so its read-check fires (use-after-scope
@@ -964,6 +977,26 @@ fn walk_expr(
             walk_expr_lvalue(inner, ctx, errors, program);
             if let Some(source) = source_of_lvalue(inner, ctx, program) {
                 check_and_add_mut_borrow(source, &expr.span, ctx, errors);
+            }
+        }
+        // ADR 0071 M1.4b slice 3c: `*g` reads THROUGH the (Move-typed) `?Guard`
+        // without consuming it — the guard must stay live for its scope-exit unlock,
+        // and the motivating RMW shape derefs it repeatedly (`let v = *g; *g = v+6`).
+        // A consuming walk would mark `g` Moved: the unlock drop would be skipped
+        // (a leak + a free-while-locked abort) and the second `*g` would be a bogus
+        // UseAfterMove. Non-consuming ALSO mirrors scg's unary walk, whose deref
+        // operand is unconditionally non-consuming — for `Ref` operands (Copy) the
+        // difference was moot, for the Move guard it is load-bearing (the
+        // moved-sources dump must stay byte-identical). The use-after-move CHECK
+        // still fires (a genuinely moved `g` is still rejected).
+        TypedExprKind::Unary(UnaryOp::Deref, inner)
+            if matches!(inner.ty, Type::Nullable(NullableInner::Guard(_))) =>
+        {
+            if let TypedExprKind::Var(id) = &inner.kind {
+                check_read_conflict(*id, &inner.span, ctx, errors);
+                check_use_alive(*id, &inner.span, ctx, errors);
+            } else {
+                walk_expr(inner, ctx, errors, program);
             }
         }
         TypedExprKind::Unary(_, inner) => {
@@ -1260,6 +1293,18 @@ fn walk_expr_lvalue(
             check_use_alive(*id, &expr.span, ctx, errors);
         }
         TypedExprKind::Unary(UnaryOp::Deref, inner) => {
+            // ADR 0071 M1.4b slice 3c: `& *g` reads through the (Move-typed)
+            // `?Guard` without consuming it — same non-consuming read as `*g`
+            // (see walk_expr's guard-deref arm).
+            if matches!(inner.ty, Type::Nullable(NullableInner::Guard(_))) {
+                if let TypedExprKind::Var(id) = &inner.kind {
+                    check_read_conflict(*id, &inner.span, ctx, errors);
+                    check_use_alive(*id, &inner.span, ctx, errors);
+                } else {
+                    walk_expr(inner, ctx, errors, program);
+                }
+                return;
+            }
             // `& *r` — walk r as a normal expression so its
             // OutlivesSource check fires.
             walk_expr(inner, ctx, errors, program);

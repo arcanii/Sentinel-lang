@@ -1709,6 +1709,37 @@ pub extern "C" fn sentinel_mutex_unlock(m: *mut SentinelMutex) {
     }
 }
 
+/// ADR 0071 M1.4b slice 3c: the guard's data accessor — the protected slot pointer
+/// for `*g` reads/writes. `valid` is the `?Guard`'s valid bit (1 = the `lock()`
+/// acquired; 0 = it timed out). Dereferencing a TIMED-OUT guard would read/write the
+/// slot WITHOUT holding the lock (a data race), so an invalid (or null) guard
+/// ABORTS loudly — the same posture as `sentinel_panic_oob` for an out-of-bounds
+/// index (maintainer-pinned; check `is_some(g)` before `*g`). Putting the check
+/// HERE keeps all three codegen backends' IR tiny (extract, zext, call, load/store)
+/// and the abort logic in one place. The valid bit is public control data (the lock
+/// outcome, D5), so this branch is constant-time-clean.
+///
+/// # Safety
+/// `m` must be a `*mut SentinelMutex` from `sentinel_mutex_new` (or null). When
+/// `valid != 0`, the caller must actually HOLD the lock (a live guard from a
+/// successful `lock()`): the returned pointer is only sound to dereference inside
+/// that critical section, and codegen's guard no-escape pin enforces it.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+#[no_mangle]
+pub extern "C" fn sentinel_mutex_data(m: *mut SentinelMutex, valid: i64) -> *mut i64 {
+    if m.is_null() || valid == 0 {
+        eprintln!(
+            "sentinel: dereference of a lock() guard that did not acquire \
+             (LockTimeout) — check is_some(g) before *g"
+        );
+        std::process::abort();
+    }
+    // SAFETY: `m` is a live SentinelMutex per the caller contract; `data_ptr` does
+    // not touch the lock state (the caller holds it, per the contract above).
+    let cell = unsafe { &*m };
+    cell.lock.data_ptr()
+}
+
 // =============================================================================
 // ADR 0066 M2.1: subprocess spawn — `Process` over `std::process::Command`.
 //
@@ -2366,17 +2397,18 @@ mod tests {
             sentinel_mutex_lock as *const (),
             sentinel_mutex_try_lock_for as *const (),
             sentinel_mutex_unlock as *const (),
+            sentinel_mutex_data as *const (),
         ];
-        // 42 symbols: 23 codegen-declared (incl. D.2's sentinel_str_eq,
+        // 49 symbols: 23 codegen-declared (incl. D.2's sentinel_str_eq,
         // D.3's sentinel_realloc, D.4's sentinel_read_file /
         // sentinel_write_file / sentinel_print_bytes, and ADR 0065 D6's
         // sentinel_kont_free) + sentinel_kont_panic_resumed + ADR 0066 M1.2's
         // 4 sentinel_channel_* + M2.1's 2 sentinel_process_spawn/_wait + M2.2's
         // 2 sentinel_process_write/_read + M2.3's 2 sentinel_process_send/_recv +
         // M2.4b's 2 sentinel_stdin_recv/_stdout_send + the 2 sentinel_arg_count/_arg +
-        // ADR 0071 M1.4a's 4 sentinel_shared_new/_clone/_get/_release + M1.4b's 6
-        // sentinel_mutex_new/_clone/_release/_lock/_try_lock_for/_unlock.
-        assert_eq!(symbols.len(), 48);
+        // ADR 0071 M1.4a's 4 sentinel_shared_new/_clone/_get/_release + M1.4b's 7
+        // sentinel_mutex_new/_clone/_release/_lock/_try_lock_for/_unlock/_data.
+        assert_eq!(symbols.len(), 49);
         assert!(symbols.iter().all(|&s| !s.is_null()), "every symbol has an address");
     }
 
@@ -2754,6 +2786,36 @@ mod tests {
         // SAFETY: `m` is live (main holds the last owner).
         assert_eq!(unsafe { (*m).rc.load(Ordering::Relaxed) }, 1);
         sentinel_mutex_release(m); // last owner -> freed exactly once
+    }
+
+    #[test]
+    fn sentinel_mutex_data_reads_and_writes_the_slot() {
+        // ADR 0071 M1.4b slice 3c: `sentinel_mutex_data(m, valid=1)` on a HELD lock
+        // returns the protected slot — the `*g` read/write path. It must agree with
+        // the slot ptr the lock itself reported, and a write through it must be
+        // visible to a later locked read. (The valid==0 / null abort path can't be
+        // unit-tested in-process — abort kills the harness — same as the file-I/O
+        // and alloc abort paths; the runtime check is documented + code-reviewed.)
+        let m = sentinel_mutex_new(36);
+        let mut slot: *mut i64 = std::ptr::null_mut();
+        assert_eq!(sentinel_mutex_lock(m, &mut slot as *mut *mut i64), 0);
+        let data = sentinel_mutex_data(m, 1);
+        assert_eq!(data, slot); // same protected slot as the lock reported
+        // SAFETY: the lock is held; `data` points at the protected value.
+        unsafe {
+            assert_eq!(*data, 36);
+            *data = 42;
+        }
+        sentinel_mutex_unlock(m);
+        // Re-lock and read back through a fresh accessor call.
+        let mut slot2: *mut i64 = std::ptr::null_mut();
+        assert_eq!(sentinel_mutex_lock(m, &mut slot2 as *mut *mut i64), 0);
+        // SAFETY: the lock is held again.
+        unsafe {
+            assert_eq!(*sentinel_mutex_data(m, 1), 42);
+        }
+        sentinel_mutex_unlock(m);
+        sentinel_mutex_release(m);
     }
 
     // ---- ADR 0066 M2.1: the subprocess spawn runtime surface ----

@@ -4033,6 +4033,41 @@ pub enum TypeError {
         span: miette::SourceSpan,
     },
 
+    /// ADR 0071 M1.4b slice 3c: taking a reference THROUGH a lock guard (`& *g`
+    /// or `&mut *g`) is rejected. The resulting reference aliases the mutex cell's
+    /// protected slot; because a `?Guard` is pinned to its `let` (D3) and its
+    /// scope-exit drop UNLOCKS — and the owning `Mutex` is then released, freeing
+    /// the cell — such a reference could escape past the guard/mutex into a
+    /// use-after-free (or an unsynchronized alias after the unlock). Only in-place
+    /// `*g` reads and `*g = v` writes are allowed at the M1.4b minimum; a guard
+    /// borrow model is a deferred hardening.
+    #[error("cannot take a reference through a lock guard (`& *g`)")]
+    #[diagnostic(
+        code(sentinel::types::guard_borrow_not_allowed),
+        help("read or write the protected value in place with `*g` / `*g = v`; taking `& *g` (a reference into the mutex cell) is not supported — it could outlive the guard's unlock and the cell's release")
+    )]
+    GuardBorrowNotAllowed {
+        #[label("a reference through a lock guard here")]
+        span: miette::SourceSpan,
+    },
+
+    /// ADR 0071 M1.4b slice 3c: `*g` (a lock-guard deref) is only allowed on the
+    /// DIRECTLY `let`-bound guard binding. A computed guard operand — `*{ g }`,
+    /// `*(if c { g } else { g2 })` — is rejected: it would fall to a *consuming*
+    /// borrow-check walk that marks the guard moved, SKIPPING its unlock-on-drop
+    /// (freeing a still-locked cell) and diverging from the self-host mirror. This
+    /// is the same conservative pin as [`GuardNotLetBound`] (`lock()` may only be a
+    /// direct `let` RHS): dereference the guard binding directly.
+    #[error("a lock guard can only be dereferenced (`*g`) directly on its `let` binding")]
+    #[diagnostic(
+        code(sentinel::types::guard_deref_not_var),
+        help("bind the guard with `let g = lock(m);` and write `*g` / `*g = v` on `g` directly — dereferencing a computed guard expression is not supported")
+    )]
+    GuardDerefNotVar {
+        #[label("a computed lock-guard deref here")]
+        span: miette::SourceSpan,
+    },
+
     /// ADR 0071 M1.4b slice 3b (guard no-escape, conservative pin): a `lock()`
     /// call appeared somewhere other than the direct RHS of an immutable `let`.
     /// A `?Guard` unlocks the mutex on its scope-exit drop, so it must stay
@@ -7513,6 +7548,12 @@ fn check_mutable_lvalue(
                     }
                     Ok(())
                 }
+                // ADR 0071 M1.4b slice 3c: `*g = v;` writes the protected element
+                // through the lock guard. The guard IS the exclusive claim on the
+                // cell (the lock is held), so no `mut` binding is required — the
+                // pinned motivating-example shape (and the guard-pin rule REQUIRES
+                // an immutable `let g` anyway).
+                Type::Nullable(NullableInner::Guard(_)) => Ok(()),
                 _ => Err(TypeError::DerefOfNonRef {
                     got: inner.ty,
                     span: to_source_span(&inner.span),
@@ -8757,6 +8798,19 @@ fn check_expr(
                             span: to_source_span(&inner.span),
                         });
                     }
+                    // ADR 0071 M1.4b slice 3c: reject borrowing THROUGH a lock
+                    // guard (`& *g` / `&mut *g`) — the reference aliases the mutex
+                    // cell's protected slot and could escape the guard's pinned
+                    // scope into a use-after-free once the guard unlocks + the cell
+                    // is released. (`&mut *g` was already rejected downstream via
+                    // `DerefOfNonRef`; this gives both the clearer diagnostic.)
+                    if let TypedExprKind::Unary(UnaryOp::Deref, d_inner) = &inner_t.kind {
+                        if matches!(d_inner.ty, Type::Nullable(NullableInner::Guard(_))) {
+                            return Err(TypeError::GuardBorrowNotAllowed {
+                                span: to_source_span(&expr.span),
+                            });
+                        }
+                    }
                     let mutable_borrow = matches!(op, UnaryOp::RefMut);
                     if mutable_borrow {
                         // `&mut` requires a mutable lvalue.
@@ -8799,6 +8853,25 @@ fn check_expr(
                     )?;
                     let inner_ty = match inner_t.ty {
                         Type::Ref(id) => refs[id.0 as usize].inner,
+                        // ADR 0071 M1.4b slice 3c: `*g` where `g` is the `?Guard<T>`
+                        // a `let g = lock(m)` binds — reads (and, as an assign
+                        // target, writes) the protected element `T`. The guard IS
+                        // the exclusive claim on the cell, so no `mut` is required
+                        // (the pinned motivating-example shape). A deref of a
+                        // TIMED-OUT guard aborts at runtime inside
+                        // `sentinel_mutex_data` (maintainer-pinned — check
+                        // `is_some(g)` first); the valid bit is public, so the
+                        // check is constant-time-clean. The operand MUST be the
+                        // direct guard Var — a computed guard (`*{ g }`) would fall
+                        // to a consuming borrow-walk that skips the unlock drop.
+                        Type::Nullable(NullableInner::Guard(gid)) => {
+                            if !matches!(inner_t.kind, TypedExprKind::Var(_)) {
+                                return Err(TypeError::GuardDerefNotVar {
+                                    span: to_source_span(&inner.span),
+                                });
+                            }
+                            guard_elem_for(gid)
+                        }
                         // C3 / ADR 0019 D7 (C3.1) — SecretInRefDeref:
                         // dereferencing a `secret &T` (secret
                         // pointer) leaks via the memory side
@@ -11524,6 +11597,16 @@ fn type_error_to_diagnostic(err: &TypeError) -> Diagnostic {
         TypeError::MutexReturnNotSupported { span } => (
             "sentinel::types::mutex_return_not_supported",
             "returning a named `Mutex<T>` binding is not yet supported".to_string(),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        TypeError::GuardBorrowNotAllowed { span } => (
+            "sentinel::types::guard_borrow_not_allowed",
+            "cannot take a reference through a lock guard (`& *g`)".to_string(),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        TypeError::GuardDerefNotVar { span } => (
+            "sentinel::types::guard_deref_not_var",
+            "a lock guard can only be dereferenced (`*g`) directly on its `let` binding".to_string(),
             span.offset()..(span.offset() + span.len()),
         ),
         TypeError::GuardNotLetBound { span } => (

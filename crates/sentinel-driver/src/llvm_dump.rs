@@ -164,6 +164,9 @@ struct RuntimeSyms {
     mutex_clone: bool,
     mutex_release: bool,
     mutex_unlock: bool,
+    /// ADR 0071 M1.4b slice 3c: `sentinel_mutex_data(ptr, i64) -> ptr` — the
+    /// protected slot for `*g` (aborts in the runtime on a timed-out guard).
+    mutex_data: bool,
     /// ADR 0066 M2.1: the subprocess runtime symbols.
     /// `sentinel_process_spawn(ptr, i64, ptr, i64) -> ptr`, `_wait(ptr) -> i64`.
     process_spawn: bool,
@@ -221,6 +224,7 @@ impl RuntimeSyms {
         self.mutex_clone |= other.mutex_clone;
         self.mutex_release |= other.mutex_release;
         self.mutex_unlock |= other.mutex_unlock;
+        self.mutex_data |= other.mutex_data;
         self.process_spawn |= other.process_spawn;
         self.process_wait |= other.process_wait;
         self.process_write |= other.process_write;
@@ -338,6 +342,9 @@ impl RuntimeSyms {
         if self.mutex_unlock {
             writeln!(out, "declare void @sentinel_mutex_unlock(ptr)").unwrap();
         }
+        if self.mutex_data {
+            writeln!(out, "declare ptr @sentinel_mutex_data(ptr, i64)").unwrap();
+        }
         // ADR 0066 M2.1: the subprocess runtime group.
         if self.process_spawn {
             writeln!(out, "declare ptr @sentinel_process_spawn(ptr, i64, ptr, i64)").unwrap();
@@ -408,6 +415,7 @@ impl RuntimeSyms {
             || self.mutex_clone
             || self.mutex_release
             || self.mutex_unlock
+            || self.mutex_data
             || self.process_spawn
             || self.process_wait
             || self.process_write
@@ -1812,7 +1820,48 @@ impl Emit<'_> {
             TypedExprKind::Unary(UnaryOp::Ref, inner)
             | TypedExprKind::Unary(UnaryOp::RefMut, inner) => self.lower_lvalue_ptr(inner),
             // `*r` (rvalue) → load the pointee through r's pointer value.
+            // ADR 0071 M1.4b slice 3c: `*g` (rvalue) on a `?Guard<T>` → extract the
+            // valid bit + cell handle from the `{ i1, ptr }`, zext the bit, call
+            // `sentinel_mutex_data(m, valid)` (aborts in the runtime on a timed-out
+            // guard), load the i64 slot, and DECODE into `T` (the `shared_get`
+            // decode; `i64` = no decode, byte-identical with scg's i64-only mirror).
             TypedExprKind::Unary(UnaryOp::Deref, inner) => {
+                if let Type::Nullable(NullableInner::Guard(gid)) = inner.ty {
+                    let g = self.lower_expr(inner)?;
+                    let valid = self.fresh();
+                    writeln!(self.body, "  %v{valid} = extractvalue {{ i1, ptr }} {g}, 0").unwrap();
+                    let m = self.fresh();
+                    writeln!(self.body, "  %v{m} = extractvalue {{ i1, ptr }} {g}, 1").unwrap();
+                    let vz = self.fresh();
+                    writeln!(self.body, "  %v{vz} = zext i1 %v{valid} to i64").unwrap();
+                    let data = self.fresh();
+                    writeln!(self.body, "  %v{data} = call ptr @sentinel_mutex_data(ptr %v{m}, i64 %v{vz})").unwrap();
+                    self.used.mutex_data = true;
+                    let raw = self.fresh();
+                    writeln!(self.body, "  %v{raw} = load i64, ptr %v{data}").unwrap();
+                    let elem = sentinel_types::guard_elem_for(gid);
+                    let ety = self.lty(elem)?;
+                    let value = match elem {
+                        Type::I64 => format!("%v{raw}"),
+                        Type::I32 | Type::U8 | Type::Bool => {
+                            let d = self.fresh();
+                            writeln!(self.body, "  %v{d} = trunc i64 %v{raw} to {ety}").unwrap();
+                            format!("%v{d}")
+                        }
+                        Type::F64 => {
+                            let d = self.fresh();
+                            writeln!(self.body, "  %v{d} = bitcast i64 %v{raw} to double").unwrap();
+                            format!("%v{d}")
+                        }
+                        Type::Ptr => {
+                            let d = self.fresh();
+                            writeln!(self.body, "  %v{d} = inttoptr i64 %v{raw} to ptr").unwrap();
+                            format!("%v{d}")
+                        }
+                        other => return Err(format!("guard deref element not ported (word-scalar): {other:?}")),
+                    };
+                    return Ok(value);
+                }
                 let ptr = self.lower_expr(inner)?;
                 let pointee = match inner.ty {
                     Type::Ref(id) => self.program.refs[id.0 as usize].inner,
@@ -2450,7 +2499,33 @@ impl Emit<'_> {
                 let slot = *self.slots.get(id).ok_or("address-of an unbound var")?;
                 Ok(format!("%v{slot}"))
             }
-            TypedExprKind::Unary(UnaryOp::Deref, inner) => self.lower_expr(inner),
+            TypedExprKind::Unary(UnaryOp::Deref, inner) => {
+                // ADR 0071 M1.4b slice 3c: `*g = v` — the place is the guard's
+                // protected slot: extract valid + m from the `{ i1, ptr }`, zext,
+                // call `sentinel_mutex_data` (aborts on a timed-out guard). The
+                // Assign caller stores `llty(target.ty)` through it — the slot is
+                // an i64 cell, so a NON-i64 element write is not ported (the store
+                // width would mismatch; the encode-on-write lives in inkwell only,
+                // and the differential corpus is i64-only — the `IndexAssign`-style
+                // deferral).
+                if let Type::Nullable(NullableInner::Guard(gid)) = inner.ty {
+                    if sentinel_types::guard_elem_for(gid) != Type::I64 {
+                        return Err("guard assign element not ported (i64 only)".into());
+                    }
+                    let g = self.lower_expr(inner)?;
+                    let valid = self.fresh();
+                    writeln!(self.body, "  %v{valid} = extractvalue {{ i1, ptr }} {g}, 0").unwrap();
+                    let m = self.fresh();
+                    writeln!(self.body, "  %v{m} = extractvalue {{ i1, ptr }} {g}, 1").unwrap();
+                    let vz = self.fresh();
+                    writeln!(self.body, "  %v{vz} = zext i1 %v{valid} to i64").unwrap();
+                    let data = self.fresh();
+                    writeln!(self.body, "  %v{data} = call ptr @sentinel_mutex_data(ptr %v{m}, i64 %v{vz})").unwrap();
+                    self.used.mutex_data = true;
+                    return Ok(format!("%v{data}"));
+                }
+                self.lower_expr(inner)
+            }
             // 8f-3: `&(target).f` — GEP into the target's lvalue pointer. For `&mut
             // (*c).f` the target is `*c` (a Deref → c's value, a struct pointer). The
             // GEP type is the target struct (`%Struct.N`), field `field_index`.

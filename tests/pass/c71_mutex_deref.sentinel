@@ -1,0 +1,24 @@
+// ADR 0071 M1.4b slice 3c: the `*g` guard deref — READ and WRITE the protected
+// value through a held lock (the ADR's motivating read-modify-write shape). `*g`
+// lowers to `sentinel_mutex_data(m, valid)` (extract the `?Guard`'s two fields,
+// zext the public valid bit, call) + a load — or, as an assign target, a store —
+// on the i64 slot. A deref of a TIMED-OUT guard ABORTS inside the runtime
+// (maintainer-pinned, the `sentinel_panic_oob` posture); here the uncontended
+// lock always acquires, so the reads/writes are under the lock.
+//
+// The deref is NON-consuming on the Move-typed `?Guard` (three `*g` uses below —
+// a consuming read would poison the later uses with UseAfterMove and skip the
+// scope-exit unlock). At main's exit the drops fire in reverse order: `g` unlocks
+// (valid arm), then `m` releases (rc→0, freed once) — the clean exit is the
+// unlock/leak proof.
+//
+// Trace: mutex_new(36) → lock (rc unchanged; lock held) → read 36 → write 36+6=42
+// → read back 42 as the tail. Exit 42.
+
+fn main() -> i64 {
+    let m = mutex_new(36);
+    let g = lock(m);
+    let v = *g;
+    *g = v + 6;
+    *g
+}

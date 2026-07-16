@@ -1,0 +1,14 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c71_guard_deref_computed.sentinel\")"
+---
+sentinel::types::guard_deref_not_var
+
+  × a lock guard can only be dereferenced (`*g`) directly on its `let` binding
+    ╭─[tests/ui/c71_guard_deref_computed.sentinel:10:14]
+  9 │     let g = lock(m);
+ 10 │     let v = *{ g };
+    ·              ──┬──
+    ·                ╰── 
+ 11 │     v
+    ╰────
