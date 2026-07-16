@@ -436,3 +436,39 @@ rejection fixture is auto-skipped by every self-host differential), exactly as t
 fixture `tests/pass/c71_mutex_lock` was rewritten from the old unbound rvalue (now rejected by
 the pin) to the sound bound form `let m = mutex_new(42); let g = lock(m); is_some(g)` (exit 42,
 the clean exit being the unlock/leak proof).
+
+### slice 3c — the `*g` guard deref (read + write the protected value)
+
+Delivers the read-modify-write the whole feature exists for: `*g` READS and `*g = v` WRITES
+the protected element through the held lock. New runtime C-ABI symbol
+`sentinel_mutex_data(m, valid) -> *mut i64` (the abi count moves 48 → 49) returns the guard's
+protected slot; it **ABORTS** (the `sentinel_panic_oob` posture — maintainer-pinned) when
+`valid == 0` (a deref of a **timed-out** guard, i.e. one that did not acquire) or `m` is null,
+because reading/writing the slot without holding the lock is a data race. Check `is_some(g)`
+before `*g`. Keeping the valid-check in the runtime keeps all three codegen backends'
+`*g` emission branch-free — extract `valid` + the cell handle `m` from the `{ i1, ptr }`
+`?Guard`, `zext` the (public) valid bit, `call sentinel_mutex_data`, then `load` + decode (read)
+or encode + `store` (write) on the i64 slot. The deref is **non-consuming** on the Move-typed
+guard so it stays live for its unlock-on-drop, and the repeated `*g` of an RMW does not
+use-after-move. Fixture `tests/pass/c71_mutex_deref` (`let m = mutex_new(36); let g = lock(m);
+let v = *g; *g = v + 6; *g` → 42).
+
+**Guard soundness (hardened by an adversarial review that caught a use-after-free BEFORE it
+was committed):** the guard-deref is confined to the pinned shape — `*g` where `g` is the
+directly `let`-bound guard Var, in read or assign-target position only. Everything else is a
+type-check rejection (snc-only, like the peer pins; the ui fixtures are differential-skipped):
+- **`& *g` / `&mut *g` (`GuardBorrowNotAllowed`, ui `c71_guard_no_borrow`).** A reference into
+  the mutex cell's protected slot must not be formed: it is rooted nowhere (`?Guard` binds no
+  `ref_source`), so it escaped `OutlivesSource`/`ReturnsLocalRef` — a block-tail or `return & *g`
+  aliased a cell freed at the guard/mutex scope exit (a use-after-free). Only in-place `*g` is
+  allowed; a guard-borrow lifetime model is a deferred hardening.
+- **a COMPUTED guard operand — `*{ g }`, `*(if c { g } else { g2 })` (`GuardDerefNotVar`, ui
+  `c71_guard_deref_computed`).** A non-Var operand fell to a *consuming* borrow-walk that marked
+  the guard moved, skipping its unlock drop (freeing a still-locked cell) and diverging from the
+  self-host mirror; the pin to the direct `let`-bound Var (mirroring `GuardNotLetBound`) forbids
+  it.
+
+Codegen note: the inkwell `*g = v` lowers **place-then-value** to match the oracle + scg
+(observable via the `sentinel_mutex_data` abort). The `*g` on a **secret** element stays out of
+scope (public-`T` only until M1.4c) — a secret write is a plain type mismatch against the
+public guard element.

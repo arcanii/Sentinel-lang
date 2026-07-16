@@ -14,8 +14,21 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
-**Latest (2026-07-15) — ADR 0071 M1.4b (`Mutex<T>`): the guard's unlock-on-drop (slice 3b,
-feat `f15c16a`) — a bound-and-locked mutex is now sound, self-hosted byte-identically.** `Mutex<T> =
+**Latest (2026-07-16) — ADR 0071 M1.4b (`Mutex<T>`): the `*g` guard deref (slice 3c, feat
+`06eba8d`) — `Mutex` is now fully usable (read-modify-write under the lock), self-hosted
+byte-identically, and UAF-hardened.** `*g` READS and `*g = v` WRITES the protected value through
+the held lock via a new runtime accessor `sentinel_mutex_data(m, valid) -> *mut i64` (abi 48→**49**)
+that ABORTS on a timed-out (`valid==0`) or null guard (the `sentinel_panic_oob` posture — a deref
+without the lock is a data race; check `is_some(g)` first), keeping all three backends' `*g`
+emission branch-free. The deref is non-consuming on the Move guard (RMW doesn't use-after-move).
+**A 4-lens adversarial review CAUGHT + reproduced a use-after-free before commit** and it was
+closed by confining guard-deref to the pinned shape: `& *g`/`&mut *g` (`GuardBorrowNotAllowed`, a
+guard-slot reference escaped `OutlivesSource`/`ReturnsLocalRef` into freed heap) and a computed
+guard operand `*{ g }` (`GuardDerefNotVar`, a consuming walk skipped the unlock drop) are both
+type-rejected (snc-only, differential-skipped, like the peer pins); the inkwell `*g = v` was
+reordered to place-then-value to match the oracle+scg. Fixture `tests/pass/c71_mutex_deref` (read
+36, write 42, read back → 42) + ui `c71_guard_no_borrow` / `c71_guard_deref_computed`. **Slice 3b
+(feat `f15c16a`) delivered the guard's unlock-on-drop before this;** `Mutex<T> =
 Shared<SentinelMutex<T>>` (public word-scalar `T`) is being built in the M1.4a slice rhythm,
 layering on `Shared`'s solved co-ownership: a `parking_lot`-backed `SentinelMutex` runtime
 cell + C-ABI symbols (slice 1); the FnId-base shift 40→42 (slice 2a); `Type::Mutex` +
@@ -40,9 +53,11 @@ matching the peer `SharedReturnNotSupported`/`MutexReturnNotSupported` guards). 
 inkwell (`tests/pass/c71_mutex_lock` rewritten from the old unbound rvalue, now pin-rejected, to
 the sound bound form `let m = mutex_new(42); let g = lock(m); is_some(g)`, exit 42), the oracle
 `.ll`, and the `scg` `.ll` (all exit 42), byte-identical `snc llvm` ≡ `scg` on the self-host
-differential + both bootstrap fixed points green. **Next: slice 3c (the `*g` deref value read,
-needs a runtime `sentinel_mutex_data_ptr`) + the D5a deadlock tiers; then M1.4c (secret `T`).**
-See ADR 0071 (M1.4b implementation log) + HANDOVER §RESUME.
+differential + both bootstrap fixed points green. **Next: slice 4 (the D5a opt-in `Deadlock`
+wait-for-graph tier; `LockTimeout` is already always-on) → M1.4c (secret `Shared<secret T>` /
+`Mutex<secret T>`, D6, which also unblocks `Channel<secret T>`).** The full ADR-D3 guard
+no-escape (outer-scope guard-VAR reshuffles) + a `& *g` guard-borrow lifetime model stay deferred
+hardening. See ADR 0071 (M1.4b implementation log) + HANDOVER §RESUME.
 
 **(2026-07-02) — ADR 0071 M1.4a: `Shared<T>` refcounted-handle DONE — the first
 `Copy`-for-the-checker YET drop-emitting type, self-hosted byte-identically.** The ADR 0066

@@ -51,7 +51,53 @@ reference as you work through the milestones.
 
 ---
 
-### ▶ RESUME HERE (2026-07-15 — M1.4b `Mutex<T>` slice 3b (guard unlock-on-drop) DONE — feat `f15c16a` + docs — snc + `llvm_dump.rs` oracle + `scg` mirror + fixtures + re-bless landed atomically; next is slice 3c (`*g` deref) + the D5a deadlock tiers)
+### ▶ RESUME HERE (2026-07-16 — M1.4b `Mutex<T>` slice 3c (`*g` deref read+write) DONE — feat `06eba8d` — snc + `llvm_dump.rs` oracle + `scg` mirror + fixtures landed; UAF-hardened after an adversarial review; next is slice 4 = the D5a opt-in `Deadlock` wait-for-graph tier, then M1.4c secret)
+
+> **▶▶ SLICE 3c LANDED — the `*g` guard deref (read + write)** (feat `06eba8d`).
+> `*g` READS and `*g = v` WRITES the protected value through the held lock (the ADR's
+> motivating read-modify-write). New runtime symbol `sentinel_mutex_data(m, valid) -> *mut i64`
+> (abi 48→**49**) = the guard's protected slot; it ABORTS on a timed-out (`valid==0`) or null
+> guard (the `sentinel_panic_oob` posture — a deref without the lock is a data race; check
+> `is_some(g)` first). Keeping the check in the runtime keeps all three backends' `*g` emission
+> branch-free (extract valid+m from `{i1,ptr}`, zext, call, load/decode or encode/store). The
+> deref is NON-CONSUMING on the Move guard (stays live for its unlock drop; RMW doesn't
+> use-after-move). Fixture `tests/pass/c71_mutex_deref` (read 36, write 42, read back → 42).
+>
+> **⚠ A 4-lens adversarial review CAUGHT + reproduced a use-after-free this slice would have
+> introduced — closed BEFORE commit** (that's the review's whole point). Guard-deref is now
+> confined to the pinned shape (`*g` on the direct `let`-bound Var, read/assign only); the rest
+> is type-rejected (snc-only, differential-skipped, like the peer pins):
+>   - **`& *g` / `&mut *g` → `GuardBorrowNotAllowed`** (ui `c71_guard_no_borrow`). A `?Guard`
+>     binds no `ref_source`, so a `& *g` reference escaped `OutlivesSource`/`ReturnsLocalRef`
+>     into a read of the freed mutex cell (block-tail `let r = {…; & *g}; *r` AND `fn leak() ->
+>     &i64 { …; & *g }` both reproduced exit-with-stale-value). Reject borrowing through a guard.
+>   - **computed guard operand `*{ g }` / `*(if..)` → `GuardDerefNotVar`** (ui
+>     `c71_guard_deref_computed`). A non-Var operand fell to a CONSUMING borrow-walk → guard
+>     marked moved → unlock drop skipped (free-while-locked) + an scg parity break. Pin `*g` to
+>     the direct `let`-bound Var.
+>   - **MEDIUM eval-order:** inkwell `*g = v` reordered to place-then-value (matches oracle+scg).
+>     A pre-existing sibling divergence for `a[oob] = <side effect>` in the generic Assign arm is
+>     out of scope (spawned as a separate task).
+>
+> Verified: four-check green (18 known Windows failures, zero new; `fmt` stays env-RED on the
+> maintainer's box, unchanged); all 9 self-host differential stages byte-identical (the
+> type-check rejections are snc-only so oracle/scg are untouched); the three exploit programs now
+> rejected, `c71_mutex_deref` + all c71 fixtures pass; runtime unit test
+> `sentinel_mutex_data_reads_and_writes_the_slot` + the abi-49 assertion pass.
+>
+> **REMAINING on the M1.4b/M1.4 track:**
+>   - **slice 4 — the D5a opt-in `Deadlock` wait-for-graph tier.** `LockTimeout` is already
+>     always-on (`try_lock_for` + the 10s default deadline); the opt-in process-wide wait-for
+>     graph over public lock identity (a `debug`/`--detect-deadlocks` default, mirroring the
+>     broker's `--record`) is still to build.
+>   - **the FULL ADR-D3 guard no-escape** (outer-scope guard-VAR reshuffles, `let mut outer = g0;
+>     outer = g1`, block-tail-VAR) + a guard-BORROW lifetime model (`& *g`) — deferred hardening
+>     beyond the conservative pins.
+>   - **then M1.4c** — secret `Shared<secret T>` / `Mutex<secret T>` (D6).
+>
+> Interner kinds: Shared = 17, Mutex = 18, Guard = 19; next free = 20.
+
+> **▶ (superseded) prior RESUME HERE (2026-07-15 — slice 3b guard unlock-on-drop) below:**
 
 > **▶▶ SLICE 3b LANDED — ADR 0071 M1.4b (the guard's unlock-on-drop) is complete** (feat
 > `f15c16a`; this docs commit is the pair).
