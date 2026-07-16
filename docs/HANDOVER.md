@@ -51,51 +51,68 @@ reference as you work through the milestones.
 
 ---
 
-### ▶ RESUME HERE (2026-07-16 — M1.4b `Mutex<T>` slice 3c (`*g` deref read+write) DONE — feat `06eba8d` — snc + `llvm_dump.rs` oracle + `scg` mirror + fixtures landed; UAF-hardened after an adversarial review; next is slice 4 = the D5a opt-in `Deadlock` wait-for-graph tier, then M1.4c secret)
+### ▶ RESUME HERE (2026-07-17 — M1.4b `Mutex<T>` COMPLETE: slice 4 (the D5a opt-in `Deadlock` wait-for-graph tier) DONE, runtime-only + non-oracle-moving; ADR 0071 now ACCEPTED for M1.4b; next is M1.4c — secret `Shared<secret T>`/`Mutex<secret T>` (D6))
 
-> **▶▶ SLICE 3c LANDED — the `*g` guard deref (read + write)** (feat `06eba8d`).
-> `*g` READS and `*g = v` WRITES the protected value through the held lock (the ADR's
-> motivating read-modify-write). New runtime symbol `sentinel_mutex_data(m, valid) -> *mut i64`
-> (abi 48→**49**) = the guard's protected slot; it ABORTS on a timed-out (`valid==0`) or null
-> guard (the `sentinel_panic_oob` posture — a deref without the lock is a data race; check
-> `is_some(g)` first). Keeping the check in the runtime keeps all three backends' `*g` emission
-> branch-free (extract valid+m from `{i1,ptr}`, zext, call, load/decode or encode/store). The
-> deref is NON-CONSUMING on the Move guard (stays live for its unlock drop; RMW doesn't
-> use-after-move). Fixture `tests/pass/c71_mutex_deref` (read 36, write 42, read back → 42).
+> **▶▶ SLICE 4 LANDED — the D5a opt-in `Deadlock` tier** (pure `sentinel-runtime` change;
+> zero compiler/IR/ABI surface — abi count stays 49, the differential untouched by
+> construction). Opt-in via **`SENTINEL_DEADLOCK_DETECT`** (env var, read once per process,
+> on = anything but empty/`0`); a blocking `lock()`/`try_lock_for` cycle-checks a
+> process-wide wait-for graph (holders: cell addr → `ThreadId`; waits: thread →
+> (awaited addr, expiry `Instant`)) behind a lazy `OnceLock<parking_lot::Mutex<..>>`; a
+> detected cycle returns the EXISTING `LockTimeout`/null arm IMMEDIATELY + the cycle on
+> stderr (`deadlock detected` prefix). Maintainer-pinned forks (recorded as the ADR-0071
+> **D5 amendment**): env var over a `--detect-deadlocks` driver flag (a flag would be
+> oracle-moving for a debug tier; the broker "--record" precedent is an in-crate option,
+> not a CLI flag); null-arm fold over a new typed `Deadlock` status (in-language,
+> `LockTimeout` itself only surfaces as the `?Guard` null arm).
 >
-> **⚠ A 4-lens adversarial review CAUGHT + reproduced a use-after-free this slice would have
-> introduced — closed BEFORE commit** (that's the review's whole point). Guard-deref is now
-> confined to the pinned shape (`*g` on the direct `let`-bound Var, read/assign only); the rest
-> is type-rejected (snc-only, differential-skipped, like the peer pins):
->   - **`& *g` / `&mut *g` → `GuardBorrowNotAllowed`** (ui `c71_guard_no_borrow`). A `?Guard`
->     binds no `ref_source`, so a `& *g` reference escaped `OutlivesSource`/`ReturnsLocalRef`
->     into a read of the freed mutex cell (block-tail `let r = {…; & *g}; *r` AND `fn leak() ->
->     &i64 { …; & *g }` both reproduced exit-with-stale-value). Reject borrowing through a guard.
->   - **computed guard operand `*{ g }` / `*(if..)` → `GuardDerefNotVar`** (ui
->     `c71_guard_deref_computed`). A non-Var operand fell to a CONSUMING borrow-walk → guard
->     marked moved → unlock drop skipped (free-while-locked) + an scg parity break. Pin `*g` to
->     the direct `let`-bound Var.
->   - **MEDIUM eval-order:** inkwell `*g = v` reordered to place-then-value (matches oracle+scg).
->     A pre-existing sibling divergence for `a[oob] = <side effect>` in the generic Assign arm is
->     out of scope (spawned as a separate task).
+> **⚠ The pre-commit adversarial review (5 lenses + mutation testing) caught a REAL false
+> positive:** a timed-out waiter's **stale wait edge** (retired only after `try_lock_for`
+> returns) let another thread's walk close a phantom cycle → spurious null arm + false
+> stderr diagnosis. **Closed by deadline-stamping the wait edges** — `find_cycle(now)`
+> treats an expired edge as absent (an unexpired edge is a true commitment; the residual
+> direction is a benign missed detection, backstopped by the always-on 10s `LockTimeout`).
+> Non-blocking tries (`timeout ≤ 0`) neither check nor publish. The review's mutation pass
+> also drove four new tests (the detect-on TIMEOUT arm; contended-handoff holder-edge
+> integrity; the release-path scrub via a `mutex_release_impl(m, detect)` seam; the env
+> parse's FALSE side via `deadlock_env_value_on`) — unit tests exercise detection through
+> `mutex_try_lock_for_impl(.., detect)` seams (the env gate `OnceLock`-freezes per
+> process); the env wiring end-to-end is the driver test
+> `crates/sentinel-driver/tests/deadlock.rs` (compiled self-deadlock program, exit 42 via
+> the null arm, <8s vs the 10s deadline, cycle on stderr).
 >
-> Verified: four-check green (18 known Windows failures, zero new; `fmt` stays env-RED on the
-> maintainer's box, unchanged); all 9 self-host differential stages byte-identical (the
-> type-check rejections are snc-only so oracle/scg are untouched); the three exploit programs now
-> rejected, `c71_mutex_deref` + all c71 fixtures pass; runtime unit test
-> `sentinel_mutex_data_reads_and_writes_the_slot` + the abi-49 assertion pass.
+> Verified: four-check green (18 known Windows failures, zero new; runtime units 39→47;
+> `pass` 148/148; all 9 self-host differential stages + both bootstrap fixed points green).
+> **Box gotcha:** `cargo test` does NOT regenerate `target/debug/sentinel_runtime.lib` —
+> run `cargo build` (workspace or `-p sentinel-runtime`) before any driver-test run after
+> a runtime change, or `snc` links the STALE staticlib (cost a debugging round this
+> session).
 >
-> **REMAINING on the M1.4b/M1.4 track:**
->   - **slice 4 — the D5a opt-in `Deadlock` wait-for-graph tier.** `LockTimeout` is already
->     always-on (`try_lock_for` + the 10s default deadline); the opt-in process-wide wait-for
->     graph over public lock identity (a `debug`/`--detect-deadlocks` default, mirroring the
->     broker's `--record`) is still to build.
->   - **the FULL ADR-D3 guard no-escape** (outer-scope guard-VAR reshuffles, `let mut outer = g0;
->     outer = g1`, block-tail-VAR) + a guard-BORROW lifetime model (`& *g`) — deferred hardening
->     beyond the conservative pins.
->   - **then M1.4c** — secret `Shared<secret T>` / `Mutex<secret T>` (D6).
+> **NEXT — M1.4c: secret `Shared<secret T>` / `Mutex<secret T>` (ADR 0071 D6).**
+> Security-relevant (extra adversarial verification is mandatory; a secret reaching a
+> branch/index/divisor without a `secret_leak` rejection = security bug → private report).
+> The three D6-pinned pieces: (1) the container-interner secret-representability fix
+> (`channel_chanid_for` returns `None` for `Type::Secret`, the annotation resolver rejects
+> secret elements — closing this ALSO unblocks `Channel<secret T>`); (2) broker-backed
+> `mlock` + zero-on-free allocation for the secret cell (pluggable allocator; zeroed
+> exactly once at the last drop); (3) the `OpenResult`-shaped secret `lock()` (`?(secret
+> T)` is unrepresentable — no `NullableInner::Secret`). Plus D6's two named fixtures: a
+> `tests/pass` proving `lock()`/read does NOT strip the secret qualifier, and a `tests/ui`
+> proving a secret branch inside a lock-holding fn is still rejected. Honesty caveat (D6.3):
+> document that contention latency/timeouts are OUTSIDE the CT boundary — do not over-claim.
+>
+> **Also open on the M1.4 track:** the FULL ADR-D3 guard no-escape (outer-scope guard-VAR
+> reshuffles) + a `& *g` guard-borrow lifetime model — deferred hardening beyond the
+> conservative pins; the named-`Shared`-return exemption (`SharedReturnNotSupported`).
 >
 > Interner kinds: Shared = 17, Mutex = 18, Guard = 19; next free = 20.
+
+> **▶ (archived) slice 3c (`*g` guard deref, feat `06eba8d` + docs `7148eaa`)** — full detail
+> in the **ADR 0071 M1.4b implementation log** + STATE.md's 2026-07-16 entry. Key facts:
+> `sentinel_mutex_data(m, valid)` (abi 49) ABORTS on a timed-out/null guard; guard-deref is
+> confined to the pinned shape — `& *g` → `GuardBorrowNotAllowed`, computed `*{g}` →
+> `GuardDerefNotVar` (both snc-only, differential-skipped) — after a 4-lens adversarial
+> review reproduced a use-after-free pre-commit; inkwell `*g = v` is place-then-value.
 
 > **▶ (archived) slice 3b (guard unlock-on-drop, feat `f15c16a`) + slice 3a/2b/2a/1** — the
 > full slice-by-slice detail now lives permanently in the **ADR 0071 M1.4b implementation log**

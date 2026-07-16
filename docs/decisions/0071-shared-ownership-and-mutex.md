@@ -1,8 +1,9 @@
 # ADR 0071: `Shared<T>` shared ownership + `Mutex<T>` — the bounded shared-state escape hatch (ADR 0066 M1.4)
 
-Status: **ACCEPTED for M1.4a (`Shared<T>`) — implemented 2026-07-02; M1.4b (`Mutex<T>`)
-+ M1.4c (secret) PROPOSED, design PINNED.** Design PINNED with maintainer sign-off
-2026-07-02. This is the M1.4 sub-phase of the ADR 0066 threading roadmap, broken out into
+Status: **ACCEPTED for M1.4a (`Shared<T>`) — implemented 2026-07-02 — and for M1.4b
+(`Mutex<T>`) — implemented 2026-07-15/16/17, slices 1–4 incl. the D5a deadlock tiers
+(see the implementation log + the D5 amendment); M1.4c (secret) PROPOSED, design
+PINNED.** Design PINNED with maintainer sign-off 2026-07-02. This is the M1.4 sub-phase of the ADR 0066 threading roadmap, broken out into
 its own ADR per **ADR 0066 D5** ("blocked on first designing a runtime-refcounted
 `Shared<T>` handle … a language feature in its own right, arguably bigger than the mutex
 it unblocks, and warranting its own ADR"). All D-points D1–D9 are PINNED.
@@ -238,6 +239,38 @@ data — the decision to lock is already required-public, D6), never over secret
 so detection introduces **no secret-dependent timing channel**. The same machinery
 generalizes later to channel deadlock (a follow-on, not in M1.4).
 
+**Amendment (2026-07-17, maintainer-pinned at slice-4 implementation) — two deviations
+from the original D5 text above, plus one hardening:**
+
+1. **Opt-in = the `SENTINEL_DEADLOCK_DETECT` env var** (runtime-gated, read once per
+   process, on = anything but empty/`0`) — NOT a `--detect-deadlocks` driver flag or a
+   debug-build default. A driver flag would have to bake an enable call into the emitted
+   program (oracle-moving churn — both compilers + the scg mirror — for a debug-only
+   tier), and the "broker's opt-in `--record`" this section cites as precedent turned
+   out to be an in-crate constructor option, not a CLI flag, so there was no literal
+   flag precedent to mirror. The env var keeps slice 4 a pure runtime change (zero
+   IR/ABI/driver surface; the differential is untouched by construction) and works on
+   already-built binaries. A future `snc run --detect-deadlocks` convenience can simply
+   set the env var without touching codegen.
+2. **A detected cycle folds into the existing `LockTimeout`/null arm** — returned
+   IMMEDIATELY, with the cycle reported on stderr (stable `deadlock detected` prefix) —
+   NOT a new typed `Deadlock` status. In-language, `LockTimeout` itself only ever
+   surfaces as the `?Guard` null arm (there is no distinct timeout value a program can
+   see), so a distinct `Deadlock` status would be a new source-level surface (a third
+   status/shape through both compilers + scg) bought for a debug tier; this section's
+   own intent — "a typed error instead of hanging" — is met by the null arm. The
+   Deadlock-vs-Timeout distinction lives in the stderr report.
+3. **Wait edges are deadline-stamped** (a pre-commit adversarial-review finding, three
+   lenses converging): a timed-out waiter retires its wait edge only after
+   `try_lock_for` returns, so for a moment the edge outlives the wait — following that
+   stale edge reported cycles that no longer existed (a false positive + a spurious
+   null arm). `find_cycle(now)` treats an edge past its stamped expiry as absent; an
+   unexpired edge is always a true commitment (`try_lock_for` cannot give up before its
+   deadline, and the stamp is taken before the blocking call, so it expires no later
+   than the physical timeout — the residual error direction is a benign missed
+   detection, backstopped by the always-on `LockTimeout`). Non-blocking tries
+   (`timeout ≤ 0`) neither cycle-check nor publish — they never wait.
+
 ### D6. Secret shared state is in scope for v1 (phased M1.4c) and is *safe*, with two representation fixes and one honesty caveat. **PINNED (security-relevant).**
 
 `Shared<secret T>`/`Mutex<secret T>` are **coherent and allowed** — not fenced like
@@ -381,9 +414,10 @@ worked examples: Task/Channel/Process/SealedChannel/Fn):
 
 ## M1.4b implementation log (slices)
 
-`Mutex<T>` (public `T`) is being built in the same slice rhythm as M1.4a, each landing
-four-check-green with both bootstrap fixed points byte-identical. Status: **in progress**
-(the ADR stays PROPOSED for M1.4b until slice 3c + the D5a deadlock tiers close).
+`Mutex<T>` (public `T`) was built in the same slice rhythm as M1.4a, each slice landing
+four-check-green with both bootstrap fixed points byte-identical. Status: **COMPLETE
+(2026-07-17)** — slice 3c + the D5a deadlock tiers (slice 4) have closed, flipping the
+ADR to ACCEPTED for M1.4b; M1.4c (secret) remains.
 
 - **slice 1** — the `SentinelMutex<T>` runtime cell (a `parking_lot`-backed near-clone of
   `SentinelChannel`) + the 5 C-ABI symbols (`sentinel_mutex_new`/`_lock`/`_try_lock_for`/
@@ -472,3 +506,43 @@ Codegen note: the inkwell `*g = v` lowers **place-then-value** to match the orac
 (observable via the `sentinel_mutex_data` abort). The `*g` on a **secret** element stays out of
 scope (public-`T` only until M1.4c) — a secret write is a plain type mismatch against the
 public guard element.
+
+### slice 4 — the D5a opt-in `Deadlock` wait-for-graph tier (runtime-only, non-oracle-moving)
+
+Closes D5's second tier per the 2026-07-17 amendment above (env-var opt-in; a detected
+cycle folds into the existing null arm + a stderr report). **Pure runtime change** in
+`sentinel-runtime`: a process-wide `WaitForGraph` (`holders`: cell address → holding
+`ThreadId`; `waits`: blocked `ThreadId` → (awaited address, wait-expiry `Instant`))
+behind the lazy `OnceLock<parking_lot::Mutex<..>>` this section specified, keyed by the
+public lock handle's raw address. On a blocking `lock()`/`try_lock_for` with the tier on:
+cycle-check under the meta-lock BEFORE blocking (on a hit: report + return status 1
+without waiting); else publish the deadline-stamped wait edge, block WITHOUT the
+meta-lock, then retire the wait edge + record the holder edge in one atomic meta-lock
+section. `unlock` retires the holder edge BEFORE `force_unlock` (a momentarily-stale
+"free" edge is a benign missed detection; a stale "held" edge after the unlock could
+false-report); the rc==0 free path scrubs any pathological leftover edge (address-reuse
+defense for release builds, where the free-while-locked check is compiled out). The
+meta-lock is a strict leaf (never held across a blocking call), and `find_cycle` is
+bounded by a seen-set (a foreign cycle formed by racing checks can neither hang the walk
+nor be misattributed). **Zero compiler surface:** no new runtime symbol (abi count stays
+49), no FnId/IR/driver change — all 9 self-host differential stages and both bootstrap
+fixed points are untouched by construction (and verified green).
+
+**A pre-commit adversarial review (5 lenses + mutation testing) caught a real false
+positive:** the stale wait edge of a timed-out waiter (amendment point 3) — fixed by the
+deadline stamp. Its mutation pass also proved four coverage holes, each now closed by a
+dedicated test: the detect-on TIMEOUT arm (a timed-out acquire must retire its edge and
+never overwrite the true holder's — the `is_some`-guard mutant survived the old suite),
+the contended-handoff holder-edge integrity (the retire-before-`force_unlock` ordering
+mutant survived), the release-path scrub (given a `mutex_release_impl(m, detect)` test
+seam), and the env parse's FALSE side (`deadlock_env_value_on`, split out because the
+`OnceLock` gate freezes per process). Verification: 8 runtime unit tests (self-cycle
+instant; deterministic AB-BA via a published-edge spin; pure `find_cycle` incl. foreign
+cycles + expired edges; off-path inert; the four above) + the end-to-end driver test
+`crates/sentinel-driver/tests/deadlock.rs` — a real compiled self-deadlock program
+(`let g = lock(m); let g2 = lock(m)`) run with `SENTINEL_DEADLOCK_DETECT=1` exits 42 via
+the null arm in <8s (vs the 10s deadline) with the cycle on stderr. No `tests/pass`
+fixture (the tier is env-gated; the driver test owns end-to-end). Operational note for
+this box: `cargo test` does NOT regenerate `target/debug/sentinel_runtime.lib` — a
+`cargo build` must precede any driver-test run after a runtime change, or snc links the
+stale staticlib.

@@ -14,7 +14,44 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
-**Latest (2026-07-16) — ADR 0071 M1.4b (`Mutex<T>`): the `*g` guard deref (slice 3c, feat
+**Latest (2026-07-17) — ADR 0071 M1.4b (`Mutex<T>`) COMPLETE: slice 4 lands the D5a opt-in
+`Deadlock` wait-for-graph tier (runtime-only, non-oracle-moving) — the ADR flips to ACCEPTED
+for M1.4b.** Opt-in via the **`SENTINEL_DEADLOCK_DETECT`** env var (read once per process;
+on = anything but empty/`0`; maintainer-pinned over a `--detect-deadlocks` driver flag, which
+would have been oracle-moving for a debug-only tier — the "broker `--record`" precedent the ADR
+cited turned out to be an in-crate constructor option, not a CLI flag). A blocking `lock()` /
+`try_lock_for` first cycle-checks a process-wide **wait-for graph** (`holders`: cell address →
+holding `ThreadId`; `waits`: blocked thread → (awaited address, wait-expiry `Instant`)) behind
+the ADR's lazy `OnceLock<parking_lot::Mutex<..>>`, keyed by the public lock handle's raw address
+(D5a's "public lock identity"); a detected cycle **returns the existing `LockTimeout`/null arm
+IMMEDIATELY** with the cycle reported on stderr (stable `deadlock detected` prefix) — NO new
+source-level status (maintainer-pinned: in-language, `LockTimeout` itself only surfaces as the
+`?Guard` null arm, so both tiers fold there; the distinction lives in the report). Otherwise the
+wait edge is published (deadline-stamped) before blocking; retire + holder-record are one atomic
+meta-lock section; `unlock` retires the holder edge BEFORE `force_unlock`; the rc==0 free scrubs
+leftovers (address-reuse/ABA defense). The meta-lock is a strict leaf — never held across a
+blocking call — and `find_cycle` is seen-set-bounded (racing foreign cycles can't hang the walk).
+**A 5-lens pre-commit adversarial review caught a real false positive** (three lenses converged
++ a repro): a timed-out waiter's **stale wait edge** — retired only after `try_lock_for`
+returns — let another thread's walk close a phantom cycle; **fixed by the deadline stamp**
+(`find_cycle(now)` treats an expired edge as absent; an unexpired edge is a true commitment
+since `try_lock_for` can't give up early; the residual direction is a benign missed detection,
+backstopped by the always-on 10s `LockTimeout`). The review's mutation pass also exposed four
+coverage holes, each closed by a dedicated test (the detect-on TIMEOUT arm; contended-handoff
+holder-edge integrity; the release scrub via a new `mutex_release_impl` seam; the env parse's
+FALSE side via the split-out `deadlock_env_value_on`). **Zero compiler surface** — no new symbol
+(abi stays 49), no FnId/IR/driver change — so all 9 self-host differential stages + both
+bootstrap fixed points are untouched by construction (verified green anyway). Tests: 8 runtime
+units + the end-to-end driver test `crates/sentinel-driver/tests/deadlock.rs` (a compiled
+self-deadlock program `let g = lock(m); let g2 = lock(m)` with the env var: exit 42 via the null
+arm, <8s vs the 10s deadline, cycle on stderr). Four-check green (18 known Windows failures,
+zero new; runtime units 39→47; `pass` 148/148). Box gotcha for the record: `cargo test` does NOT
+regenerate `target/debug/sentinel_runtime.lib` — run `cargo build` first or snc links a stale
+runtime. **Next: M1.4c — secret `Shared<secret T>`/`Mutex<secret T>` (D6; also unblocks
+`Channel<secret T>`) — security-relevant, gets extra adversarial verification.** See ADR 0071
+(D5 amendment + implementation log slice 4) + HANDOVER §RESUME.
+
+**Earlier (2026-07-16) — ADR 0071 M1.4b (`Mutex<T>`): the `*g` guard deref (slice 3c, feat
 `06eba8d`) — `Mutex` is now fully usable (read-modify-write under the lock), self-hosted
 byte-identically, and UAF-hardened.** `*g` READS and `*g = v` WRITES the protected value through
 the held lock via a new runtime accessor `sentinel_mutex_data(m, valid) -> *mut i64` (abi 48→**49**)
