@@ -675,9 +675,15 @@ const DEFERRED_PROGRAMS: &[(&str, &str)] = &[
     ("examples/lang/sealed_session.sentinel", "ADR 0069 M2.4b-crypto: sealed stdlib snc-only"),
     // ADR 0066 M1.2b-cont: generic word-scalar CHANNEL elements are snc-only
     // (scg's channel paths are i64-only, and differential-clean for i64).
-    ("examples/lang/channel_generic.sentinel", "ADR 0066 M1.2b-cont: generic channel elements are snc-only"),
+    // NOTE both channel entries below are worse than a name/shape difference:
+    // scg emits INVALID IR for them, passing the raw narrow element where the
+    // runtime symbol takes an i64 (`call i64 @sentinel_channel_send(ptr %v2,
+    // i64 %v3)` with `%v3` an i8) — it is missing the zext ENCODE that the
+    // generic-element design specifies. The oracle's IR for both verifies
+    // cleanly, so this is scg-side.
+    ("examples/lang/channel_generic.sentinel", "ADR 0066 M1.2b-cont: generic channel elements are snc-only — scg emits INVALID IR (missing the zext encode: i8 passed as i64)"),
     // ADR 0066 M2.3b: generic word-scalar elements for the process channel.
-    ("examples/lang/process_channel_typed.sentinel", "ADR 0066 M2.3b: generic process-channel elements are snc-only"),
+    ("examples/lang/process_channel_typed.sentinel", "ADR 0066 M2.3b: generic process-channel elements are snc-only — scg emits INVALID IR (missing the zext encode: i8 passed as i64)"),
 ];
 
 /// Programs whose divergence is a REAL BUG in `scg`, not a deferred feature —
@@ -689,25 +695,45 @@ const DEFERRED_PROGRAMS: &[(&str, &str)] = &[
 /// Both entries below were found by this test on its first run; neither was
 /// known before, and neither is reachable through `tests/pass`.
 const KNOWN_SCG_BUGS: &[(&str, &str)] = &[
-    // scg's merge handles `extern "C"` imports BACKWARDS for this module: the
-    // oracle emits `define @std$sys$posix$pid()` calling the C symbol
-    // `@getpid()`, while scg module-qualifies the EXTERN IMPORT
-    // (`define @std$sys$posix$getpid()`) and leaves the real function
-    // UNqualified (`define @pid()`). The caller then finds no
-    // `@std$sys$posix$pid` and emits NO CALL AT ALL — main silently loses
-    // `let p: i64 = pid();` and stores an alloca into itself
-    // (`store i64 %v0, ptr %v0`), which does not even assemble:
-    //   llvm-as: error: '%v0' defined with type 'ptr' but expected 'i64'
-    // Minimal repro: a program that `use std::sys::posix::pid;` and calls it —
-    // `uid()` in the same module resolves correctly, so it is specific to the
-    // extern-adjacent name, not to statement position.
-    ("examples/sys/process_ids.sentinel", "scg merge mis-renames `extern \"C\"` imports: qualifies the extern, leaves the real fn bare, drops the call (emits non-assemblable IR)"),
-    // scg does not module-qualify CLASS/IMPL symbols: the oracle emits
-    // `@input$Logged__init` and `@default__input$Logged__input$Meter__tick`,
-    // scg emits `@Logged__init` / `@default__Logged__Meter__tick`. Same shape,
-    // wrong symbol names — a cross-module collision hazard rather than a
-    // missing feature.
-    ("examples/lang/delegation.sentinel", "scg omits the module prefix on class/impl symbols (`@Logged__init` vs `@input$Logged__init`)"),
+    // NARROWED to a single honest cause (an adversarial review falsified an
+    // earlier, more optimistic version of this comment — the merge fix alone did
+    // NOT close it, and the emitter half was worse than the rename half).
+    //
+    // FIXED, in selfhost/merge/: (a) `build_rename` no longer walks INTO an
+    // `extern "C" { … }` block recording foreign C symbols as module names, and
+    // `skip_to_item_end` terminates a BODYLESS decl at its `;`; (b) — the severe
+    // one — `emit_item` had no `extern` arm at all, so the block's bodyless
+    // decls reached `emit_fn_decl`, which parses a block that is not there and
+    // DELETED the following declaration. That deletion produced a loud
+    // miscompile (`ret i64 %v0`, `%v0` never defined) AND a silent one
+    // (`getpid() + getuid()` emitting `add i64 %v0, %v0` — it assembled, ran,
+    // and returned the wrong answer). Extern blocks are now skipped as a unit,
+    // matching the Rust merge exactly (`snc merge` also drops them, keeping the
+    // calls as bare C symbol names). The silent wrong answer is gone: LLVM now
+    // rejects the output ("Only PHI nodes may reference their own value!").
+    //
+    // WHAT REMAINS (4 diff lines, one cause): scg has no `extern "C"` awareness
+    // in its TYPES/CODEGEN stages, so once the merge drops the block the callee
+    // is simply unknown and scg emits NOTHING where the oracle emits
+    // `%v0 = call i64 @getpid()` inside each wrapper. Closing it needs the
+    // extern declarations carried into scg's fn table with an is-extern flag
+    // that suppresses a `define` — i.e. real extern support, not a merge tweak.
+    ("examples/sys/process_ids.sentinel", "scg has no `extern \"C\"` support in types/codegen: the extern call is missing from each wrapper (merge halves FIXED)"),
+    // MOSTLY FIXED (36 diff lines -> 8). scg's merge never recorded trait (54)
+    // or class (56) declarations in its rename map, so it emitted
+    // `@Logged__init` / `@default__Logged__Meter__tick` where the oracle emits
+    // `@input$Logged__init` / `@default__input$Logged__input$Meter__tick` — the
+    // right instruction shape under the wrong symbol names, and a cross-module
+    // collision hazard. Both kinds are now recorded.
+    // WHAT REMAINS: a NAMED impl's own name (`impl Add as Meter for Dial`, which
+    // codegen mangles into `<Name>__<Type>__<Trait>__<method>`) is still not
+    // qualified — scg emits `@Add__input$Dial__input$Meter__tick` vs the
+    // oracle's `@input$Add__…`. Recording it in `build_rename` IS the missing
+    // half, but doing so alone makes scg CRASH downstream
+    // ("index out of bounds: idx=-1, len=5"), so some later impl-name lookup
+    // still expects the bare name and must be fixed in the same change. A
+    // wrong-symbol divergence beats a crash, so it stays registered.
+    ("examples/lang/delegation.sentinel", "scg does not qualify a NAMED impl's own name (`@Add__…` vs `@input$Add__…`); trait/class halves FIXED"),
 ];
 
 /// The deferral reason for `rel` (a repo-relative, forward-slashed path).
@@ -745,6 +771,43 @@ fn collect_programs() -> Vec<PathBuf> {
     }
     out.sort();
     out
+}
+
+/// Does LLVM accept `ll`? Returns `Some(reason)` when it does NOT.
+///
+/// This exists because a byte-DIFFERENCE against the oracle is a tolerable,
+/// registerable state — but INVALID IR never is, and the two are independent:
+/// an adversarial review found scg emitting non-assemblable IR for a program
+/// whose divergence was already registered, so the whole suite stayed green
+/// while scg produced output no backend would accept. Byte-comparison alone
+/// cannot see that; this can.
+///
+/// NOTE `llvm-as` exits 0 even when verification fails, printing
+/// "assembly parsed, but does not verify as correct!" — so the exit code is not
+/// a usable signal on its own and stderr must be inspected. Skipped (returns
+/// `None`) when `LLVM_SYS_180_PREFIX` is unset, so the test still runs without
+/// an LLVM install.
+fn llvm_rejects(ll: &Path) -> Option<String> {
+    let prefix = std::env::var("LLVM_SYS_180_PREFIX").ok()?;
+    let tool = PathBuf::from(prefix).join("bin").join(if cfg!(windows) {
+        "llvm-as.exe"
+    } else {
+        "llvm-as"
+    });
+    if !tool.exists() {
+        return None;
+    }
+    let out = Command::new(&tool)
+        .arg(ll)
+        .arg("-o")
+        .arg(ll.with_extension("bc"))
+        .output()
+        .ok()?;
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    if out.status.success() && !stderr.contains("does not verify") {
+        return None;
+    }
+    Some(stderr.lines().take(2).collect::<Vec<_>>().join(" / "))
 }
 
 /// Copy `src`'s CONTENTS into `dst` recursively (so `sentinel_library/std` lands
@@ -791,6 +854,9 @@ fn sentinel_codegen_matches_oracle_on_real_programs() {
     let mut emitted = 0usize;
     let mut mismatches: Vec<String> = Vec::new();
     let mut stale: Vec<String> = Vec::new();
+    let mut unverifiable: Vec<String> = Vec::new();
+    let scg_ll = tmp.join("scg_out.ll");
+    let oracle_ll = tmp.join("oracle_out.ll");
     for program in &programs {
         let rel = program
             .strip_prefix(&root)
@@ -812,6 +878,30 @@ fn sentinel_codegen_matches_oracle_on_real_programs() {
             .current_dir(&work)
             .output()
             .expect("run the Sentinel codegen");
+        // Validity is checked INDEPENDENTLY of byte-equality: a registered
+        // divergence excuses different BYTES, never invalid IR.
+        //
+        // It is a DIFFERENTIAL check — scg is only at fault when the oracle's
+        // own IR verifies and scg's does not. That distinction is load-bearing:
+        // the hand-maintained text oracle currently emits IR LLVM rejects for
+        // ~30 real programs (dominated by shift-operand width mismatches such as
+        // `shl i32 %v4, %v7` with an i64 amount, across every chacha20/ssh/ct
+        // example), and scg faithfully MIRRORS it — which is byte-correct and
+        // exactly what this differential asks of it. Those are oracle defects,
+        // tracked separately; inkwell (`snc build`) is unaffected, so the
+        // programs themselves compile and run correctly.
+        // A REGISTERED program is exempt (its entry states the severity — two of
+        // them record "scg emits INVALID IR" explicitly); an unregistered one is
+        // not, so a NEW instance of this class fails loudly instead of hiding.
+        std::fs::write(&scg_ll, &sentinel.stdout).expect("stage scg .ll");
+        if deferred_reason(&rel).is_none() {
+            if let Some(why) = llvm_rejects(&scg_ll) {
+                std::fs::write(&oracle_ll, &oracle.stdout).expect("stage oracle .ll");
+                if llvm_rejects(&oracle_ll).is_none() {
+                    unverifiable.push(format!("  {rel}: {why}"));
+                }
+            }
+        }
         if oracle.stdout == sentinel.stdout {
             if deferred_reason(&rel).is_some() {
                 stale.push(format!(
@@ -836,6 +926,14 @@ fn sentinel_codegen_matches_oracle_on_real_programs() {
         "expected the oracle to emit for a meaningful number of real programs, got {emitted}"
     );
     assert!(stale.is_empty(), "DEFERRED_PROGRAMS is stale:\n{}", stale.join("\n"));
+    assert!(
+        unverifiable.is_empty(),
+        "scg emitted IR that LLVM will not accept for {} program(s) where the ORACLE's \
+         IR verifies cleanly — a registered byte-divergence excuses different bytes, \
+         never IR no backend would accept:\n{}",
+        unverifiable.len(),
+        unverifiable.join("\n")
+    );
     assert!(
         mismatches.is_empty(),
         "the Sentinel codegen diverged from `snc llvm` on {}/{} emitted real program(s) \

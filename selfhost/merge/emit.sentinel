@@ -1050,6 +1050,48 @@ fn emit_ops(out: &mut Vec<u8>, c: &MergeCtx, k: &Vec<i64>, s: &Vec<i64>, e: &Vec
     }
 }
 
+// An `extern "C" { fn f() -> T; … }` block is SKIPPED — emitted as nothing,
+// which is exactly what the Rust merge does (`snc merge` on a program with an
+// extern block yields only `fn main() … { ((getpid()) + (getuid())) }`: the
+// declarations vanish and the calls stay as bare C symbol names).
+//
+// It must be skipped as a UNIT. Previously `emit_item` had no `extern` arm, so
+// `extern`/`"C"`/`{` fell through as unknown tokens and the block's BODYLESS
+// declarations reached `emit_fn_decl`, which parses a block that is not there,
+// runs past the `;`, and DELETES the following declaration. That produced two
+// miscompiles: a loud one (`ret i64 %v0` with `%v0` never defined — llvm-as
+// rejects it) and a SILENT one (`extern "C" { fn getpid(); fn getuid(); }` +
+// `getpid() + getuid()` emitting `add i64 %v0, %v0` — assembles cleanly, runs,
+// wrong answer).
+fn emit_extern_block(k: &Vec<i64>, cur: &mut i64) -> i64 {
+    let n: i64 = len((*k));
+    while *cur < n && (*k)[*cur] != 6 {
+        *cur = *cur + 1;
+    }
+    let mut depth: i64 = 0;
+    let mut done: bool = false;
+    while *cur < n && !done {
+        let t: i64 = (*k)[*cur];
+        if t == 6 {
+            depth = depth + 1;
+            0
+        } else if t == 7 {
+            depth = depth - 1;
+            0
+        } else {
+            0
+        };
+        *cur = *cur + 1;
+        if depth == 0 {
+            done = true;
+            0
+        } else {
+            0
+        };
+    }
+    0
+}
+
 fn emit_item(out: &mut Vec<u8>, c: &MergeCtx, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> i64 {
     if (*k)[*cur] == 59 {
         *cur = *cur + 1;
@@ -1058,7 +1100,11 @@ fn emit_item(out: &mut Vec<u8>, c: &MergeCtx, k: &Vec<i64>, s: &Vec<i64>, e: &Ve
         0
     };
     let lead: i64 = (*k)[*cur];
-    if lead == 58 {
+    if lead == 2 && is_extern(src, (*s)[*cur], (*e)[*cur]) {
+        // Must precede the `fn` arm: without it the block's bodyless decls fall
+        // through to `emit_fn_decl`, which overruns and deletes the next item.
+        emit_extern_block(k, cur)
+    } else if lead == 58 {
         skip_use(k, cur)
     } else if lead == 64 {
         skip_use(k, cur)

@@ -10,6 +10,20 @@ fn is_main(src: &[u8], ns: i64, ne: i64) -> bool {
         && (*src)[ns + 3] == 'n'
 }
 
+// Is src[ns..ne] the identifier `extern`? The selfhost lexer has no `extern`
+// KEYWORD (it lexes as a plain identifier), so the merge's top-level scan has to
+// recognise the `extern "C" { … }` block by text. Getting this wrong is not
+// cosmetic — see `build_rename`.
+fn is_extern(src: &[u8], ns: i64, ne: i64) -> bool {
+    ne - ns == 6
+        && (*src)[ns] == 'e'
+        && (*src)[ns + 1] == 'x'
+        && (*src)[ns + 2] == 't'
+        && (*src)[ns + 3] == 'e'
+        && (*src)[ns + 4] == 'r'
+        && (*src)[ns + 5] == 'n'
+}
+
 // Record `name` (src[ns..ne]) → `<module-prefix>$name` (the prefix is queue entry `scan`).
 fn record_own(c: &mut MergeCtx, scan: i64, src: &[u8], ns: i64, ne: i64) -> i64 {
     let ss: i64 = len((*c).rnsrc);
@@ -96,7 +110,11 @@ fn record_use(c: &mut MergeCtx, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &
     after
 }
 
-fn skip_to_item_end(k: &Vec<i64>, start: i64) -> i64 {
+// Skip an entire `extern "C" { … }` block: scan to its `{` (kind 6) and balance
+// to the matching `}` (kind 7), recording nothing. Mirrors `skip_to_item_end`'s
+// balancing, but deliberately WITHOUT the bodyless-`;` early exit — here the
+// braces are the block's own, and the `;`s inside are the extern decls'.
+fn skip_extern_block(k: &Vec<i64>, start: i64) -> i64 {
     let n: i64 = len((*k));
     let mut i: i64 = start;
     while i < n && (*k)[i] != 6 {
@@ -126,6 +144,50 @@ fn skip_to_item_end(k: &Vec<i64>, start: i64) -> i64 {
     i
 }
 
+// Skip past a top-level item: scan to its body `{` and balance to the matching
+// `}`. A BODYLESS declaration (`fn getpid() -> i64;` inside an `extern "C"`
+// block) has no `{` of its own, so the scan must stop at the terminating `;` —
+// otherwise it runs on to the NEXT item's body and swallows it whole. That was
+// a real miscompile: the first extern in `std::sys::posix` consumed the
+// following `pub fn pid()`, so `pid` was never renamed, the caller found no
+// `@std$sys$posix$pid`, and codegen emitted NO CALL at all (producing IR that
+// would not even assemble).
+fn skip_to_item_end(k: &Vec<i64>, start: i64) -> i64 {
+    let n: i64 = len((*k));
+    let mut i: i64 = start;
+    while i < n && (*k)[i] != 6 && (*k)[i] != 44 {
+        i = i + 1;
+    }
+    if i < n && (*k)[i] == 44 {
+        // A `;`-terminated declaration (kind 44 = `;`): the item ends here, with
+        // no body of its own.
+        i + 1
+    } else {
+        let mut depth: i64 = 0;
+        let mut done: bool = false;
+        while i < n && !done {
+            let t: i64 = (*k)[i];
+            if t == 6 {
+                depth = depth + 1;
+                0
+            } else if t == 7 {
+                depth = depth - 1;
+                0
+            } else {
+                0
+            };
+            i = i + 1;
+            if depth == 0 {
+                done = true;
+                0
+            } else {
+                0
+            };
+        }
+        i
+    }
+}
+
 // Scan this module's top-level decls, recording each name in the rename map. The entry's
 // (scan == 0) `main` keeps its symbol (not recorded → emitted verbatim).
 fn build_rename(c: &mut MergeCtx, scan: i64, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8]) -> i64 {
@@ -140,7 +202,18 @@ fn build_rename(c: &mut MergeCtx, scan: i64, k: &Vec<i64>, s: &Vec<i64>, e: &Vec
             0
         };
         let lead: i64 = (*k)[j];
-        if lead == 58 {
+        if lead == 2 && is_extern(src, (*s)[j], (*e)[j]) {
+            // An `extern "C" { fn … ; … }` block: the names inside are FOREIGN C
+            // symbols, resolved by bare symbol name, and must NEVER be
+            // module-qualified (the Rust merge leaves them alone — the oracle
+            // emits `@getpid()`, not `@std$sys$posix$getpid()`). Skip the whole
+            // block without recording anything. Previously the walk stepped into
+            // it, recorded the extern as an OWN name, and then — because a
+            // bodyless decl has no `{` — ran past the block and swallowed the
+            // next real function, so THAT function was never renamed either.
+            i = skip_extern_block(k, j);
+            0
+        } else if lead == 58 {
             i = record_use(c, k, s, e, src, j);
             0
         } else if lead == 3 {
@@ -154,10 +227,40 @@ fn build_rename(c: &mut MergeCtx, scan: i64, k: &Vec<i64>, s: &Vec<i64>, e: &Vec
             };
             i = skip_to_item_end(k, j);
             0
-        } else if lead == 52 || lead == 53 {
+        } else if lead == 52 || lead == 53 || lead == 54 || lead == 56 || lead == 57 {
+            // A named type declaration: struct (52), enum (53), trait (54),
+            // class (56) or effect (57). All must be module-qualified.
+            //
+            // trait/class: codegen mangles class/impl symbols FROM these names,
+            // so leaving them bare emitted `@Logged__init` /
+            // `@default__Logged__Meter__tick` where the oracle emits
+            // `@input$Logged__init` / `@default__input$Logged__input$Meter__tick`
+            // — the same instruction shape under the WRONG symbol names, and a
+            // cross-module collision hazard.
+            //
+            // effect: the IMPORTING module already rewrites its reference (via
+            // `record_use`), so omitting the DECLARATION made the two disagree —
+            // the merged text held `effect Io {…}` + `perform Io.read()` in one
+            // place and `handle io$Io.read(k)` in another. The handler's op-id
+            // lookup then missed (`icmp eq i32 %v4, -65537`, the not-found
+            // sentinel), no arm matched, and control fell into `unreachable`:
+            // the oracle's binary exits 42 where scg's traps. Same-named effects
+            // in two modules also collapsed to one op id, so one module's
+            // handler intercepted the other's `perform`.
             record_own(c, scan, src, (*s)[j + 1], (*e)[j + 1]);
             i = skip_to_item_end(k, j);
             0
+        // NOT recorded: a NAMED impl's own name (`impl Add as Meter for Dial`,
+        // mangled into `<Name>__<Type>__<Trait>__<method>`). The oracle DOES
+        // qualify it (`@input$Add__…`), so scg still diverges there — but
+        // recording it here makes scg CRASH downstream
+        // ("index out of bounds: idx=-1, len=5"), evidently because some later
+        // impl-name lookup still expects the bare name. A wrong-symbol-name
+        // divergence is strictly better than a crash, so this stays registered
+        // in KNOWN_SCG_BUGS until the downstream lookup is fixed too. (The
+        // discriminator, when someone returns to it: `impl Add as …` has an
+        // identifier (kind 2) after `impl`, an unnamed `impl as …` has `as`
+        // (kind 60).)
         } else {
             i = i + 1;
             0
