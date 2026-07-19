@@ -14,6 +14,25 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
+**Latest (2026-07-19) — the `snc llvm` TEXT ORACLE now emits VALID LLVM IR: ~30 invalid
+programs → 0.** The oracle is the ground truth the entire self-host differential verifies scg
+against, and it was emitting IR `llvm-as` refuses to assemble for ~30 of the 47 real programs it
+can emit — essentially every chacha20/ssh/constant-time example. Invisible until the differential
+began ASSEMBLING the output (nothing ever had), and consequential: scg was being held to a
+standard that was itself invalid, so any scg bug in the same expression shapes was
+unfalsifiable. Two defects: **(1) shift-amount width** — LLVM requires a shift's amount to share
+the value's integer type, but the oracle emitted `shl i32 %v4, %v7` with an i64 amount; it now
+coerces (trunc when wider, zext when narrower — a shift count is non-negative), mirroring
+inkwell's `shamt` coercion. The old code carried a comment reasoning this was safe because "no
+shift fixture is in the differential corpus yet" — true of `tests/pass`, false of real programs,
+which the new sweep now covers. **(2) missing extern declares** — `extern "C"` imports were
+called but never declared (`call i64 @getgid()` with no `declare`), so the module referenced
+undefined values; they are now declared under their bare C symbol, matching inkwell's
+`program.externs` handling. **ORACLE-MOVING, mirrored into scg in the same change**
+(`cg_int_bits` + `cg_shift_amt_cast` + the coercion in the shift path): all 9 stages stay
+byte-identical, both bootstrap fixed points hold. **inkwell was never affected** — these programs
+always compiled and ran correctly (`ct_memcmp` exits 42); this was purely the text backend.
+
 **Latest (2026-07-19) — three scg merge miscompiles fixed, and the differential now checks
 that emitted IR is VALID, not merely byte-equal.** An adversarial review FALSIFIED the first
 attempt at the extern fix: repairing the merge's rename pass was necessary but not sufficient,
