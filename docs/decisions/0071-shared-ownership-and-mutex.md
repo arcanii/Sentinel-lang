@@ -2,9 +2,9 @@
 
 Status: **ACCEPTED for M1.4a (`Shared<T>`) — implemented 2026-07-02 — and for M1.4b
 (`Mutex<T>`) — implemented 2026-07-15/16/17, slices 1–4 incl. the D5a deadlock tiers
-(see the implementation log + the D5 amendment); M1.4c (secret) PROPOSED — M1.4c-1 is
-implemented snc-side 2026-07-19 (see the M1.4c implementation log + the D6/D4
-amendment), and it stays PROPOSED until the scg mirror (M1.4c-1b) lands.** Design
+(see the implementation log + the D5 amendment); and for M1.4c (secret
+`Shared`/`Mutex`) — implemented 2026-07-19, snc-side + the scg mirror, see the M1.4c
+implementation log + the D6/D4 amendment. `Channel<secret T>` (M1.4c-2) remains open.** Design
 PINNED with maintainer sign-off 2026-07-02. This is the M1.4 sub-phase of the ADR 0066 threading roadmap, broken out into
 its own ADR per **ADR 0066 D5** ("blocked on first designing a runtime-refcounted
 `Shared<T>` handle … a language feature in its own right, arguably bigger than the mutex
@@ -606,8 +606,9 @@ stale staticlib.
 
 ## M1.4c implementation log (secret containers)
 
-Status: **M1.4c-1 (snc-side) DONE 2026-07-19; the scg mirror is M1.4c-1b and the ADR
-stays PROPOSED for M1.4c until it lands.** `Channel<secret T>` is **M1.4c-2** (see below).
+Status: **M1.4c-1 (snc-side) + M1.4c-1b (the scg mirror) BOTH DONE 2026-07-19 — M1.4c is
+COMPLETE for `Shared`/`Mutex` and the ADR is ACCEPTED for M1.4c.** `Channel<secret T>`
+is **M1.4c-2** (see below), scoped separately for the reason given there.
 
 ### M1.4c-1 — `Shared<secret T>` / `Mutex<secret T>`, snc-side
 
@@ -653,7 +654,34 @@ They were caught by a pre-commit diff audit. **Always grep the diff for `if fals
 scratch files after a mutation-testing review** — a disabled security scrub is exactly the
 kind of change that passes every test.
 
-### M1.4c-1b (NEXT) — the scg mirror: element-generic containers
+### M1.4c-1b (DONE 2026-07-19) — the scg mirror: element-generic containers
+
+Landed as designed below, and `tests/pass/c71_secret_shared.sentinel` is back in the
+differential corpus (D6's "a `tests/pass` fixture" requirement, met literally). scg's
+interner being STRUCTURAL made this threading rather than new representation:
+`container_elem`/`is_secret_ty` (reusing the pre-existing `strip_secret`), a
+`dump_container_call` dispatched for FnIds 38/39/40/41, the `_secret` constructor choice
+in cg + its two declare flags. **The `*g` deref needed no change at all** — its result
+type is already computed structurally (`ta[ta[guard]]`), so it yields the secret element
+by itself. One wrinkle the oracle forced: the READERS (`shared_get`/`lock`) must render a
+`(targs <elem>)` annotation for a non-i64 element (the Rust side records `type_args`
+there), which means buffering the args first — the `dump_gcall` shape — while the
+CONSTRUCTORS dump straight through like `dump_apply_call`. The i64 case emits no targs,
+so every pre-M1.4c fixture stays byte-identical.
+
+**It also exposed and fixed a PRE-EXISTING scg refcount bug.** `mvbv` (the direct-Var
+tracker) is reset only on ENTRY to `dump_texpr` and set by the `Var` arm, so a var dumped
+as a CALL ARGUMENT leaks up: `let s = shared_new(a)` saw `mvbv = a`, concluded the RHS was
+a named binding, and emitted a spurious `sentinel_shared_clone`. An rvalue source
+TRANSFERS its refcount unit and must not clone, so that is a refcount overcount — a cell
+that is never freed — diverging from the oracle, which decides structurally on the RHS
+expression. It stayed latent because every earlier fixture passed a LITERAL to the
+constructors (`shared_new(20)`, `mutex_new(42)`); this was the first to pass a variable.
+Fixed by clearing `mvbv` before `dump_te_call` returns — a call's value is always an
+rvalue. Same class as the documented `mvbv` compound-tail leak behind
+`SharedReturnNotSupported`.
+
+### M1.4c-1b (as designed) — the plan this followed
 
 `c71_secret_shared` cannot enter the differential corpus yet: **scg has no element-generic
 container path at all.** Its `builtin_ret` (`selfhost/types/interner.sentinel`) and its

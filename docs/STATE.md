@@ -14,9 +14,25 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
-**Latest (2026-07-19) — ADR 0071 M1.4c-1: SECRET shared state (`Shared<secret T>` /
-`Mutex<secret T>`, D6) works snc-side; the scg mirror (M1.4c-1b) is next and the ADR stays
-PROPOSED for M1.4c.** The representability fix is sharper than "the interner rejects secrets":
+**Latest (2026-07-19) — ADR 0071 M1.4c COMPLETE (M1.4c-1 snc-side + M1.4c-1b the scg mirror):
+SECRET shared state (`Shared<secret T>` / `Mutex<secret T>`, D6) is implemented AND
+self-hosted byte-identically; the ADR is ACCEPTED for M1.4c.** The mirror made scg's
+containers ELEMENT-GENERIC for the first time (its `builtin_ret` and annotation arm had
+hardcoded the i64 element handle): scg's interner is structural, so `Shared<secret i64>`
+needed no new representation — only a `dump_container_call` threading the element off the
+concrete argument's handle (constructors dump straight through; the readers emit a
+`(targs <elem>)` for a non-i64 element, so they buffer args first), the `_secret`
+constructor choice in cg, and two declare flags. The `*g` deref needed NO change (its type
+is already computed structurally). **The mirror also exposed and fixed a PRE-EXISTING scg
+refcount bug:** `mvbv` (the direct-Var tracker) is reset only on ENTRY to `dump_texpr`, so a
+var passed as a CALL ARGUMENT leaked up — `let s = shared_new(a)` emitted a spurious
+`sentinel_shared_clone`, an overcount that leaks the cell, diverging from the oracle (which
+decides structurally on the RHS). Latent because every earlier fixture passed a LITERAL to
+the constructors; fixed by clearing `mvbv` before `dump_te_call` returns (a call's value is
+always an rvalue). `tests/pass/c71_secret_shared` is back in the differential corpus,
+meeting D6's "a `tests/pass` fixture" requirement literally; pass 148→149.
+
+**Earlier the same day (2026-07-19) — ADR 0071 M1.4c-1: the snc side.** The representability fix is sharper than "the interner rejects secrets":
 the container element maps (`shared_id_for`/`mutex_id_for`/`guard_id_for`) are **table-free**, so
 they need an element's interner id to be a knowable CONSTANT — which a source-encounter-ordered
 `SecretId` is not. Fix: **pre-intern the secretable word-scalars (`i64`/`i32`/`u8`/`bool`) at

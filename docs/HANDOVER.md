@@ -51,7 +51,7 @@ reference as you work through the milestones.
 
 ---
 
-### ▶ RESUME HERE (2026-07-19 — M1.4c-1 DONE snc-side: secret `Shared<secret T>`/`Mutex<secret T>` (D6) — next is **M1.4c-1b, the scg mirror** (element-generic containers), which is what flips ADR 0071 to ACCEPTED for M1.4c)
+### ▶ RESUME HERE (2026-07-19 — **ADR 0071 M1.4c COMPLETE**: secret `Shared<secret T>`/`Mutex<secret T>` implemented AND self-hosted (M1.4c-1 + the M1.4c-1b scg mirror); ADR ACCEPTED for M1.4c. Open on this track: M1.4c-2 `Channel<secret T>`)
 
 > **▶▶ M1.4c-1 LANDED (snc-side)** — commit `248a6f0`. Secret containers work end-to-end
 > through inkwell + the `snc llvm` oracle. Full design rationale is the ADR's 2026-07-19
@@ -69,27 +69,35 @@ reference as you work through the milestones.
 > the differential (dumps render secrets structurally; mangling is structural; no dump
 > iterates the interner tables) — the only churn was `<secret#0>`→`<secret#2>` in one ui snap.
 >
-> **▶ NEXT — M1.4c-1b: the scg mirror (element-generic containers).** `c71_secret_shared`
-> cannot enter the differential corpus because **scg has NO element-generic container path**:
-> `builtin_ret` (`selfhost/types/interner.sentinel` ~1471-1485) and the `Shared<…>`/`Mutex<…>`
-> annotation arm (~1282-1300) both hardcode the i64 element handle `0`. This is the first
-> corpus-bound container with a non-i64 element, so the demonstrator sits in `examples/`
-> (outside the differential) per the M2.3b/M1.2b-cont precedent. **The four sites are already
-> mapped (full detail in the ADR's M1.4c log):**
->   1. **Call typing** — a `dump_container_call` helper mirroring `dump_apply_call`'s
->      "dynamic type decoded from the concrete arg's own handle" shape (`infer.sentinel`),
->      dispatched from `dump_te_call` (`borrow_arms.sentinel` ~1013, beside the `fid == 37`
->      arm) for FnIds 38/39/40/41. scg's interner is STRUCTURAL
->      (`intern_type(kind, elem, 0)`) and `render_type` already recurses, so
->      `Shared<secret i64>` is natively expressible — this is threading, not new machinery.
->      Element accessors: `(*c).tk[h]` = kind (secret = 3), `(*c).ta[h]` = element handle.
->   2. **cg** (`cg_effects.sentinel` fids 38/40) — pick the `_secret` symbol when the
->      element of the already-passed `rt` handle is kind 3.
->   3. **Declare group** — `cg_used_sharednewsecret`/`cg_used_mutexnewsecret` + tyctx init +
->      declare lines + the `cg_anydecl` OR-chain (⚠ that chain is easy to forget).
->   4. **Deref decode** — the `*g` arm must strip the secret before its i64-only gate.
-> Then move the fixture back to `tests/pass/` (satisfying D6's literal "a `tests/pass`
-> fixture" requirement) and flip the ADR to ACCEPTED for M1.4c.
+> **▶▶ M1.4c-1b LANDED — the scg mirror (element-generic containers)** — commit `c010c2b`.
+> scg's containers were i64-hardcoded (`builtin_ret` + the annotation arm); its interner is
+> STRUCTURAL, so `Shared<secret i64>` needed no new representation, only threading:
+> `container_elem`/`is_secret_ty` (`strip_secret` already existed — reuse it),
+> `dump_container_call` + `is_container_builtin` dispatched from `dump_te_call` for FnIds
+> 38/39/40/41, the `_secret` constructor choice in `cg_effects.sentinel`, and two
+> `cg_used_*secret` flags (+ tyctx init + declares + the `cg_anydecl` chain). **The `*g`
+> deref needed NO change** — its result type is already `ta[ta[guard]]`, structurally correct.
+> Wrinkle: the READERS (`shared_get`/`lock`) must emit `(targs <elem>)` for a non-i64 element
+> (the Rust side records `type_args` there), so they buffer args first (the `dump_gcall`
+> shape) while the CONSTRUCTORS dump straight through (the `dump_apply_call` shape); the i64
+> case emits no targs, so all pre-M1.4c fixtures stay byte-identical.
+>
+> **⚠ It exposed a PRE-EXISTING scg REFCOUNT BUG — worth knowing, the class will recur.**
+> `mvbv` (the direct-Var tracker) is reset only on ENTRY to `dump_texpr` and set by the `Var`
+> arm, so a var dumped as a CALL ARGUMENT leaks up: `let s = shared_new(a)` saw `mvbv = a`,
+> concluded "the RHS is a named binding", and emitted a spurious `sentinel_shared_clone`. An
+> rvalue source TRANSFERS its refcount unit and must not clone — so that is an overcount that
+> LEAKS the cell, diverging from the oracle (which decides structurally on the RHS
+> expression). Latent because every earlier fixture passed a LITERAL to the constructors.
+> Fixed by clearing `mvbv` before `dump_te_call` returns (a call's value is always an
+> rvalue). Same class as the `mvbv` compound-tail leak behind `SharedReturnNotSupported` —
+> **if you touch `mvbv` consumers, check for nested-Var leakage.**
+>
+> **▶ NEXT on this track — M1.4c-2: `Channel<secret T>`.** D6.1's fix already unblocks the
+> typing side (`channel_chanid_for` gains the same secret slots 6..=9). What needs its own
+> decision is the memory policy: a channel's IN-TRANSIT values sit in `std::sync::mpsc` queue
+> nodes that Sentinel does not allocate, so they can be neither mlocked nor scrubbed without
+> replacing the queue. Decide that before implementing.
 >
 > ⚠ **REVIEW-HYGIENE LESSON (cost real time, will recur):** the adversarial review's mutation
 > pass left two planted `if false` guards in the working tree that DISABLED BOTH secret-scrub
