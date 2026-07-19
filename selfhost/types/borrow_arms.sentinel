@@ -354,7 +354,34 @@ fn dump_te_binary(out: &mut Vec<u8>, bop: i64, l: Expr, r: Expr, exp: i64, src: 
                         // ADR 0048: LOGICAL shift right (zero-fill, all int types).
                         "lshr"
                     };
-                    cg_bin(c, opn, lt, cglk0, cglv0, cgrk, cgrv);
+                    // (ADR 0048) A shift's AMOUNT must share the value's integer
+                    // type or LLVM rejects the module (`shl i32 %v4, %v7` with an
+                    // i64 amount: "'%v7' defined with type 'i64' but expected
+                    // 'i32'"). Coerce first — trunc when wider, zext when
+                    // narrower — mirroring the oracle + inkwell. Only shifts need
+                    // it: every other binop has operands of the same type.
+                    let sh_lw: i64 = if bop == 16 || bop == 17 {
+                        cg_int_bits(c, lt)
+                    } else {
+                        0 - 1
+                    };
+                    let sh_rw: i64 = if bop == 16 || bop == 17 {
+                        cg_int_bits(c, rt)
+                    } else {
+                        0 - 1
+                    };
+                    let sh_cast: bool = sh_lw > 0 && sh_rw > 0 && sh_lw != sh_rw;
+                    let amt_k: i64 = if sh_cast {
+                        0
+                    } else {
+                        cgrk
+                    };
+                    let amt_v: i64 = if sh_cast {
+                        cg_shift_amt_cast(c, sh_rw > sh_lw, rt, lt, cgrk, cgrv)
+                    } else {
+                        cgrv
+                    };
+                    cg_bin(c, opn, lt, cglk0, cglv0, amt_k, amt_v);
                     0
                 } else if bop <= 13 {
                     let prd: [u8] = if bop == 8 {

@@ -742,6 +742,29 @@ pub fn dump(program: &TypedProgram, drop_plan: &DropPlan) -> Result<String, Stri
     if used.emit_declares(&mut out) {
         out.push('\n');
     }
+    // ADR 0057: `extern "C"` foreign imports are DECLARED under their bare C
+    // symbol (never module-qualified — a C symbol is global), matching inkwell's
+    // `program.externs` handling. Omitting these made the oracle's IR reference
+    // undefined values (`call i64 @getgid()` with no declaration), which
+    // `llvm-as` rejects — invisible until the differential began assembling the
+    // output. A program with no externs emits nothing here, so every existing
+    // fixture stays byte-identical.
+    let mut emitted_extern = false;
+    for fn_id in &program.externs {
+        let Some(sig) = program.fn_signatures.iter().find(|s| s.id == *fn_id) else {
+            continue;
+        };
+        let ret = llvm_ty(sig.return_type, program)?;
+        let mut params = Vec::with_capacity(sig.param_types.len());
+        for p in &sig.param_types {
+            params.push(llvm_ty(*p, program)?);
+        }
+        writeln!(out, "declare {ret} @{}({})", sig.name, params.join(", ")).unwrap();
+        emitted_extern = true;
+    }
+    if emitted_extern {
+        out.push('\n');
+    }
     out.push_str(&fns_buf);
     Ok(out)
 }
@@ -1596,6 +1619,20 @@ impl Emit<'_> {
         llvm_ty(ty, self.program)
     }
 
+    /// The bit width of an integer type as this backend lowers it (a `secret T`
+    /// erases to `T`). `None` for anything not an integer. Used to coerce a
+    /// shift AMOUNT to the shifted value's width, which LLVM requires.
+    fn int_bits(&self, ty: Type) -> Option<u32> {
+        match self.unsecret(ty) {
+            Type::Bool => Some(1),
+            Type::U8 => Some(8),
+            Type::I32 => Some(32),
+            Type::I64 => Some(64),
+            Type::U128 => Some(128),
+            _ => None,
+        }
+    }
+
     /// ADR 0071 M1.4c: strip one `secret` layer — `secret T` lowers identically to
     /// `T` (the taint is a type-system property, erased in the IR), so the
     /// container encode/decode arms match on the INNER scalar. Non-secret types
@@ -1916,6 +1953,38 @@ impl Emit<'_> {
                 // `u8` is unsigned → `/` is `udiv` (ADR 0033 D6); the rest are
                 // sign-agnostic in two's complement.
                 let is_unsigned = matches!(lhs.ty, Type::U8);
+                // ADR 0048: `>>` is LOGICAL (zero-fill) for all int types.
+                //
+                // LLVM requires a shift's AMOUNT to share the value's integer
+                // type, so coerce it first — trunc when wider, zext when
+                // narrower (a shift count is non-negative), reuse when equal.
+                // This mirrors the inkwell backend's `shamt` coercion exactly
+                // (sentinel-codegen `BinOp::Shl | BinOp::Shr`).
+                //
+                // This was previously omitted, with a comment reasoning that "no
+                // shift fixture is in the differential corpus yet". That was true
+                // of `tests/pass`, but NOT of real programs: the oracle emitted
+                // `shl i32 %v4, %v7` with an i64 amount for ~30 of them —
+                // essentially every chacha20/ssh/constant-time example — and
+                // `llvm-as` rejects all of it. Nothing had ever assembled the
+                // oracle's output, so the whole self-host differential was
+                // verifying scg against unassemblable ground truth.
+                if matches!(op, BinOp::Shl | BinOp::Shr) {
+                    let amt = match (self.int_bits(expr.ty), self.int_bits(rhs.ty)) {
+                        (Some(value_bits), Some(amt_bits)) if amt_bits != value_bits => {
+                            let aty = self.lty(rhs.ty)?;
+                            let cast = if amt_bits > value_bits { "trunc" } else { "zext" };
+                            let c = self.fresh();
+                            writeln!(self.body, "  %v{c} = {cast} {aty} {r} to {llty}").unwrap();
+                            format!("%v{c}")
+                        }
+                        _ => r,
+                    };
+                    let opcode = if matches!(op, BinOp::Shl) { "shl" } else { "lshr" };
+                    let v = self.fresh();
+                    writeln!(self.body, "  %v{v} = {opcode} {llty} {l}, {amt}").unwrap();
+                    return Ok(format!("%v{v}"));
+                }
                 let opcode = match op {
                     BinOp::Add => "add",
                     BinOp::Sub => "sub",
@@ -1925,13 +1994,7 @@ impl Emit<'_> {
                     BinOp::BitAnd => "and",
                     BinOp::BitOr => "or",
                     BinOp::BitXor => "xor",
-                    // ADR 0048: `>>` is LOGICAL (zero-fill) for all int types.
-                    // (Phase 2 / full oracle: a mismatched-width shift amount
-                    // would need a trunc/zext here to match the inkwell backend
-                    // byte-for-byte; no shift fixture is in the differential
-                    // corpus yet, so the corpus emission is unaffected.)
-                    BinOp::Shl => "shl",
-                    BinOp::Shr => "lshr",
+                    BinOp::Shl | BinOp::Shr => unreachable!("shifts return above"),
                 };
                 let v = self.fresh();
                 writeln!(self.body, "  %v{v} = {opcode} {llty} {l}, {r}").unwrap();

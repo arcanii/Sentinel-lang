@@ -783,6 +783,46 @@ fn cg_reg(c: &mut TyCtx, d: i64) -> i64 {
 // --- per-instruction emitters (each sets `cglast` to its dest, where it has one) --
 
 // `  %vD = <op> <ty> <l>, <r>` (binop).
+// (ADR 0048) The bit width of an integer type handle as codegen lowers it (a
+// `secret T` erases to `T`): i64=64, i32=32, u8=8, bool=1; -1 for a non-integer.
+// Used to coerce a shift AMOUNT to the shifted value's width, which LLVM
+// requires — mirrors the oracle's `Emit::int_bits`.
+fn cg_int_bits(c: &mut TyCtx, h: i64) -> i64 {
+    let hs: i64 = strip_secret(c, h);
+    if hs == 0 {
+        64
+    } else if hs == 1 {
+        32
+    } else if hs == 2 {
+        1
+    } else if hs == 3 {
+        8
+    } else {
+        0 - 1
+    }
+}
+
+// (ADR 0048) `  %vD = <trunc|zext> <fromty> <op> to <toty>` — the shift-amount
+// width coercion. LLVM requires a shift's amount to share the value's integer
+// type; trunc when the amount is wider, zext when narrower (a shift count is
+// non-negative). Returns the coerced operand's register.
+fn cg_shift_amt_cast(c: &mut TyCtx, wider: bool, from_ty: i64, to_ty: i64, rk: i64, rv: i64) -> i64 {
+    let d: i64 = cg_dst(c);
+    if wider {
+        cgo_str(c, "trunc ")
+    } else {
+        cgo_str(c, "zext ")
+    };
+    cgo_ty(c, from_ty);
+    cg_putc(c, ' ');
+    cgo_operand(c, rk, rv);
+    cgo_str(c, " to ");
+    cgo_ty(c, to_ty);
+    cg_putc(c, '\n');
+    cg_reg(c, d);
+    d
+}
+
 fn cg_bin(c: &mut TyCtx, op: [u8], ty: i64, lk: i64, lv: i64, rk: i64, rv: i64) -> i64 {
     let d: i64 = cg_dst(c);
     cgo_str(c, op);
