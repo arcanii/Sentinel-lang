@@ -51,7 +51,7 @@ reference as you work through the milestones.
 
 ---
 
-### ▶ RESUME HERE (2026-07-19 — **ADR 0071 M1.4c COMPLETE**: secret `Shared<secret T>`/`Mutex<secret T>` implemented AND self-hosted (M1.4c-1 + the M1.4c-1b scg mirror); ADR ACCEPTED for M1.4c. Open on this track: M1.4c-2 `Channel<secret T>`)
+### ▶ RESUME HERE (2026-07-19 — ADR 0071 **M1.4c COMPLETE + ACCEPTED** (secret `Shared`/`Mutex`, snc + scg mirror). Same session also hardened the SELF-HOST VERIFICATION story: the differential now sweeps REAL programs and checks IR VALIDITY, which exposed 3 scg merge miscompiles + ~30 programs where the ORACLE itself emitted unassemblable IR — all fixed. **Next: scg `extern "C"` support in types/codegen** (prerequisite landed; the risky half is scoped below))
 
 > **▶▶ M1.4c-1 LANDED (snc-side)** — commit `248a6f0`. Secret containers work end-to-end
 > through inkwell + the `snc llvm` oracle. Full design rationale is the ADR's 2026-07-19
@@ -116,6 +116,69 @@ reference as you work through the milestones.
 > ⚠ **The same blind spot still applies to the OTHER stages** (types/mir/borrow/effects/
 > resolve differentials all use the fixture-only `collect_fixtures`). Extending them the
 > same way is the obvious follow-on.
+>
+> **▶▶ THE VERIFICATION TRACK (this session's second half) — read this before touching
+> `selfhost/` or `llvm_dump.rs`.** The self-host differential swept only `tests/pass` +
+> `tests/ui` (single-construct fixtures) and compared BYTES only. Both gaps are now closed,
+> and closing them found real, previously-invisible defects:
+>
+> 1. **Real-program sweep** (`d8552c9`) — `selfhost_codegen.rs` gained
+>    `sentinel_codegen_matches_oracle_on_real_programs`, sweeping `examples/`,
+>    `sentinel_library/`, `tools/`. It stages `sentinel_library/` into the work dir (the
+>    `examples.rs` `assemble()` trick) so `use std::…` resolves for the oracle AND scg's own
+>    merge — that is what gets **48 real programs** comparing. Divergences must be fixed or
+>    REGISTERED in one of two deliberately-separate lists: `DEFERRED_PROGRAMS` (ADR-documented
+>    feature gaps) vs `KNOWN_SCG_BUGS` (real defects, carrying their diagnosis). A registered
+>    program is still RUN, and one that starts MATCHING fails the test, so neither list can rot.
+> 2. **IR-validity check** (`8061aae`) — the harness now assembles scg's output with
+>    `llvm-as`. It is DIFFERENTIAL (scg is at fault only when the ORACLE verifies and scg does
+>    not) because it immediately showed the oracle itself was invalid for ~30 programs.
+>    ⚠ `llvm-as` EXITS 0 while printing "does not verify as correct!" — check stderr, not the
+>    exit code.
+> 3. **Three scg merge miscompiles fixed** (`8061aae`): `emit_item` had no `extern` arm, so a
+>    block's BODYLESS decls reached `emit_fn_decl`, which parses a block that is not there and
+>    DELETED the following declaration — a loud miscompile AND a **silent** one
+>    (`getpid() + getuid()` → `add i64 %v0, %v0`: assembled, ran, wrong answer). `build_rename`
+>    also never recorded trait (54) / class (56) / **effect (57)**; the effect omission made a
+>    cross-module `handle` fall into `unreachable` — the oracle's binary exits 42 where scg's
+>    **traps**.
+> 4. **Oracle IR validity fixed** (`83c1f21`): ~30 invalid programs → **0**. (a) shift-amount
+>    width coercion (`shl i32 %v4, %v7` with an i64 amount — every chacha20/ssh/ct example);
+>    (b) `extern "C"` imports were called but never `declare`d. ORACLE-MOVING, mirrored into
+>    scg in the same commit. **inkwell was never affected** — those programs always ran fine;
+>    this was purely the text backend, which is the ground truth the whole differential
+>    verifies scg against.
+>
+> **▶▶ NEXT — scg `extern "C"` support in types/codegen.** The PREREQUISITE landed
+> (`e66362b`): `source_dump.rs` was LOSSY (its `snc merge` output could not be recompiled —
+> "undefined function `getpid`"), which is fatal for scg because scg's pipeline is
+> merge-TEXT → parse → types → codegen. It now emits extern blocks (grouped by `link_libs`,
+> ADR 0057 A9) and round-trips; scg's merge mirrors it, emitting C symbol names RAW
+> (`append_slice`, never `emit_name_slice` — a C symbol is global).
+> **What remains, and why it was NOT rushed:** scg parses the block but registers nothing,
+> because **Pass 1 in `selfhost/types.sentinel` (~line 561) is a BRACE-DEPTH scan that only
+> records items at `depth == 0`** — an extern block's `{` puts its decls at depth 1. Fixing it
+> means giving extern decls entries in scg's fn tables, which makes their **FnId NUMBERING
+> differential-critical** (resolve/types/mir dumps all print `#<fnid>`; the oracle assigns
+> extern FnIds in its own order — see `merge_modules`, "then imported externs, then own").
+> **Order of work:** Pass 1 records extern decls with an is-extern flag → CONFIRM FnId parity
+> against the oracle on a multi-module extern fixture BEFORE touching codegen → then suppress
+> the `define` and add `declare` emission. `examples/sys/process_ids.sentinel` is the fixture
+> (currently 9 diff lines: 4 declares + 4 calls + 1); it stays in `KNOWN_SCG_BUGS`.
+>
+> **▶ ALSO OPEN (self-host):**
+>   - **Named-impl qualification** (`delegation.sentinel`, 8 diff lines). Recording the name in
+>     `build_rename` is the missing half BUT alone it CRASHES scg: `borrow.sentinel:651`
+>     `impl_lookup` → `impl_trait_of` → `trait_method_index` passes an unguarded `-1` into a
+>     table index. Both halves must land together (and that unguarded `-1` is worth fixing
+>     regardless — any unresolved impl name is an index panic, not a diagnostic).
+>   - **The other stage differentials still have the real-program blind spot** —
+>     types/mir/borrow/effects/resolve all use the fixture-only `collect_fixtures`. Extending
+>     them is mechanical now that the staging pattern exists in `selfhost_codegen.rs`.
+>   - **Type-param over-rename** (pre-existing, contrived trigger): scg's renamer has no
+>     type-param scoping, so a generic param named identically to a same-module struct/enum/
+>     trait/class is wrongly qualified. The trait/class arm widened its reach. The Rust
+>     `Renamer` skips in-scope type params; scg has no `tparams` set.
 >
 > **▶ NEXT on this track — M1.4c-2: `Channel<secret T>`.** D6.1's fix already unblocks the
 > typing side (`channel_chanid_for` gains the same secret slots 6..=9). What needs its own
