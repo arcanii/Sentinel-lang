@@ -2,8 +2,10 @@
 
 Status: **ACCEPTED for M1.4a (`Shared<T>`) — implemented 2026-07-02 — and for M1.4b
 (`Mutex<T>`) — implemented 2026-07-15/16/17, slices 1–4 incl. the D5a deadlock tiers
-(see the implementation log + the D5 amendment); M1.4c (secret) PROPOSED, design
-PINNED.** Design PINNED with maintainer sign-off 2026-07-02. This is the M1.4 sub-phase of the ADR 0066 threading roadmap, broken out into
+(see the implementation log + the D5 amendment); M1.4c (secret) PROPOSED — M1.4c-1 is
+implemented snc-side 2026-07-19 (see the M1.4c implementation log + the D6/D4
+amendment), and it stays PROPOSED until the scg mirror (M1.4c-1b) lands.** Design
+PINNED with maintainer sign-off 2026-07-02. This is the M1.4 sub-phase of the ADR 0066 threading roadmap, broken out into
 its own ADR per **ADR 0066 D5** ("blocked on first designing a runtime-refcounted
 `Shared<T>` handle … a language feature in its own right, arguably bigger than the mutex
 it unblocks, and warranting its own ADR"). All D-points D1–D9 are PINNED.
@@ -53,8 +55,10 @@ Date: 2026-07-02
   channels/mutexes/atomics, now being lifted in stages.
 - **ADR 0069** (`SealedChannel<secret T>`) — the `OpenResult { ok: i64, v: secret i64 }`
   precedent for returning a secret value when `?(secret T)` is unrepresentable
-  (`NullableInner` has no `Secret` variant); this ADR reuses that shape for `lock()` on
-  secret `T`.
+  (`NullableInner` has no `Secret` variant). D4 originally reused that shape for `lock()`
+  on secret `T`; **the 2026-07-19 amendment corrects that** — a guard-returning `lock()`
+  hands back a public handle, so the ordinary `?Guard<secret T>` suffices and no
+  `OpenResult` is needed.
 - **ADR 0017 D8** — user-defined `fn drop(&mut self)` is out of scope pre-traits; this
   ADR deliberately does **not** introduce a general `Drop` trait, using a hard-coded
   drop-content arm for the two new runtime handle types instead.
@@ -309,6 +313,59 @@ adversarial verification** at implementation, and any change that let a secret r
 branch/index/divisor through a `Shared`/`Mutex` without a `secret_leak` rejection is a
 security bug → private report, not a public PR.
 
+**Amendment (2026-07-19, at M1.4c-1 implementation) — how D6.1/D6.2 were actually built,
+plus a correction to D4's secret `lock()` shape:**
+
+1. **D6.1's representability fix = pre-interned secret scalars at FIXED `SecretId`s.** The
+   root cause was sharper than "the interner rejects secrets": the container element maps
+   (`shared_id_for`/`mutex_id_for`/`guard_id_for`, and `channel_chanid_for`) are
+   **table-free** — they map a `Type` to a fixed id so a container type resolves without
+   threading an interner through the checker. A `Type::Secret(SecretId)` cannot participate
+   because a `SecretId` is assigned in source-encounter ORDER, so it is not a knowable
+   constant. Fix: pre-intern the secretable word-scalars (`i64`/`i32`/`u8`/`bool`,
+   `SECRET_SCALARS`) at fixed `SecretId`s 0..=3 before any other interning, and extend the
+   container maps with slots **6..=9**. `secret f64` is absent by design (a type error —
+   float ops are not constant-time) and `secret ptr` too (a secret address is itself a leak
+   vector). Interning those four unconditionally only fixes the secrets table's NUMBERING,
+   which is invisible to the differential: no dump iterates the interner tables, the dumps
+   render secrets structurally (`secret i64`, always passing the program — `<secret#N>` is a
+   no-program *diagnostic* fallback) and mangling is structural (`sec_{inner}`). Verified:
+   the only churn was one ui snapshot (`<secret#0>` → `<secret#2>`).
+2. **D4 CORRECTION — secret `lock()` returns the ordinary `?Guard<secret T>`, NOT an
+   `OpenResult`.** D4's `OpenResult` prescription predates the guard design (slice 2b-ii):
+   it was chosen because `?(secret T)` is unrepresentable, but `lock()` no longer returns the
+   value — it returns a **guard whose payload is the public mutex-cell handle**, and whose
+   valid bit is public control data (the lock outcome, D5). Only the protected element that
+   `*g` yields is secret. So `?Guard<secret T>` is directly representable and needs no new
+   shape: every guard pin, drop arm and deref is reused unchanged. A second divergent
+   `lock()` surface would have been pure cost.
+3. **D6.2's memory policy is applied PER CELL, page-refcounted.** The broker's arenas are
+   capacity-bounded slabs while these cells are individually heap-allocated and unbounded in
+   number, so the policy uses the broker's *primitives* (`lock_memory`/`secure_zero`, newly
+   exposed) rather than an arena: new runtime symbols `sentinel_shared_new_secret` /
+   `sentinel_mutex_new_secret` (abi 49→**51**) allocate a cell that is mlocked at birth, and
+   the rc==0 path volatile-zeroes its **value slot only** (the refcount/lock words are public
+   control data, and zeroing a live `parking_lot::Mutex`'s own state before dropping it would
+   be scribbling on a live object) exactly once, never per-clone. **mlock failure is
+   FAIL-CLOSED (abort)** — continuing would silently downgrade a security property.
+4. **Two hazards the adversarial review reproduced, and the fixes they forced.** Locking is
+   **page-refcounted** (lock on 0→1, unlock on 1→0) because `munlock`/`VirtualUnlock` are
+   page-granular and do **not** nest: the naive per-cell version unlocked the page holding a
+   freed cell's still-live secret SIBLINGS (4 of 5 in the repro), losing the very property
+   the birth-time lock aborts to preserve. And because each tiny cell pinned a whole page
+   while Windows caps `VirtualLock` by the ~150 KiB default minimum working set, the
+   fail-closed abort was reachable by ordinary programs (~4942 live cells); page-refcounting
+   plus `grow_locked_memory_budget` (`SetProcessWorkingSetSize`, the documented remedy) lifts
+   it — the repro now passes at 6000 and 50000 live cells. **Residual, stated honestly:** a
+   hard platform ceiling still exists, and pathologically scattered cells could still reach
+   it; the abort is now genuine exhaustion rather than ordinary load.
+5. **D6.3's honesty caveat, restated concretely.** The cells' bytes are locked and scrubbed,
+   but this does **not** hide a secret from co-resident code, and a value read out of a
+   container transits ordinary registers/stack slots that are **not** scrubbed. Lock
+   contention latency and the `LockTimeout`/deadlock deadlines remain **outside** the
+   README's constant-time boundary. What *is* guaranteed is unchanged and machine-checked:
+   the qualifier survives the container, so every downstream use is still `secret_leak`-checked.
+
 ### D7. Poisoning — v1 has no in-process poisoning case; reserve `LockPoisoned` for the future cross-process story. **PINNED.**
 
 Rust's `std::sync::Mutex` poisons when a holder panics mid-critical-section. Sentinel's
@@ -546,3 +603,83 @@ fixture (the tier is env-gated; the driver test owns end-to-end). Operational no
 this box: `cargo test` does NOT regenerate `target/debug/sentinel_runtime.lib` — a
 `cargo build` must precede any driver-test run after a runtime change, or snc links the
 stale staticlib.
+
+## M1.4c implementation log (secret containers)
+
+Status: **M1.4c-1 (snc-side) DONE 2026-07-19; the scg mirror is M1.4c-1b and the ADR
+stays PROPOSED for M1.4c until it lands.** `Channel<secret T>` is **M1.4c-2** (see below).
+
+### M1.4c-1 — `Shared<secret T>` / `Mutex<secret T>`, snc-side
+
+Delivers D6.1 (representability), D6.2 (memory policy) and the D4 correction, all
+detailed in the 2026-07-19 amendment above. Surface: a secret element is now spellable
+in `Shared`/`Mutex`/`Guard`; `shared_get`/`*g` return `secret T`; `lock()` yields the
+ordinary `?Guard<secret T>`. Codegen is erasure — the element ENCODES/DECODES as its
+inner scalar in both backends, and only the CONSTRUCTOR differs (the `_secret` symbol,
+abi 49→51). `is_spawn_word_scalar` already admitted `Shared`/`Mutex` element-agnostically,
+so capturing a secret container into a spawned worker came free.
+
+**Verification (D6's two named fixtures).** `examples/lang/secret_shared.sentinel` (exit
+42) is the positive one: its `secret i64` annotations only type-check while the container
+read PRESERVES the qualifier, and reaching a public exit code needs exactly one sanctioned
+`declassify` — so a compile *is* the invariant check. `tests/ui/c71_secret_mutex_branch`
+is the negative one: `if *g > 0` on a `Mutex<secret i64>` is still rejected
+(`sentinel::types::secret_branch` — the types stage catches an `if` on a secret condition
+before MIR's `secret_leak` sees it, which is also why that fixture is excluded from the
+types-stage differential corpus). Together they pin that the container did not become a
+laundering hole.
+
+**The adversarial review (5 lenses, 53 agents) confirmed 16 findings over 5 root causes —
+all fixed before commit, three of them reproduced.** The two page-locking hazards and their
+fixes are recorded in amendment point 4. The other three:
+- **CRITICAL — the oracle emitted INVALID IR.** `RuntimeSyms::merge` folds each function's
+  used-symbol flags into the module set; the two new `_secret` flags were never added to it,
+  so the `declare` lines were dropped while the calls were emitted. `llvm-as` rejects the
+  result — on this change's own fixture. Invisible to the suite (the corpus had no secret
+  fixture, and the smoke test only asserts an exit code), so it would have shipped and then
+  detonated in the scg mirror slice. Fixed + verified by assembling the oracle dump.
+- **MEDIUM — UB in the `Shared` scrub:** it wrote through a pointer derived from a *shared*
+  reference to a non-`UnsafeCell` field, violating `secure_zero`'s own contract; now derived
+  from the raw pointer. (The `Mutex` side is fine — its slot is inside `parking_lot`'s own
+  `UnsafeCell`, and `data_ptr()` is the sanctioned accessor.)
+- **MEDIUM — the policy was unasserted:** deleting the scrub arms passed the entire suite.
+  Three tests now pin page-refcounting, the secret flag's effect, and a large live
+  population. They serialize on the process-global page table — a race the same review
+  surfaced (53/53 alone, 51/53 under load).
+
+⚠ **Review-hygiene note for future sessions:** the review's mutation pass left two planted
+`if false` guards in the working tree (disabling BOTH scrub arms) and a scratch test dir.
+They were caught by a pre-commit diff audit. **Always grep the diff for `if false`/`MUTANT`/
+scratch files after a mutation-testing review** — a disabled security scrub is exactly the
+kind of change that passes every test.
+
+### M1.4c-1b (NEXT) — the scg mirror: element-generic containers
+
+`c71_secret_shared` cannot enter the differential corpus yet: **scg has no element-generic
+container path at all.** Its `builtin_ret` (`selfhost/types/interner.sentinel`) and its
+`Shared<…>`/`Mutex<…>` annotation arm both hardcode the i64 element handle (0), so this is
+the FIRST corpus-bound container with a non-i64 element. The demonstrator therefore lives
+in `examples/` (outside the differential) per the M2.3b / M1.2b-cont precedent, and the
+mirror is its own slice. Its four sites are already mapped:
+1. **Call typing** — a `dump_container_call` helper (mirroring `dump_apply_call`'s
+   "type is dynamic, decoded from the concrete arg's own interned handle" shape) dispatched
+   from `dump_te_call` for FnIds 38/39/40/41: `shared_new(v) -> mk_shared(elem_of_arg)`,
+   `shared_get(s) -> ta[s]`, `mutex_new`, `lock -> mk_nullable(mk_guard(ta[m]))`. scg's
+   interner is STRUCTURAL (`intern_type(kind, elem, 0)`), so `Shared<secret i64>` is natively
+   expressible and `render_type` already recurses correctly — this is threading, not new
+   representation.
+2. **cg** (`cg_effects.sentinel` fids 38/40) — choose the `_secret` symbol when the return
+   type's element is a secret (kind 3), reading it off the `rt` handle already passed in.
+3. **Declare group** — `cg_used_sharednewsecret`/`cg_used_mutexnewsecret` fields + tyctx
+   init + declare lines + the `cg_anydecl` OR-chain.
+4. **Deref decode** — the `*g` arm must strip the secret before its i64-only gate.
+Once green, move the fixture back to `tests/pass/` (satisfying D6's "a `tests/pass` fixture"
+requirement literally) and flip the ADR to ACCEPTED for M1.4c.
+
+### M1.4c-2 (deferred) — `Channel<secret T>`
+
+D6.1's fix also unblocks it (`channel_chanid_for` gains the same secret slots), but its
+memory-policy story is genuinely different and deserves its own decision: a channel's
+in-transit values sit in `std::sync::mpsc` queue nodes that Sentinel does not allocate, so
+they can be neither mlocked nor scrubbed without replacing the queue. Deferred rather than
+bundled.

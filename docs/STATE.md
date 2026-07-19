@@ -14,7 +14,52 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
-**Latest (2026-07-17) — ADR 0071 M1.4b (`Mutex<T>`) COMPLETE: slice 4 lands the D5a opt-in
+**Latest (2026-07-19) — ADR 0071 M1.4c-1: SECRET shared state (`Shared<secret T>` /
+`Mutex<secret T>`, D6) works snc-side; the scg mirror (M1.4c-1b) is next and the ADR stays
+PROPOSED for M1.4c.** The representability fix is sharper than "the interner rejects secrets":
+the container element maps (`shared_id_for`/`mutex_id_for`/`guard_id_for`) are **table-free**, so
+they need an element's interner id to be a knowable CONSTANT — which a source-encounter-ordered
+`SecretId` is not. Fix: **pre-intern the secretable word-scalars (`i64`/`i32`/`u8`/`bool`) at
+FIXED `SecretId`s 0..=3** before any other interning, and give the container maps slots **6..=9**.
+`secret f64` stays a type error (float ops aren't constant-time); `secret ptr` is excluded (a
+secret address is itself a leak vector). The renumbering is invisible to the differential —
+verified, not assumed: no dump iterates the interner tables, dumps render secrets structurally
+(`secret i64`; `<secret#N>` is a no-program *diagnostic* fallback) and mangling is structural —
+the only churn was one ui snapshot. **D4 CORRECTION: secret `lock()` returns the ORDINARY
+`?Guard<secret T>`, not the ADR's `OpenResult`** — that text predates the guard design; the
+guard's payload is the PUBLIC cell handle and the valid bit is public control data (D5), so only
+`*g`'s element is secret and every guard pin/drop/deref is reused unchanged. **D6.2 memory
+policy, per cell:** new runtime symbols `sentinel_shared_new_secret`/`sentinel_mutex_new_secret`
+(abi 49→**51**) allocate a cell mlocked at birth whose VALUE SLOT ONLY is volatile-zeroed at the
+last drop (never per-clone); mlock failure is FAIL-CLOSED. Codegen is erasure — the element
+encodes/decodes as its inner scalar in both backends, only the CONSTRUCTOR differs. **The
+mandatory adversarial review (5 lenses, 53 agents) confirmed 16 findings over 5 root causes, ALL
+fixed pre-commit, three reproduced:** (1) **CRITICAL** — `RuntimeSyms::merge` dropped the two new
+flags, so the `snc llvm` ORACLE emitted calls to UNDECLARED symbols (invalid IR that `llvm-as`
+rejects, on this change's own fixture) and no test could see it; (2) **HIGH** — `munlock` is
+page-granular and does NOT nest, so freeing one 24-byte cell unlocked the page holding its
+still-live secret siblings → locking is now **page-refcounted**; (3) **HIGH** — the fail-closed
+abort was reachable by ordinary programs (~4942 live cells, since each tiny cell pinned a page
+and Windows caps `VirtualLock` by the ~150 KiB default working set) → page-refcounting +
+`grow_locked_memory_budget` lifts it, the repro now passing at 6000 AND 50000 cells; plus UB in
+the `Shared` scrub (a write through a shared-reference-derived pointer) and an unasserted policy
+(deleting the scrub passed the whole suite → three new tests, serialized on the global page
+table after the review surfaced a 53/53-alone vs 51/53-under-load race). ⚠ The review's mutation
+pass also left two planted `if false` guards DISABLING both scrub arms in the working tree, caught
+by a pre-commit diff audit — always grep a post-review diff for `if false`/`MUTANT`/scratch files.
+Fixtures: `examples/lang/secret_shared.sentinel` (exit 42 — its `secret i64` annotations only
+type-check while the container read preserves the qualifier, so a compile IS the invariant check)
+and ui `c71_secret_mutex_branch` (branching on `*g` of a `Mutex<secret i64>` is still REJECTED —
+the proof the container is not a laundering hole). **Scope: snc-side.** scg has no element-generic
+container path (its `builtin_ret` and annotation arm hardcode the i64 element handle), so this is
+the first non-i64 container element; the demonstrator lives in `examples/` (outside the
+differential) per the M2.3b/M1.2b-cont precedent, and **the scg mirror is the next slice** (its
+four sites are mapped in the ADR log). Four-check green (18 known Windows failures, zero new;
+runtime 47→53, types 268→273, examples 55→56); all 9 differential stages byte-identical.
+**Next: M1.4c-1b (the scg mirror) → then M1.4c-2 (`Channel<secret T>`, whose in-transit mpsc
+queue nodes can be neither mlocked nor scrubbed without replacing the queue — its own decision).**
+
+**Earlier (2026-07-17) — ADR 0071 M1.4b (`Mutex<T>`) COMPLETE: slice 4 lands the D5a opt-in
 `Deadlock` wait-for-graph tier (runtime-only, non-oracle-moving) — the ADR flips to ACCEPTED
 for M1.4b.** Opt-in via the **`SENTINEL_DEADLOCK_DETECT`** env var (read once per process;
 on = anything but empty/`0`; maintainer-pinned over a `--detect-deadlocks` driver flag, which

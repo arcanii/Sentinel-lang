@@ -51,61 +51,62 @@ reference as you work through the milestones.
 
 ---
 
-### ▶ RESUME HERE (2026-07-17 — M1.4b `Mutex<T>` COMPLETE: slice 4 (the D5a opt-in `Deadlock` wait-for-graph tier) DONE, runtime-only + non-oracle-moving; ADR 0071 now ACCEPTED for M1.4b; next is M1.4c — secret `Shared<secret T>`/`Mutex<secret T>` (D6))
+### ▶ RESUME HERE (2026-07-19 — M1.4c-1 DONE snc-side: secret `Shared<secret T>`/`Mutex<secret T>` (D6) — next is **M1.4c-1b, the scg mirror** (element-generic containers), which is what flips ADR 0071 to ACCEPTED for M1.4c)
 
-> **▶▶ SLICE 4 LANDED — the D5a opt-in `Deadlock` tier** (pure `sentinel-runtime` change;
-> zero compiler/IR/ABI surface — abi count stays 49, the differential untouched by
-> construction). Opt-in via **`SENTINEL_DEADLOCK_DETECT`** (env var, read once per process,
-> on = anything but empty/`0`); a blocking `lock()`/`try_lock_for` cycle-checks a
-> process-wide wait-for graph (holders: cell addr → `ThreadId`; waits: thread →
-> (awaited addr, expiry `Instant`)) behind a lazy `OnceLock<parking_lot::Mutex<..>>`; a
-> detected cycle returns the EXISTING `LockTimeout`/null arm IMMEDIATELY + the cycle on
-> stderr (`deadlock detected` prefix). Maintainer-pinned forks (recorded as the ADR-0071
-> **D5 amendment**): env var over a `--detect-deadlocks` driver flag (a flag would be
-> oracle-moving for a debug tier; the broker "--record" precedent is an in-crate option,
-> not a CLI flag); null-arm fold over a new typed `Deadlock` status (in-language,
-> `LockTimeout` itself only surfaces as the `?Guard` null arm).
+> **▶▶ M1.4c-1 LANDED (snc-side)** — commit `248a6f0`. Secret containers work end-to-end
+> through inkwell + the `snc llvm` oracle. Full design rationale is the ADR's 2026-07-19
+> amendment + the M1.4c implementation log; STATE.md's Latest entry carries the summary.
+> The four design forks were resolved on my recommendations (the maintainer dismissed the
+> question dialog and said "resume") and are recorded as ADR amendments — **overturnable**:
+> `?Guard<secret T>` over `OpenResult`; broker primitives per-cell over a broker arena;
+> `Shared`+`Mutex` now with `Channel<secret T>` as M1.4c-2; elements i64/i32/u8/bool.
 >
-> **⚠ The pre-commit adversarial review (5 lenses + mutation testing) caught a REAL false
-> positive:** a timed-out waiter's **stale wait edge** (retired only after `try_lock_for`
-> returns) let another thread's walk close a phantom cycle → spurious null arm + false
-> stderr diagnosis. **Closed by deadline-stamping the wait edges** — `find_cycle(now)`
-> treats an expired edge as absent (an unexpired edge is a true commitment; the residual
-> direction is a benign missed detection, backstopped by the always-on 10s `LockTimeout`).
-> Non-blocking tries (`timeout ≤ 0`) neither check nor publish. The review's mutation pass
-> also drove four new tests (the detect-on TIMEOUT arm; contended-handoff holder-edge
-> integrity; the release-path scrub via a `mutex_release_impl(m, detect)` seam; the env
-> parse's FALSE side via `deadlock_env_value_on`) — unit tests exercise detection through
-> `mutex_try_lock_for_impl(.., detect)` seams (the env gate `OnceLock`-freezes per
-> process); the env wiring end-to-end is the driver test
-> `crates/sentinel-driver/tests/deadlock.rs` (compiled self-deadlock program, exit 42 via
-> the null arm, <8s vs the 10s deadline, cycle on stderr).
+> **THE KEY MECHANISM** (read before touching this): the container element maps are
+> TABLE-FREE, so an element's interner id must be a knowable CONSTANT — which a
+> source-encounter-ordered `SecretId` is not. Hence the secretable scalars are pre-interned
+> at FIXED `SecretId`s 0..=3 (`SECRET_SCALARS`, interned FIRST in `check_program`), with
+> container slots 6..=9 (`secret_scalar_slot`/`secret_elem_for_slot`). Verified invisible to
+> the differential (dumps render secrets structurally; mangling is structural; no dump
+> iterates the interner tables) — the only churn was `<secret#0>`→`<secret#2>` in one ui snap.
 >
-> Verified: four-check green (18 known Windows failures, zero new; runtime units 39→47;
-> `pass` 148/148; all 9 self-host differential stages + both bootstrap fixed points green).
-> **Box gotcha:** `cargo test` does NOT regenerate `target/debug/sentinel_runtime.lib` —
-> run `cargo build` (workspace or `-p sentinel-runtime`) before any driver-test run after
-> a runtime change, or `snc` links the STALE staticlib (cost a debugging round this
-> session).
+> **▶ NEXT — M1.4c-1b: the scg mirror (element-generic containers).** `c71_secret_shared`
+> cannot enter the differential corpus because **scg has NO element-generic container path**:
+> `builtin_ret` (`selfhost/types/interner.sentinel` ~1471-1485) and the `Shared<…>`/`Mutex<…>`
+> annotation arm (~1282-1300) both hardcode the i64 element handle `0`. This is the first
+> corpus-bound container with a non-i64 element, so the demonstrator sits in `examples/`
+> (outside the differential) per the M2.3b/M1.2b-cont precedent. **The four sites are already
+> mapped (full detail in the ADR's M1.4c log):**
+>   1. **Call typing** — a `dump_container_call` helper mirroring `dump_apply_call`'s
+>      "dynamic type decoded from the concrete arg's own handle" shape (`infer.sentinel`),
+>      dispatched from `dump_te_call` (`borrow_arms.sentinel` ~1013, beside the `fid == 37`
+>      arm) for FnIds 38/39/40/41. scg's interner is STRUCTURAL
+>      (`intern_type(kind, elem, 0)`) and `render_type` already recurses, so
+>      `Shared<secret i64>` is natively expressible — this is threading, not new machinery.
+>      Element accessors: `(*c).tk[h]` = kind (secret = 3), `(*c).ta[h]` = element handle.
+>   2. **cg** (`cg_effects.sentinel` fids 38/40) — pick the `_secret` symbol when the
+>      element of the already-passed `rt` handle is kind 3.
+>   3. **Declare group** — `cg_used_sharednewsecret`/`cg_used_mutexnewsecret` + tyctx init +
+>      declare lines + the `cg_anydecl` OR-chain (⚠ that chain is easy to forget).
+>   4. **Deref decode** — the `*g` arm must strip the secret before its i64-only gate.
+> Then move the fixture back to `tests/pass/` (satisfying D6's literal "a `tests/pass`
+> fixture" requirement) and flip the ADR to ACCEPTED for M1.4c.
 >
-> **NEXT — M1.4c: secret `Shared<secret T>` / `Mutex<secret T>` (ADR 0071 D6).**
-> Security-relevant (extra adversarial verification is mandatory; a secret reaching a
-> branch/index/divisor without a `secret_leak` rejection = security bug → private report).
-> The three D6-pinned pieces: (1) the container-interner secret-representability fix
-> (`channel_chanid_for` returns `None` for `Type::Secret`, the annotation resolver rejects
-> secret elements — closing this ALSO unblocks `Channel<secret T>`); (2) broker-backed
-> `mlock` + zero-on-free allocation for the secret cell (pluggable allocator; zeroed
-> exactly once at the last drop); (3) the `OpenResult`-shaped secret `lock()` (`?(secret
-> T)` is unrepresentable — no `NullableInner::Secret`). Plus D6's two named fixtures: a
-> `tests/pass` proving `lock()`/read does NOT strip the secret qualifier, and a `tests/ui`
-> proving a secret branch inside a lock-holding fn is still rejected. Honesty caveat (D6.3):
-> document that contention latency/timeouts are OUTSIDE the CT boundary — do not over-claim.
+> ⚠ **REVIEW-HYGIENE LESSON (cost real time, will recur):** the adversarial review's mutation
+> pass left two planted `if false` guards in the working tree that DISABLED BOTH secret-scrub
+> arms, plus a scratch test dir. A pre-commit diff audit caught them. **After any
+> mutation-testing review, grep the diff for `if false` / `MUTANT` / stray files before
+> committing** — a silently disabled security scrub passes every test.
 >
-> **Also open on the M1.4 track:** the FULL ADR-D3 guard no-escape (outer-scope guard-VAR
-> reshuffles) + a `& *g` guard-borrow lifetime model — deferred hardening beyond the
-> conservative pins; the named-`Shared`-return exemption (`SharedReturnNotSupported`).
+> ⚠ **BOX GOTCHA (unchanged):** `cargo test` does NOT regenerate
+> `target/debug/sentinel_runtime.lib` — run `cargo build` after ANY runtime change or snc
+> links the STALE staticlib.
 >
-> Interner kinds: Shared = 17, Mutex = 18, Guard = 19; next free = 20.
+> HANDOFF STATE: four-check green (18 known Windows failures, zero new; runtime 47→53, types
+> 268→273, examples 55→56, ui 45→46); all 9 differential stages byte-identical, both bootstrap
+> fixed points hold; working tree clean. abi count **51**. Interner kinds: Shared=17, Mutex=18,
+> Guard=19; next free = 20. Secret container slots: 6..=9 (i64/i32/u8/bool).
+
+> **▶ (archived) M1.4b COMPLETE — slice 4, the D5a opt-in `Deadlock` wait-for-graph tier** (feat `36ad1af` + docs `a82e994`); ADR 0071 ACCEPTED for M1.4b. Runtime-only + non-oracle-moving (abi stayed 49): opt-in via `SENTINEL_DEADLOCK_DETECT`; a detected cycle returns the EXISTING `?Guard` null arm immediately + a stderr cycle report; wait edges are DEADLINE-STAMPED after the review caught a stale-edge false positive. Full detail in the ADR's D5 amendment + implementation log.
 
 > **▶ (archived) slice 3c (`*g` guard deref, feat `06eba8d` + docs `7148eaa`)** — full detail
 > in the **ADR 0071 M1.4b implementation log** + STATE.md's 2026-07-16 entry. Key facts:
