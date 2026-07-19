@@ -14,6 +14,34 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
+**Latest (2026-07-19) — the self-host differential's REAL-PROGRAM blind spot is closed; it
+immediately found 2 previously-unknown `scg` bugs.** The differential swept only
+`tests/pass` + `tests/ui` — single-file fixtures exercising one construct each — so
+divergence in real multi-module programs was structurally invisible. `selfhost_codegen.rs`
+gains `sentinel_codegen_matches_oracle_on_real_programs`, sweeping `examples/`,
+`sentinel_library/` and `tools/`; it stages `sentinel_library/` into the work dir (the
+`examples.rs` `assemble()` approach) so `use std::…` resolves for the ORACLE and for scg's
+own self-hosted discover+merge alike — which is what gets **48 real programs emitting**
+(an ad-hoc `SNC_LIB_PATH` sweep reached only 14). Every divergence must now be fixed or
+REGISTERED in one of two deliberately-separate lists — conflating "not ported yet" with
+"wrong" is the very problem being fixed: **`DEFERRED_PROGRAMS`** (7 ADR-documented feature
+gaps: `fn_value`/`fn_value_generic` ADR 0070, the three `sealed_*` ADR 0069,
+`channel_generic` ADR 0066 M1.2b-cont, `process_channel_typed` M2.3b) and
+**`KNOWN_SCG_BUGS`** (real defects, carrying their diagnosis). A registered program is
+still RUN, and one that starts MATCHING fails the test, so neither list can rot into a
+silent exemption. **The two bugs it found on its first run:** (1) scg's merge handles
+`extern "C"` imports BACKWARDS — it module-qualifies the extern IMPORT
+(`define @std$sys$posix$getpid`) and leaves the real function bare (`define @pid`), so the
+caller finds no `@std$sys$posix$pid` and emits **NO CALL AT ALL**, producing IR that does
+not even assemble (`llvm-as`: `'%v0' defined with type 'ptr' but expected 'i64'`); `uid()`
+in the same module is fine, so it is extern-specific. (2) scg omits the module prefix on
+class/impl symbols (`@Logged__init` vs `@input$Logged__init`) — same instruction shape,
+wrong symbol names, a cross-module collision hazard. Both are tracked as tasks; both are
+invisible to `tests/pass` by construction. ⚠ **The same blind spot still applies to the
+other stages** (types/mir/borrow/effects/resolve all use the fixture-only
+`collect_fixtures`) — extending them is the obvious follow-on. Clippy clean; the full
+suite shows exactly the 18 known Windows failures, zero new.
+
 **Latest (2026-07-19) — ADR 0071 M1.4c COMPLETE (M1.4c-1 snc-side + M1.4c-1b the scg mirror):
 SECRET shared state (`Shared<secret T>` / `Mutex<secret T>`, D6) is implemented AND
 self-hosted byte-identically; the ADR is ACCEPTED for M1.4c.** The mirror made scg's

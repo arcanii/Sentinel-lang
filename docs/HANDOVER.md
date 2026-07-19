@@ -93,6 +93,30 @@ reference as you work through the milestones.
 > rvalue). Same class as the `mvbv` compound-tail leak behind `SharedReturnNotSupported` —
 > **if you touch `mvbv` consumers, check for nested-Var leakage.**
 >
+> **▶ SEPARATE TRACK — the self-host differential blind spot is now CLOSED (`d8552c9`).**
+> The differential swept only `tests/pass` + `tests/ui` (single-construct fixtures), so
+> divergence in REAL programs was structurally invisible. `selfhost_codegen.rs` gained
+> `sentinel_codegen_matches_oracle_on_real_programs`, sweeping `examples/`,
+> `sentinel_library/` and `tools/` — it stages `sentinel_library/` into the work dir (the
+> `examples.rs` `assemble()` approach) so `use std::…` resolves for the oracle AND scg's
+> own merge, which is what gets **48 real programs emitting** (an ad-hoc `SNC_LIB_PATH`
+> pass reached only 14). Divergences must be fixed or REGISTERED in one of two
+> deliberately-separate lists: `DEFERRED_PROGRAMS` (7 ADR-documented feature gaps) and
+> `KNOWN_SCG_BUGS` (real defects). A registered program is still run, and one that starts
+> MATCHING fails the test, so neither list can rot.
+>
+> **It found 2 REAL scg bugs on its first run, neither previously known** (both have
+> spawned tasks): (1) **`extern "C"` merge mis-renaming** — scg qualifies the extern
+> IMPORT (`@std$sys$posix$getpid`) and leaves the real fn bare (`@pid`), so the caller
+> emits **NO CALL AT ALL** and the IR **does not assemble** (`store i64 %v0, ptr %v0`);
+> minimal repro is in the test's comment, and `uid()` in the same module is fine, so it is
+> extern-specific. (2) **class/impl symbols lose the module prefix** (`@Logged__init` vs
+> `@input$Logged__init`) — a cross-module collision hazard.
+>
+> ⚠ **The same blind spot still applies to the OTHER stages** (types/mir/borrow/effects/
+> resolve differentials all use the fixture-only `collect_fixtures`). Extending them the
+> same way is the obvious follow-on.
+>
 > **▶ NEXT on this track — M1.4c-2: `Channel<secret T>`.** D6.1's fix already unblocks the
 > typing side (`channel_chanid_for` gains the same secret slots 6..=9). What needs its own
 > decision is the memory policy: a channel's IN-TRANSIT values sit in `std::sync::mpsc` queue
