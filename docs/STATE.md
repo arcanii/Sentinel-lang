@@ -14,6 +14,37 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
+**Latest (2026-07-19) — three scg merge miscompiles fixed, and the differential now checks
+that emitted IR is VALID, not merely byte-equal.** An adversarial review FALSIFIED the first
+attempt at the extern fix: repairing the merge's rename pass was necessary but not sufficient,
+and the half it missed was worse. **(1) extern blocks:** `emit_item` had no `extern` arm, so a
+block's BODYLESS decls reached `emit_fn_decl`, which parses a block that is not there and
+**deleted the following declaration** — producing a loud miscompile (`ret i64 %v0`, `%v0` never
+defined) and a **silent** one (`getpid() + getuid()` emitting `add i64 %v0, %v0`: it assembled,
+ran, and returned the wrong answer). Extern blocks are now skipped as a unit, matching the Rust
+merge exactly, and the silent case is gone (LLVM rejects it). `build_rename` also no longer
+records foreign C symbols as module names, and `skip_to_item_end` ends a bodyless decl at its
+`;`. **(2) effects:** the type-decl arm now records `effect` (57). The importing module already
+rewrote its reference, so omitting the DECLARATION made the merged text disagree with itself
+(`perform Io.read()` vs `handle io$Io.read(k)`); the op-id lookup missed, no arm matched, and
+control fell into `unreachable` — the oracle's binary exits 42 where scg's **traps**. Same-named
+effects in two modules also collapsed to one op id. **(3) trait/class** qualification (earlier
+the same day) took delegation from 36 diff lines to 8. **The differential now assembles scg's
+output with `llvm-as`** — byte-comparison alone could never see invalid IR. The check is
+DIFFERENTIAL (scg is at fault only when the ORACLE verifies and scg does not) because it
+immediately showed **the hand-maintained text oracle itself emits invalid IR for ~30 programs**
+— shift-operand width mismatches (`shl i32 %v4, %v7` with an i64 amount) across every
+chacha20/ssh/ct example, which scg faithfully mirrors. That is an ORACLE defect (filed
+separately); inkwell is unaffected, so those programs compile and run correctly — but the text
+oracle is the ground truth the whole self-host effort is verified against, so its own IR being
+unassemblable is a real hole in the verification story. The check also showed the two
+generic-channel deferrals are worse than "not ported": scg passes an `i8` where the runtime
+takes an `i64` (a missing zext encode). Residuals, both registered with narrowed diagnoses:
+`process_ids` 4 lines (scg has no `extern "C"` support in types/codegen) and `delegation` 8
+lines (a NAMED impl's own name — recording it in the merge makes scg crash, so it needs the
+downstream impl-name lookup fixed in the same change). All 9 stages byte-identical, both
+bootstrap fixed points green.
+
 **Latest (2026-07-19) — the self-host differential's REAL-PROGRAM blind spot is closed; it
 immediately found 2 previously-unknown `scg` bugs.** The differential swept only
 `tests/pass` + `tests/ui` — single-file fixtures exercising one construct each — so
