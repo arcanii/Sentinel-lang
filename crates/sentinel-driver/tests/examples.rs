@@ -483,6 +483,14 @@ const EXAMPLES: &[(&str, i32)] = &[
     // unaddressed; no channel-of-channels, no select to correlate them). Runs
     // only because the checked result is order-independent. 7 requests *+6 = 42.
     ("examples/lang/shared_sequence_via_channel.sentinel", 42),
+    // ADR 0071 M1.4c (D6): SECRET shared state — `Shared<secret T>` /
+    // `Mutex<secret T>`. Proves D6's named invariant (a container read does NOT
+    // strip the `secret` qualifier) end-to-end; the sibling ui fixture
+    // `c71_secret_mutex_branch` proves the `secret_leak` rejection still fires on
+    // a value read out of a lock. snc-side while the scg mirror (the FIRST
+    // non-i64 container element in the self-host) lands — the M2.3b/M1.2b-cont
+    // precedent for a generalized element. 30 + (6*2) = 42.
+    ("examples/lang/secret_shared.sentinel", 42),
     // ADR 0066 M2.3b: GENERIC word-scalar elements for the typed process channel —
     // `process_send`/`process_recv` over `u8` / `i32` / `bool` (not just `i64`),
     // encoded into / decoded from the 8-byte i64 frame (the M1.1 spawn encode). The
@@ -812,6 +820,16 @@ fn lang_shared_counter_via_channel() {
         "shared_counter_via_channel",
         42,
     );
+}
+
+#[test]
+fn lang_secret_shared() {
+    // ADR 0071 M1.4c (D6): secret shared state. The `secret i64` annotations in
+    // the program only type-check while the container read PRESERVES the
+    // qualifier, so a compile is itself the invariant check; the exit code proves
+    // the mlocked cells (D6.2) read/write correctly under the lock. Reaching 42
+    // needs exactly one sanctioned `declassify` (the exit code is public output).
+    check_example("examples/lang/secret_shared.sentinel", "secret_shared", 42);
 }
 
 #[test]

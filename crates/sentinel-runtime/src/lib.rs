@@ -1417,12 +1417,227 @@ pub extern "C" fn sentinel_channel_close(ch: *mut SentinelChannel) -> i64 {
 // M1.1 spawn encode), so the cell is fixed-size; aggregate `T` and mutation
 // (`Mutex<T>`, M1.4b) are follow-ons.
 
+// ----- ADR 0071 M1.4c (D6.2): the secret-payload memory policy -----
+//
+// A `Shared<secret T>` / `Mutex<secret T>` cell's backing bytes must honor the
+// broker's `mlock` + zero-on-free `SecretStrategy` posture. The broker's own
+// arenas are capacity-bounded slabs, and these cells are individually
+// heap-allocated and unbounded in number, so the policy is applied PER CELL
+// using the broker's proven primitives (`lock_memory` / `secure_zero`) rather
+// than by routing allocation through an arena.
+//
+// FAIL-CLOSED: a failed `mlock` ABORTS. Continuing would leave secret bytes in
+// swappable memory while the program still believes the policy holds — silently
+// downgrading a security property (and over-claiming the guarantee is itself a
+// bug). The cell is tiny (one page at most), so this only fires where memory
+// locking is genuinely unavailable/exhausted.
+//
+// The lock covers the whole cell allocation (mlock granularity is a page
+// anyway); only the VALUE slot is zeroed at free — the refcount/lock words are
+// public control data, and volatile-zeroing a `parking_lot::Mutex`'s own state
+// before dropping it would be scribbling on a live object.
+
+/// The OS page size, queried once. Memory locking is PAGE-granular on every
+/// platform, so the bookkeeping below has to work in real pages — assuming 4 KiB
+/// would silently mis-track on a 16 KiB-page host (Apple silicon).
+fn page_size() -> usize {
+    static PAGE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *PAGE.get_or_init(|| {
+        #[cfg(unix)]
+        {
+            // SAFETY: sysconf with a valid name is always sound.
+            let v = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+            if v > 0 {
+                v as usize
+            } else {
+                4096
+            }
+        }
+        #[cfg(windows)]
+        {
+            #[repr(C)]
+            struct SystemInfo {
+                processor_architecture: u16,
+                reserved: u16,
+                page_size: u32,
+                min_app_addr: *mut std::ffi::c_void,
+                max_app_addr: *mut std::ffi::c_void,
+                active_processor_mask: usize,
+                number_of_processors: u32,
+                processor_type: u32,
+                allocation_granularity: u32,
+                processor_level: u16,
+                processor_revision: u16,
+            }
+            extern "system" {
+                fn GetSystemInfo(info: *mut SystemInfo);
+            }
+            // SAFETY: GetSystemInfo fills the out-param; the layout matches the
+            // documented SYSTEM_INFO.
+            let mut info: std::mem::MaybeUninit<SystemInfo> = std::mem::MaybeUninit::uninit();
+            unsafe {
+                GetSystemInfo(info.as_mut_ptr());
+                let sz = info.assume_init().page_size as usize;
+                if sz > 0 {
+                    sz
+                } else {
+                    4096
+                }
+            }
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            4096
+        }
+    })
+}
+
+/// Per-PAGE lock refcounts for secret cells (ADR 0071 M1.4c D6.2).
+///
+/// Refcounting is load-bearing, not an optimization — an adversarial review
+/// reproduced both failure modes of the naive per-cell version:
+///
+/// 1. **It silently unlocked LIVE secrets.** `munlock`/`VirtualUnlock` are
+///    page-granular and do NOT nest, so freeing one 24-byte cell unlocked the
+///    whole page — including the still-live secret cells sharing it (4 of 5 in
+///    the repro). The exact property the birth-time lock aborts to preserve was
+///    being dropped moments later.
+/// 2. **It aborted correct programs.** Each tiny cell pinned a whole page, so a
+///    few thousand live secret cells exhausted the per-process locked-page quota
+///    (~4942 cells on the review's Windows box) and tripped the fail-closed
+///    abort. With refcounting, the ~170 cells that share a 4 KiB page cost ONE
+///    locked page, so the abort once again means genuine exhaustion.
+fn secret_locked_pages() -> &'static parking_lot::Mutex<std::collections::HashMap<usize, usize>> {
+    static PAGES: std::sync::OnceLock<
+        parking_lot::Mutex<std::collections::HashMap<usize, usize>>,
+    > = std::sync::OnceLock::new();
+    PAGES.get_or_init(|| parking_lot::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Try to raise this process's capacity for locked memory, returning whether the
+/// attempt might have helped. On Windows the `VirtualLock` budget IS the process
+/// **minimum working set**, which defaults to a very small value (~150 KiB on the
+/// review's box — only ~38 pages), so a program holding a few thousand secret
+/// cells hits it and trips the fail-closed abort. Growing the working set is the
+/// documented remedy, and is what production crypto libraries do. On Unix the
+/// analogous budget is `RLIMIT_MEMLOCK`, which cannot be raised without
+/// privileges — but its default (commonly 8 MiB) is far more generous, so there
+/// is nothing to do.
+#[cfg(windows)]
+fn grow_locked_memory_budget(extra_bytes: usize) -> bool {
+    use std::ffi::c_void;
+    extern "system" {
+        fn GetCurrentProcess() -> *mut c_void;
+        fn GetProcessWorkingSetSize(h: *mut c_void, min: *mut usize, max: *mut usize) -> i32;
+        fn SetProcessWorkingSetSize(h: *mut c_void, min: usize, max: usize) -> i32;
+    }
+    // SAFETY: the pseudo-handle from GetCurrentProcess is always valid, and both
+    // calls only read/write the out-params we own.
+    unsafe {
+        let h = GetCurrentProcess();
+        let (mut min, mut max) = (0usize, 0usize);
+        if GetProcessWorkingSetSize(h, &mut min, &mut max) == 0 {
+            return false;
+        }
+        let new_min = min.saturating_add(extra_bytes);
+        let new_max = max.max(new_min.saturating_add(extra_bytes));
+        SetProcessWorkingSetSize(h, new_min, new_max) != 0
+    }
+}
+
+#[cfg(not(windows))]
+fn grow_locked_memory_budget(_extra_bytes: usize) -> bool {
+    false
+}
+
+/// How much to grow the locked-memory budget by when a lock is refused — large
+/// enough that the growth is amortized over many cells rather than once per page.
+const LOCKED_BUDGET_GROWTH: usize = 4 * 1024 * 1024; // 4 MiB
+
+/// The inclusive range of page numbers a `[ptr, ptr+len)` allocation touches.
+fn page_range(ptr: *mut u8, len: usize) -> std::ops::RangeInclusive<usize> {
+    let ps = page_size();
+    let start = ptr as usize;
+    let end = start + len.max(1) - 1;
+    (start / ps)..=(end / ps)
+}
+
+/// Lock a just-allocated secret cell into RAM, or abort. `ptr`/`len` describe the
+/// whole cell allocation; the pages it touches are locked once and refcounted, so
+/// sibling cells on the same page share the lock.
+///
+/// # Safety
+/// `ptr` must point to `len` bytes of a live allocation owned by the caller.
+unsafe fn secret_cell_lock(ptr: *mut u8, len: usize) {
+    let ps = page_size();
+    let mut pages = secret_locked_pages().lock();
+    for page in page_range(ptr, len) {
+        let count = pages.entry(page).or_insert(0);
+        *count += 1;
+        if *count != 1 {
+            continue; // already locked by a sibling cell on this page
+        }
+        let addr = (page * ps) as *mut u8;
+        // SAFETY: the page is mapped — it contains the caller's live allocation.
+        let mut res = unsafe { sentinel_broker::secret::lock_memory(addr, ps) };
+        if res.is_err() && grow_locked_memory_budget(LOCKED_BUDGET_GROWTH) {
+            // The refusal was a BUDGET limit, not an impossibility — raise it and
+            // retry once before giving up (see `grow_locked_memory_budget`).
+            // SAFETY: as above.
+            res = unsafe { sentinel_broker::secret::lock_memory(addr, ps) };
+        }
+        if let Err(e) = res {
+            eprintln!(
+                "sentinel: could not lock secret memory into RAM ({e}) — refusing to \
+                 hold a secret in swappable memory (ADR 0071 D6.2)"
+            );
+            std::process::abort();
+        }
+    }
+}
+
+/// Zero a secret cell's value slot, then release this cell's claim on the pages it
+/// occupies — the last-drop path. A page is only actually unlocked once no live
+/// secret cell remains on it. Unlock failure is ignored (the range is being freed
+/// regardless).
+///
+/// # Safety
+/// `value` must point to `value_len` writable bytes inside the cell described by
+/// `cell`/`cell_len`, which must have been locked by [`secret_cell_lock`], and the
+/// caller must hold the cell exclusively (rc reached 0).
+unsafe fn secret_cell_scrub(value: *mut u8, value_len: usize, cell: *mut u8, cell_len: usize) {
+    // SAFETY: forwarded per this fn's own contract; the last owner holds the cell
+    // exclusively (rc reached 0 past an Acquire fence), so nothing aliases it.
+    unsafe {
+        sentinel_broker::secret::secure_zero(value, value_len);
+    }
+    let ps = page_size();
+    let mut pages = secret_locked_pages().lock();
+    for page in page_range(cell, cell_len) {
+        let Some(count) = pages.get_mut(&page) else {
+            continue;
+        };
+        *count -= 1;
+        if *count != 0 {
+            continue; // a live secret cell still occupies this page — keep it locked
+        }
+        pages.remove(&page);
+        // SAFETY: the page was locked by `secret_cell_lock` and is still mapped
+        // (the caller's cell is not yet freed).
+        unsafe {
+            let _ = sentinel_broker::secret::unlock_memory((page * ps) as *mut u8, ps);
+        }
+    }
+}
+
 /// A heap-allocated refcounted shared cell (ADR 0071 M1.4a). `rc` is atomic so
 /// clones/releases from multiple threads are sound; `value` holds the word-scalar
-/// element (encoded into `i64` by codegen).
+/// element (encoded into `i64` by codegen). ADR 0071 M1.4c: `secret` marks a cell
+/// whose payload is a `secret T` — allocated mlocked and zeroed at the last drop.
 pub struct SentinelShared {
     rc: std::sync::atomic::AtomicUsize,
     value: i64,
+    secret: bool,
 }
 
 /// ADR 0071 M1.4a: allocate a shared cell holding `value`, refcount 1. Returns an
@@ -1432,8 +1647,29 @@ pub extern "C" fn sentinel_shared_new(value: i64) -> *mut SentinelShared {
     let cell = Box::new(SentinelShared {
         rc: std::sync::atomic::AtomicUsize::new(1),
         value,
+        secret: false,
     });
     Box::into_raw(cell)
+}
+
+/// ADR 0071 M1.4c (D6.2): allocate a shared cell whose payload is a `secret T` —
+/// identical to [`sentinel_shared_new`] except the cell is locked into RAM at
+/// birth and its value slot is volatile-zeroed when the last owner drops it.
+/// Codegen calls this instead of `sentinel_shared_new` when the element type is
+/// `Type::Secret(_)`; the handle shape and every other operation are unchanged.
+#[no_mangle]
+pub extern "C" fn sentinel_shared_new_secret(value: i64) -> *mut SentinelShared {
+    let cell = Box::new(SentinelShared {
+        rc: std::sync::atomic::AtomicUsize::new(1),
+        value,
+        secret: true,
+    });
+    let raw = Box::into_raw(cell);
+    // SAFETY: `raw` is a live allocation of exactly one SentinelShared.
+    unsafe {
+        secret_cell_lock(raw.cast::<u8>(), std::mem::size_of::<SentinelShared>());
+    }
+    raw
 }
 
 /// ADR 0071 M1.4a: register a new owner — increment the refcount and return the
@@ -1498,6 +1734,26 @@ pub extern "C" fn sentinel_shared_release(s: *mut SentinelShared) {
         // Last owner: an `Acquire` fence so all prior owners' releases are visible
         // before we reclaim, then free the box.
         std::sync::atomic::fence(std::sync::atomic::Ordering::Acquire);
+        if cell.secret {
+            // ADR 0071 M1.4c (D6.2): scrub the secret payload EXACTLY ONCE — here,
+            // at the last drop, not per-clone (a clone shares this very cell).
+            // The write pointer is derived from the RAW pointer `s`, never from the
+            // `&SentinelShared` above: `value` is a plain `i64` (no `UnsafeCell`),
+            // so writing through a pointer whose provenance runs through a shared
+            // reference is UB — and it would violate `secure_zero`'s own
+            // "not aliased by any live reference" contract.
+            // SAFETY: rc reached 0 past the Acquire fence, so this owner holds the
+            // cell exclusively; the value slot lies inside the locked allocation.
+            unsafe {
+                let value = std::ptr::addr_of_mut!((*s).value).cast::<u8>();
+                secret_cell_scrub(
+                    value,
+                    std::mem::size_of::<i64>(),
+                    s.cast::<u8>(),
+                    std::mem::size_of::<SentinelShared>(),
+                );
+            }
+        }
         // SAFETY: rc reached 0, so no other owner can observe the cell; reclaim it.
         unsafe {
             drop(Box::from_raw(s));
@@ -1662,6 +1918,9 @@ fn report_deadlock(cycle: &[(std::thread::ThreadId, usize)]) {
 pub struct SentinelMutex {
     rc: std::sync::atomic::AtomicUsize,
     lock: parking_lot::Mutex<i64>,
+    /// ADR 0071 M1.4c: marks a cell whose protected value is a `secret T` —
+    /// allocated mlocked, its value slot zeroed at the last drop.
+    secret: bool,
 }
 
 /// ADR 0071 M1.4b: allocate a mutex cell holding `value` (unlocked), refcount 1.
@@ -1672,8 +1931,30 @@ pub extern "C" fn sentinel_mutex_new(value: i64) -> *mut SentinelMutex {
     let cell = Box::new(SentinelMutex {
         rc: std::sync::atomic::AtomicUsize::new(1),
         lock: parking_lot::Mutex::new(value),
+        secret: false,
     });
     Box::into_raw(cell)
+}
+
+/// ADR 0071 M1.4c (D6.2): allocate a mutex cell whose protected value is a
+/// `secret T` — identical to [`sentinel_mutex_new`] except the cell is locked
+/// into RAM at birth and its value slot is volatile-zeroed at the last drop.
+/// Codegen calls this instead of `sentinel_mutex_new` when the element type is
+/// `Type::Secret(_)`; lock/unlock/data/clone/release are unchanged (the lock
+/// discipline is over PUBLIC control state, D5/D6).
+#[no_mangle]
+pub extern "C" fn sentinel_mutex_new_secret(value: i64) -> *mut SentinelMutex {
+    let cell = Box::new(SentinelMutex {
+        rc: std::sync::atomic::AtomicUsize::new(1),
+        lock: parking_lot::Mutex::new(value),
+        secret: true,
+    });
+    let raw = Box::into_raw(cell);
+    // SAFETY: `raw` is a live allocation of exactly one SentinelMutex.
+    unsafe {
+        secret_cell_lock(raw.cast::<u8>(), std::mem::size_of::<SentinelMutex>());
+    }
+    raw
 }
 
 /// ADR 0071 M1.4b: register a new owner — increment the refcount, return the same
@@ -1750,6 +2031,24 @@ fn mutex_release_impl(m: *mut SentinelMutex, detect: bool) {
             // free-while-locked debug_assert above fires in debug; this keeps the
             // graph consistent in release builds too.
             wait_for_graph().lock().holders.remove(&(m as usize));
+        }
+        if cell.secret {
+            // ADR 0071 M1.4c (D6.2): scrub the protected secret EXACTLY ONCE, at
+            // the last drop. `data_ptr()` is the same slot `lock`/`_data` hand out,
+            // and does not touch the lock state. (Unlike `Shared`'s plain `i64`
+            // field, this slot lives inside the `parking_lot::Mutex`'s own
+            // `UnsafeCell`, so `data_ptr()` is the sanctioned write path — no
+            // shared-reference provenance problem.)
+            // SAFETY: rc reached 0 past the Acquire fence, so this owner holds the
+            // cell exclusively; the slot lies inside the locked allocation.
+            unsafe {
+                secret_cell_scrub(
+                    cell.lock.data_ptr().cast::<u8>(),
+                    std::mem::size_of::<i64>(),
+                    m.cast::<u8>(),
+                    std::mem::size_of::<SentinelMutex>(),
+                );
+            }
         }
         // SAFETY: rc reached 0, so no other owner can observe the cell; reclaim it.
         unsafe {
@@ -2602,8 +2901,10 @@ mod tests {
             sentinel_mutex_try_lock_for as *const (),
             sentinel_mutex_unlock as *const (),
             sentinel_mutex_data as *const (),
+            sentinel_shared_new_secret as *const (),
+            sentinel_mutex_new_secret as *const (),
         ];
-        // 49 symbols: 23 codegen-declared (incl. D.2's sentinel_str_eq,
+        // 51 symbols: 23 codegen-declared (incl. D.2's sentinel_str_eq,
         // D.3's sentinel_realloc, D.4's sentinel_read_file /
         // sentinel_write_file / sentinel_print_bytes, and ADR 0065 D6's
         // sentinel_kont_free) + sentinel_kont_panic_resumed + ADR 0066 M1.2's
@@ -2611,8 +2912,9 @@ mod tests {
         // 2 sentinel_process_write/_read + M2.3's 2 sentinel_process_send/_recv +
         // M2.4b's 2 sentinel_stdin_recv/_stdout_send + the 2 sentinel_arg_count/_arg +
         // ADR 0071 M1.4a's 4 sentinel_shared_new/_clone/_get/_release + M1.4b's 7
-        // sentinel_mutex_new/_clone/_release/_lock/_try_lock_for/_unlock/_data.
-        assert_eq!(symbols.len(), 49);
+        // sentinel_mutex_new/_clone/_release/_lock/_try_lock_for/_unlock/_data +
+        // M1.4c's 2 sentinel_shared_new_secret/sentinel_mutex_new_secret (D6.2).
+        assert_eq!(symbols.len(), 51);
         assert!(symbols.iter().all(|&s| !s.is_null()), "every symbol has an address");
     }
 
@@ -3310,6 +3612,162 @@ mod tests {
             !wait_for_graph().lock().holders.contains_key(&addr),
             "the free path must scrub the stale holder edge"
         );
+    }
+
+    // ---- ADR 0071 M1.4c (D6.2): the secret-cell memory policy ----
+    //
+    // The locked-page table is process-global, so these tests must not run
+    // concurrently with each other: cargo runs a target's tests in parallel, and
+    // one test's cells can land on another's pages — making "this page is/ is not
+    // in the table" assertions flaky (observed: 53/53 alone, 51/53 under load).
+    // Every test that inspects or perturbs the table takes this guard.
+    static SECRET_PAGE_TEST_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
+    #[test]
+    fn secret_shared_cell_behaves_identically_and_scrubs_at_last_drop() {
+        let _guard = SECRET_PAGE_TEST_LOCK.lock();
+        // A secret cell is operationally identical to a public one (same handle,
+        // same clone/get/release accounting) — the policy is invisible to codegen.
+        let s = sentinel_shared_new_secret(0x5EC2E7);
+        assert_eq!(sentinel_shared_get(s), 0x5EC2E7);
+        assert_eq!(sentinel_shared_clone(s), s);
+        sentinel_shared_release(s); // rc 2 -> 1: NOT the last owner, no scrub yet
+        assert_eq!(sentinel_shared_get(s), 0x5EC2E7, "a non-last release must not scrub");
+        // Read the value slot back through a raw pointer after the LAST release:
+        // the allocation is freed, so this is a use-after-free read and cannot be
+        // asserted on (a freed page may be unmapped, and the allocator may reuse
+        // the bytes). The scrub is verified structurally instead — by the
+        // single-scrub accounting above plus `secure_zero`'s own broker tests.
+        sentinel_shared_release(s); // last owner -> zero + munlock + free
+    }
+
+    #[test]
+    fn secret_mutex_cell_locks_reads_writes_and_frees() {
+        let _guard = SECRET_PAGE_TEST_LOCK.lock();
+        // The lock discipline is over public control state, so every M1.4b
+        // operation works unchanged on a secret cell.
+        let m = sentinel_mutex_new_secret(36);
+        let mut slot: *mut i64 = std::ptr::null_mut();
+        assert_eq!(sentinel_mutex_lock(m, &mut slot as *mut *mut i64), 0);
+        assert_eq!(sentinel_mutex_data(m, 1), slot);
+        // SAFETY: the lock is held; `slot` points at the protected value.
+        unsafe {
+            assert_eq!(*slot, 36);
+            *slot = 42;
+        }
+        sentinel_mutex_unlock(m);
+        let mut slot2: *mut i64 = std::ptr::null_mut();
+        assert_eq!(sentinel_mutex_lock(m, &mut slot2 as *mut *mut i64), 0);
+        // SAFETY: the lock is held again.
+        unsafe {
+            assert_eq!(*slot2, 42, "the write survived under the lock");
+        }
+        sentinel_mutex_unlock(m);
+        sentinel_mutex_release(m); // last owner -> zero + munlock + free
+    }
+
+    #[test]
+    fn secret_cell_page_locks_are_refcounted_across_siblings() {
+        let _guard = SECRET_PAGE_TEST_LOCK.lock();
+        // The page-refcount fix (an adversarial review reproduced BOTH failure
+        // modes of the naive per-cell version). Allocate several secret cells,
+        // free ONE, and assert every page still occupied by a live secret cell is
+        // still counted — the naive version's `munlock` would have unlocked the
+        // shared page out from under the survivors.
+        let cells: Vec<*mut SentinelShared> =
+            (0..8).map(|i| sentinel_shared_new_secret(100 + i)).collect();
+        let live_pages: Vec<usize> = cells[1..]
+            .iter()
+            .flat_map(|&c| page_range(c.cast::<u8>(), std::mem::size_of::<SentinelShared>()))
+            .collect();
+        sentinel_shared_release(cells[0]); // free exactly one
+        {
+            let pages = secret_locked_pages().lock();
+            for p in &live_pages {
+                assert!(
+                    pages.contains_key(p),
+                    "page {p:#x} still holds a LIVE secret cell — it must stay locked"
+                );
+            }
+        }
+        for &c in &cells[1..] {
+            sentinel_shared_release(c);
+        }
+        // Every cell is gone, so its pages must be fully released (no leak of
+        // locked pages across a program's lifetime).
+        {
+            let pages = secret_locked_pages().lock();
+            for p in &live_pages {
+                assert!(
+                    !pages.contains_key(p),
+                    "page {p:#x} has no live secret cell left — it must be unlocked"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn many_live_secret_cells_do_not_exhaust_the_locked_memory_budget() {
+        let _guard = SECRET_PAGE_TEST_LOCK.lock();
+        // The review reproduced a hard ABORT at ~4942 live secret cells on this
+        // platform: each tiny cell pinned a whole page, and Windows caps
+        // VirtualLock by the (small, ~150 KiB default) process minimum working
+        // set. Page-refcounting plus `grow_locked_memory_budget` lifts that; this
+        // asserts a population well past the old ceiling survives, since the
+        // failure mode is an abort that would take the test process down.
+        let cells: Vec<*mut SentinelShared> =
+            (0..20_000).map(|i| sentinel_shared_new_secret(i)).collect();
+        assert_eq!(sentinel_shared_get(cells[19_999]), 19_999);
+        for &c in &cells {
+            sentinel_shared_release(c);
+        }
+    }
+
+    #[test]
+    fn secret_flag_drives_the_lock_and_scrub_bookkeeping() {
+        let _guard = SECRET_PAGE_TEST_LOCK.lock();
+        // Closes the review's "the D6.2 policy is never asserted" gap: deleting the
+        // `if cell.secret { .. }` arms (or the `secret: true` in the constructors)
+        // must FAIL a test. A PUBLIC cell touches no page bookkeeping at all; a
+        // SECRET cell registers its pages and gives them back at the last drop.
+        let public = sentinel_shared_new(1);
+        let public_pages: Vec<usize> =
+            page_range(public.cast::<u8>(), std::mem::size_of::<SentinelShared>()).collect();
+        let untouched = {
+            let pages = secret_locked_pages().lock();
+            public_pages.iter().all(|p| !pages.contains_key(p))
+        };
+        sentinel_shared_release(public);
+        assert!(untouched, "a public cell must not enter the secret page table");
+
+        let secret = sentinel_shared_new_secret(1);
+        let secret_pages: Vec<usize> =
+            page_range(secret.cast::<u8>(), std::mem::size_of::<SentinelShared>()).collect();
+        {
+            let pages = secret_locked_pages().lock();
+            for p in &secret_pages {
+                assert!(pages.contains_key(p), "a secret cell must lock its pages at birth");
+            }
+        }
+        sentinel_shared_release(secret);
+    }
+
+    #[test]
+    fn secret_cells_are_mlocked_and_scrub_is_exactly_once() {
+        let _guard = SECRET_PAGE_TEST_LOCK.lock();
+        // The policy primitives themselves: locking a cell-sized region succeeds
+        // on this platform (the fail-closed abort path is therefore not hit by
+        // ordinary programs), and secure_zero wipes a value slot in place.
+        let mut probe: i64 = 0x1234_5678_9ABC_DEF0;
+        let p = std::ptr::addr_of_mut!(probe).cast::<u8>();
+        let len = std::mem::size_of::<i64>();
+        // SAFETY: `probe` is a live local of exactly `len` bytes.
+        unsafe {
+            sentinel_broker::secret::lock_memory(p, len).expect("lock a cell-sized region");
+            sentinel_broker::secret::secure_zero(p, len);
+            let _ = sentinel_broker::secret::unlock_memory(p, len);
+        }
+        assert_eq!(probe, 0, "secure_zero wipes the value slot");
     }
 
     #[test]

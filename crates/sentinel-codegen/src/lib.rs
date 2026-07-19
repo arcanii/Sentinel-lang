@@ -645,6 +645,16 @@ pub fn compile_to_object_for_module(
         ptr_ty.fn_type(&[i64_ty.into()], false),
         None,
     );
+    // ADR 0071 M1.4c (D6.2): the secret-payload constructor — same signature as
+    // `sentinel_shared_new`, but the cell is mlocked at birth and its value slot
+    // volatile-zeroed at the last drop. Chosen per-call from the ELEMENT type, so
+    // every other operation (`get`/`clone`/`release`) stays shared with the public
+    // path — the secretness is a property of the cell, not of the handle.
+    let shared_new_secret_fn = module.add_function(
+        "sentinel_shared_new_secret",
+        ptr_ty.fn_type(&[i64_ty.into()], false),
+        None,
+    );
     let shared_get_fn = module.add_function(
         "sentinel_shared_get",
         i64_ty.fn_type(&[ptr_ty.into()], false),
@@ -666,6 +676,14 @@ pub fn compile_to_object_for_module(
     // codegen begins emitting them (lock in 2b-ii, the refcount/unlock in 3).
     let mutex_new_fn = module.add_function(
         "sentinel_mutex_new",
+        ptr_ty.fn_type(&[i64_ty.into()], false),
+        None,
+    );
+    // ADR 0071 M1.4c (D6.2): the secret-payload mutex constructor (mirrors
+    // `sentinel_shared_new_secret`). Lock/unlock/data are unchanged — the lock
+    // discipline is over PUBLIC control state (D5/D6).
+    let mutex_new_secret_fn = module.add_function(
+        "sentinel_mutex_new_secret",
         ptr_ty.fn_type(&[i64_ty.into()], false),
         None,
     );
@@ -1442,10 +1460,12 @@ pub fn compile_to_object_for_module(
             channel_recv_fn,
             channel_close_fn,
             shared_new_fn,
+            shared_new_secret_fn,
             shared_get_fn,
             shared_clone_fn,
             shared_release_fn,
             mutex_new_fn,
+            mutex_new_secret_fn,
             mutex_lock_fn,
             mutex_clone_fn,
             mutex_release_fn,
@@ -1724,6 +1744,9 @@ struct CodegenCtx<'ctx, 'plan> {
     /// `shared_new(i64) -> ptr` (rc=1), `shared_get(ptr) -> i64`,
     /// `shared_clone(ptr) -> ptr` (rc++), `shared_release(ptr)` (rc--, free at 0).
     shared_new_fn: FunctionValue<'ctx>,
+    /// ADR 0071 M1.4c (D6.2): `sentinel_shared_new_secret(i64) -> ptr` — the
+    /// mlocked, zeroed-at-last-drop cell used when the element is `secret T`.
+    shared_new_secret_fn: FunctionValue<'ctx>,
     shared_get_fn: FunctionValue<'ctx>,
     shared_clone_fn: FunctionValue<'ctx>,
     shared_release_fn: FunctionValue<'ctx>,
@@ -1731,6 +1754,10 @@ struct CodegenCtx<'ctx, 'plan> {
     /// 2b-i only `mutex_new(i64) -> ptr` (rc=1, unlocked) is emitted; lock/unlock/
     /// clone/release are added as codegen begins emitting them.
     mutex_new_fn: FunctionValue<'ctx>,
+    /// ADR 0071 M1.4c (D6.2): `sentinel_mutex_new_secret(i64) -> ptr` — the
+    /// mlocked, zeroed-at-last-drop cell used when the protected value is
+    /// `secret T`.
+    mutex_new_secret_fn: FunctionValue<'ctx>,
     /// ADR 0071 M1.4b: `sentinel_mutex_lock(m, out) -> i64` (0 acquired / 1 timeout).
     mutex_lock_fn: FunctionValue<'ctx>,
     /// ADR 0071 M1.4b slice 3a: `sentinel_mutex_clone(ptr) -> ptr` (rc++),
@@ -6522,9 +6549,17 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                 )));
             }
         };
+        // ADR 0071 M1.4c (D6.2): a `secret T` payload goes to the mlocked,
+        // zeroed-at-last-drop cell. The element type is the ARGUMENT's type (the
+        // same source `shared_id_for` reads), so the choice is static.
+        let new_fn = if matches!(value.ty, Type::Secret(_)) {
+            self.shared_new_secret_fn
+        } else {
+            self.shared_new_fn
+        };
         let call = self
             .builder
-            .build_call(self.shared_new_fn, &[encoded.into()], "shared_new")
+            .build_call(new_fn, &[encoded.into()], "shared_new")
             .map_err(|e| CodegenError::Builder(e.to_string()))?;
         Ok(call
             .try_as_basic_value()
@@ -6570,9 +6605,16 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                 )));
             }
         };
+        // ADR 0071 M1.4c (D6.2): mirrors `shared_new` — a `secret T` protected
+        // value goes to the mlocked, zeroed-at-last-drop cell.
+        let new_fn = if matches!(value.ty, Type::Secret(_)) {
+            self.mutex_new_secret_fn
+        } else {
+            self.mutex_new_fn
+        };
         let call = self
             .builder
-            .build_call(self.mutex_new_fn, &[encoded.into()], "mutex_new")
+            .build_call(new_fn, &[encoded.into()], "mutex_new")
             .map_err(|e| CodegenError::Builder(e.to_string()))?;
         Ok(call
             .try_as_basic_value()

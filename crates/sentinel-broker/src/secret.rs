@@ -122,6 +122,27 @@ mod os {
     }
 }
 
+/// Lock a byte range into RAM (mlock / VirtualLock) so it cannot be
+/// paged to swap. ADR 0071 D6.2: exposed so the runtime's secret
+/// `Shared`/`Mutex` cells can honor the same policy per-cell — the
+/// broker's arenas are capacity-bounded slabs, while those cells are
+/// individually heap-allocated and unbounded in number.
+///
+/// # Safety
+/// `ptr` must point to `len` bytes owned by the caller.
+pub unsafe fn lock_memory(ptr: *mut u8, len: usize) -> Result<(), std::io::Error> {
+    os::lock(ptr, len)
+}
+
+/// Release a lock taken by [`lock_memory`]. Failure is not actionable
+/// (the range is being freed regardless), so callers may ignore it.
+///
+/// # Safety
+/// `ptr`/`len` must match a prior [`lock_memory`] call.
+pub unsafe fn unlock_memory(ptr: *mut u8, len: usize) -> Result<(), std::io::Error> {
+    os::unlock(ptr, len)
+}
+
 /// Volatile, optimizer-resistant zero of a byte range.
 ///
 /// # Safety

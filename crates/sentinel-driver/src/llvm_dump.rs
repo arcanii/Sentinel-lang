@@ -150,6 +150,9 @@ struct RuntimeSyms {
     /// `sentinel_shared_clone(ptr) -> ptr` (rc++), `sentinel_shared_release(ptr)`
     /// (rc--, free at 0) — the slice-3 refcount accounting.
     shared_new: bool,
+    /// ADR 0071 M1.4c (D6.2): `sentinel_shared_new_secret(i64) -> ptr` — the
+    /// mlocked, zeroed-at-last-drop cell for a `secret T` payload.
+    shared_new_secret: bool,
     shared_get: bool,
     shared_clone: bool,
     shared_release: bool,
@@ -160,6 +163,9 @@ struct RuntimeSyms {
     /// (rc--, free at 0) — the slice-3a refcount accounting. `sentinel_mutex_unlock(ptr)`
     /// is the slice-3b Guard scope-exit unlock (`force_unlock`, no refcount change).
     mutex_new: bool,
+    /// ADR 0071 M1.4c (D6.2): `sentinel_mutex_new_secret(i64) -> ptr` — the
+    /// mlocked, zeroed-at-last-drop cell for a `secret T` protected value.
+    mutex_new_secret: bool,
     mutex_lock: bool,
     mutex_clone: bool,
     mutex_release: bool,
@@ -216,10 +222,14 @@ impl RuntimeSyms {
         self.channel_recv |= other.channel_recv;
         self.channel_close |= other.channel_close;
         self.shared_new |= other.shared_new;
+        self.shared_new_secret |= other.shared_new_secret;
+        self.shared_new_secret |= other.shared_new_secret;
         self.shared_get |= other.shared_get;
         self.shared_clone |= other.shared_clone;
         self.shared_release |= other.shared_release;
         self.mutex_new |= other.mutex_new;
+        self.mutex_new_secret |= other.mutex_new_secret;
+        self.mutex_new_secret |= other.mutex_new_secret;
         self.mutex_lock |= other.mutex_lock;
         self.mutex_clone |= other.mutex_clone;
         self.mutex_release |= other.mutex_release;
@@ -317,6 +327,9 @@ impl RuntimeSyms {
         if self.shared_new {
             writeln!(out, "declare ptr @sentinel_shared_new(i64)").unwrap();
         }
+        if self.shared_new_secret {
+            writeln!(out, "declare ptr @sentinel_shared_new_secret(i64)").unwrap();
+        }
         if self.shared_get {
             writeln!(out, "declare i64 @sentinel_shared_get(ptr)").unwrap();
         }
@@ -329,6 +342,9 @@ impl RuntimeSyms {
         // ADR 0071 M1.4b: the Mutex<T> refcounted-cell runtime group.
         if self.mutex_new {
             writeln!(out, "declare ptr @sentinel_mutex_new(i64)").unwrap();
+        }
+        if self.mutex_new_secret {
+            writeln!(out, "declare ptr @sentinel_mutex_new_secret(i64)").unwrap();
         }
         if self.mutex_lock {
             writeln!(out, "declare i64 @sentinel_mutex_lock(ptr, ptr)").unwrap();
@@ -407,10 +423,12 @@ impl RuntimeSyms {
             || self.channel_recv
             || self.channel_close
             || self.shared_new
+            || self.shared_new_secret
             || self.shared_get
             || self.shared_clone
             || self.shared_release
             || self.mutex_new
+            || self.mutex_new_secret
             || self.mutex_lock
             || self.mutex_clone
             || self.mutex_release
@@ -1578,6 +1596,22 @@ impl Emit<'_> {
         llvm_ty(ty, self.program)
     }
 
+    /// ADR 0071 M1.4c: strip one `secret` layer — `secret T` lowers identically to
+    /// `T` (the taint is a type-system property, erased in the IR), so the
+    /// container encode/decode arms match on the INNER scalar. Non-secret types
+    /// pass through unchanged.
+    fn unsecret(&self, ty: Type) -> Type {
+        match ty {
+            Type::Secret(id) => self
+                .program
+                .secrets
+                .get(id.0 as usize)
+                .map(|s| s.inner)
+                .unwrap_or(ty),
+            other => other,
+        }
+    }
+
     fn lower_stmt(&mut self, stmt: &TypedStmt) -> Result<(), String> {
         match &stmt.kind {
             TypedStmtKind::Let { id, ty, value, .. } => {
@@ -1839,7 +1873,10 @@ impl Emit<'_> {
                     self.used.mutex_data = true;
                     let raw = self.fresh();
                     writeln!(self.body, "  %v{raw} = load i64, ptr %v{data}").unwrap();
-                    let elem = sentinel_types::guard_elem_for(gid);
+                    // ADR 0071 M1.4c: a secret protected element decodes as its
+                    // inner; `*g` still TYPES as `secret T`, so the taint oracle
+                    // keeps checking every use of the value read out.
+                    let elem = self.unsecret(sentinel_types::guard_elem_for(gid));
                     let ety = self.lty(elem)?;
                     let value = match elem {
                         Type::I64 => format!("%v{raw}"),
@@ -2509,7 +2546,9 @@ impl Emit<'_> {
                 // and the differential corpus is i64-only — the `IndexAssign`-style
                 // deferral).
                 if let Type::Nullable(NullableInner::Guard(gid)) = inner.ty {
-                    if sentinel_types::guard_elem_for(gid) != Type::I64 {
+                    // ADR 0071 M1.4c: `secret i64` writes through the same i64
+                    // store (erasure), so strip before the i64-only gate.
+                    if self.unsecret(sentinel_types::guard_elem_for(gid)) != Type::I64 {
                         return Err("guard assign element not ported (i64 only)".into());
                     }
                     let g = self.lower_expr(inner)?;
@@ -3454,10 +3493,15 @@ impl Emit<'_> {
         // encode; `i64` byte-identical), then allocate the refcounted cell (rc=1).
         if id == SHARED_NEW_FN_ID {
             let val = self.lower_expr(&args[0])?;
-            let enc = match args[0].ty {
+            // ADR 0071 M1.4c: a `secret T` element ENCODES exactly like its inner
+            // (secrets lower identically to their inner — the taint lives in the
+            // type system, not the IR); only the CONSTRUCTOR differs (D6.2).
+            let is_secret = matches!(args[0].ty, Type::Secret(_));
+            let elem = self.unsecret(args[0].ty);
+            let enc = match elem {
                 Type::I64 => val,
                 Type::I32 | Type::U8 | Type::Bool => {
-                    let ety = self.lty(args[0].ty)?;
+                    let ety = self.lty(elem)?;
                     let e = self.fresh();
                     writeln!(self.body, "  %v{e} = zext {ety} {val} to i64").unwrap();
                     format!("%v{e}")
@@ -3475,8 +3519,13 @@ impl Emit<'_> {
                 other => return Err(format!("shared_new element not ported (word-scalar): {other:?}")),
             };
             let v = self.fresh();
-            writeln!(self.body, "  %v{v} = call ptr @sentinel_shared_new(i64 {enc})").unwrap();
-            self.used.shared_new = true;
+            let sym = if is_secret { "sentinel_shared_new_secret" } else { "sentinel_shared_new" };
+            writeln!(self.body, "  %v{v} = call ptr @{sym}(i64 {enc})").unwrap();
+            if is_secret {
+                self.used.shared_new_secret = true;
+            } else {
+                self.used.shared_new = true;
+            }
             return Ok(format!("%v{v}"));
         }
         // ADR 0071 M1.4b: mutex_new(v: T) -> Mutex<T> (a ptr): ENCODE the word-scalar
@@ -3484,10 +3533,14 @@ impl Emit<'_> {
         // then allocate the refcounted, lock-protected cell (rc=1, unlocked).
         if id == MUTEX_NEW_FN_ID {
             let val = self.lower_expr(&args[0])?;
-            let enc = match args[0].ty {
+            // ADR 0071 M1.4c: as `shared_new` — the encode is over the stripped
+            // inner; only the constructor differs (D6.2).
+            let is_secret = matches!(args[0].ty, Type::Secret(_));
+            let elem = self.unsecret(args[0].ty);
+            let enc = match elem {
                 Type::I64 => val,
                 Type::I32 | Type::U8 | Type::Bool => {
-                    let ety = self.lty(args[0].ty)?;
+                    let ety = self.lty(elem)?;
                     let e = self.fresh();
                     writeln!(self.body, "  %v{e} = zext {ety} {val} to i64").unwrap();
                     format!("%v{e}")
@@ -3505,8 +3558,13 @@ impl Emit<'_> {
                 other => return Err(format!("mutex_new element not ported (word-scalar): {other:?}")),
             };
             let v = self.fresh();
-            writeln!(self.body, "  %v{v} = call ptr @sentinel_mutex_new(i64 {enc})").unwrap();
-            self.used.mutex_new = true;
+            let sym = if is_secret { "sentinel_mutex_new_secret" } else { "sentinel_mutex_new" };
+            writeln!(self.body, "  %v{v} = call ptr @{sym}(i64 {enc})").unwrap();
+            if is_secret {
+                self.used.mutex_new_secret = true;
+            } else {
+                self.used.mutex_new = true;
+            }
             return Ok(format!("%v{v}"));
         }
         // ADR 0071 M1.4b: lock(m) -> ?Guard: call sentinel_mutex_lock(m, out) (writes
@@ -3537,7 +3595,10 @@ impl Emit<'_> {
             // shared_get(s) -> T: read the cell's i64 slot, DECODE into T (returned
             // DIRECTLY — no `?T` wrapper, unlike recv). Element from `type_args[0]`
             // (`i64` if absent; the i64 case emits no decode, byte-identical).
-            let elem = type_args.first().copied().unwrap_or(Type::I64);
+            // ADR 0071 M1.4c: a secret element DECODES as its inner (erasure) —
+            // the value stays `secret T` in the type system, which is what keeps
+            // `secret_leak` checking every downstream use.
+            let elem = self.unsecret(type_args.first().copied().unwrap_or(Type::I64));
             let ety = self.lty(elem)?;
             let s = self.lower_expr(&args[0])?;
             let raw = self.fresh();

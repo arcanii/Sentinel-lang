@@ -1578,11 +1578,55 @@ pub fn intern_channel(channels: &mut Vec<ChannelData>, elem_ty: Type) -> ChanId 
     id
 }
 
+// ----- ADR 0071 M1.4c (D6.1): secret container elements -----
+//
+// The container element maps below are table-free — they map a `Type` to a FIXED
+// interner id, so `Shared<T>`/`Mutex<T>`/`Guard<T>` resolve without threading an
+// interner through the checker. A `Type::Secret(SecretId)` could not participate,
+// because a `SecretId` is assigned in source-encounter ORDER and so is not a fixed,
+// knowable constant — which is exactly why `shared_id_for` (and its peers) returned
+// `None` for every secret element, and why secret shared state was unrepresentable.
+//
+// The fix that preserves the table-free property: pre-intern the SECRETABLE
+// word-scalars at FIXED `SecretId`s 0..=3 during builtin signature setup (see
+// `SECRET_SCALARS`), exactly as the containers already pre-intern their own
+// elements. A secret element then has a constant id, and the container maps gain
+// slots 6..=9 for them.
+//
+// `f64` is absent by design — `secret f64` is a type error (float ops are not
+// constant-time). `ptr` is absent because a secret ADDRESS is itself a leak vector
+// (and `Type::Secret` over a handle is not a meaningful payload). `u128` is absent
+// for the same reason it is absent from the public set (it does not fit the cell's
+// i64 slot).
+
+/// The secretable word-scalars, pre-interned at `SecretId`s 0..=3 (this order is
+/// load-bearing: it defines [`secret_scalar_slot`]'s numbering).
+pub const SECRET_SCALARS: [Type; 4] = [Type::I64, Type::I32, Type::U8, Type::Bool];
+
+/// The container-map slot offset for secret elements: public word-scalars occupy
+/// 0..=5, the secret scalars 6..=9.
+const SECRET_SLOT_BASE: u32 = 6;
+
+/// The container-map slot for a `Type::Secret(id)` element, or `None` if `id` is
+/// not one of the pre-interned secretable scalars (e.g. `secret [u8]`, or a secret
+/// over a type the cell's i64 slot cannot hold).
+pub fn secret_scalar_slot(id: SecretId) -> Option<u32> {
+    (id.0 < SECRET_SCALARS.len() as u32).then_some(SECRET_SLOT_BASE + id.0)
+}
+
+/// The inverse of [`secret_scalar_slot`]: the element `Type` for a container id in
+/// the secret range 6..=9, or `None` for a public-range id.
+pub fn secret_elem_for_slot(slot: u32) -> Option<Type> {
+    let idx = slot.checked_sub(SECRET_SLOT_BASE)?;
+    (idx < SECRET_SCALARS.len() as u32).then_some(Type::Secret(SecretId(idx)))
+}
+
 /// ADR 0071 M1.4a: the `Shared<T>` word-scalar element types are pre-interned at
 /// FIXED [`SharedId`]s 0..=5 during builtin signature setup (mirroring
 /// [`channel_chanid_for`]), so a `Shared<T>` annotation / `shared_new(v)` result
 /// maps to a stable `SharedId` WITHOUT threading the `shared` interner through the
 /// checker. Returns the fixed index for a word-scalar `elem`, else `None`.
+/// ADR 0071 M1.4c: a pre-interned SECRET scalar maps to 6..=9 (D6.1).
 pub fn shared_id_for(elem: Type) -> Option<u32> {
     match elem {
         Type::I64 => Some(0),
@@ -1591,6 +1635,7 @@ pub fn shared_id_for(elem: Type) -> Option<u32> {
         Type::Bool => Some(3),
         Type::F64 => Some(4),
         Type::Ptr => Some(5),
+        Type::Secret(sid) => secret_scalar_slot(sid),
         _ => None,
     }
 }
@@ -1600,6 +1645,9 @@ pub fn shared_id_for(elem: Type) -> Option<u32> {
 /// `Type::Shared(id)` alone (no `shared`-table access in the checker). `i64` for
 /// an unknown id (defensive). Mirrors [`channel_elem_for`].
 pub fn shared_elem_for(id: SharedId) -> Type {
+    if let Some(secret) = secret_elem_for_slot(id.0) {
+        return secret;
+    }
     match id.0 {
         1 => Type::I32,
         2 => Type::U8,
@@ -1628,6 +1676,7 @@ pub fn intern_shared(shared: &mut Vec<SharedData>, elem_ty: Type) -> SharedId {
 /// [`shared_id_for`]), so a `Mutex<T>` annotation / `mutex_new(v)` result maps to
 /// a stable `MutexId` WITHOUT threading the `mutexes` interner. Returns the fixed
 /// index for a word-scalar `elem`, else `None`.
+/// ADR 0071 M1.4c: a pre-interned SECRET scalar maps to 6..=9 (D6.1).
 pub fn mutex_id_for(elem: Type) -> Option<u32> {
     match elem {
         Type::I64 => Some(0),
@@ -1636,6 +1685,7 @@ pub fn mutex_id_for(elem: Type) -> Option<u32> {
         Type::Bool => Some(3),
         Type::F64 => Some(4),
         Type::Ptr => Some(5),
+        Type::Secret(sid) => secret_scalar_slot(sid),
         _ => None,
     }
 }
@@ -1645,6 +1695,9 @@ pub fn mutex_id_for(elem: Type) -> Option<u32> {
 /// alone (no `mutexes`-table access in the checker). `i64` for an unknown id
 /// (defensive). Mirrors [`shared_elem_for`].
 pub fn mutex_elem_for(id: MutexId) -> Type {
+    if let Some(secret) = secret_elem_for_slot(id.0) {
+        return secret;
+    }
     match id.0 {
         1 => Type::I32,
         2 => Type::U8,
@@ -1673,6 +1726,10 @@ pub fn intern_mutex(mutexes: &mut Vec<MutexData>, elem_ty: Type) -> MutexId {
 /// [`mutex_id_for`]), so `lock`'s `?Guard<T>` result maps to a stable `GuardId`
 /// WITHOUT threading the `guards` interner. Returns the fixed index for a
 /// word-scalar `elem`, else `None`.
+/// ADR 0071 M1.4c: a pre-interned SECRET scalar maps to 6..=9 (D6.1), so
+/// `lock(m: Mutex<secret T>)` yields `?Guard<secret T>` — the guard's PAYLOAD is
+/// still a public `ptr` (the mutex cell handle), only its protected ELEMENT is
+/// secret, so no new shape is needed (D4 amendment).
 pub fn guard_id_for(elem: Type) -> Option<u32> {
     match elem {
         Type::I64 => Some(0),
@@ -1681,6 +1738,7 @@ pub fn guard_id_for(elem: Type) -> Option<u32> {
         Type::Bool => Some(3),
         Type::F64 => Some(4),
         Type::Ptr => Some(5),
+        Type::Secret(sid) => secret_scalar_slot(sid),
         _ => None,
     }
 }
@@ -1689,6 +1747,9 @@ pub fn guard_id_for(elem: Type) -> Option<u32> {
 /// `Guard<T>` `GuardId` (the `*g` deref result type, slice 3). `i64` for an
 /// unknown id (defensive). Mirrors [`mutex_elem_for`].
 pub fn guard_elem_for(id: GuardId) -> Type {
+    if let Some(secret) = secret_elem_for_slot(id.0) {
+        return secret;
+    }
     match id.0 {
         1 => Type::I32,
         2 => Type::U8,
@@ -5020,6 +5081,19 @@ pub fn check_module(
     let mut generic_instances: Vec<GenericInstanceData> = Vec::new();
     let mut refs: Vec<RefData> = Vec::new();
     let mut secrets: Vec<SecretData> = Vec::new();
+    // ADR 0071 M1.4c (D6.1): pre-intern the secretable word-scalars at FIXED
+    // `SecretId`s 0..=3 — FIRST, before any other interning can claim those ids.
+    // This is what makes a secret container element expressible at all: the
+    // container maps (`shared_id_for` & peers) are table-free and so need the
+    // element's id to be a knowable CONSTANT, which a source-encounter-ordered
+    // `SecretId` otherwise is not. Interning these unconditionally only fixes the
+    // NUMBERING of the secrets table — it is invisible to every dump (the dumps
+    // render secret types structurally, `secret i64`, always passing the program;
+    // the `<secret#N>` form is a no-program diagnostic fallback) and to name
+    // mangling (`sec_{inner}`, structural), so it moves no oracle.
+    for scalar in SECRET_SCALARS {
+        intern_secret(&mut secrets, scalar);
+    }
     // ADR 0066 M1.2: the channel-type interner. M1.2 minimum interns a single
     // `Channel<i64>` while building the channel-builtin signatures below.
     let mut channels: Vec<ChannelData> = Vec::new();
@@ -5630,6 +5704,14 @@ pub fn check_module(
         intern_shared(&mut shared, Type::Bool);
         intern_shared(&mut shared, Type::F64);
         intern_shared(&mut shared, Type::Ptr);
+        // ADR 0071 M1.4c (D6.1): the secret elements at fixed SharedIds 6..=9,
+        // matching `shared_id_for`'s secret range. `Shared<secret T>` is safe
+        // IN-PROCESS (D6): one address space, and the receiver is still fully
+        // `secret_leak`-checked — no new taint sink, since a secret-dependent
+        // decision is already a rejected secret branch.
+        for scalar in SECRET_SCALARS {
+            intern_shared(&mut shared, Type::Secret(intern_secret(&mut secrets, scalar)));
+        }
         let shared_sigs: &[(usize, &[Type], Type)] = &[
             (38, &[Type::I64], shared_i64),   // shared_new(i64) -> Shared<i64>
             (39, &[shared_i64], Type::I64),   // shared_get(Shared<i64>) -> i64
@@ -5670,6 +5752,16 @@ pub fn check_module(
         intern_guard(&mut guards, Type::Bool);
         intern_guard(&mut guards, Type::F64);
         intern_guard(&mut guards, Type::Ptr);
+        // ADR 0071 M1.4c (D6.1): the secret elements at fixed Mutex/Guard ids
+        // 6..=9. `lock(m: Mutex<secret T>) -> ?Guard<secret T>` needs NO new shape
+        // (the D4 amendment): the guard's payload is the PUBLIC mutex-cell handle
+        // and the valid bit is public control data (the lock outcome, D5) — only
+        // the protected ELEMENT that `*g` yields is secret.
+        for scalar in SECRET_SCALARS {
+            let secret_ty = Type::Secret(intern_secret(&mut secrets, scalar));
+            intern_mutex(&mut mutexes, secret_ty);
+            intern_guard(&mut guards, secret_ty);
+        }
         let mutex_sigs: &[(usize, &[Type], Type)] = &[
             (40, &[Type::I64], mutex_i64),   // mutex_new(i64) -> Mutex<i64>
             (41, &[mutex_i64], guard_i64),   // lock(Mutex<i64>) -> ?Guard<i64>
@@ -13622,14 +13714,22 @@ fn main() -> i64 {
 
     // ---- C3.1 / ADR 0019 D5: `secret T` interns into Type::Secret ----
 
+    /// How many entries of `secret <inner>` the program's interner holds. ADR
+    /// 0071 M1.4c pre-interns the secretable scalars (D6.1), so the table has a
+    /// nonzero baseline and its raw LENGTH no longer means "how many secrets did
+    /// this program mention" — these tests assert per-type multiplicity instead,
+    /// which is what the interner actually guarantees (intern once, dedup after).
+    fn secret_entries(p: &TypedProgram, inner: Type) -> usize {
+        p.secrets.iter().filter(|s| s.inner == inner).count()
+    }
+
     #[test]
     fn c31_secret_in_param_type_interns() {
         // A fn with `secret i64` in its signature type-checks; the
         // body still has to return the declared type (i64 here).
         let p = check_ok("fn f(x: secret i64) -> i64 { 0 } fn main() -> i64 { 0 }");
-        // One secret entry should be in the program's interner.
-        assert_eq!(p.secrets.len(), 1);
-        assert_eq!(p.secrets[0].inner, Type::I64);
+        // `secret i64` is in the program's interner, exactly once.
+        assert_eq!(secret_entries(&p, Type::I64), 1);
     }
 
     #[test]
@@ -13643,8 +13743,7 @@ fn main() -> i64 {
         let p = check_ok(
             "fn f(x: secret bool) -> bool { false } fn main() -> i64 { 0 }",
         );
-        assert_eq!(p.secrets.len(), 1);
-        assert_eq!(p.secrets[0].inner, Type::Bool);
+        assert_eq!(secret_entries(&p, Type::Bool), 1);
     }
 
     #[test]
@@ -13653,7 +13752,7 @@ fn main() -> i64 {
         let p = check_ok(
             "fn f(x: secret i64, y: secret i64) -> i64 { 0 } fn main() -> i64 { 0 }",
         );
-        assert_eq!(p.secrets.len(), 1);
+        assert_eq!(secret_entries(&p, Type::I64), 1);
     }
 
     #[test]
@@ -13663,7 +13762,7 @@ fn main() -> i64 {
         let p = check_ok("fn f(x: & secret i64) -> i64 { 0 } fn main() -> i64 { 0 }");
         // The ref + the secret it wraps both land in the interner
         // tables.
-        assert_eq!(p.secrets.len(), 1);
+        assert_eq!(secret_entries(&p, Type::I64), 1);
         assert!(p.refs.iter().any(|r| matches!(r.inner, Type::Secret(_))));
     }
 
@@ -13676,7 +13775,97 @@ fn main() -> i64 {
         let p = check_ok(
             "fn main() -> i64 { let pw: secret i64 = 42; 0 }",
         );
-        assert_eq!(p.secrets.len(), 1);
+        assert_eq!(secret_entries(&p, Type::I64), 1);
+    }
+
+    // ---- ADR 0071 M1.4c (D6.1): secret container elements ----
+
+    #[test]
+    fn c71_secret_scalars_are_pre_interned_at_fixed_ids() {
+        // The whole mechanism rests on these ids being CONSTANT (the container
+        // maps are table-free), so pin the numbering explicitly.
+        let p = check_ok("fn main() -> i64 { 0 }");
+        for (idx, scalar) in SECRET_SCALARS.iter().enumerate() {
+            assert_eq!(
+                p.secrets[idx].inner, *scalar,
+                "SecretId({idx}) must stay pinned to {scalar:?}"
+            );
+            assert_eq!(secret_scalar_slot(SecretId(idx as u32)), Some(6 + idx as u32));
+        }
+        // A non-pre-interned secret (e.g. `secret [u8]`, id >= 4) has no slot, so
+        // it stays a rejected container element rather than aliasing a scalar.
+        assert_eq!(secret_scalar_slot(SecretId(SECRET_SCALARS.len() as u32)), None);
+    }
+
+    #[test]
+    fn c71_secret_container_maps_round_trip() {
+        // Every container maps a secret element to its slot and back, so
+        // `shared_get`/`lock`/`*g` recover the SECRET element type — the taint
+        // oracle (a value is secret iff its Type is Secret) stays intact through
+        // the container.
+        for (idx, scalar) in SECRET_SCALARS.iter().enumerate() {
+            let sid = SecretId(idx as u32);
+            let secret_ty = Type::Secret(sid);
+            let slot = 6 + idx as u32;
+            assert_eq!(shared_id_for(secret_ty), Some(slot));
+            assert_eq!(shared_elem_for(SharedId(slot)), secret_ty);
+            assert_eq!(mutex_id_for(secret_ty), Some(slot));
+            assert_eq!(mutex_elem_for(MutexId(slot)), secret_ty);
+            assert_eq!(guard_id_for(secret_ty), Some(slot));
+            assert_eq!(guard_elem_for(GuardId(slot)), secret_ty);
+            let _ = scalar;
+        }
+        // The public range is untouched by the secret extension.
+        assert_eq!(shared_elem_for(SharedId(0)), Type::I64);
+        assert_eq!(mutex_elem_for(MutexId(5)), Type::Ptr);
+        assert_eq!(guard_elem_for(GuardId(3)), Type::Bool);
+    }
+
+    #[test]
+    fn c71_shared_get_does_not_strip_the_secret_qualifier() {
+        // D6's NAMED INVARIANT, asserted at the type level: reading out of a
+        // secret container yields a value that is still `secret`. The fn's
+        // declared return type is `secret i64`, and its body is exactly
+        // `shared_get(s)` — so this only type-checks if the read preserves the
+        // qualifier (the taint oracle is the Type, so a stripped qualifier here
+        // would silently untaint every value in a shared cell).
+        let p = check_ok(
+            "fn read(s: Shared<secret i64>) -> secret i64 { shared_get(s) }\
+             fn main() -> i64 { 0 }",
+        );
+        let read = p.fns.iter().find(|f| f.name == "read").expect("read");
+        assert!(
+            matches!(read.body.ty, Type::Secret(_)),
+            "shared_get on a Shared<secret i64> must stay secret, got {:?}",
+            read.body.ty
+        );
+    }
+
+    #[test]
+    fn c71_secret_mutex_lock_uses_the_ordinary_guard_shape() {
+        // The D4 amendment: `lock(m: Mutex<secret T>)` returns the ORDINARY
+        // `?Guard<T>` shape — no `OpenResult` — because the guard's payload is the
+        // public cell handle and the valid bit is public control data (the lock
+        // outcome, D5). Only the protected element `*g` yields is secret. That it
+        // type-checks under the SAME guard pins as the public case is the claim.
+        check_ok(
+            "fn main() -> i64 {\n\
+             \x20   let s: secret i64 = 7;\n\
+             \x20   let m = mutex_new(s);\n\
+             \x20   let g = lock(m);\n\
+             \x20   if is_some(g) { 0 } else { 1 }\n\
+             }",
+        );
+    }
+
+    #[test]
+    fn c71_secret_f64_is_not_a_container_element() {
+        // `secret f64` is a type error in its own right (float ops are not
+        // constant-time), so it must never acquire a container slot — pinned here
+        // because the secret range is keyed by SecretId, and a future
+        // pre-interning of f64 would silently admit it.
+        assert!(!SECRET_SCALARS.contains(&Type::F64));
+        assert!(!SECRET_SCALARS.contains(&Type::Ptr));
     }
 
     #[test]

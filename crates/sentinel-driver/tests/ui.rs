@@ -146,6 +146,11 @@ ui_snapshot!(c71_guard_no_borrow, "c71_guard_no_borrow.sentinel");
 // (GuardDerefNotVar) — only the directly `let`-bound guard Var may be `*g`-derefed
 // (a computed operand would consume the guard, skipping its unlock-on-drop).
 ui_snapshot!(c71_guard_deref_computed, "c71_guard_deref_computed.sentinel");
+// ADR 0071 M1.4c (D6): a secret read out of a `Mutex<secret T>` is STILL secret for
+// every downstream check — branching on `*g` is rejected exactly as any other secret
+// branch is. This is the fixture that proves the secret container did not become a
+// laundering hole: if it ever compiles, constant-time is broken.
+ui_snapshot!(c71_secret_mutex_branch, "c71_secret_mutex_branch.sentinel");
 
 // ---- ADR 0070: non-capturing function values (types) ----
 // D4: a wrong-arity fn is not eligible as a Fn<T,R> value (any word-scalar shape).
