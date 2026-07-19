@@ -626,3 +626,224 @@ fn sentinel_codegen_self_merges_the_compiler_and_reaches_fixed_point() {
 
     let _ = std::fs::remove_dir_all(&tmp);
 }
+
+// ---------------------------------------------------------------------------
+// The EXTENDED program differential: real multi-module programs, not just the
+// curated single-file fixture corpus.
+//
+// `collect_fixtures` above sweeps only `tests/pass` + `tests/ui` — single-file
+// fixtures written to exercise one construct each. That left the harness
+// structurally blind to divergence in REAL programs: a verification pass found
+// that 7 of the 14 `examples/lang/` programs the oracle emits diverged from
+// `scg`, ALL silently (both sides exit 0) — including a catastrophic miscompile
+// (`fn_value.sentinel`: the oracle emits an indirect call, `scg` emitted an
+// effect-continuation resume) and an ABI-shaped break (`sealed_*`: a
+// `SealedChannel` param typed `i64` where the oracle uses `ptr`). Most of those
+// are KNOWN-deferred features — but "known" lived only in prose, so a genuine
+// REGRESSION in that surface would have been equally invisible.
+//
+// This closes the blind spot: it sweeps `examples/`, `sentinel_library/` and
+// `tools/`, and every divergence must be either fixed or listed in
+// `DEFERRED_PROGRAMS` with the ADR that defers it. The list IS the deliverable —
+// it converts an invisible gap into an auditable one, and a deferred program
+// that starts matching fails the test so the list cannot rot.
+
+/// Programs whose `scg` divergence is a KNOWN, deliberately-deferred feature
+/// gap, each with the ADR/decision that defers it. A listed program is still RUN
+/// (so a crash, or the oracle ceasing to emit, is still noticed) but its
+/// byte-difference is not a failure. Deleting an entry is how a mirror slice
+/// records that it closed the gap.
+///
+/// NOTE the asymmetry that makes this list tolerable: `snc build` uses the
+/// inkwell backend, so every program here COMPILES AND RUNS CORRECTLY today
+/// (asserted end-to-end in `examples.rs`). The divergence is between the
+/// hand-maintained `snc llvm` text ORACLE and `scg` — it constrains the
+/// self-host story, not the shipped compiler.
+const DEFERRED_PROGRAMS: &[(&str, &str)] = &[
+    // ADR 0070 D3-revisit: a `Fn<T,R>`-typed local called DIRECTLY (`op(5)`).
+    // scg's `dump_te_call` keeps ADR 0020 D5's "vars win over fns" dispatch
+    // unconditionally, so it lowers the call as a kont RESUME rather than an
+    // indirect call — the most severe entry here: wrong code, not a missing
+    // feature.
+    ("examples/lang/fn_value.sentinel", "ADR 0070 D3-revisit: direct call of a Fn-typed var is unmirrored in scg (lowers as a kont resume)"),
+    ("examples/lang/fn_value_generic.sentinel", "ADR 0070 M-cont: generic Fn<T,R> instantiations are snc-only"),
+    // ADR 0069 / ADR 0066 M2.4a-c: the SealedChannel bridge + the sealed stdlib
+    // are snc-side; scg types a SealedChannel param `i64` where the oracle uses
+    // `ptr` (an ABI-shaped divergence).
+    ("examples/lang/sealed_bytes.sentinel", "ADR 0069 M2.4c-1: sealed stdlib snc-only (SealedChannel param i64 vs ptr)"),
+    ("examples/lang/sealed_channel.sentinel", "ADR 0069 M2.4a: sealed stdlib snc-only (SealedChannel param i64 vs ptr)"),
+    ("examples/lang/sealed_session.sentinel", "ADR 0069 M2.4b-crypto: sealed stdlib snc-only"),
+    // ADR 0066 M1.2b-cont: generic word-scalar CHANNEL elements are snc-only
+    // (scg's channel paths are i64-only, and differential-clean for i64).
+    ("examples/lang/channel_generic.sentinel", "ADR 0066 M1.2b-cont: generic channel elements are snc-only"),
+    // ADR 0066 M2.3b: generic word-scalar elements for the process channel.
+    ("examples/lang/process_channel_typed.sentinel", "ADR 0066 M2.3b: generic process-channel elements are snc-only"),
+];
+
+/// Programs whose divergence is a REAL BUG in `scg`, not a deferred feature —
+/// kept separate from `DEFERRED_PROGRAMS` on purpose. Conflating "we chose not
+/// to port this yet" with "this is wrong" is precisely the invisible-gap problem
+/// this test exists to end, so a bug listed here must carry its DIAGNOSIS, and
+/// the entry is a debt marker to be deleted by a fix — never by a re-label.
+///
+/// Both entries below were found by this test on its first run; neither was
+/// known before, and neither is reachable through `tests/pass`.
+const KNOWN_SCG_BUGS: &[(&str, &str)] = &[
+    // scg's merge handles `extern "C"` imports BACKWARDS for this module: the
+    // oracle emits `define @std$sys$posix$pid()` calling the C symbol
+    // `@getpid()`, while scg module-qualifies the EXTERN IMPORT
+    // (`define @std$sys$posix$getpid()`) and leaves the real function
+    // UNqualified (`define @pid()`). The caller then finds no
+    // `@std$sys$posix$pid` and emits NO CALL AT ALL — main silently loses
+    // `let p: i64 = pid();` and stores an alloca into itself
+    // (`store i64 %v0, ptr %v0`), which does not even assemble:
+    //   llvm-as: error: '%v0' defined with type 'ptr' but expected 'i64'
+    // Minimal repro: a program that `use std::sys::posix::pid;` and calls it —
+    // `uid()` in the same module resolves correctly, so it is specific to the
+    // extern-adjacent name, not to statement position.
+    ("examples/sys/process_ids.sentinel", "scg merge mis-renames `extern \"C\"` imports: qualifies the extern, leaves the real fn bare, drops the call (emits non-assemblable IR)"),
+    // scg does not module-qualify CLASS/IMPL symbols: the oracle emits
+    // `@input$Logged__init` and `@default__input$Logged__input$Meter__tick`,
+    // scg emits `@Logged__init` / `@default__Logged__Meter__tick`. Same shape,
+    // wrong symbol names — a cross-module collision hazard rather than a
+    // missing feature.
+    ("examples/lang/delegation.sentinel", "scg omits the module prefix on class/impl symbols (`@Logged__init` vs `@input$Logged__init`)"),
+];
+
+/// The deferral reason for `rel` (a repo-relative, forward-slashed path).
+fn deferred_reason(rel: &str) -> Option<&'static str> {
+    DEFERRED_PROGRAMS
+        .iter()
+        .chain(KNOWN_SCG_BUGS.iter())
+        .find(|(p, _)| *p == rel)
+        .map(|(_, why)| *why)
+}
+
+/// Recursively collect `.sentinel` files under `dir`.
+fn collect_under(dir: &Path, out: &mut Vec<PathBuf>) {
+    if !dir.is_dir() {
+        return;
+    }
+    for entry in std::fs::read_dir(dir).expect("read dir") {
+        let path = entry.expect("dir entry").path();
+        if path.is_dir() {
+            collect_under(&path, out);
+        } else if path.extension().and_then(|e| e.to_str()) == Some("sentinel") {
+            out.push(path);
+        }
+    }
+}
+
+/// The real-program corpus: every `.sentinel` under `examples/`,
+/// `sentinel_library/` and `tools/`. Library modules with no `main` simply fail
+/// the oracle and are skipped, exactly like a deferred construct.
+fn collect_programs() -> Vec<PathBuf> {
+    let root = workspace_root();
+    let mut out = Vec::new();
+    for sub in ["examples", "sentinel_library", "tools"] {
+        collect_under(&root.join(sub), &mut out);
+    }
+    out.sort();
+    out
+}
+
+/// Copy `src`'s CONTENTS into `dst` recursively (so `sentinel_library/std` lands
+/// at `<dst>/std`). Mirrors `examples.rs`'s `assemble()` staging, which is what
+/// makes `use std::…` / `use Sentinel::…` resolve: module discovery roots at the
+/// entry file's parent directory, for the oracle and for scg's own self-hosted
+/// discover+merge alike.
+fn copy_tree_contents(src: &Path, dst: &Path) {
+    std::fs::create_dir_all(dst).expect("create dst");
+    for entry in std::fs::read_dir(src).expect("read_dir") {
+        let entry = entry.expect("dir entry");
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        if from.is_dir() {
+            copy_tree_contents(&from, &to);
+        } else {
+            std::fs::copy(&from, &to).expect("copy file");
+        }
+    }
+}
+
+#[test]
+fn sentinel_codegen_matches_oracle_on_real_programs() {
+    let tmp = std::env::temp_dir().join(format!("snc_selfhost_cg_prog_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).expect("create temp dir");
+    let cg = build_sentinel_codegen(&tmp);
+
+    let work = tmp.join("work");
+    std::fs::create_dir_all(&work).expect("create work dir");
+    // Stage the first-party libraries next to the entry so `use std::…` /
+    // `use Sentinel::…` resolves for BOTH sides.
+    copy_tree_contents(&workspace_root().join("sentinel_library"), &work);
+    let input = work.join("input.sentinel");
+
+    let programs = collect_programs();
+    assert!(
+        programs.len() > 50,
+        "expected a substantial program corpus, got {}",
+        programs.len()
+    );
+
+    let root = workspace_root();
+    let mut emitted = 0usize;
+    let mut mismatches: Vec<String> = Vec::new();
+    let mut stale: Vec<String> = Vec::new();
+    for program in &programs {
+        let rel = program
+            .strip_prefix(&root)
+            .expect("under root")
+            .to_string_lossy()
+            .replace('\\', "/");
+        let bytes = std::fs::read(program).expect("read program");
+        std::fs::write(&input, &bytes).expect("stage input");
+        let oracle = Command::new(env!("CARGO_BIN_EXE_snc"))
+            .arg("llvm")
+            .arg(&input)
+            .output()
+            .expect("run snc llvm");
+        if !oracle.status.success() {
+            continue; // not in the emitted subset (deferred construct / not a program)
+        }
+        emitted += 1;
+        let sentinel = Command::new(&cg)
+            .current_dir(&work)
+            .output()
+            .expect("run the Sentinel codegen");
+        if oracle.stdout == sentinel.stdout {
+            if deferred_reason(&rel).is_some() {
+                stale.push(format!(
+                    "  {rel} now MATCHES the oracle — delete it from \
+                     DEFERRED_PROGRAMS / KNOWN_SCG_BUGS"
+                ));
+            }
+            continue;
+        }
+        if deferred_reason(&rel).is_some() {
+            continue; // a registered gap: an ADR-deferred feature or a tracked bug
+        }
+        mismatches.push(format!(
+            "  {rel} (oracle {} bytes vs sentinel {} bytes)",
+            oracle.stdout.len(),
+            sentinel.stdout.len()
+        ));
+    }
+
+    assert!(
+        emitted >= 10,
+        "expected the oracle to emit for a meaningful number of real programs, got {emitted}"
+    );
+    assert!(stale.is_empty(), "DEFERRED_PROGRAMS is stale:\n{}", stale.join("\n"));
+    assert!(
+        mismatches.is_empty(),
+        "the Sentinel codegen diverged from `snc llvm` on {}/{} emitted real program(s) \
+         NOT registered as deferred:\n{}",
+        mismatches.len(),
+        emitted,
+        mismatches.join("\n")
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
