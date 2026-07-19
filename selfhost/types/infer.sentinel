@@ -392,6 +392,15 @@ fn is_generic_builtin(fid: i64) -> bool {
     fid == 1 || fid == 2 || fid == 3 || fid == 7 || fid == 8 || fid == 9 || fid == 10
 }
 
+// (ADR 0071 M1.4c) The `Shared`/`Mutex` builtins whose type is ELEMENT-dependent —
+// shared_new(38) / shared_get(39) / mutex_new(40) / lock(41). Not
+// `is_generic_builtin`s: those infer a `(targs T)` annotation from the first arg,
+// while these carry no targs and instead read the element off a concrete handle
+// (see `dump_container_call`).
+fn is_container_builtin(fid: i64) -> bool {
+    fid == 38 || fid == 39 || fid == 40 || fid == 41
+}
+
 // The inferred type-arg T for a generic builtin. `firstty` = the first arg's type
 // (-1 if none); `exp` = the call's expected type (for vec_new, which has no args).
 fn targ_of_builtin(c: &mut TyCtx, fid: i64, firstty: i64, exp: i64) -> i64 {
@@ -552,6 +561,74 @@ fn dump_args_capture_first(out: &mut Vec<u8>, a: Args, consume_rest: bool, src: 
             (*c).consuming = svc;
             t0
         },
+    }
+}
+
+// (ADR 0071 M1.4c) The `Shared`/`Mutex` builtins' types are DYNAMIC — the element
+// comes from the CONCRETE argument's own interned handle, not from the fixed
+// per-FnId `builtin_ret` table (which knows only an FnId, so it could only ever
+// answer the i64 default). Mirrors `dump_apply_call`'s shape and the Rust
+// `check_call` special-cases:
+//   38 shared_new(v: T)      -> Shared<T>          (element = the value arg's type)
+//   39 shared_get(s: Shared<T>) -> T               (element read off the handle)
+//   40 mutex_new(v: T)       -> Mutex<T>
+//   41 lock(m: Mutex<T>)     -> ?Guard<T>
+// This is what makes a SECRET element expressible end-to-end in scg: the interner
+// is structural, so `Shared<secret i64>` needs no new representation — only this
+// threading. An empty arg list / a non-container argument falls back to
+// `builtin_ret` (the oracle rejects those cases, so the differential never compares
+// scg's behavior for them — this project's usual reject-path stance).
+// The CONSTRUCTORS (38 shared_new / 40 mutex_new) read the element off the VALUE
+// argument and record NO `type_args` on the Rust side (codegen encodes by LLVM
+// value kind), so they dump args straight — the `dump_apply_call` shape. The
+// READERS (39 shared_get / 41 lock) take the element off the CONTAINER handle and
+// DO record `type_args` whenever it is non-`i64` — so they must render a
+// `(targs <elem>)` annotation before the args, which means buffering the args
+// first (the `dump_gcall` shape) since the element is only known after the arg is
+// typed. The `i64` case emits no targs, keeping every pre-M1.4c fixture
+// byte-identical.
+fn dump_container_call(out: &mut Vec<u8>, fid: i64, ca: Args, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
+    if fid == 38 {
+        let vt: i64 = dump_args_capture_first(out, ca, false, src, c, gb);
+        if vt == 0 - 1 {
+            builtin_ret(c, fid)
+        } else {
+            mk_shared(c, vt)
+        }
+    } else if fid == 40 {
+        let vt2: i64 = dump_args_capture_first(out, ca, false, src, c, gb);
+        if vt2 == 0 - 1 {
+            builtin_ret(c, fid)
+        } else {
+            mk_mutex(c, vt2)
+        }
+    } else {
+        let mut abuf: Vec<u8> = vec_new();
+        let ht: i64 = dump_args_capture_first(&mut abuf, ca, false, src, c, gb);
+        let elem: i64 = if ht == 0 - 1 {
+            0 - 1
+        } else {
+            container_elem(c, ht)
+        };
+        if elem == 0 - 1 {
+            append_str(out, vec_to_array(abuf));
+            builtin_ret(c, fid)
+        } else {
+            if elem == 0 {
+                0
+            } else {
+                append_str(out, " (targs ");
+                render_type(out, elem, c);
+                push(out, ')');
+                0
+            };
+            append_str(out, vec_to_array(abuf));
+            if fid == 39 {
+                elem
+            } else {
+                mk_nullable(c, mk_guard(c, elem))
+            }
+        }
     }
 }
 

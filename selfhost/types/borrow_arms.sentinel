@@ -1018,6 +1018,12 @@ fn dump_te_call(out: &mut Vec<u8>, cn: [u8], ca: Args, exp: i64, src: &[u8], c: 
                     // (ADR 0070) apply: the return type depends on the concrete
                     // Fn<T,R> passed as the first arg, not a fixed per-FnId table.
                     dump_apply_call(out, ca, src, c, gb)
+                } else if is_container_builtin(fid) {
+                    // (ADR 0071 M1.4c) shared_new/shared_get/mutex_new/lock: the
+                    // ELEMENT comes from the concrete argument's own handle, so the
+                    // call's type is dynamic (the `apply` shape). This is what lets
+                    // a SECRET element flow through the containers.
+                    dump_container_call(out, fid, ca, src, c, gb)
                 } else {
                     dump_targs(out, ca, src, c, gb);
                     fn_ret(c, fid)
@@ -1041,6 +1047,19 @@ fn dump_te_call(out: &mut Vec<u8>, cn: [u8], ca: Args, exp: i64, src: &[u8], c: 
                 } else {
                     0
                 };
+                // (ADR 0071 M1.4c) A CALL's value is an RVALUE, never a "named
+                // binding read" — so clear the direct-Var tracker before returning.
+                // `dump_texpr` only resets `mvbv` on ENTRY and only the `Var` arm
+                // sets it, so without this a var dumped as an ARGUMENT leaks up:
+                // `let s = shared_new(a)` saw `mvbv = a` and emitted a spurious
+                // `sentinel_shared_clone` (an rvalue source TRANSFERS its refcount
+                // unit — it must NOT clone), diverging from the oracle, which
+                // decides structurally on the RHS expression. Latent until a
+                // fixture first passed a VARIABLE to a container constructor;
+                // every earlier one passed a literal, whose arm leaves `mvbv` at
+                // the entry reset. Same class as the documented `mvbv` compound-tail
+                // leak behind `SharedReturnNotSupported`.
+                (*c).mvbv = 0 - 1;
                 rt
             }
 }

@@ -1214,6 +1214,22 @@ fn pass_c71_mutex_deref() {
 }
 
 #[test]
+fn pass_c71_secret_shared() {
+    // ADR 0071 M1.4c (D6): secret shared state — `Shared<secret T>` /
+    // `Mutex<secret T>`. D6's named invariant: a container read does NOT strip the
+    // `secret` qualifier (the fixture's `secret i64` annotations only type-check
+    // while it survives), so `secret_leak` keeps checking every downstream use;
+    // the sibling ui fixture `c71_secret_mutex_branch` proves the rejection still
+    // fires on a value read out of a lock. The cells are mlocked at birth and
+    // zeroed at the last drop (D6.2). 30 + (6*2) = 42, declassified once for the
+    // public exit code. M1.4c-1b: now in the differential corpus (scg mirrors the
+    // element-generic containers byte-identically).
+    let r = build_and_run("c71_secret_shared.sentinel");
+    assert_eq!(r.exit, 42);
+    assert_eq!(r.stdout, "");
+}
+
+#[test]
 fn pass_c71_mutex_rc() {
     // ADR 0071 M1.4b slice 3a: the Mutex<T> handle refcount clone/drop accounting.
     // Exercises all three rc++ duplication sites (let-binding, by-value user-fn arg,

@@ -687,6 +687,46 @@ fn class_of_handle(c: &mut TyCtx, h: i64) -> i64 {
 }
 
 // Strip one reference layer: `&T` / `&mut T` (kind 2, inner in `tb`) → `T`; else
+// (ADR 0071 M1.4c) The ELEMENT handle of a container type — `Shared<T>` (kind 17),
+// `Mutex<T>` (18) and `Guard<T>` (19) all store the element in payload A, like
+// `Channel<T>`. Returns -1 for a non-container handle. This is what makes the
+// containers element-GENERIC in scg: the interner is structural, so
+// `Shared<secret i64>` is just `intern_type(17, mk_secret(i64), 0)` and the element
+// rides in `ta` — the i64-only hardcoding the M1.4a/M1.4b slices used (element
+// handle `0`) was a scope cut, not a representational limit.
+fn container_elem(c: &mut TyCtx, h: i64) -> i64 {
+    if h < tbase() {
+        0 - 1
+    } else {
+        let idx: i64 = h - tbase();
+        let k: i64 = (*c).tk[idx];
+        if k == 17 {
+            (*c).ta[idx]
+        } else if k == 18 {
+            (*c).ta[idx]
+        } else if k == 19 {
+            (*c).ta[idx]
+        } else {
+            0 - 1
+        }
+    }
+}
+
+// (ADR 0071 M1.4c) Is this handle a `secret T` (interner kind 3)? Codegen picks the
+// mlocked `_secret` cell constructor on it (D6.2), and the encode/decode arms strip
+// it first — a secret lowers identically to its inner (erasure), so only the
+// CONSTRUCTOR differs.
+fn is_secret_ty(c: &mut TyCtx, h: i64) -> bool {
+    if h < tbase() {
+        false
+    } else {
+        (*c).tk[h - tbase()] == 3
+    }
+}
+
+// (`strip_secret` — the oracle's `unsecret()` twin — already exists in
+// `infer.sentinel`; the container arms reuse it rather than duplicating it.)
+
 // unchanged. A method receiver `c.m()` carries the class value, but a `&Class` /
 // `&mut Class` (e.g. a `self` re-borrow) strips to the class.
 fn strip_ref(c: &mut TyCtx, h: i64) -> i64 {

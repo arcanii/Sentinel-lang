@@ -817,10 +817,22 @@ fn cg_emit_call(c: &mut TyCtx, src: &[u8], fid: i64, snap: i64, rty: i64) -> i64
         let sn_vk: i64 = (*c).cgak[snap];
         let sn_vv: i64 = (*c).cgav[snap];
         let sn_d: i64 = cg_dst(c);
-        cgo_str(c, "call ptr @sentinel_shared_new(i64 ");
+        // (ADR 0071 M1.4c D6.2) a `secret T` payload goes to the mlocked,
+        // zeroed-at-last-drop cell. `rt` is `Shared<elem>`; the element rides in
+        // payload A. The VALUE encode is unchanged — a secret lowers identically to
+        // its inner (erasure), so only the CONSTRUCTOR differs.
+        let sn_sec: bool = is_secret_ty(c, container_elem(c, rty));
+        if sn_sec {
+            cgo_str(c, "call ptr @sentinel_shared_new_secret(i64 ");
+            (*c).cg_used_sharednewsecret = true;
+            0
+        } else {
+            cgo_str(c, "call ptr @sentinel_shared_new(i64 ");
+            (*c).cg_used_sharednew = true;
+            0
+        };
         cgo_operand(c, sn_vk, sn_vv);
         cgo_str(c, ")\n");
-        (*c).cg_used_sharednew = true;
         cg_reg(c, sn_d);
         0
     } else if fid == 39 {
@@ -844,10 +856,20 @@ fn cg_emit_call(c: &mut TyCtx, src: &[u8], fid: i64, snap: i64, rty: i64) -> i64
         let mn_vk: i64 = (*c).cgak[snap];
         let mn_vv: i64 = (*c).cgav[snap];
         let mn_d: i64 = cg_dst(c);
-        cgo_str(c, "call ptr @sentinel_mutex_new(i64 ");
+        // (ADR 0071 M1.4c D6.2) mirrors shared_new: a `secret T` protected value
+        // goes to the mlocked, zeroed-at-last-drop cell.
+        let mn_sec: bool = is_secret_ty(c, container_elem(c, rty));
+        if mn_sec {
+            cgo_str(c, "call ptr @sentinel_mutex_new_secret(i64 ");
+            (*c).cg_used_mutexnewsecret = true;
+            0
+        } else {
+            cgo_str(c, "call ptr @sentinel_mutex_new(i64 ");
+            (*c).cg_used_mutexnew = true;
+            0
+        };
         cgo_operand(c, mn_vk, mn_vv);
         cgo_str(c, ")\n");
-        (*c).cg_used_mutexnew = true;
         cg_reg(c, mn_d);
         0
     } else if fid == 41 {
