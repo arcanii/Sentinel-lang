@@ -36,7 +36,8 @@
 //! correct-or-loud over the bootstrap subset, never silently wrong.
 
 use sentinel_ast::{
-    BinOp, Block, ClassDecl, CmpOp, DelegateDecl, EffectDecl, EnumDecl, Expr, ExprKind, FnDef,
+    BinOp, Block, ClassDecl, CmpOp, DelegateDecl, EffectDecl, EnumDecl, Expr, ExprKind,
+    ExternFnDecl, FnDef,
     HandlerArm, ImplDecl, InitDef, LogicOp, OpDecl, Param, Pattern, Program, SelfKind,
     Stmt, StmtKind, StructDecl, TraitDecl, TraitMethodSig, TypeExpr, TypeExprKind, UnaryOp,
     Visibility,
@@ -51,6 +52,16 @@ pub fn dump(program: &Program) -> Result<String, String> {
     // classes follow the fns: a delegate inside a class re-synthesizes its impl at
     // resolve time, so its ImplId lands right after the user impls — preserved by
     // emitting each kind's vector in order.
+    // ADR 0057: `extern "C"` foreign imports come FIRST, before anything that
+    // can call them. Omitting them made this dump LOSSY — `snc merge` on a
+    // program with an extern block produced text that could not be recompiled
+    // ("undefined function `getpid`"). That is a defect in its own right (the
+    // merge output is meant to be a faithful single-file rendering), and it is
+    // what blocks the self-hosted `scg` from ever supporting externs: scg's
+    // whole pipeline is merge-TEXT -> parse -> types -> codegen, so anything the
+    // text drops is invisible to it. Blocks are re-grouped by their `link_libs`
+    // (every decl in one source block shares that list, ADR 0057 A9).
+    emit_externs(&mut out, &program.externs)?;
     for s in &program.structs {
         emit_struct(&mut out, s)?;
     }
@@ -73,6 +84,53 @@ pub fn dump(program: &Program) -> Result<String, String> {
         emit_effect(&mut out, ef)?;
     }
     Ok(out)
+}
+
+// --- extern "C" foreign imports (ADR 0057) -----------------------------------
+
+/// Emit the program's `extern "C"` declarations, grouped into blocks by their
+/// shared `link_libs` (ADR 0057 A9 — every decl in one source block carries the
+/// block's list, so equal lists reconstruct the original grouping). Declarations
+/// are BODYLESS and terminated by `;`. Emits nothing when there are no externs,
+/// so every extern-free program's dump is byte-unchanged.
+fn emit_externs(out: &mut String, externs: &[ExternFnDecl]) -> Result<(), String> {
+    let mut i = 0;
+    while i < externs.len() {
+        let libs = &externs[i].link_libs;
+        out.push_str("extern \"C\"");
+        if !libs.is_empty() {
+            out.push_str(" link(");
+            for (n, lib) in libs.iter().enumerate() {
+                if n > 0 {
+                    out.push_str(", ");
+                }
+                out.push('"');
+                out.push_str(lib);
+                out.push('"');
+            }
+            out.push(')');
+        }
+        out.push_str(" {\n");
+        // Consume the whole run sharing this link list.
+        while i < externs.len() && externs[i].link_libs == *libs {
+            let ef = &externs[i];
+            out.push_str("    fn ");
+            out.push_str(&ef.name);
+            out.push('(');
+            for (n, p) in ef.params.iter().enumerate() {
+                if n > 0 {
+                    out.push_str(", ");
+                }
+                emit_param(out, p);
+            }
+            out.push_str(") -> ");
+            emit_type(out, &ef.return_type);
+            out.push_str(";\n");
+            i += 1;
+        }
+        out.push_str("}\n");
+    }
+    Ok(())
 }
 
 // --- effects (Bar B / effects) -----------------------------------------------

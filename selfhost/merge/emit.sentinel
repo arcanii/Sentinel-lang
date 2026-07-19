@@ -1050,45 +1050,92 @@ fn emit_ops(out: &mut Vec<u8>, c: &MergeCtx, k: &Vec<i64>, s: &Vec<i64>, e: &Vec
     }
 }
 
-// An `extern "C" { fn f() -> T; … }` block is SKIPPED — emitted as nothing,
-// which is exactly what the Rust merge does (`snc merge` on a program with an
-// extern block yields only `fn main() … { ((getpid()) + (getuid())) }`: the
-// declarations vanish and the calls stay as bare C symbol names).
+// An `extern "C" { fn f(p: T, …) -> T; … }` block is RE-EMITTED in the oracle's
+// canonical form. Three things make this arm necessary:
 //
-// It must be skipped as a UNIT. Previously `emit_item` had no `extern` arm, so
-// `extern`/`"C"`/`{` fell through as unknown tokens and the block's BODYLESS
-// declarations reached `emit_fn_decl`, which parses a block that is not there,
-// runs past the `;`, and DELETES the following declaration. That produced two
-// miscompiles: a loud one (`ret i64 %v0` with `%v0` never defined — llvm-as
-// rejects it) and a SILENT one (`extern "C" { fn getpid(); fn getuid(); }` +
-// `getpid() + getuid()` emitting `add i64 %v0, %v0` — assembles cleanly, runs,
-// wrong answer).
-fn emit_extern_block(k: &Vec<i64>, cur: &mut i64) -> i64 {
+// 1. It must be handled as a UNIT. Previously `emit_item` had no `extern` arm, so
+//    `extern`/`"C"`/`{` fell through as unknown tokens and the block's BODYLESS
+//    declarations reached `emit_fn_decl`, which parses a block that is not there,
+//    runs past the `;`, and DELETED the following declaration — a loud miscompile
+//    (`ret i64 %v0`, `%v0` never defined) and a SILENT one (`getpid() + getuid()`
+//    emitting `add i64 %v0, %v0`: it assembled, ran, wrong answer).
+// 2. The names inside are FOREIGN C symbols — global, resolved by bare name — so
+//    they are emitted with `append_slice` (raw), NEVER `emit_name_slice` (which
+//    would module-qualify them).
+// 3. The block must SURVIVE the merge. It used to be dropped, matching the Rust
+//    `source_dump`, but that dump was LOSSY: its output could not be recompiled
+//    ("undefined function `getpid`"). Since scg's whole pipeline is
+//    merge-TEXT -> parse -> types -> codegen, anything the text drops is
+//    invisible to scg forever. `source_dump` now emits these blocks, so this
+//    mirrors it byte-for-byte: `extern "C"` + optional ` link("a", "b")`, then
+//    `{\n`, then `    fn name(params) -> ty;\n` per decl, then `}\n`.
+fn emit_extern_block(out: &mut Vec<u8>, c: &MergeCtx, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> i64 {
     let n: i64 = len((*k));
-    while *cur < n && (*k)[*cur] != 6 {
+    // `extern`
+    *cur = *cur + 1;
+    append_str(out, "extern \"C\"");
+    // the `"C"` string literal
+    *cur = *cur + 1;
+    // ADR 0057 A9: an optional ` link("lib", …)` clause, re-emitted verbatim.
+    if *cur < n && (*k)[*cur] == 2 {
+        append_str(out, " link(");
+        // `link`
         *cur = *cur + 1;
-    }
-    let mut depth: i64 = 0;
-    let mut done: bool = false;
-    while *cur < n && !done {
-        let t: i64 = (*k)[*cur];
-        if t == 6 {
-            depth = depth + 1;
-            0
-        } else if t == 7 {
-            depth = depth - 1;
-            0
-        } else {
-            0
-        };
+        // `(`
         *cur = *cur + 1;
-        if depth == 0 {
-            done = true;
-            0
-        } else {
-            0
-        };
+        let mut firstlib: bool = true;
+        while *cur < n && (*k)[*cur] != 13 {
+            if (*k)[*cur] == 63 {
+                if firstlib {
+                    0
+                } else {
+                    append_str(out, ", ")
+                };
+                push(out, '"');
+                append_slice(out, src, (*s)[*cur], (*e)[*cur]);
+                push(out, '"');
+                firstlib = false;
+                0
+            } else {
+                0
+            };
+            *cur = *cur + 1;
+        }
+        // `)`
+        *cur = *cur + 1;
+        push(out, ')');
+        0
+    } else {
+        0
+    };
+    append_str(out, " {\n");
+    // `{`
+    *cur = *cur + 1;
+    while *cur < n && (*k)[*cur] != 7 {
+        // `fn`
+        *cur = *cur + 1;
+        let nm_s: i64 = (*s)[*cur];
+        let nm_e: i64 = (*e)[*cur];
+        // name
+        *cur = *cur + 1;
+        // `(`
+        *cur = *cur + 1;
+        let params: Params = parse_params(k, s, e, src, cur);
+        *cur = *cur + 1;
+        let rty: TypeE = parse_type(k, s, e, src, cur);
+        // `;`
+        *cur = *cur + 1;
+        append_str(out, "    fn ");
+        append_slice(out, src, nm_s, nm_e);
+        push(out, '(');
+        emit_params(out, c, params);
+        append_str(out, ") -> ");
+        emit_type(out, c, rty);
+        append_str(out, ";\n");
     }
+    // `}` — no trailing newline: `emit_module` appends one after every item.
+    *cur = *cur + 1;
+    push(out, '}');
     0
 }
 
@@ -1103,7 +1150,7 @@ fn emit_item(out: &mut Vec<u8>, c: &MergeCtx, k: &Vec<i64>, s: &Vec<i64>, e: &Ve
     if lead == 2 && is_extern(src, (*s)[*cur], (*e)[*cur]) {
         // Must precede the `fn` arm: without it the block's bodyless decls fall
         // through to `emit_fn_decl`, which overruns and deletes the next item.
-        emit_extern_block(k, cur)
+        emit_extern_block(out, c, k, s, e, src, cur)
     } else if lead == 58 {
         skip_use(k, cur)
     } else if lead == 64 {
