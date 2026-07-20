@@ -1,0 +1,23 @@
+// c67_module_decl — a `module` directive on a single-file program (ADR 0067).
+//
+// This exists for the SELF-HOST lexer differential, not for the language feature.
+// `module`/`part` are ADR 0067 keywords; the modularization work mirrored them into
+// the self-hosted PARSER (`is_kw_module`/`is_kw_part`, tags 64/65) but NOT into
+// `selfhost/lexer.sentinel`'s `ident_kind` — so `snc lex` classified `module` as a
+// keyword while the self-hosted lexer emitted `Ident`. That divergence was invisible
+// because the lex differential sweeps only `tests/pass` + `tests/ui` and no fixture
+// there carried the directive (every real user of `module` is a multi-file program
+// under `selfhost/` or `examples/`, which that differential never sees). An
+// adversarial review of the extern slice caught it; this fixture is the guard.
+//
+// `part` needs a sibling file, so it cannot be covered by a single-file fixture — it
+// waits on the open work to extend the other stage differentials to real programs.
+// A single-file `module` declaration is legal (the module is simply its own root),
+// compiles, and runs; exit 42 means the whole pipeline agreed.
+module demo;
+
+fn double(x: i64) -> i64 { x + x }
+
+fn main() -> i64 {
+    double(21)
+}

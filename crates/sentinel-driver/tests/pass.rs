@@ -1592,6 +1592,25 @@ fn pass_c65_return_match() {
 }
 
 #[test]
+fn pass_c57_extern_call() {
+    // ADR 0057 c57_extern_call: an `extern "C"` foreign import called through a safe
+    // Sentinel wrapper. The FIRST fixture in `tests/` to use `extern` at all — that
+    // gap made every stage's extern handling structurally untestable, since the
+    // selfhost differential corpus is exactly `tests/pass` + `tests/ui`, and it hid
+    // two real defects (scg registering no externs, and its merge deleting whole
+    // programs that used `link(...)`).
+    //
+    // It also guards the FnId ORDERING invariant the differentials print as
+    // `#<fnid>`: externs are registered AFTER every own fn, so `wrap` is 42, `main`
+    // 43 and `llabs` 44 despite the extern block coming first in the source.
+    //
+    // `llabs` is portable in a way `getpid` is not — C99, in libc AND the MSVC CRT —
+    // so unlike `examples/sys/process_ids.sentinel` this one links on Windows too.
+    // llabs(-20) + llabs(22) = 42.
+    assert_eq!(run_exit("c57_extern_call.sentinel"), 42);
+}
+
+#[test]
 fn pass_c60_vec_struct_move() {
     // ADR 0034 D8: a Move-typed struct element (a struct owning a `[u8]`) pushed
     // into a `Vec` through a BY-VALUE function parameter is consumed/moved, so it

@@ -1062,6 +1062,40 @@ fn dump_class_delegate(buf: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i6
 // a `&mut` *param* across if-tails is fine (cf. parse_postfix_rest). An optional
 // `pub` prefix is parsed-and-skipped (the dump omits visibility). Leading tags:
 // use=58, struct=52, enum=53, effect=57, trait=54, impl=55, class=56; else fn.
+// (ADR 0057) Skip an `extern "C" [link(…)] { … }` block whole: scan to its `{`
+// (kind 6) and balance to the matching `}` (kind 7), emitting nothing. Deliberately
+// WITHOUT a bodyless-`;` early exit — the braces here are the block's own and the
+// `;`s inside terminate its declarations. Mirrors `skip_extern_block` in
+// selfhost/merge/engine.sentinel.
+fn skip_extern_block(k: &Vec<i64>, cur: &mut i64) -> i64 {
+    let n: i64 = len((*k));
+    while *cur < n && (*k)[*cur] != 6 {
+        *cur = *cur + 1;
+    }
+    let mut depth: i64 = 0;
+    let mut done: bool = false;
+    while *cur < n && !done {
+        let t: i64 = (*k)[*cur];
+        if t == 6 {
+            depth = depth + 1;
+            0
+        } else if t == 7 {
+            depth = depth - 1;
+            0
+        } else {
+            0
+        };
+        *cur = *cur + 1;
+        if depth == 0 {
+            done = true;
+            0
+        } else {
+            0
+        };
+    }
+    0
+}
+
 fn dump_item(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> i64 {
     if (*k)[*cur] == 59 {
         *cur = *cur + 1;
@@ -1070,7 +1104,20 @@ fn dump_item(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &
         0
     };
     let lead: i64 = (*k)[*cur];
-    if lead == 58 {
+    if lead == 2 && is_extern_kw(src, (*s)[*cur], (*e)[*cur]) {
+        // (ADR 0057) an `extern "C" { … }` block. The ORACLE's `snc ast` dump OMITS
+        // externs entirely, so this skips the block as a UNIT and emits nothing.
+        //
+        // It MUST precede the `fn` fallthrough below. Without this arm `extern` fell
+        // through to `dump_fn_decl`, which read the ABI string as the fn NAME and the
+        // block as a parameter list, emitting the malformed
+        // `(fn "C" ((param fn () (param x i64)) i64 (block (int 0)))` — unbalanced
+        // parens, and the real declarations lost. Exactly the shape of the merge's
+        // `emit_item` bug (it had no extern arm either, and DELETED the following
+        // declaration); this one was invisible for the same reason — until
+        // `tests/pass/c57_extern_call.sentinel` no fixture used `extern` at all.
+        skip_extern_block(k, cur)
+    } else if lead == 58 {
         dump_use_decl(out, k, s, e, src, cur)
     } else if lead == 64 {
         dump_module_decl(out, k, s, e, src, cur)
@@ -1179,14 +1226,31 @@ fn main() -> i64 {
     let mut cur: i64 = 0;
     let mut firstitem: bool = true;
     while cur < ntok {
+        let sep: i64 = len(out);
         if firstitem {
             0
         } else {
             push(&mut out, '\n');
             0
         };
-        firstitem = false;
+        let aftersep: i64 = len(out);
         dump_item(&mut out, &kinds, &starts, &ends, &src, &mut cur);
+        // (ADR 0057) An item may emit NOTHING — an `extern "C"` block, which the
+        // oracle's `snc ast` omits. It must not consume the separator pushed above,
+        // or the dump gains a stray blank line (and `firstitem` must stay set, so the
+        // first REAL item is still treated as first). Rewind to `sep` and leave the
+        // flag alone. Written as a general "did this item emit?" test rather than an
+        // extern special-case, so any future silent item behaves.
+        if len(out) == aftersep {
+            while len(out) > sep {
+                let _d: u8 = pop(&mut out);
+                0
+            }
+            0
+        } else {
+            firstitem = false;
+            0
+        };
     }
     push(&mut out, '\n');
     let arr: [u8] = vec_to_array(out);

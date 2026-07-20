@@ -1,0 +1,56 @@
+// c57: `extern "C"` foreign imports (ADR 0057) — the FIRST fixture in `tests/` to
+// use `extern` at all. That absence was not cosmetic: the whole fixture-driven
+// differential corpus (lex, parse, resolve, types, borrow, effects, mir, codegen)
+// is built from `tests/pass` + `tests/ui`, so every stage's extern handling was
+// structurally untestable, and two real defects sat green because of it — the
+// self-hosted `scg` registered no extern declarations at all (emitting NO CALL
+// where the oracle emits one), and its merge silently deleted whole programs that
+// used the ADR 0057 A9 `link(...)` clause. ADR 0057's own phasing anticipated this,
+// deferring the `scg` mirror "until a corpus fixture uses `extern`".
+//
+// The fixture is deliberately shaped to guard the ORDERING invariant, which is the
+// part that is easy to get wrong and expensive to get wrong. The Rust resolver
+// registers every own `fn` FIRST and every `extern "C"` declaration AFTER, so here
+// `wrap` is FnId 42, `main` 43, and `llabs` 44 — even though the extern block comes
+// FIRST in the source (verified against `snc resolve`, which prints
+// `(fn #42 wrap … (call #44 …))`). Registering in source order — the natural mistake
+// — would make `llabs` 42 and shift every other id.
+//
+// Which differentials actually catch what, stated precisely rather than optimistically:
+//   * an ID SHIFT surfaces in FOUR of the nine — resolve, types, borrow, effects.
+//     `mir` and `llvm` render callees by NAME, and lex/ast run before resolution, so
+//     those four are the whole guard.
+//   * dropping extern REGISTRATION entirely surfaces more widely: resolve/types emit
+//     `(call #)` with no id, and `llvm` loses both the `declare` and the call.
+//   * dropping the PARSER's extern arm surfaces in ast (malformed, unbalanced parens);
+//     dropping the LEXER keyword surfaces in lex (`Ident` for `Extern`).
+// Note the asymmetry: only the resolve differential covers `selfhost/resolve`, so that
+// stage has exactly one guard here, not four.
+//
+// `llabs` is chosen for portability, not flavour: it is C99, lives in libc on
+// macOS/Linux AND in the MSVC CRT on Windows, and is genuinely `i64 -> i64` (unlike
+// `abs`/`labs`, which are `int`/`long` and so mismatch the declared ABI on some
+// platforms). `getpid`, used by `examples/sys/process_ids.sentinel`, is NOT portable
+// this way — it has no MSVC CRT equivalent, which is why that example is a known
+// Windows link failure and why it could not serve as the corpus fixture.
+//
+// FFI values are PUBLIC (the unverified boundary): a `secret` argument crossing an
+// extern call is rejected by the ADR 0057 secret fence, so none of this is `secret`.
+
+extern "C" {
+    fn llabs(x: i64) -> i64;
+}
+
+// Wrapping the call in a non-`main` fn mirrors the real `std::sys::posix` shape,
+// where each libc symbol is fronted by a safe Sentinel wrapper.
+fn wrap(v: i64) -> i64 {
+    llabs(v)
+}
+
+fn main() -> i64 {
+    // Two call sites, one already-positive, so a stubbed-out `llabs` returning its
+    // argument unchanged would still fail the negative case.
+    let a: i64 = wrap(0 - 20);
+    let b: i64 = wrap(22);
+    a + b
+}

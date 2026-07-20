@@ -79,8 +79,23 @@ fn emit_simple(out: &mut Vec<u8>, kind: [u8], start: i64, end: i64) -> i64 {
     end
 }
 
-// Map an identifier slice to its keyword KIND name, or "Ident" if it is
-// not a keyword. Mirrors the Rust lexer's keyword set (35 keywords).
+// Map an identifier slice to its keyword KIND name, or "Ident" if it is not a
+// keyword. Must mirror the Rust lexer's keyword set EXACTLY — 38 as of 2026-07-20.
+//
+// Do not take that number on trust, and do not eyeball the lists; derive both and
+// diff them, which is a two-line check:
+//   grep -oE '#\[token\("[A-Za-z_][A-Za-z0-9_]*"\)\]' crates/sentinel-syntax/src/lexer.rs \
+//     | sed 's/.*token("//; s/").*//' | sort -u
+//   grep -oE 'str_eq\(slice, "[^"]*"\)' selfhost/lexer.sentinel \
+//     | sed 's/.*, "//; s/").*//' | sort -u
+// `comm -23` of those two must be EMPTY.
+//
+// This comment has been wrong twice, in the same direction both times: it claimed 35
+// when the table held 34, and then 37 when it held 36 — each time asserting a parity
+// that did not hold. Four keywords were missing in total (`extern`, `export`,
+// `module`, `part`), every one of them invisible because the lex differential sweeps
+// only `tests/pass` + `tests/ui` and no fixture there used any of the four. An
+// asserted count is worth nothing here; the diff above is worth everything.
 fn ident_kind(slice: [u8]) -> [u8] {
     if str_eq(slice, "let") {
         "Let"
@@ -150,6 +165,30 @@ fn ident_kind(slice: [u8]) -> [u8] {
         "Enum"
     } else if str_eq(slice, "match") {
         "Match"
+    } else if str_eq(slice, "extern") {
+        // ADR 0057 / ADR 0059: `extern "C"` and `export "C"` are RESERVED KEYWORDS in
+        // the Rust lexer, so `snc lex` tags them `Extern` / `Export` (see the header
+        // comment for the full parity history). `tests/pass/c57_extern_call.sentinel`
+        // is what surfaced the `extern` gap.
+        //
+        // This affects the `snc lex` DUMP only. The downstream stages do not share this
+        // table: `selfhost/parser.sentinel` has its own byte-compare keyword
+        // recognisers, and it still lexes `extern` as a plain identifier — which is why
+        // the merge / types / resolve extern scans match it by TEXT (kind 2) rather than
+        // by a keyword tag. Changing that representation is a separate, larger change.
+        "Extern"
+    } else if str_eq(slice, "export") {
+        "Export"
+    } else if str_eq(slice, "module") {
+        // ADR 0067's self-host mirror updated selfhost/parser.sentinel (`is_kw_module` /
+        // `is_kw_part`, tags 64/65), parser/dump.sentinel and merge.sentinel — but not
+        // THIS file, the standalone `snc lex` stage. So `snc lex` disagreed with the
+        // self-hosted lexer on any source carrying the directives, which is 25 files
+        // under selfhost/ today. Green only because the lex differential sweeps
+        // `tests/pass` + `tests/ui`, and no fixture there uses them.
+        "Module"
+    } else if str_eq(slice, "part") {
+        "Part"
     } else {
         "Ident"
     }

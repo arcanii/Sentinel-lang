@@ -190,6 +190,52 @@ fn name_eq_src(src: &[u8], st: i64, en: i64, q: &[u8]) -> bool {
     }
 }
 
+// (ADR 0057) Compare a `src` slice against a string LITERAL — the `extern` block
+// recogniser. The selfhost lexer has no `extern` KEYWORD (it lexes as a plain
+// identifier, kind 2), so the top-level scan matches it by text. Mirrors the same
+// pair in selfhost/types.sentinel; kept local because `resolve` imports only the
+// parser.
+fn src_eq_lit(src: &[u8], st: i64, en: i64, lit: [u8]) -> bool {
+    let ln: i64 = len(lit);
+    if en - st != ln {
+        false
+    } else {
+        let mut i: i64 = 0;
+        let mut ok: bool = true;
+        while i < ln {
+            if (*src)[st + i] != lit[i] {
+                ok = false;
+                0
+            } else {
+                0
+            };
+            i = i + 1;
+        }
+        ok
+    }
+}
+
+// Compare two `src` slices (the extern-dedup predicate).
+fn src_eq_src(src: &[u8], a0: i64, a1: i64, b0: i64, b1: i64) -> bool {
+    if a1 - a0 != b1 - b0 {
+        false
+    } else {
+        let mut i: i64 = 0;
+        let n: i64 = a1 - a0;
+        let mut ok: bool = true;
+        while i < n {
+            if (*src)[a0 + i] != (*src)[b0 + i] {
+                ok = false;
+                0
+            } else {
+                0
+            };
+            i = i + 1;
+        }
+        ok
+    }
+}
+
 // Compare the owned query name `q` (borrowed) to a string literal `lit`.
 fn name_eq_lit(q: &[u8], lit: [u8]) -> bool {
     let qn: i64 = len(*q);

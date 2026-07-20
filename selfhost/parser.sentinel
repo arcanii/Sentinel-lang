@@ -258,6 +258,20 @@ fn is_fn_kw(src: &[u8], start: i64, end: i64) -> bool {
     end - start == 2 && (*src)[start] == 'f' && (*src)[start + 1] == 'n'
 }
 
+// (ADR 0057) Is `src[start..end]` the identifier `extern`? This tokenizer has no
+// `extern` KEYWORD — it lexes as a plain identifier — so an `extern "C" { … }` block
+// is recognised by TEXT at the item lead, the same way the merge's `is_extern` does
+// (selfhost/merge/engine.sentinel).
+pub fn is_extern_kw(src: &[u8], start: i64, end: i64) -> bool {
+    end - start == 6
+        && (*src)[start] == 'e'
+        && (*src)[start + 1] == 'x'
+        && (*src)[start + 2] == 't'
+        && (*src)[start + 3] == 'e'
+        && (*src)[start + 4] == 'r'
+        && (*src)[start + 5] == 'n'
+}
+
 // Keyword-atom recognition (mirrors `is_fn_kw` — byte-compare in place, no
 // allocation): `true` / `false` / `null` lex as identifiers but parse to the
 // `BoolLit` / `NullLit` nodes the oracle emits, NOT to `(var ...)`.

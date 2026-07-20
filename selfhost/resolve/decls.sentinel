@@ -830,6 +830,80 @@ fn resolve_item(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src
     }
 }
 
+// (ADR 0057) Register every `extern "C"` declaration found by the top-level scan,
+// AFTER every real `fn`. `xpos` holds each block's `extern` token index in source
+// order. This mirrors `register_externs` in selfhost/types.sentinel — read the `nufn`
+// comment there for the full rationale; the short version is that the Rust resolver
+// registers own fns FIRST and externs AFTER, while the merged TEXT puts the block
+// somewhere else entirely, so registration MUST be deferred to after the scan or
+// every `#<fnid>` in the dump shifts.
+//
+// The resolve stage needs strictly less than types does: an extern's only job here is
+// to make `fn_lookup` resolve a call to its bare C name, so only the NAME goes in.
+// There is no signature to scan (resolve has no type tables), and no `itempos` entry
+// is needed — `resolve_fn` numbers fns off its OWN kind-3 counter (`fnidx`), not off
+// this table, and nothing iterates `ufs` for emission. Without this, an extern call
+// resolved to -1 and the dump emitted `(call #)` where the oracle emits `(call #49)`.
+fn register_externs(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], xpos: &Vec<i64>, c: &mut RCtx) -> i64 {
+    let nk: i64 = len((*k));
+    let nb: i64 = len((*xpos));
+    let mut bi: i64 = 0;
+    while bi < nb {
+        // Past the block header (`extern` `"C"` + an optional ADR 0057 A9 `link(…)`
+        // clause — its parens are kinds 4/5, not braces) to the block's `{` (kind 6).
+        let mut i: i64 = (*xpos)[bi];
+        while i < nk && (*k)[i] != 6 {
+            i = i + 1;
+        }
+        i = i + 1;
+        while i < nk && (*k)[i] != 7 {
+            if (*k)[i] == 3 {
+                let ns: i64 = (*s)[i + 1];
+                let ne: i64 = (*e)[i + 1];
+                if extern_dup(c, src, ns, ne) {
+                    0
+                } else {
+                    push(&mut (*c).ufs, ns);
+                    push(&mut (*c).ufe, ne);
+                    0
+                };
+                // Past this bodyless decl's `;` (kind 44); the loop's `i + 1` finishes.
+                while i < nk && (*k)[i] != 44 {
+                    i = i + 1;
+                }
+                0
+            } else {
+                0
+            };
+            i = i + 1;
+        }
+        bi = bi + 1;
+    }
+    0
+}
+
+// Is `src[ns..ne]` already registered? Deduplication mirrors `merge_modules` ("the
+// same libc symbol may be declared in several modules"): the Rust merge dedups before
+// the resolver sees them, and scg's own merge re-emits one block PER MODULE. Unlike
+// the types stage this scans the WHOLE table, not just an extern region — resolve
+// keeps no split point, and a clash with a real `fn` is the Rust resolver's
+// `RedefinedFunction`, which scg (a dump-only port) does not diagnose either way.
+fn extern_dup(c: &mut RCtx, src: &[u8], ns: i64, ne: i64) -> bool {
+    let n: i64 = len((*c).ufs);
+    let mut i: i64 = 0;
+    let mut dup: bool = false;
+    while i < n {
+        if src_eq_src(src, (*c).ufs[i], (*c).ufe[i], ns, ne) {
+            dup = true;
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    dup
+}
+
 fn main() -> i64 {
     let path: [u8] = "input.sentinel";
     let src: [u8] = read_file(path);
@@ -901,6 +975,9 @@ fn main() -> i64 {
     let mut ecount: i64 = 0;
     let mut itempos: Vec<i64> = vec_new();
     let mut itemkind: Vec<i64> = vec_new();
+    // (ADR 0057) each `extern "C" { … }` block's `extern` token index; registration is
+    // deferred until after this scan (see `register_externs`).
+    let mut xpos: Vec<i64> = vec_new();
     let mut p1: i64 = 0;
     while p1 < ntok {
         let t1: i64 = kinds[p1];
@@ -979,6 +1056,15 @@ fn main() -> i64 {
                 scan_ops_of(&kinds, &starts, &ends, ecount, p1 + 2, &mut ctx);
                 ecount = ecount + 1;
                 0
+            } else if t1 == 2 && p1 + 1 < ntok && kinds[p1 + 1] == 63 && src_eq_lit(&src, starts[p1], ends[p1], "extern") {
+                // (ADR 0057) an `extern "C"` block. `extern` is an IDENT here, so the
+                // ABI string (kind 63) is the second gate: this scan sees EVERY depth-0
+                // token, and a fn signature's params sit at depth 0 too (parens are not
+                // braces), so matching on the word alone could send `register_externs`
+                // hunting for a `{` and finding a fn BODY. Only the POSITION is recorded
+                // — the decls inside are at depth 1, and must be numbered after all fns.
+                push(&mut xpos, p1);
+                0
             } else {
                 0
             };
@@ -988,6 +1074,10 @@ fn main() -> i64 {
         };
         p1 = p1 + 1;
     }
+
+    // (ADR 0057) every real `fn` is now in `ufs`; append the externs after them, which
+    // is the FnId order the Rust resolver assigns.
+    register_externs(&kinds, &starts, &ends, &src, &xpos, &mut ctx);
 
     // Pass 2 — GROUP-ORDER resolution. The Rust resolver resolves EVERY fn body,
     // then class methods, then impl methods (lib.rs:2559); the dump is source
