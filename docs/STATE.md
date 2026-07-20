@@ -14,6 +14,20 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
+**Latest (2026-07-21) — `spawn <runtime builtin>` (e.g. `spawn print(5)`) is now REJECTED,
+closing a three-way-inconsistent latent bug** (`3791337`). It type-checked but was handled
+three ways downstream: the `snc llvm` text oracle emitted an undefined `@__spawn_wrapper_0`
+(invalid IR), the self-hosted `scg` panicked (`ufs[0 - 42]`, negative index), and inkwell
+compiled+ran it (stdout "5"). A builtin slips the word-scalar arg/result gates (`print` is
+`i64 -> i64`). Root cause: a spawn wrapper is synthesized from the target's SIGNATURE, which
+works only when the signature name IS the emitted symbol — true for a user fn and (since
+`e17a631`) an `extern "C"` fn, false for a builtin (`print` vs `@sentinel_print`). Fix: a
+single `is_runtime` gate in the type-checker's `Spawn` arm (`TypeError::SpawnBuiltin`) —
+pre-codegen, so **all three back ends converge on rejection**. snc-only (no self-host mirror:
+type-check rejections are snc-side by convention, their `tests/ui` fixtures differential-skipped);
+scg's panic is a controlled bounds-check on out-of-contract input, now unreachable in any real
+pipeline. Recorded as an ADR 0066 D6 clarification; ui 46→47, both fixed points green.
+
 **Latest (2026-07-21) — the `extern "C"` self-host mirror is COMPLETE across resolve +
 parser + lexer, and the oracle's `spawn <extern>` invalid-IR bug is fixed.** Two of the three
 divergences the 2026-07-20 review left registered are closed. **(1) resolve/parser/lexer**

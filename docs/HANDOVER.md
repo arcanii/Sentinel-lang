@@ -51,7 +51,7 @@ reference as you work through the milestones.
 
 ---
 
-### ▶ RESUME HERE (2026-07-21 — **the `extern "C"` self-host mirror is COMPLETE**: resolve + parser + lexer (`5c911f5`) join types/codegen (`83a0473`), and the oracle's `spawn <extern>` invalid-IR bug is fixed (`e17a631`). Two of the three 2026-07-20-registered divergences are closed; the reviews on both slices found the module/part lex gap and a false code comment, and confirmed the secret FFI fence holds under spawn. First `extern`/`module` fixtures added. See "▶ ALSO OPEN" for what remains)
+### ▶ RESUME HERE (2026-07-21 — **the `extern "C"` self-host mirror is COMPLETE** (resolve + parser + lexer `5c911f5`, types/codegen `83a0473`), the oracle's `spawn <extern>` invalid-IR bug is fixed (`e17a631`), AND `spawn <runtime builtin>` is now rejected (`3791337`) — closing the three-way split the spawn-extern review surfaced. All three 2026-07-20-registered divergences are closed and the two follow-on spawn bugs resolved. First `extern`/`module` fixtures added. See "▶ ALSO OPEN" for what remains)
 
 > **▶▶ M1.4c-1 LANDED (snc-side)** — commit `248a6f0`. Secret containers work end-to-end
 > through inkwell + the `snc llvm` oracle. Full design rationale is the ADR's 2026-07-19
@@ -191,14 +191,10 @@ reference as you work through the milestones.
 >     shift). Parser + lexer arms landed in the same commit; first `extern`/`module` fixtures.
 >   - **✅ DONE `spawn <extern>` oracle IR** (`e17a631`) — legalized (inkwell + scg already
 >     supported it); the `program.externs` fallback converges the oracle onto scg.
->   - **NEW — `spawn <runtime builtin>` (e.g. `spawn print(5)`) is a THREE-WAY split**, found
->     by the spawn-extern review: `snc types` accepts it, the oracle emits invalid IR
->     (`@__spawn_wrapper_0` undefined), **scg CRASHES** (`index out of bounds: idx=-42,
->     len=1`), and inkwell compiles+runs it (stdout "5"). Pre-existing, orthogonal to the
->     extern work. The gate in `dump_spawn_wrapper` is deliberately extern-only — a builtin's
->     `sig.name` ("print") is not its runtime symbol (`@sentinel_print`), so it CANNOT be
->     fixed by widening that gate; the fix is a type-check rejection of `spawn <builtin>` (or
->     matching inkwell). Task filed. The scg crash is a second, independent symptom.
+>   - **✅ DONE `spawn <runtime builtin>` rejected** (`3791337`) — `TypeError::SpawnBuiltin`,
+>     an `is_runtime` gate in the type-checker's `Spawn` arm, pre-codegen so oracle + inkwell
+>     + scg all converge on rejection. snc-only (differential-skipped ui fixture); the scg
+>     panic is now unreachable in any real pipeline. ADR 0066 D6 clarification.
 >   - **The OTHER stage differentials still have the real-program blind spot** — lex/ast/
 >     resolve/types/borrow/effects/mir all use the fixture-only `collect_fixtures`, which is
 >     exactly what hid the module/part lex gap (25 `selfhost/` files use `module`, zero
@@ -249,8 +245,9 @@ reference as you work through the milestones.
 > not on the overstated one. **Verify the consequence, not just the discrepancy.**
 >
 > HANDOFF STATE: four-check green (18 known Windows failures, zero new; `pass` 151 incl.
-> `c57_extern_call` + `c66_spawn_extern` + `c67_module_decl`); all 9 differential stages
-> byte-identical, both bootstrap fixed points hold; working tree clean. abi count **51**.
+> `c57_extern_call` + `c66_spawn_extern` + `c67_module_decl`; `ui` 47 incl.
+> `c66_spawn_builtin`); all 9 differential stages byte-identical, both bootstrap fixed points
+> hold; working tree clean. abi count **51**.
 > Interner kinds: Shared=17, Mutex=18, Guard=19; next free = 20. Secret container slots:
 > 6..=9 (i64/i32/u8/bool). `KNOWN_SCG_BUGS` is down to ONE entry (`delegation.sentinel`, the
 > named-impl qualification). Lexer keyword table = Rust's exactly (38; derive-and-diff command
