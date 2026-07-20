@@ -18,6 +18,7 @@ fn new_tyctx(mode: i64) -> TyCtx {
         ufnb: vec_new(),
         ufns: vec_new(),
         ufne: vec_new(),
+        nufn: 0,
         snb: vec_new(),
         sts: vec_new(),
         ste: vec_new(),

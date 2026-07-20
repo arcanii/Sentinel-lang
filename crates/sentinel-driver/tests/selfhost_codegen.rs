@@ -694,31 +694,12 @@ const DEFERRED_PROGRAMS: &[(&str, &str)] = &[
 ///
 /// Both entries below were found by this test on its first run; neither was
 /// known before, and neither is reachable through `tests/pass`.
+///
+/// `examples/sys/process_ids.sentinel` used to head this list — the `extern "C"`
+/// bug, closed across three commits (the merge rename half, the merge emitter
+/// half, then ADR 0057 extern support in scg's types/codegen). It is deleted, not
+/// re-labelled, which is the only way an entry may leave.
 const KNOWN_SCG_BUGS: &[(&str, &str)] = &[
-    // NARROWED to a single honest cause (an adversarial review falsified an
-    // earlier, more optimistic version of this comment — the merge fix alone did
-    // NOT close it, and the emitter half was worse than the rename half).
-    //
-    // FIXED, in selfhost/merge/: (a) `build_rename` no longer walks INTO an
-    // `extern "C" { … }` block recording foreign C symbols as module names, and
-    // `skip_to_item_end` terminates a BODYLESS decl at its `;`; (b) — the severe
-    // one — `emit_item` had no `extern` arm at all, so the block's bodyless
-    // decls reached `emit_fn_decl`, which parses a block that is not there and
-    // DELETED the following declaration. That deletion produced a loud
-    // miscompile (`ret i64 %v0`, `%v0` never defined) AND a silent one
-    // (`getpid() + getuid()` emitting `add i64 %v0, %v0` — it assembled, ran,
-    // and returned the wrong answer). Extern blocks are now skipped as a unit,
-    // matching the Rust merge exactly (`snc merge` also drops them, keeping the
-    // calls as bare C symbol names). The silent wrong answer is gone: LLVM now
-    // rejects the output ("Only PHI nodes may reference their own value!").
-    //
-    // WHAT REMAINS (4 diff lines, one cause): scg has no `extern "C"` awareness
-    // in its TYPES/CODEGEN stages, so once the merge drops the block the callee
-    // is simply unknown and scg emits NOTHING where the oracle emits
-    // `%v0 = call i64 @getpid()` inside each wrapper. Closing it needs the
-    // extern declarations carried into scg's fn table with an is-extern flag
-    // that suppresses a `define` — i.e. real extern support, not a merge tweak.
-    ("examples/sys/process_ids.sentinel", "scg has no `extern \"C\"` support in types/codegen: the extern call is missing from each wrapper (merge halves FIXED)"),
     // MOSTLY FIXED (36 diff lines -> 8). scg's merge never recorded trait (54)
     // or class (56) declarations in its rename map, so it emitted
     // `@Logged__init` / `@default__Logged__Meter__tick` where the oracle emits

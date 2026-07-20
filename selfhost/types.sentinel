@@ -92,6 +92,20 @@ struct TyCtx {
     ufnb: Vec<u8>,
     ufns: Vec<i64>,
     ufne: Vec<i64>,
+    // --- (ADR 0057) the user-fn table's fn/extern SPLIT POINT: entries `0..nufn` are
+    //     real `fn`s (source order), `nufn..len(ufs)` are `extern "C"` declarations.
+    //     The order is NOT cosmetic — the Rust resolver registers every own fn FIRST
+    //     and every extern AFTER (lib.rs, "ADR 0057: register each `extern \"C\"`
+    //     declaration" runs after Pass 1's `program.fns` loop), so a FnId is only
+    //     oracle-identical if scg registers externs LAST too. The merged TEXT does not
+    //     say so: the Rust `source_dump` puts the extern block FIRST and scg's own
+    //     merge puts it mid-file, which is exactly why registration is DEFERRED to
+    //     after Pass 1's scan rather than done in source order. Externs get full rows
+    //     in every parallel table, so calls, returns and symbols need no special case;
+    //     what the split IS needed for is (a) `dump_moves` (an extern has no body, so
+    //     the `snc borrow` oracle emits no line for it) and (b) codegen, which emits
+    //     a `declare` for this range instead of a `define`. ---
+    nufn: i64,
     // --- struct table: names live in `snb` (a struct-name blob, so render_type
     //     needs no `src`); StructId = index. `sts`/`ste` = blob offsets. ---
     snb: Vec<u8>,
@@ -429,6 +443,52 @@ fn name_eq_src(src: &[u8], st: i64, en: i64, q: &[u8]) -> bool {
     }
 }
 
+// Compare a `src` slice against a string LITERAL. (ADR 0057) The selfhost lexer has
+// no `extern` KEYWORD — it lexes as a plain identifier (kind 2) — so the top-level
+// scan has to recognise an `extern "C" { … }` block by TEXT, exactly as the merge's
+// `is_extern` does (selfhost/merge/engine.sentinel). Kept local: `types` imports only
+// the parser, and `is_extern` is private to the `merge` module.
+fn src_eq_lit(src: &[u8], st: i64, en: i64, lit: [u8]) -> bool {
+    let ln: i64 = len(lit);
+    if en - st != ln {
+        false
+    } else {
+        let mut i: i64 = 0;
+        let mut ok: bool = true;
+        while i < ln {
+            if (*src)[st + i] != lit[i] {
+                ok = false;
+                0
+            } else {
+                0
+            };
+            i = i + 1;
+        }
+        ok
+    }
+}
+
+// Compare two `src` slices (the extern-dedup predicate).
+fn src_eq_src(src: &[u8], a0: i64, a1: i64, b0: i64, b1: i64) -> bool {
+    if a1 - a0 != b1 - b0 {
+        false
+    } else {
+        let mut i: i64 = 0;
+        let n: i64 = a1 - a0;
+        let mut ok: bool = true;
+        while i < n {
+            if (*src)[a0 + i] != (*src)[b0 + i] {
+                ok = false;
+                0
+            } else {
+                0
+            };
+            i = i + 1;
+        }
+        ok
+    }
+}
+
 fn name_eq_lit(q: &[u8], lit: [u8]) -> bool {
     let qn: i64 = len(*q);
     let ln: i64 = len(lit);
@@ -504,6 +564,100 @@ fn sink_name(gb: &mut Vec<u8>, name: [u8]) -> i64 {
     0
 }
 
+// (ADR 0057) Register every `extern "C"` declaration found by Pass 1, AFTER every
+// real `fn` — see `nufn`'s comment for why the order is the whole point of this being
+// a deferred sub-pass. `xpos` holds each block's `extern` token index in source order.
+//
+// A decl becomes a full user-fn-table row (`ufs`/`ufe` name slice + the `ufnb` blob
+// copy), so `fn_lookup` resolves a call to its bare C name and `cg_emit_call` renders
+// `@getpid` with no extern-specific code at all. Its `itempos`/`itemkind` entry uses
+// the SYNTHETIC kind 100, which every pass-2 group ignores — that is what suppresses
+// the `define` — while pass 1.5 routes it to the ordinary `scan_fn_sig` (an extern's
+// token shape `fn name(params) -> ty` is a fn signature; only the terminator differs,
+// `;` for `{`, and `scan_fn_sig` stops before it).
+//
+// Names are DEDUPLICATED, mirroring `merge_modules` ("the same libc symbol may be
+// declared in several modules"): the Rust merge dedups before the resolver ever sees
+// them, and scg's own merge re-emits one block PER MODULE, so without this the same
+// symbol would take two FnIds and shift every later id.
+fn register_externs(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], xpos: &Vec<i64>, c: &mut TyCtx, itempos: &mut Vec<i64>, itemkind: &mut Vec<i64>) -> i64 {
+    let nk: i64 = len((*k));
+    let nb: i64 = len((*xpos));
+    let mut bi: i64 = 0;
+    while bi < nb {
+        // Scan past the block header (`extern` `"C"` + an optional ADR 0057 A9
+        // `link(…)` clause, whose parens are kinds 4/5 — NOT braces, so they never
+        // touch the depth counter) to the block's `{`.
+        //
+        // ⚠ Those constants are worth stating precisely: `(`/`)` are 4/5, and 13 is
+        // `==` (selfhost/parser.sentinel, the operator table). An earlier draft of
+        // this comment said "12/13", and that exact misreading is what wrote
+        // `emit_extern_block`'s link-clause loop in selfhost/merge/emit.sentinel as
+        // `!= 13` — which terminates on the next `==` in the file instead of on `)`.
+        // This scan does not depend on the paren kind at all (it looks for the `{`,
+        // kind 6), so it was never affected; the note is here so the next reader
+        // checks the table rather than inheriting the belief.
+        let mut i: i64 = (*xpos)[bi];
+        while i < nk && (*k)[i] != 6 {
+            i = i + 1;
+        }
+        i = i + 1;
+        while i < nk && (*k)[i] != 7 {
+            if (*k)[i] == 3 {
+                let ns: i64 = (*s)[i + 1];
+                let ne: i64 = (*e)[i + 1];
+                if extern_dup(c, src, ns, ne) {
+                    0
+                } else {
+                    push(&mut (*c).ufs, ns);
+                    push(&mut (*c).ufe, ne);
+                    let bst: i64 = len((*c).ufnb);
+                    let mut bx: i64 = ns;
+                    while bx < ne {
+                        push(&mut (*c).ufnb, (*src)[bx]);
+                        bx = bx + 1;
+                    }
+                    push(&mut (*c).ufns, bst);
+                    push(&mut (*c).ufne, bst + (ne - ns));
+                    push(itempos, i);
+                    push(itemkind, 100);
+                    0
+                };
+                // Past this bodyless decl's `;` (kind 44) — the loop's own `i + 1`
+                // completes the step.
+                while i < nk && (*k)[i] != 44 {
+                    i = i + 1;
+                }
+                0
+            } else {
+                0
+            };
+            i = i + 1;
+        }
+        bi = bi + 1;
+    }
+    0
+}
+
+// Is `src[ns..ne]` already registered as an extern? Scans only the extern region
+// (`nufn..`) — a clash with a real `fn` is the Rust resolver's `RedefinedFunction`,
+// which scg (a dump-only port) does not diagnose.
+fn extern_dup(c: &mut TyCtx, src: &[u8], ns: i64, ne: i64) -> bool {
+    let n: i64 = len((*c).ufs);
+    let mut i: i64 = (*c).nufn;
+    let mut dup: bool = false;
+    while i < n {
+        if src_eq_src(src, (*c).ufs[i], (*c).ufe[i], ns, ne) {
+            dup = true;
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    dup
+}
+
 // (6/N) the shared build pipeline (ADR 0043 D3 reuse): parse → resolve → type-check
 // the whole program, computing the typed dump + the moved-sources side-table. `mode`
 // 0 → write the `snc types` dump to `result`; mode 1 → write the `snc borrow`
@@ -566,6 +720,10 @@ pub fn run(src: [u8], mode: i64, result: &mut Vec<u8>) -> i64 {
     let mut ecount: i64 = 0;
     let mut itempos: Vec<i64> = vec_new();
     let mut itemkind: Vec<i64> = vec_new();
+    // (ADR 0057) each `extern "C" { … }` block's `extern` token index. The decls
+    // INSIDE the block sit at brace depth 1, so this depth-0 scan cannot record them
+    // in place — and must not: they are numbered after every fn (see `nufn`).
+    let mut xpos: Vec<i64> = vec_new();
     let mut p1: i64 = 0;
     while p1 < ntok {
         let t1: i64 = kinds[p1];
@@ -681,6 +839,23 @@ pub fn run(src: [u8], mode: i64, result: &mut Vec<u8>) -> i64 {
                 push(&mut ctx.efe, ends[p1 + 1]);
                 ecount = ecount + 1;
                 0
+            } else if t1 == 2 && p1 + 1 < ntok && kinds[p1 + 1] == 63 && src_eq_lit(&src, starts[p1], ends[p1], "extern") {
+                // (ADR 0057) an `extern "C"` block — `extern` is an IDENT here (the
+                // selfhost lexer has no such keyword). Only its POSITION is recorded;
+                // registration is deferred to after this loop.
+                //
+                // The ABI-string check is a deliberate second gate. Unlike the merge's
+                // `is_extern`, which only ever runs at an ITEM LEAD, this scan sees
+                // EVERY depth-0 token — and a fn signature's params/types sit at depth
+                // 0 too (parens are not braces). A bare `extern` there would send
+                // `register_externs` hunting for a `{` and it would find the fn's BODY,
+                // registering its contents as foreign symbols. The real lexer reserves
+                // `extern` as a keyword so no valid program can trigger that, but the
+                // invariant lives in another codebase; `extern` IMMEDIATELY followed by
+                // a string literal (kind 63) is the block's own shape and cannot occur
+                // in a parameter list.
+                push(&mut xpos, p1);
+                0
             } else {
                 0
             }
@@ -689,6 +864,11 @@ pub fn run(src: [u8], mode: i64, result: &mut Vec<u8>) -> i64 {
         };
         p1 = p1 + 1;
     }
+
+    // (ADR 0057) the fn/extern split: every real `fn` is now in `ufs`, so freeze the
+    // count and append the extern decls after it — the Rust resolver's own order.
+    ctx.nufn = len(ctx.ufs);
+    register_externs(&kinds, &starts, &ends, &src, &xpos, &mut ctx, &mut itempos, &mut itemkind);
 
     // Pass 1.5: resolve fn return types (`ufret`, fn source order) + struct fields,
     // now that all top-level NAMES are registered.
@@ -701,6 +881,14 @@ pub fn run(src: [u8], mode: i64, result: &mut Vec<u8>) -> i64 {
     let mut ef2: i64 = 0;
     while q < ni {
         if itemkind[q] == 3 {
+            scan_fn_sig(&kinds, &starts, &ends, &src, itempos[q], &mut ctx, &mut garbage);
+            0
+        } else if itemkind[q] == 100 {
+            // (ADR 0057) an extern decl's signature is scanned by the ORDINARY fn-sig
+            // walk: same `fn name(params) -> ty` token shape, and `scan_fn_sig` stops
+            // at the terminator without reading a body. It lands `uftp` = 0 (no `<…>`)
+            // and `ufeff` = 0 (the token after the return type is `;`, not `!`), which
+            // is what the FFI boundary means anyway — no generics, no effect row.
             scan_fn_sig(&kinds, &starts, &ends, &src, itempos[q], &mut ctx, &mut garbage);
             0
         } else if itemkind[q] == 52 {
@@ -1349,6 +1537,9 @@ pub fn run(src: [u8], mode: i64, result: &mut Vec<u8>) -> i64 {
         } else {
             0
         };
+        // (ADR 0057) the `extern "C"` declares sit between the runtime-symbol group
+        // and the first `define` — the oracle's position exactly.
+        cg_extern_declares(result, &mut ctx, &src);
         let cn: i64 = len(ctx.cgout);
         let mut ci: i64 = 0;
         while ci < cn {
@@ -1388,7 +1579,9 @@ pub fn run(src: [u8], mode: i64, result: &mut Vec<u8>) -> i64 {
 // the moved-from VarIds in ascending order (membership over the `mvf`/`mvv` side-table),
 // one line per fn. (The `snc borrow` oracle's format.)
 pub fn dump_moves(c: &mut TyCtx, src: &[u8], out: &mut Vec<u8>) -> i64 {
-    let nf: i64 = len((*c).ufs);
+    // (ADR 0057) `nufn`, NOT `len(ufs)` — the tail of that table is the `extern "C"`
+    // decls, which have no body and so no line in the `snc borrow` oracle's output.
+    let nf: i64 = (*c).nufn;
     let nv: i64 = (*c).nextvid;
     let mut i: i64 = 0;
     while i < nf {
