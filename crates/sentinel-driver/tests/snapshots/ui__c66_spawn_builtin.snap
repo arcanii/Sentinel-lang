@@ -1,0 +1,14 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c66_spawn_builtin.sentinel\")"
+---
+sentinel::types::spawn_builtin
+
+  × cannot `spawn` the built-in function `print`
+    ╭─[tests/ui/c66_spawn_builtin.sentinel:15:23]
+ 14 │     let r: i64 = scope concurrent {
+ 15 │         let h = spawn print(5);
+    ·                       ────┬───
+    ·                           ╰── 
+ 16 │         h.await
+    ╰────

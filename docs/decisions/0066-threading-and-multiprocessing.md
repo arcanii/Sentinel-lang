@@ -390,6 +390,22 @@ per-spawn-site wrapper machinery (ADR 0024 D8), stays within the
 value-ABI, and avoids a boxed-value runtime. `secret`-typed results are
 fine (the result is a `secret T`, the awaiter receives `secret T`; D8).
 
+**D6 clarification (2026-07-21) — a spawn TARGET must be a user-defined or
+`extern "C"` function, never a runtime builtin.** The per-spawn-site wrapper
+is synthesized from the target's SIGNATURE, and it works only when the
+target's signature name IS its emitted symbol: true for a user fn and for an
+`extern "C"` fn (D6 of ADR 0057 legalized the latter), false for a builtin
+(`print`'s signature name is `print`, its emitted symbol is `@sentinel_print`).
+Left unchecked, `spawn print(5)` slipped the word-scalar arg/result gates
+(print is `i64 -> i64`) and produced an undefined `@__spawn_wrapper_<id>` in
+the text oracle (invalid IR) plus a negative-index panic in `scg` — while
+inkwell incidentally accepted it. Spawning a compiler intrinsic onto a task is
+meaningless, so it is rejected at type-check (`TypeError::SpawnBuiltin`, gated
+on `is_runtime`) — a pre-codegen point every back end shares, so all three
+converge on rejection. This is a bug fix, not a roadmap change; the rejection
+is snc-only (its `tests/ui` fixture is differential-skipped, like the peer
+spawn/guard rejections), so no self-host mirror was needed.
+
 ### D7. Multi-processing — `Process` over `std::process::Command`; a `Subprocess` capability effect.
 
 Process spawn is **cross-platform via `std::process::Command`** (no

@@ -4894,6 +4894,29 @@ pub enum TypeError {
         span: miette::SourceSpan,
     },
 
+    /// ADR 0066: a `spawn` target that is a runtime BUILTIN (`print`,
+    /// `len`, …). A spawn wrapper runs the target on a task, and both
+    /// text codegen and inkwell synthesize it from the target's
+    /// signature — which works for a user fn (its name IS its symbol)
+    /// and an `extern "C"` fn (ditto), but NOT a builtin: a builtin's
+    /// signature name (`print`) is not its emitted runtime symbol
+    /// (`@sentinel_print`), so no wrapper can be built from the
+    /// signature. Left unchecked it produced an undefined
+    /// `@__spawn_wrapper_<id>` reference in the text oracle (invalid IR)
+    /// and a negative-index panic in the self-hosted `scg`. Spawning a
+    /// compiler intrinsic onto a task is meaningless anyway, so it is
+    /// rejected here — a pre-codegen gate every back end shares.
+    #[error("cannot `spawn` the built-in function `{name}`")]
+    #[diagnostic(
+        code(sentinel::types::spawn_builtin),
+        help("a `spawn` target must be a user-defined or `extern \"C\"` function; built-in intrinsics like `print`/`len` are not spawnable")
+    )]
+    SpawnBuiltin {
+        name: String,
+        #[label("built-in, not a spawnable function")]
+        span: miette::SourceSpan,
+    },
+
     /// ADR 0066 M1.1: a `spawn` argument or result type that codegen
     /// can't yet pack/return. M1.1 lifts the ADR 0024 D7 `Task<i64>`-only
     /// restriction to any **word-sized scalar** (`i64`/`i32`/`u8`/`bool`/
@@ -10225,6 +10248,22 @@ fn check_expr(
                 });
             }
             let typed_call = check_expr(call_expr, None, env, signatures, structs, class_decls, enums, instances, refs, secrets, arrays, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
+            // The spawn TARGET must be a user-defined or `extern "C"` fn — not a
+            // runtime builtin. A builtin's signature name is not its emitted symbol,
+            // so no per-spawn wrapper can be synthesized from it (undefined-symbol
+            // IR / a negative-index panic downstream). `is_runtime` selects exactly
+            // the builtins; user fns and externs are both `is_runtime == false`.
+            // Checked BEFORE the arg/result-type gates so a bad target is diagnosed
+            // as such rather than by an incidental arg-type mismatch.
+            if let TypedExprKind::Call { id, .. } = &typed_call.kind {
+                let sig = &signatures[id.0 as usize];
+                if sig.is_runtime {
+                    return Err(TypeError::SpawnBuiltin {
+                        name: sig.name.clone(),
+                        span: to_source_span(&call_expr.span),
+                    });
+                }
+            }
             if !is_spawn_word_scalar(typed_call.ty) {
                 return Err(TypeError::SpawnTypeUnsupported {
                     got: typed_call.ty,
@@ -11997,6 +12036,11 @@ fn type_error_to_diagnostic(err: &TypeError) -> Diagnostic {
         TypeError::SpawnMustBeCall { span } => (
             "sentinel::types::spawn_must_be_call",
             "`spawn` requires a function-call target".to_string(),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        TypeError::SpawnBuiltin { name, span } => (
+            "sentinel::types::spawn_builtin",
+            format!("cannot `spawn` the built-in function `{name}`"),
             span.offset()..(span.offset() + span.len()),
         ),
         TypeError::SpawnTypeUnsupported { got, role, span } => (

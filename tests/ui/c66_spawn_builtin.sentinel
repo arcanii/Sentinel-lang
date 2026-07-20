@@ -1,0 +1,19 @@
+// ADR 0066: a `spawn` target must be a user-defined or `extern "C"` function,
+// never a runtime BUILTIN. `print` takes an i64 and returns an i64 (both spawn
+// word-scalars), so it slips past the arg/result-type gates — but a builtin has
+// no Sentinel body and its signature name (`print`) is not its emitted runtime
+// symbol (`@sentinel_print`), so no per-spawn wrapper can be synthesized from the
+// signature the way a user fn's or an extern's can. Left unchecked this produced
+// an undefined `@__spawn_wrapper_0` reference in the text oracle (invalid IR that
+// `llvm-as` rejects) and a negative-index panic in `scg` (`ufs[0 - 42]`), while
+// inkwell incidentally accepted it — a three-way split closed by rejecting here.
+//
+// Expected: compile error `sentinel::types::spawn_builtin`.
+
+fn main() -> i64 {
+    let r: i64 = scope concurrent {
+        let h = spawn print(5);
+        h.await
+    };
+    r
+}
