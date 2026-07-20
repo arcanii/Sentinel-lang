@@ -14,6 +14,34 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
+**Latest (2026-07-21) — the `extern "C"` self-host mirror is COMPLETE across resolve +
+parser + lexer, and the oracle's `spawn <extern>` invalid-IR bug is fixed.** Two of the three
+divergences the 2026-07-20 review left registered are closed. **(1) resolve/parser/lexer**
+(`5c911f5`): the resolve stage got the same deferred-registration shape as types (only the
+NAME goes in `ufs`, so `fn_lookup` resolves the bare C symbol; `(call #)` → `(call #49)`,
+byte-identical on merged `process_ids`, 1665 B). `effects` was checked and deliberately NOT
+changed (it prints one line per fn, externs number last, and registering there would break its
+fn-count-sized edge masks). The parser's `dump_item` gained an extern arm — without it `extern`
+fell through to `dump_fn_decl`, which read the ABI string as the fn NAME and emitted malformed
+unbalanced-paren output. An adversarial review then caught that the same completeness pass which
+added `extern`/`export` to the lexer keyword table had MISSED `module`/`part` — ADR 0067 mirrored
+those into the parser but never into the standalone `snc lex` stage, so `snc lex` tagged them
+keywords while the self-hosted lexer emitted `Ident` (25 files under `selfhost/` open with
+`module`). Both arms added; the header comment that had asserted a false parity count — twice,
+off-by-one both times — is replaced with the derive-and-diff command that actually checks it
+(Rust 38, selfhost 38). **First fixtures to exercise `extern`/`module` at all**
+(`c57_extern_call`, `c67_module_decl`) — that corpus gap is what hid every one of these, since
+the non-codegen differentials sweep only `tests/pass` + `tests/ui`. **(2) `spawn <extern>`**
+(`e17a631`): `dump_spawn_wrapper` looked the target up in `program.fns` (bodies only); an extern
+has a signature but no body, so it returned silently while the call site had already referenced
+`@__spawn_wrapper_<id>` — invalid IR. inkwell + scg both synthesize the wrapper from the
+signature already, so the fix (a `program.externs` fallback) converges the oracle onto scg,
+no mirror needed; byte-identical across 0/1/2 params. The review confirmed the ADR 0057 secret
+FFI fence still holds under spawn (`spawn llabs(secret)` fails type-check identically to the
+direct call) and caught a false "unreachable/safe" claim in the first draft comment — a runtime
+builtin (`spawn print(5)`) is ALSO bodyless and re-emits the same invalid IR, a PRE-EXISTING
+separate bug now tracked. All 9 stages byte-identical, both fixed points green, pass 151.
+
 **Latest (2026-07-20) — ADR 0057 `extern "C"` is SELF-HOSTED: scg's types + codegen now
 support foreign imports, closing the last `process_ids` divergence.** scg parsed an
 `extern "C" { … }` block but registered nothing — Pass 1 in `selfhost/types.sentinel` is a

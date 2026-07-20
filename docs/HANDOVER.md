@@ -51,7 +51,7 @@ reference as you work through the milestones.
 
 ---
 
-### ▶ RESUME HERE (2026-07-20 — **ADR 0057 `extern "C"` is SELF-HOSTED** (`83a0473`): scg's types + codegen support foreign imports, `process_ids` is byte-identical, and its `KNOWN_SCG_BUGS` entry is deleted. The adversarial review of that change found a pre-existing **silent miscompile** in the merge's `link(...)` clause (`52d42d2`) and left two divergences REGISTERED — see "▶ ALSO OPEN". Also: `cg_anydecl`'s oracle mirror restored (`4dbf4b2`))
+### ▶ RESUME HERE (2026-07-21 — **the `extern "C"` self-host mirror is COMPLETE**: resolve + parser + lexer (`5c911f5`) join types/codegen (`83a0473`), and the oracle's `spawn <extern>` invalid-IR bug is fixed (`e17a631`). Two of the three 2026-07-20-registered divergences are closed; the reviews on both slices found the module/part lex gap and a false code comment, and confirmed the secret FFI fence holds under spawn. First `extern`/`module` fixtures added. See "▶ ALSO OPEN" for what remains)
 
 > **▶▶ M1.4c-1 LANDED (snc-side)** — commit `248a6f0`. Secret containers work end-to-end
 > through inkwell + the `snc llvm` oracle. Full design rationale is the ADR's 2026-07-19
@@ -186,17 +186,24 @@ reference as you work through the milestones.
 > shipped `link(...)` program bails on the ORACLE side first (`ptr`/`f64` "not yet ported").
 >
 > **▶ ALSO OPEN (self-host):**
->   - **`snc resolve` diverges on every `extern "C"` program** — `selfhost/resolve` was left
->     out of scope. `resolve/decls.sentinel:913` is the SAME depth-0 scan, with its own
->     `42 + i` table (`resolve.sentinel:330-345`); `effects.sentinel:702` has the identical
->     shape (verify, don't assume). Mirror `register_externs` + `nufn`, and re-read the
->     ordering note above first — this is the same FnId trap. Not covered by any differential.
->   - **The ORACLE emits INVALID IR for `spawn <extern>()`** — `ptr @__spawn_wrapper_43` with
->     no definition (`llvm-as`: "use of undefined value"); **scg emits the wrapper and is
->     correct**. Same class as the ~30 programs fixed in `83c1f21`, and it hid for the same
->     reason: no `extern` fixture exists, and the differential only skips programs where the
->     oracle FAILS — here it succeeds and emits bad IR. Decide whether `spawn <extern>` should
->     be legal at all (it jumps into unverified foreign code) before patching codegen.
+>   - **✅ DONE `snc resolve` extern support** (`5c911f5`) — mirrored `register_externs` into
+>     `selfhost/resolve`; `effects` verified as not needing it (numbers externs last, no
+>     shift). Parser + lexer arms landed in the same commit; first `extern`/`module` fixtures.
+>   - **✅ DONE `spawn <extern>` oracle IR** (`e17a631`) — legalized (inkwell + scg already
+>     supported it); the `program.externs` fallback converges the oracle onto scg.
+>   - **NEW — `spawn <runtime builtin>` (e.g. `spawn print(5)`) is a THREE-WAY split**, found
+>     by the spawn-extern review: `snc types` accepts it, the oracle emits invalid IR
+>     (`@__spawn_wrapper_0` undefined), **scg CRASHES** (`index out of bounds: idx=-42,
+>     len=1`), and inkwell compiles+runs it (stdout "5"). Pre-existing, orthogonal to the
+>     extern work. The gate in `dump_spawn_wrapper` is deliberately extern-only — a builtin's
+>     `sig.name` ("print") is not its runtime symbol (`@sentinel_print`), so it CANNOT be
+>     fixed by widening that gate; the fix is a type-check rejection of `spawn <builtin>` (or
+>     matching inkwell). Task filed. The scg crash is a second, independent symptom.
+>   - **The OTHER stage differentials still have the real-program blind spot** — lex/ast/
+>     resolve/types/borrow/effects/mir all use the fixture-only `collect_fixtures`, which is
+>     exactly what hid the module/part lex gap (25 `selfhost/` files use `module`, zero
+>     fixtures did). Extending them to real programs the way `selfhost_codegen.rs` does would
+>     have caught it mechanically; it also covers `part`, which no single-file fixture can.
 >   - **Named-impl qualification** (`delegation.sentinel`, 8 diff lines). Recording the name in
 >     `build_rename` is the missing half BUT alone it CRASHES scg: `borrow.sentinel:651`
 >     `impl_lookup` → `impl_trait_of` → `trait_method_index` passes an unguarded `-1` into a
@@ -241,14 +248,16 @@ reference as you work through the milestones.
 > (`4dbf4b2`) on the honest ground — invariant drift whose harmlessness rests on an accident —
 > not on the overstated one. **Verify the consequence, not just the discrepancy.**
 >
-> HANDOFF STATE: four-check green (18 known Windows failures, zero new); all 9 differential
-> stages byte-identical (25 tests), both bootstrap fixed points hold; working tree clean.
-> abi count **51**. Interner kinds: Shared=17, Mutex=18, Guard=19; next free = 20. Secret
-> container slots: 6..=9 (i64/i32/u8/bool). `KNOWN_SCG_BUGS` is down to ONE entry
-> (`delegation.sentinel`, the named-impl qualification). **Token kinds, VERIFIED against
-> `selfhost/parser.sentinel` this session** (an unverified list caused a miscompile): `(`=4,
-> `)`=5, `{`=6, `}`=7, `+`=9, `-`=10, `*`=11, `/`=12, `==`=13, `!=`=14, ident=2, fn=3, `;`=44,
-> struct=52, enum=53, trait=54, impl=55, class=56, effect=57, use=58, pub=59, string=63.
+> HANDOFF STATE: four-check green (18 known Windows failures, zero new; `pass` 151 incl.
+> `c57_extern_call` + `c66_spawn_extern` + `c67_module_decl`); all 9 differential stages
+> byte-identical, both bootstrap fixed points hold; working tree clean. abi count **51**.
+> Interner kinds: Shared=17, Mutex=18, Guard=19; next free = 20. Secret container slots:
+> 6..=9 (i64/i32/u8/bool). `KNOWN_SCG_BUGS` is down to ONE entry (`delegation.sentinel`, the
+> named-impl qualification). Lexer keyword table = Rust's exactly (38; derive-and-diff command
+> is in `ident_kind`'s header comment — do not eyeball it). **Token kinds, VERIFIED against
+> `selfhost/parser.sentinel`** (an unverified list caused a miscompile): `(`=4, `)`=5, `{`=6,
+> `}`=7, `+`=9, `-`=10, `*`=11, `/`=12, `==`=13, `!=`=14, ident=2, fn=3, `;`=44, struct=52,
+> enum=53, trait=54, impl=55, class=56, effect=57, use=58, pub=59, string=63.
 
 > **▶ (archived) M1.4b COMPLETE — slice 4, the D5a opt-in `Deadlock` wait-for-graph tier** (feat `36ad1af` + docs `a82e994`); ADR 0071 ACCEPTED for M1.4b. Runtime-only + non-oracle-moving (abi stayed 49): opt-in via `SENTINEL_DEADLOCK_DETECT`; a detected cycle returns the EXISTING `?Guard` null arm immediately + a stderr cycle report; wait edges are DEADLINE-STAMPED after the review caught a stale-edge false positive. Full detail in the ADR's D5 amendment + implementation log.
 
