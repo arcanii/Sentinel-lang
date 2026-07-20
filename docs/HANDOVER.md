@@ -51,7 +51,7 @@ reference as you work through the milestones.
 
 ---
 
-### ▶ RESUME HERE (2026-07-19 — ADR 0071 **M1.4c COMPLETE + ACCEPTED** (secret `Shared`/`Mutex`, snc + scg mirror). Same session also hardened the SELF-HOST VERIFICATION story: the differential now sweeps REAL programs and checks IR VALIDITY, which exposed 3 scg merge miscompiles + ~30 programs where the ORACLE itself emitted unassemblable IR — all fixed. **Next: scg `extern "C"` support in types/codegen** (prerequisite landed; the risky half is scoped below))
+### ▶ RESUME HERE (2026-07-20 — **ADR 0057 `extern "C"` is SELF-HOSTED** (`83a0473`): scg's types + codegen support foreign imports, `process_ids` is byte-identical, and its `KNOWN_SCG_BUGS` entry is deleted. The adversarial review of that change found a pre-existing **silent miscompile** in the merge's `link(...)` clause (`52d42d2`) and left two divergences REGISTERED — see "▶ ALSO OPEN". Also: `cg_anydecl`'s oracle mirror restored (`4dbf4b2`))
 
 > **▶▶ M1.4c-1 LANDED (snc-side)** — commit `248a6f0`. Secret containers work end-to-end
 > through inkwell + the `snc llvm` oracle. Full design rationale is the ADR's 2026-07-19
@@ -149,24 +149,54 @@ reference as you work through the milestones.
 >    this was purely the text backend, which is the ground truth the whole differential
 >    verifies scg against.
 >
-> **▶▶ NEXT — scg `extern "C"` support in types/codegen.** The PREREQUISITE landed
-> (`e66362b`): `source_dump.rs` was LOSSY (its `snc merge` output could not be recompiled —
-> "undefined function `getpid`"), which is fatal for scg because scg's pipeline is
-> merge-TEXT → parse → types → codegen. It now emits extern blocks (grouped by `link_libs`,
-> ADR 0057 A9) and round-trips; scg's merge mirrors it, emitting C symbol names RAW
-> (`append_slice`, never `emit_name_slice` — a C symbol is global).
-> **What remains, and why it was NOT rushed:** scg parses the block but registers nothing,
-> because **Pass 1 in `selfhost/types.sentinel` (~line 561) is a BRACE-DEPTH scan that only
-> records items at `depth == 0`** — an extern block's `{` puts its decls at depth 1. Fixing it
-> means giving extern decls entries in scg's fn tables, which makes their **FnId NUMBERING
-> differential-critical** (resolve/types/mir dumps all print `#<fnid>`; the oracle assigns
-> extern FnIds in its own order — see `merge_modules`, "then imported externs, then own").
-> **Order of work:** Pass 1 records extern decls with an is-extern flag → CONFIRM FnId parity
-> against the oracle on a multi-module extern fixture BEFORE touching codegen → then suppress
-> the `define` and add `declare` emission. `examples/sys/process_ids.sentinel` is the fixture
-> (currently 9 diff lines: 4 declares + 4 calls + 1); it stays in `KNOWN_SCG_BUGS`.
+> **▶▶ DONE — scg `extern "C"` support in types/codegen** (`83a0473`). `process_ids` is
+> byte-identical (15378 B) and `llvm-as`-clean; its `KNOWN_SCG_BUGS` entry is DELETED.
+>
+> **THE MECHANISM** (read before touching extern handling): the difficulty was **FnId
+> NUMBERING**, not parsing. The Rust resolver registers every own fn FIRST and every
+> `extern "C"` decl AFTER (`resolve_module`) — but the merged TEXT does not say so: the Rust
+> `source_dump` emits the block FIRST and scg's own merge emits it MID-FILE. So Pass 1
+> records only each block's POSITION (`xpos`) and registration is **deferred** to
+> `register_externs`, which appends after the depth-0 scan completes; **`nufn`** freezes the
+> fn/extern split point in the user-fn table. Parity was confirmed on the merged text
+> (`snc types` byte-identical; externs numbering 49..52 after main..report) **before** codegen
+> was touched — that ordering of work is what kept the risk contained, and is worth repeating
+> for the resolve mirror below.
+>
+> Externs then take a full row in every parallel table via the **ordinary `scan_fn_sig`** (an
+> extern's `fn name(params) -> ty` IS a fn signature; only the terminator differs, `;` for
+> `{`), so `fn_lookup` / `cg_emit_call` / `mir_put_callee` needed **no extern-specific code**.
+> The synthetic **itemkind 100** is ignored by every pass-2 group — that is what suppresses
+> the `define`; `cg_extern_declares` emits the `declare`s at the oracle's position;
+> `dump_moves` bounds on `nufn` (an extern has no body → no `snc borrow` line). The depth-0
+> recognizer is gated on the FOLLOWING string literal, not the `extern` text alone: unlike the
+> merge's `is_extern` it sees every depth-0 token, and fn-signature params sit at depth 0 too.
+>
+> **⚠ THE REVIEW EARNED ITS KEEP AGAIN — a pre-existing SILENT MISCOMPILE** (`52d42d2`).
+> `emit_extern_block`'s ADR 0057 A9 `link(...)` loop terminated on token kind **13**, but 13
+> is **`==`**; `)` is kind **5** (`(`/`)` are 4/5 — check `selfhost/parser.sentinel`'s operator
+> table, do not trust prose). It ran from `link(` to the next `==` anywhere in the file, or to
+> EOF, eating the block's decls and every item between. `extern "C" link("m") { … } fn main()`
+> collapsed scg from the oracle's 190 bytes to **38** — target triple only. With an `==` later
+> in the file it stopped there instead and emitted **valid IR that assembled, ran, skipped the
+> FFI call, and returned the wrong answer**: the `llvm-as` guard cannot see that class. A
+> second defect emitted `link(""m"")` (a tag-63 span ALREADY includes its quotes). **The same
+> false paren-kind belief was in a comment the extern slice had just added** — corrected there.
+> Latent in-repo only: no fixture under `tests/` contains the string `extern`, and every
+> shipped `link(...)` program bails on the ORACLE side first (`ptr`/`f64` "not yet ported").
 >
 > **▶ ALSO OPEN (self-host):**
+>   - **`snc resolve` diverges on every `extern "C"` program** — `selfhost/resolve` was left
+>     out of scope. `resolve/decls.sentinel:913` is the SAME depth-0 scan, with its own
+>     `42 + i` table (`resolve.sentinel:330-345`); `effects.sentinel:702` has the identical
+>     shape (verify, don't assume). Mirror `register_externs` + `nufn`, and re-read the
+>     ordering note above first — this is the same FnId trap. Not covered by any differential.
+>   - **The ORACLE emits INVALID IR for `spawn <extern>()`** — `ptr @__spawn_wrapper_43` with
+>     no definition (`llvm-as`: "use of undefined value"); **scg emits the wrapper and is
+>     correct**. Same class as the ~30 programs fixed in `83c1f21`, and it hid for the same
+>     reason: no `extern` fixture exists, and the differential only skips programs where the
+>     oracle FAILS — here it succeeds and emits bad IR. Decide whether `spawn <extern>` should
+>     be legal at all (it jumps into unverified foreign code) before patching codegen.
 >   - **Named-impl qualification** (`delegation.sentinel`, 8 diff lines). Recording the name in
 >     `build_rename` is the missing half BUT alone it CRASHES scg: `borrow.sentinel:651`
 >     `impl_lookup` → `impl_trait_of` → `trait_method_index` passes an unguarded `-1` into a
@@ -196,10 +226,29 @@ reference as you work through the milestones.
 > `target/debug/sentinel_runtime.lib` — run `cargo build` after ANY runtime change or snc
 > links the STALE staticlib.
 >
-> HANDOFF STATE: four-check green (18 known Windows failures, zero new; runtime 47→53, types
-> 268→273, examples 55→56, ui 45→46); all 9 differential stages byte-identical, both bootstrap
-> fixed points hold; working tree clean. abi count **51**. Interner kinds: Shared=17, Mutex=18,
-> Guard=19; next free = 20. Secret container slots: 6..=9 (i64/i32/u8/bool).
+> **⚠ REVIEW-HYGIENE, RESTATED (it paid off twice more this session).** The multi-lens review
+> of `83a0473` produced 11 surviving findings across 5 lenses, and the two that mattered were
+> both things the implementer had verified and believed settled: a comment asserting token
+> kinds that were simply wrong, and — traced from that same wrong belief — a silent
+> wrong-answer miscompile 500 lines away in a different file. It also **refuted** a claimed
+> regression in the new code (`ptr`/`f64` extern types rendering as `i64`): the ORACLE bails on
+> those first ("not yet ported (8a scalars only)"), so the differential can never reach them.
+> Run the review, and read the refutations as carefully as the findings.
+>
+> Related: a task filed mid-session asserted a reachable one-byte divergence in `cg_anydecl`;
+> checking it before fixing showed the class is UNREACHABLE (`Process` is not a nameable type,
+> so nothing can set `procsend`/`procrecv` without `procspawn`). The fix landed anyway
+> (`4dbf4b2`) on the honest ground — invariant drift whose harmlessness rests on an accident —
+> not on the overstated one. **Verify the consequence, not just the discrepancy.**
+>
+> HANDOFF STATE: four-check green (18 known Windows failures, zero new); all 9 differential
+> stages byte-identical (25 tests), both bootstrap fixed points hold; working tree clean.
+> abi count **51**. Interner kinds: Shared=17, Mutex=18, Guard=19; next free = 20. Secret
+> container slots: 6..=9 (i64/i32/u8/bool). `KNOWN_SCG_BUGS` is down to ONE entry
+> (`delegation.sentinel`, the named-impl qualification). **Token kinds, VERIFIED against
+> `selfhost/parser.sentinel` this session** (an unverified list caused a miscompile): `(`=4,
+> `)`=5, `{`=6, `}`=7, `+`=9, `-`=10, `*`=11, `/`=12, `==`=13, `!=`=14, ident=2, fn=3, `;`=44,
+> struct=52, enum=53, trait=54, impl=55, class=56, effect=57, use=58, pub=59, string=63.
 
 > **▶ (archived) M1.4b COMPLETE — slice 4, the D5a opt-in `Deadlock` wait-for-graph tier** (feat `36ad1af` + docs `a82e994`); ADR 0071 ACCEPTED for M1.4b. Runtime-only + non-oracle-moving (abi stayed 49): opt-in via `SENTINEL_DEADLOCK_DETECT`; a detected cycle returns the EXISTING `?Guard` null arm immediately + a stderr cycle report; wait edges are DEADLINE-STAMPED after the review caught a stale-edge false positive. Full detail in the ADR's D5 amendment + implementation log.
 

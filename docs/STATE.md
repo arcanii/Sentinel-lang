@@ -14,6 +14,46 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
+**Latest (2026-07-20) — ADR 0057 `extern "C"` is SELF-HOSTED: scg's types + codegen now
+support foreign imports, closing the last `process_ids` divergence.** scg parsed an
+`extern "C" { … }` block but registered nothing — Pass 1 in `selfhost/types.sentinel` is a
+brace-depth scan recording items only at `depth == 0`, and the block's `{` puts its decls at
+depth 1 — so the callee was unknown and scg emitted **no call at all** where the oracle emits
+`%v0 = call i64 @getpid()`. `examples/sys/process_ids.sentinel` is now byte-identical (15378 B)
+and `llvm-as` accepts it; its `KNOWN_SCG_BUGS` entry is **deleted**, which is the only way an
+entry may leave that list. **The risk was FnId NUMBERING, not parsing** — dumps print
+`#<fnid>`, the Rust resolver registers every own fn FIRST and every extern AFTER, and the
+merged TEXT says otherwise (`source_dump` puts the block first; scg's own merge puts it
+mid-file). So Pass 1 records only each block's POSITION and registration is **deferred** to
+after the scan, with `nufn` freezing the fn/extern split; parity was confirmed on the merged
+text (`snc types` byte-identical, externs numbering 49..52) **before** codegen was touched.
+Externs then take a full row in every parallel table via the ORDINARY `scan_fn_sig` — an
+extern's `fn name(params) -> ty` IS a fn signature, only the terminator differs — so calls,
+returns and symbols needed no extern-specific code; the synthetic itemkind 100 is ignored by
+every pass-2 group, which is what suppresses the `define`.
+
+**The adversarial review of that change found a pre-existing SILENT MISCOMPILE in the same
+feature** (fixed, `52d42d2`): the merge's ADR 0057 A9 `link(...)` loop terminated on token
+kind **13 — which is `==`, not `)` (that is kind 5)** — so it ran from `link(` to the next
+`==` anywhere in the file, or to EOF, consuming the block's declarations and every item
+between. `extern "C" link("m") { … } fn main() …` collapsed scg's module from the oracle's
+190 bytes to **38** (target triple only, no `define @main`); with an `==` later in the file
+the swallow stopped there instead and produced **valid IR that assembled, ran, skipped the
+FFI call and returned the wrong answer** — a class the `llvm-as` guard cannot catch. A second
+defect in the same block emitted `link(""m"")` (a tag-63 span already includes its quotes).
+Latent in-repo only: no fixture under `tests/` contains the string `extern` at all, and every
+shipped `link(...)` program bails on the ORACLE side first (`ptr`/`f64` are "not yet ported").
+The review also caught the same false belief about paren kinds in a comment the extern slice
+had just ADDED — corrected there. Separately, `cg_anydecl`'s mirror of the oracle's
+`emit_declares` disjunction had drifted (`procsend`/`procrecv` missing) and is restored
+(`4dbf4b2`); that one is unobservable because `Process` is not a nameable type, so no program
+can set those flags without also setting `procspawn` — invariant drift, not a live bug.
+**Two divergences are REGISTERED rather than fixed:** `snc resolve` has no extern support
+(same depth-0 scan, its own `42 + i` table), and the **ORACLE** emits invalid IR for
+`spawn <extern>()` (`ptr @__spawn_wrapper_43` with no definition — `llvm-as` rejects it) where
+**scg is correct**. Neither is reachable from the corpus. All 9 stages byte-identical, both
+bootstrap fixed points green.
+
 **Latest (2026-07-19) — the `snc llvm` TEXT ORACLE now emits VALID LLVM IR: ~30 invalid
 programs → 0.** The oracle is the ground truth the entire self-host differential verifies scg
 against, and it was emitting IR `llvm-as` refuses to assemble for ~30 of the 47 real programs it
