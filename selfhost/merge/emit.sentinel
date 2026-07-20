@@ -1084,16 +1084,28 @@ fn emit_extern_block(out: &mut Vec<u8>, c: &MergeCtx, k: &Vec<i64>, s: &Vec<i64>
         // `(`
         *cur = *cur + 1;
         let mut firstlib: bool = true;
-        while *cur < n && (*k)[*cur] != 13 {
+        // ⚠ Terminate on kind 5 — `)`. This read `!= 13` and 13 is `==`, not `)`
+        // (`(`/`)` are 4/5; see the operator table in selfhost/parser.sentinel). The
+        // loop therefore ran to the next `==` ANYWHERE in the file, or to EOF, and
+        // `*cur` was left there — so the block's own decls, and every item between,
+        // were consumed and vanished from the merged text. A minimal
+        // `extern "C" link("m") { fn ext1(x: i64) -> i64; } fn main() …` collapsed
+        // scg's whole module to the target-triple line; with an `==` later in the
+        // file it instead produced VALID IR that silently computed the wrong answer,
+        // which the harness's `llvm-as` guard cannot catch.
+        while *cur < n && (*k)[*cur] != 5 {
             if (*k)[*cur] == 63 {
                 if firstlib {
                     0
                 } else {
                     append_str(out, ", ")
                 };
-                push(out, '"');
+                // A tag-63 span INCLUDES both quotes (parser.sentinel), so slicing it
+                // is already `"lib"` — adding a pair here emitted `link(""m"")`,
+                // which does not re-parse. The oracle's `emit_externs`
+                // (crates/sentinel-driver/src/source_dump.rs) writes exactly one pair
+                // because its `lib` is the bare content.
                 append_slice(out, src, (*s)[*cur], (*e)[*cur]);
-                push(out, '"');
                 firstlib = false;
                 0
             } else {
