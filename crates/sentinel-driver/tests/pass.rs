@@ -1117,6 +1117,20 @@ fn pass_c66_task_bool() {
 }
 
 #[test]
+fn pass_c66_spawn_extern() {
+    // ADR 0057 x ADR 0024/0066: `spawn` an `extern "C"` fn. An extern target has a
+    // signature but no Sentinel body, so it is absent from `program.fns`; the text
+    // ORACLE's `dump_spawn_wrapper` returned silently for it while the call site had
+    // already referenced `@__spawn_wrapper_<id>`, emitting IR `llvm-as` rejects.
+    // inkwell and the self-hosted `scg` both synthesize a valid wrapper from the
+    // signature; the fix converges the oracle onto them (now byte-identical). `llabs`
+    // is in the MSVC CRT so this links on Windows; llabs(-42) = 42. Differential.
+    let r = build_and_run("c66_spawn_extern.sentinel");
+    assert_eq!(r.exit, 42);
+    assert_eq!(r.stdout, "");
+}
+
+#[test]
 fn pass_c66_channel_worker() {
     // ADR 0066 M1.2b: a `Channel<i64>` parameter (the resolve_type_expr arm) +
     // a cross-thread `spawn produce(ch)` with a Channel ARG; `main` drains as the

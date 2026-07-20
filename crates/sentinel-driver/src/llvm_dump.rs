@@ -514,7 +514,36 @@ fn dump_spawn_wrapper(program: &TypedProgram, fn_id: FnId, out: &mut String) -> 
     let target = program.fns.iter().find(|f| f.id == fn_id);
     let (name, n) = match target {
         Some(f) => (f.name.clone(), f.params.len()),
-        None => return Ok(()),
+        // ADR 0057: an `extern "C"` spawn target has a signature but NO `TypedFnDef`
+        // body, so it is absent from `program.fns`. Everything below reads only the
+        // SIGNATURE (name + param/return types), and for an extern the C symbol IS the
+        // signature name — so a wrapper is fully synthesizable from it, which is what
+        // inkwell (`snc build`) and the self-hosted `scg` BOTH already do. The old bare
+        // `None => return Ok(())` emitted NOTHING while the call site had already
+        // written `@__spawn_wrapper_<id>`, so the oracle referenced a value it never
+        // defined and `llvm-as` rejected the module. Restricting the fallback to
+        // `program.externs` converges the oracle onto scg's already-correct output.
+        //
+        // The gate is deliberately NARROW — externs only, NOT "any bodyless id". A
+        // runtime builtin (`print`, FnId 0, is_runtime) is ALSO bodyless and can ALSO
+        // be a spawn target (`spawn print(5)` type-checks), so it too reaches this arm
+        // and falls to the `return Ok(())` below — which re-emits the same dangling
+        // `@__spawn_wrapper_0` / invalid IR, for the builtin category. That is a
+        // PRE-EXISTING, separate bug (unchanged by this arm: before and after, a
+        // builtin returns empty here), and it is NOT fixable by widening this gate: a
+        // builtin's `sig.name` is its Sentinel name (`print`), not its emitted runtime
+        // symbol (`@sentinel_print`), so synthesizing from the signature would emit a
+        // call to a nonexistent `@print`. Its proper fix is a type-check rejection of
+        // `spawn <runtime builtin>`, tracked separately. `return Ok(())` stays as the
+        // conservative default for that still-unhandled case.
+        None => {
+            if program.externs.contains(&fn_id) {
+                let sig = program.signature(fn_id);
+                (sig.name.clone(), sig.param_types.len())
+            } else {
+                return Ok(());
+            }
+        }
     };
     let sig = program.signature(fn_id);
     writeln!(out, "define void @__spawn_wrapper_{}(ptr %arg0, ptr %arg1) {{", fn_id.0).unwrap();

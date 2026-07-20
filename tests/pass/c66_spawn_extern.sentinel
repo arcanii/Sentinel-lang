@@ -1,0 +1,19 @@
+// c66_spawn_extern — spawn an `extern "C"` function (ADR 0057 x ADR 0024/0066).
+//
+// Guards the oracle's spawn-wrapper emission for an extern target. A spawn target
+// with no Sentinel body (an extern has only a signature) made `dump_spawn_wrapper`
+// return silently while the call site had already referenced `@__spawn_wrapper_N`,
+// so the `snc llvm` oracle emitted IR `llvm-as` rejects — even though inkwell AND the
+// self-hosted `scg` both emit a valid wrapper from the signature. `llabs` is in the
+// MSVC CRT so this links on Windows; llabs(-42) = 42.
+extern "C" {
+    fn llabs(x: i64) -> i64;
+}
+
+fn main() -> i64 {
+    let r: i64 = scope concurrent {
+        let h = spawn llabs(0 - 42);
+        h.await
+    };
+    r
+}
