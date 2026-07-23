@@ -14,6 +14,29 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
+**Latest (2026-07-21) — ADR 0066 M1.2c: CHANNEL-OF-CHANNELS ships, closing the M1.4-0
+addressed-reply expressiveness wall** (`fb2f317`). `Channel<Channel<T>>` (one level) lets a
+request carry its own reply channel, so each worker waits on exactly ONE channel and replies
+are addressed structurally — the program `shared_sequence_via_channel` documents as
+impossible. New `examples/lang/addressed_reply.sentinel` runs it concurrently (42). It needs
+**no `select`**, which is why it shipped first; `select` stays deferred for the different
+problem of multiplexing N sources, with its runtime now PINNED in D11 (a Sentinel-owned
+`parking_lot` queue — no new dependency, and it also unblocks M1.4c-2 `Channel<secret T>`,
+gated precisely on mpsc owning the in-transit nodes). Two gates had to open: the table-free
+`channel_chanid_for` map (bounded nesting at fixed ids 10..=15, 6..=9 reserved for M1.4c-2,
+deeper nesting a diagnostic) and `NullableInner::Channel` — without which `recv`'s
+`.expect()` would have PANIC-ASSERTED on a nested element. Runtime + ABI UNCHANGED (`Ptr` was
+already element slot 5, so the ptrtoint/inttoptr encode carries a handle bit-identically).
+**⚠ The adversarial review caught a MEMORY-SAFETY BREAK this introduced, pre-commit:**
+`is_process_channel_elem` — the sole gate on what may cross a process pipe — was a
+coincidental intersection ("spawn word-scalar AND has a `?T` form") that excluded handles only
+because no handle had a `?T` form; granting `Channel` one flipped it TRUE, letting a live
+channel pointer be written into a pipe and an integer from the far end be turned back into a
+handle Sentinel's own runtime dereferences — from safe source. Fixed by making the fence an
+EXPLICIT list (a security fence must not be coupled to an unrelated type-map) + a ui fixture
+pinning it. snc-only; the scg mirror is REGISTERED as deferred (scg hardcodes an i64 channel
+element), on the M1.2b-cont precedent. pass 151, ui 47→48, both fixed points green.
+
 **Latest (2026-07-21) — `spawn <runtime builtin>` (e.g. `spawn print(5)`) is now REJECTED,
 closing a three-way-inconsistent latent bug** (`3791337`). It type-checked but was handled
 three ways downstream: the `snc llvm` text oracle emitted an undefined `@__spawn_wrapper_0`

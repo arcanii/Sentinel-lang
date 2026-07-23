@@ -51,7 +51,39 @@ reference as you work through the milestones.
 
 ---
 
-### ▶ RESUME HERE (2026-07-21 — **the `extern "C"` self-host mirror is COMPLETE** (resolve + parser + lexer `5c911f5`, types/codegen `83a0473`), the oracle's `spawn <extern>` invalid-IR bug is fixed (`e17a631`), AND `spawn <runtime builtin>` is now rejected (`3791337`) — closing the three-way split the spawn-extern review surfaced. All three 2026-07-20-registered divergences are closed and the two follow-on spawn bugs resolved. First `extern`/`module` fixtures added. See "▶ ALSO OPEN" for what remains)
+### ▶ RESUME HERE (2026-07-21 — **ADR 0066 M1.2c CHANNEL-OF-CHANNELS ships** (`fb2f317`), closing the M1.4-0 addressed-reply wall; `select`'s runtime is PINNED but unbuilt. The review caught a **memory-safety break this introduced** (a security fence coupled to an unrelated type-map) pre-commit — fixed + pinned by a ui fixture. Earlier the same day: the `extern "C"` mirror completed and both spawn bugs closed)
+
+> **▶▶ M1.2c LANDED — what a resuming session needs.** `Channel<Channel<T>>`, ONE level, at
+> fixed `ChanId`s 10..=15; 6..=9 are RESERVED for M1.4c-2 `Channel<secret T>` (the map and the
+> `channels` table now BOTH spell them out — they must change together). Nesting is bounded
+> because `channel_chanid_for` is table-free by design; deeper nesting is a diagnostic.
+> `NullableInner::Channel` exists ONLY so `recv` on a channel-of-channels can return
+> `?Channel<T>` — without it the recv arm's `.expect()` PANIC-ASSERTS. Runtime/ABI unchanged.
+>
+> ⚠ **THE LESSON, which generalises past channels:** `is_process_channel_elem` gated the
+> cross-process fence as a COINCIDENTAL INTERSECTION (`is_spawn_word_scalar ∩
+> to_nullable_inner.is_some()`), which excluded handles only because no handle had a `?T`
+> form. Giving `Channel` one silently widened a SECURITY FENCE from a distance — a live
+> channel pointer could be written into a pipe, and an integer from the far end turned back
+> into a handle the runtime dereferences on a plain `send()`, from safe source. It is now an
+> explicit list + `tests/ui/c66_process_channel_handle_fence.sentinel`. **Audit any other
+> predicate that defines a boundary by intersecting two unrelated maps.**
+>
+> **▶ NEXT on this track, in order:**
+>   1. **The scg mirror for M1.2c** — registered in `DEFERRED_PROGRAMS`
+>      (`addressed_reply.sentinel`). scg hardcodes `mk_channel(c, 0)` and its channel lowering
+>      has no encode/decode at all, so it shares a cause with the M1.2b-cont generic-element
+>      gap — do BOTH in one slice.
+>   2. **`select`** — runtime PINNED (D11: a Sentinel-owned `parking_lot` queue; ABI-safe
+>      because `SentinelChannel` is declared fully opaque, so the four C-ABI signatures stay
+>      byte-identical and existing codegen does not churn). Surface still OPEN and worth
+>      deciding BEFORE code: a select returns TWO things (which arm + value) where `?T` carries
+>      one; receive-only is the complete design while channels are unbounded; and it should be
+>      pinned together with the `Sender`/`Receiver` split (D11) since that would re-type it.
+>   3. **M1.4c-2 `Channel<secret T>`** — the same queue rewrite unblocks it (Sentinel would own
+>      the in-transit nodes, so they can be mlocked/scrubbed); slots 6..=9 are already reserved.
+
+### ▶ (previous) 2026-07-21 — **the `extern "C"` self-host mirror is COMPLETE** (resolve + parser + lexer `5c911f5`, types/codegen `83a0473`), the oracle's `spawn <extern>` invalid-IR bug is fixed (`e17a631`), AND `spawn <runtime builtin>` is now rejected (`3791337`) — closing the three-way split the spawn-extern review surfaced. All three 2026-07-20-registered divergences are closed and the two follow-on spawn bugs resolved. First `extern`/`module` fixtures added. See "▶ ALSO OPEN" for what remains)
 
 > **▶▶ M1.4c-1 LANDED (snc-side)** — commit `248a6f0`. Secret containers work end-to-end
 > through inkwell + the `snc llvm` oracle. Full design rationale is the ADR's 2026-07-19
