@@ -159,6 +159,7 @@ byte-identical → mark the sub-phase ACCEPTED).
 |----------|-----------|-------------|----------------|
 | **1 — threading** | M1.1 | **✅ done** — Generic `Task<T>` + `T`-typed spawn args (lift ADR 0024 A3/D7) | yes (typing + codegen) |
 | | M1.2 | **✅ done** — **Channels** — `Channel<T>` typed message passing (mpsc), ownership-transfer `send`/`recv` | yes (new `Type`, builtins, runtime symbols) |
+| | M1.2c | **Channel-of-channels** — `Channel<Channel<T>>`, one level, so a request can carry its own reply channel (D6a). Closes the M1.4-0 addressed-reply wall; needs no `select` | yes (typing only — no runtime/ABI change) |
 | | M1.3 | **✅ done** — Worker pattern — long-lived tasks within a scope wired by channels (library + examples; no new surface) | no (library) |
 | | M1.4 | `Mutex<T>` + atomics — the bounded shared-state escape hatch, with **runtime deadlock detection → typed error** (D5) | yes (new `Type` + shared-handle machinery) — **gated on a shared-ownership story** |
 | **2 — multi-processing** | M2.1 | **✅ done** — **Process spawn** — `Process` handle over `std::process::Command`; `Subprocess` capability effect | yes (new `Type` + effect + runtime symbols) |
@@ -405,6 +406,69 @@ on `is_runtime`) — a pre-codegen point every back end shares, so all three
 converge on rejection. This is a bug fix, not a roadmap change; the rejection
 is snc-only (its `tests/ui` fixture is differential-skipped, like the peer
 spawn/guard rejections), so no self-host mirror was needed.
+
+### D6a. Channel-of-channels (`Channel<Channel<T>>`) — M1.2c. PROPOSED 2026-07-21.
+
+**Why now, when M1.4-0 surveyed this road and deferred it.** The M1.4-0 gate
+analysis ([0071-m14-0-analysis.md](0071-m14-0-analysis.md)) found a genuine
+expressiveness wall — worker-side *correlated* request/reply — and named exactly
+two ways out: pass a per-worker reply channel *through* the request
+(`Channel<Channel<T>>`), or `select` over N reply channels. It resolved the wall
+by building `Shared<T>`/`Mutex<T>` instead (ADR 0071, now shipped). That
+resolution is sound for **correlated read-modify-write**, which a `Mutex` does
+dissolve in four lines. It is **not** a resolution for request/reply *topology*:
+D2 of this ADR makes message passing the **primary** model and D5 makes shared
+state a deliberately **bounded escape hatch**, so leaving addressed replies
+inexpressible pushes ordinary message-passing programs onto the escape hatch.
+M1.2c restores the primary model's expressiveness; it does not compete with
+`Mutex<T>`.
+
+It is also the cheaper of the two exits and the one that **needs no `select`**:
+with a reply channel per request, each worker waits on exactly **one** channel,
+so single-channel `recv` suffices. That is why it lands first.
+
+**The representability problem, and the decision.** `channel_chanid_for` is a
+CLOSED, table-free map (`i64`=0 … `ptr`=5) with a hardcoded inverse
+`channel_elem_for`; table-free is load-bearing — it lets the checker read a
+channel's element from its `ChanId` alone with no `channels`-table access. A
+closed map cannot enumerate infinitely many channel types, so:
+
+- **Nesting is BOUNDED to one level.** Pre-intern the six `Channel<Channel<E>>`
+  types (E over the six base elements) at **fixed `ChanId`s**, keeping the
+  table-free property. This is exactly the ADR 0071 M1.4c precedent, which faced
+  the same "a source-encounter-ordered id is not a knowable constant" problem
+  and solved it by pre-interning a bounded element set at fixed slots.
+- `Channel<Channel<Channel<T>>>` is **REJECTED with a clear diagnostic** — a
+  named, documented limit, not a silent failure or a panic.
+- **Slots 6..=9 stay RESERVED for M1.4c-2 `Channel<secret T>`**, which is
+  already designed against them; M1.2c takes the range above it. Numbering is
+  free of differential risk: dumps render channel types **structurally**
+  (`Channel<i64>`), so no `ChanId` is dump-visible — verified, not assumed.
+
+**Two gates must open, not one.** Beyond `channel_chanid_for`, `recv`'s `?T`
+needs a `NullableInner`, and `to_nullable_inner` currently excludes `Channel`
+("you never write `?Channel`"). The `recv` arm `.expect()`s that inner, so a
+nested element would **panic-assert** rather than diagnose. M1.2c adds
+`NullableInner::Channel(ChanId)`, mirroring `NullableInner::Guard`.
+
+**Cost is front-end only — the runtime does not change.** `Type::Ptr` is already
+element slot 5 and a channel handle lowers to `ptr`, so the existing
+`ptrtoint`/`inttoptr` i64-slot encode/decode already carries a handle
+bit-identically. No new runtime symbol, no `abi-v1` change. And no ownership
+machinery: `Channel` is `Copy` + deliberately leaked (`needs_drop == false`), so
+sending a handle sends a word — unlike `Shared`/`Mutex`, whose sends need
+refcount clone/release.
+
+**Secret posture.** The handle is PUBLIC — the same split ADR 0071 D4 settled
+for `Mutex` (the guard payload is the public cell handle while the contents stay
+secret). `Channel<Channel<secret T>>` therefore remains gated on M1.4c-2, not on
+this decision. No new `secret_leak` sink: passing a handle is not a branch, an
+index, or a divisor.
+
+**Self-host.** The mirror is heavier than the snc side (`scg` hardcodes
+`mk_channel(c, 0)` and its channel lowering has no encode/decode at all), so
+M1.2c follows the M1.2b-cont precedent: **ship snc-side first, register the
+example as a deferred scg gap**, mirror as its own slice.
 
 ### D7. Multi-processing — `Process` over `std::process::Command`; a `Subprocess` capability effect.
 
@@ -684,6 +748,46 @@ discipline, ADR 0029). Provisional set:
   `channel_new`. Follow-up.
 - **`select` over multiple channels**: needed for non-trivial worker
   topologies. A later surface addition.
+
+  **Runtime strategy PINNED (2026-07-21, maintainer-confirmed), design still
+  open.** `std::sync::mpsc` cannot do this — std exposes no `Select`, and the
+  current `sentinel_channel_recv` holds `receiver.lock()` for the whole wait, so
+  a "helper thread per arm" implementation would occupy every channel's receiver
+  mutex and two overlapping selects would deadlock. **A `select` must therefore
+  not go through `sentinel_channel_recv`.** Of the three shapes considered —
+  (a) polling `try_recv` with backoff, (b) replacing the mpsc backing with a
+  Sentinel-owned `Mutex<VecDeque<i64>>` + `parking_lot::Condvar` and a waiter
+  registry, (c) one process-wide "something happened" condvar — **(b) is
+  pinned.** Rationale: `parking_lot` is already a workspace dependency so it
+  adds **no new dependency** (the alternative, `crossbeam-channel`, would);
+  `Condvar::wait_for` reuses the D5 bounded-wait tier already built for
+  `Mutex<T>`; and it **also unblocks M1.4c-2 `Channel<secret T>`**, which is
+  gated precisely on "in-transit values sit in mpsc nodes Sentinel does not
+  allocate, so they can be neither mlocked nor scrubbed" — under (b) Sentinel
+  owns the nodes. Crucially this is ABI-safe: `abi-v1.md` declares
+  `SentinelChannel` fully opaque (codegen only ever holds the `*mut`), so the
+  struct can be rebuilt with the four C-ABI signatures byte-identical and **zero
+  codegen/IR/self-host churn** for the existing builtins.
+
+  **Surface questions still OPEN (do not build before deciding):**
+  - A `select` must return **two** pieces (which arm fired + the value); `?T`
+    alone cannot carry that, and D4's "closed-and-drained is a typed terminal
+    value, not a panic" must still hold for "all arms closed".
+  - **Receive-only is the complete design today.** Channels are unbounded, so
+    `send` never blocks; send-arms only become meaningful alongside the bounded
+    channels also deferred in this section.
+  - Interaction with the `Sender`/`Receiver` split above: a `select` typed over
+    `Channel<T>` (`Copy`) would have to be re-typed if `Receiver<T>` (Move)
+    lands. Pin both together rather than deferring twice.
+  - Scope is **in-process `Channel<T>` only**. `SealedChannel`/`Process` wrap
+    pipes, not a `SentinelChannel`, so multiplexing them is fd-multiplexing — a
+    different mechanism, and ADR 0069's threat model plus D8's cross-process
+    secret fence would both need re-examination.
+  - ADR 0056 deliberately exposes **no** `select`/`poll` for sockets ("the
+    blocking + per-connection-task model hides it"). An ADR proposing channel
+    `select` must say why channels differ — the honest answer being that a
+    socket connection has a natural per-connection task while a *correlated
+    reply* has no such decomposition (see M1.2c below).
 - **Cancellation scope** (`scope race`, early-exit cancellation — ADR 0024
   A2/D9 deferred): orthogonal but related; its own follow-up.
 

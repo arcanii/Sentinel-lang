@@ -1,0 +1,27 @@
+// ADR 0066 M2.3b / D8 — the cross-process element fence: a HANDLE may not cross
+// a process pipe. A `Channel<T>` (like `Task`/`Process`) is a process-local
+// address; it is meaningless in another address space, and a value arriving from
+// the far end of a pipe must never become one.
+//
+// This fixture exists because the rule was, until M1.2c, only IMPLIED. The gate
+// `is_process_channel_elem` was written as the coincidental intersection
+// "is a spawn word-scalar AND has a `?T` form", which excluded handles only
+// because no handle had a `?T` form. M1.2c gave `Channel` one (so `recv` on a
+// channel-of-channels can return `?Channel<T>`), which flipped that predicate
+// TRUE and silently opened the fence in both directions. It is now an EXPLICIT
+// element list, and this fixture pins it so a future map change cannot reopen it
+// from a distance.
+//
+// Expected: compile error `sentinel::types::call_arg_mismatch` — `process_send`
+// takes an i64 frame, not a handle.
+
+fn leaky() -> i64 ! { Subprocess } {
+    let argv: [[u8]] = ["-"];
+    let p = process_spawn("cat", argv);
+    let ch: Channel<i64> = channel_new();
+    process_send(p, ch)
+}
+
+fn main() -> i64 {
+    0
+}

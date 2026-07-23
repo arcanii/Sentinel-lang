@@ -125,6 +125,10 @@ ui_snapshot!(c66_process_secret_fence, "c66_process_secret_fence.sentinel");
 // the public `i64` framed-channel boundary (`process_send`), rejected as a type
 // mismatch (the type system IS the fence, exactly as M2.2's `[u8]` byte-pipe).
 ui_snapshot!(c66_process_channel_secret_fence, "c66_process_channel_secret_fence.sentinel");
+// ADR 0066 M2.3b / D8: the other half of the cross-process element fence — a
+// process-local HANDLE may not cross a pipe either. Pins `is_process_channel_elem`
+// as an explicit list; M1.2c showed it could otherwise be widened from a distance.
+ui_snapshot!(c66_process_channel_handle_fence, "c66_process_channel_handle_fence.sentinel");
 // ADR 0066 M2.4a / ADR 0069 D1: a `SealedChannel<T>` with a NON-secret element is a
 // type error (the fence-as-type — a SealedChannel carries an encrypted secret, so a
 // public element is pointless). Surfaces SealedChannelElementNotSupported.

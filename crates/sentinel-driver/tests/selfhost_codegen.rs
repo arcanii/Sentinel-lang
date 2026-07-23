@@ -682,6 +682,14 @@ const DEFERRED_PROGRAMS: &[(&str, &str)] = &[
     // generic-element design specifies. The oracle's IR for both verifies
     // cleanly, so this is scg-side.
     ("examples/lang/channel_generic.sentinel", "ADR 0066 M1.2b-cont: generic channel elements are snc-only — scg emits INVALID IR (missing the zext encode: i8 passed as i64)"),
+    // ADR 0066 M1.2c (D6a): channel-of-channels. Same root cause as the entry
+    // above and deferred on the same precedent — scg's channel typing hardcodes
+    // `mk_channel(c, 0)` (element always i64) and its lowering has no
+    // encode/decode at all, so a `Channel<Channel<i64>>` types as `Channel<i64>`
+    // there. The snc side is complete (typing + both back ends); the mirror is
+    // its own slice, together with the M1.2b-cont element work it shares a cause
+    // with.
+    ("examples/lang/addressed_reply.sentinel", "ADR 0066 M1.2c: channel-of-channels is snc-only — scg hardcodes an i64 channel element (shares the M1.2b-cont mirror gap)"),
     // ADR 0066 M2.3b: generic word-scalar elements for the process channel.
     ("examples/lang/process_channel_typed.sentinel", "ADR 0066 M2.3b: generic process-channel elements are snc-only — scg emits INVALID IR (missing the zext encode: i8 passed as i64)"),
 ];

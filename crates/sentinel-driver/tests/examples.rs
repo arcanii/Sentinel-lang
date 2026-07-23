@@ -483,6 +483,13 @@ const EXAMPLES: &[(&str, i32)] = &[
     // unaddressed; no channel-of-channels, no select to correlate them). Runs
     // only because the checked result is order-independent. 7 requests *+6 = 42.
     ("examples/lang/shared_sequence_via_channel.sentinel", 42),
+    // ADR 0066 M1.2c (D6a): channel-of-channels — the ADDRESSED reply, i.e. the
+    // program the line above says cannot be written. Each claimer sends its OWN
+    // reply-channel handle through a `Channel<Channel<i64>>`, so a reply reaches
+    // exactly one claimer and correlation is structural. Needs no `select`: a
+    // worker waits on one channel, its own. snc-only (the scg mirror is deferred,
+    // like process_channel_typed / channel_generic). 6+12+18+6 = 42.
+    ("examples/lang/addressed_reply.sentinel", 42),
     // ADR 0066 M2.3b: GENERIC word-scalar elements for the typed process channel —
     // `process_send`/`process_recv` over `u8` / `i32` / `bool` (not just `i64`),
     // encoded into / decoded from the 8-byte i64 frame (the M1.1 spawn encode). The
@@ -810,6 +817,19 @@ fn lang_shared_counter_via_channel() {
     check_example(
         "examples/lang/shared_counter_via_channel.sentinel",
         "shared_counter_via_channel",
+        42,
+    );
+}
+
+#[test]
+fn lang_addressed_reply() {
+    // ADR 0066 M1.2c (D6a): channel-of-channels. The correlated request/reply
+    // that `shared_sequence_via_channel` (below) documents as impossible —
+    // each claimer passes its own reply channel through the request, so it
+    // waits on exactly one channel and gets exactly its own answer.
+    check_example(
+        "examples/lang/addressed_reply.sentinel",
+        "addressed_reply",
         42,
     );
 }

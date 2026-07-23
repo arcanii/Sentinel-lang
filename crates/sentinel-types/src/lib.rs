@@ -545,9 +545,15 @@ pub enum NullableInner {
     Ref(RefId),
     /// ADR 0071 M1.4b: `?Guard<T>` — the fallible result of `lock(m)`. Inline
     /// `{ i1 valid, ptr }` (a [`Type::Guard`] lowers to a single `ptr`, like
-    /// `?ptr`). The ONLY handle with a `?` form (you never write `?Mutex` /
-    /// `?Channel`), because `lock` is fallible (D4/D5).
+    /// `?ptr`). Fallible by construction (D4/D5).
     Guard(GuardId),
+    /// ADR 0066 M1.2c (D6a): `?Channel<T>` — the payload of a `recv` on a
+    /// CHANNEL-OF-CHANNELS. You still never *write* `?Channel`; this exists
+    /// because `recv(outer)` on a `Channel<Channel<T>>` must yield
+    /// `?Channel<T>` (D4: a drained channel is a typed terminal value, not a
+    /// panic). Inline `{ i1 valid, ptr }` — identical to `Guard`, since a
+    /// channel handle lowers to one `ptr`.
+    Channel(ChanId),
 }
 
 impl NullableInner {
@@ -568,6 +574,8 @@ impl NullableInner {
             NullableInner::Ref(id) => Type::Ref(id),
             // ADR 0071 M1.4b: `?Guard<T>`'s inner is the guard handle.
             NullableInner::Guard(id) => Type::Guard(id),
+            // ADR 0066 M1.2c (D6a): `?Channel<T>`'s inner is the channel handle.
+            NullableInner::Channel(id) => Type::Channel(id),
         }
     }
 
@@ -886,6 +894,11 @@ impl Type {
             // result (the ONLY handle with a `?` form). Unlike `Mutex`/`Shared`
             // (in the None group below), a Guard can be a nullable payload.
             Type::Guard(id) => Some(NullableInner::Guard(id)),
+            // ADR 0066 M1.2c (D6a): `?Channel<T>` exists ONLY as `recv`'s result
+            // on a channel-of-channels. You still never write `?Channel` in
+            // source; without this arm the `recv` arm's `.expect()` would
+            // PANIC on a nested element instead of diagnosing.
+            Type::Channel(id) => Some(NullableInner::Channel(id)),
             // C3 / ADR 0019 D5: `?(secret T)` is not yet
             // representable — NullableInner has no Secret variant
             // at C3.1 (depth-1 composition limit). Caller surfaces
@@ -899,9 +912,6 @@ impl Type {
             | Type::Secret(_)
             | Type::Kont(_)
             | Type::Task(_)
-            // ADR 0066 M1.2: no `?Channel` / `[Channel]` (a channel handle
-            // is not a nullable payload nor an array element at M1.2).
-            | Type::Channel(_)
             | Type::Process
             // ADR 0066 M2.4a: no `?SealedChannel` (a handle, like `Process`).
             | Type::SealedChannel
@@ -1510,10 +1520,28 @@ fn is_named_mutex_return(expr: &TypedExpr) -> bool {
 /// runtime stays i64-based — no runtime/ABI change. A `secret` element is NOT a
 /// word scalar, so it is rejected here: the cross-process secret fence (D8).
 /// `u128` (16 bytes) doesn't fit the i64 frame and is excluded (not a word
-/// scalar); the `Task`/`Channel`/`Process` handles have no `?T` form and would be
-/// nonsensical across a process boundary anyway.
+/// scalar); the `Task`/`Channel`/`Process` HANDLES are excluded because a
+/// process-local address is meaningless — worse, forgeable — in another address
+/// space.
+///
+/// ⚠ This is an EXPLICIT list, and must stay one. It was written as the
+/// coincidental intersection `is_spawn_word_scalar(ty) &&
+/// ty.to_nullable_inner().is_some()`, which held only because no handle had a
+/// `?T` form. ADR 0066 M1.2c gave `Channel` exactly that form (for `recv` on a
+/// channel-of-channels), which silently flipped this predicate TRUE for
+/// `Channel` — and this predicate is the SOLE gate on `process_send`'s element
+/// and `process_recv`'s expected element. The result was a core-language memory
+/// -safety hole: `process_send(p, ch)` wrote a live `SentinelChannel*` into the
+/// pipe frame, and `process_recv -> ?Channel<T>` `inttoptr`'d an integer chosen
+/// by whatever wrote the other end back into a handle that Sentinel's OWN
+/// runtime then dereferences on a plain `send()` — no `unsafe`, no `declassify`,
+/// no `extern "C"`. Coupling a cross-process FENCE to an unrelated type-map is
+/// the bug; the list below cannot be widened by a change somewhere else.
 pub fn is_process_channel_elem(ty: Type) -> bool {
-    is_spawn_word_scalar(ty) && ty.to_nullable_inner().is_some()
+    matches!(
+        ty,
+        Type::I64 | Type::I32 | Type::U8 | Type::Bool | Type::F64 | Type::Ptr
+    )
 }
 
 /// ADR 0066 M1.2b-cont: the word-scalar in-process channel element types are
@@ -1530,6 +1558,18 @@ pub fn channel_chanid_for(elem: Type) -> Option<u32> {
         Type::Bool => Some(3),
         Type::F64 => Some(4),
         Type::Ptr => Some(5),
+        // Slots 6..=9 are RESERVED for M1.4c-2 `Channel<secret T>` (secret
+        // i64/i32/u8/bool), which is already designed against them — see ADR
+        // 0071 M1.4c, whose container slots 6..=9 this mirrors.
+        //
+        // ADR 0066 M1.2c (D6a): `Channel<Channel<E>>` at slots 10..=15, ONE
+        // level deep. This map is table-free on purpose (it lets the checker
+        // read an element off a `ChanId` with no `channels`-table access), so
+        // it cannot enumerate infinitely many channel types — hence a bounded
+        // pre-interned set, exactly the ADR 0071 M1.4c precedent. A deeper
+        // nesting has no slot and falls to `None`, which the caller turns into
+        // `ChannelElementNotSupported` — a diagnostic, never a panic.
+        Type::Channel(inner) if inner.0 <= 5 => Some(10 + inner.0),
         _ => None,
     }
 }
@@ -1545,6 +1585,21 @@ pub fn channel_elem_for(id: ChanId) -> Type {
         3 => Type::Bool,
         4 => Type::F64,
         5 => Type::Ptr,
+        // Slots 6..=9 are the M1.4c-2 `Channel<secret T>` RESERVATION. They are
+        // unreachable today (`channel_chanid_for` returns `None` for a secret
+        // element, so nothing resolves here), but they are spelled out rather
+        // than left to the `_` arm so this map AGREES with the placeholders
+        // pushed into the `channels` table — a silent disagreement between the
+        // two is exactly the trap M1.4c-2 would inherit. Both must change
+        // together when the real secret elements land.
+        6 => Type::I64,
+        7 => Type::I32,
+        8 => Type::U8,
+        9 => Type::Bool,
+        // ADR 0066 M1.2c (D6a): the inverse of `channel_chanid_for`'s nested
+        // range — slot `10 + e` is `Channel<Channel<elem_for(e)>>`, so the
+        // element here is the INNER channel type `Channel<e>`.
+        10..=15 => Type::Channel(ChanId(id.0 - 10)),
         _ => Type::I64,
     }
 }
@@ -5592,6 +5647,32 @@ pub fn check_module(
         intern_channel(&mut channels, Type::Bool);
         intern_channel(&mut channels, Type::F64);
         intern_channel(&mut channels, Type::Ptr);
+        // ADR 0066 M1.2c (D6a): slots 6..=15. `intern_channel` assigns by table
+        // POSITION, so the table must be filled contiguously for index == the
+        // fixed `channel_chanid_for` id — the renderer and `channel_data()` both
+        // index it, and a hole would render `<channel#N>` instead of the
+        // structural `Channel<…>`.
+        //
+        // 6..=9 are placeholders RESERVED for M1.4c-2 `Channel<secret T>` (secret
+        // i64/i32/u8/bool). They are filled with their PUBLIC counterparts so the
+        // indices line up; M1.4c-2 replaces them with the real secret elements
+        // when it pre-interns `SecretId`s 0..=3. Nothing can reach them today —
+        // `channel_chanid_for` returns `None` for a secret element, so no source
+        // type resolves here.
+        //
+        // These PUSH rather than `intern_channel`, deliberately: interning dedups
+        // by element, so re-interning `I64` would return slot 0 and silently leave
+        // the reserved gap unfilled — putting the nested slots at 6..=11 and
+        // desynchronising the table from `channel_chanid_for`.
+        for placeholder in [Type::I64, Type::I32, Type::U8, Type::Bool] {
+            channels.push(ChannelData { elem_ty: placeholder });
+        }
+        // 10..=15: `Channel<Channel<E>>`, one level deep, E over the six base
+        // slots — the M1.2c element set. These elements are unique, so interning
+        // would also work; pushing keeps the whole 6..=15 block one obvious rule.
+        for e in 0..=5u32 {
+            channels.push(ChannelData { elem_ty: Type::Channel(ChanId(e)) });
+        }
         let opt_i64 = Type::Nullable(NullableInner::I64);
         let channel_sigs: &[(usize, &[Type], Type)] = &[
             (21, &[], chan_i64),                       // channel_new() -> Channel<i64>

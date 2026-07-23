@@ -1571,6 +1571,13 @@ fn is_copy_nullable_inner(inner: NullableInner) -> bool {
         // it must not be duplicated (a copy would double-unlock). Move-tracking
         // makes binding it into a new owner CONSUME the source.
         NullableInner::Guard(_) => false,
+        // ADR 0066 M1.2c (D6a): `?Channel<T>` is COPY, tracking the bare
+        // `Channel` (`Type::Channel(_) => true` above). The contrast with
+        // `Guard` right above is the whole reason both arms exist: a guard is
+        // Move because its drop unlocks with no clone accounting, whereas a
+        // channel handle is `Copy` + deliberately LEAKED (`needs_drop ==
+        // false`), so duplicating one accounts for nothing and frees nothing.
+        NullableInner::Channel(_) => true,
         NullableInner::Struct(_)
         | NullableInner::GenericInstance(_)
         | NullableInner::TypeParam(_) => false,

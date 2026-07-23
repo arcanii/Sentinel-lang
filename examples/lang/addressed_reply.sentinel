@@ -1,0 +1,77 @@
+// ADR 0066 M1.2c (D6a) — channel-of-channels: the ADDRESSED REPLY.
+//
+// This is the program `examples/lang/shared_sequence_via_channel.sentinel` says
+// cannot be written. Its comment names the exact blocker:
+//
+//     "You cannot send a per-worker reply-channel handle THROUGH the request,
+//      because Sentinel channels carry only word-scalars (`Channel<i64>`), not
+//      `Channel<Channel<i64>>` (ADR 0066 M1.2b element set)."
+//
+// M1.2c lifts precisely that restriction, and doing so dissolves the wall
+// WITHOUT needing `select`: when a request carries its own reply channel, each
+// worker waits on exactly ONE channel — its own — so a single-channel `recv`
+// suffices. (`select` remains deferred, for the different problem of one party
+// multiplexing N sources; see ADR 0066 D11.)
+//
+// The protocol: each claimer makes a private reply channel, sends that HANDLE to
+// the allocator as its request, then blocks on its own channel. The allocator
+// receives a handle and replies on THAT channel — so a reply is addressed to
+// exactly one claimer, and correlation is structural rather than hoped-for.
+//
+// Determinism: the allocator serves a fixed number of requests and the claimers
+// are awaited in order, so the exit code is stable regardless of scheduling.
+// Each claimer's own value is what it returns, which is the whole point — with
+// one shared reply channel a claimer could read another claimer's answer.
+//
+// 6 + 12 + 18 + 6 = 42.
+
+use std::test::check;
+use std::test::report;
+
+// A claimer: allocate MY reply channel, send it as the request, wait on it.
+fn claimer(requests: Channel<Channel<i64>>, scratch: Channel<i64>) -> i64 {
+    let mine: Channel<i64> = channel_new();
+    send(requests, mine);
+    let got: ?i64 = recv(mine);
+    unwrap_or(got, 0)
+}
+
+// The allocator: serve `n` requests, replying on each requester's OWN channel.
+fn allocator(requests: Channel<Channel<i64>>, scratch: Channel<i64>, n: i64) -> i64 {
+    let mut next: i64 = 6;
+    let mut served: i64 = 0;
+    while served < n {
+        let who: ?Channel<i64> = recv(requests);
+        let reply: Channel<i64> = unwrap_or(who, scratch);
+        send(reply, next);
+        channel_close(reply);
+        next = next + 6;
+        served = served + 1;
+    }
+    served
+}
+
+fn main() -> i64 {
+    let requests: Channel<Channel<i64>> = channel_new();
+    // A never-used stand-in for the `?Channel` null arm (`unwrap_or` needs a
+    // default). The allocator serves exactly as many requests as are sent, so
+    // this is unreachable — closing it keeps the intent explicit.
+    let scratch: Channel<i64> = channel_new();
+    channel_close(scratch);
+
+    let total: i64 = scope concurrent {
+        let srv = spawn allocator(requests, scratch, 3);
+        let a = spawn claimer(requests, scratch);
+        let b = spawn claimer(requests, scratch);
+        let c = spawn claimer(requests, scratch);
+        let va: i64 = a.await;
+        let vb: i64 = b.await;
+        let vc: i64 = c.await;
+        let served: i64 = srv.await;
+        va + vb + vc + served * 2
+    };
+
+    let mut passed: i64 = 0;
+    passed = passed + check("every claimer got its own reply", total == 42);
+    report(passed, 1)
+}
