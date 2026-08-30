@@ -745,13 +745,18 @@ fn collect_under(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// The real-program corpus: every `.sentinel` under `examples/`,
+/// The real-program corpus: every `.sentinel` under `demos/`, `examples/`,
 /// `sentinel_library/` and `tools/`. Library modules with no `main` simply fail
 /// the oracle and are skipped, exactly like a deferred construct.
+///
+/// `demos/` was MISSING from this list until a review caught it — the same
+/// species of hole the real-program sweeps exist to close, a directory of real
+/// programs nothing compared. Kept in step with the seven stage differentials,
+/// which enumerate the same four roots.
 fn collect_programs() -> Vec<PathBuf> {
     let root = workspace_root();
     let mut out = Vec::new();
-    for sub in ["examples", "sentinel_library", "tools"] {
+    for sub in ["demos", "examples", "sentinel_library", "tools"] {
         collect_under(&root.join(sub), &mut out);
     }
     out.sort();

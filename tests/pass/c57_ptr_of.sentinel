@@ -1,0 +1,47 @@
+// ADR 0057 Phase 1b c57_ptr_of: the FIRST fixture in the corpus to use the
+// raw-pointer intrinsics, landing with the `scg` mirror of them — which is the
+// pairing ADR 0057's "Self-hosting" section asks for ("the `scg` parser / resolve
+// / types / codegen mirror lands alongside that fixture").
+//
+// WHAT IT PINS: `ptr_of` / `ptr_of_mut` / `is_null` are RESERVED NAMES the oracle
+// rewrites at a CALL SITE into a UNARY node — `(unary ptr_of …)`, not
+// `(call ptr_of …)`. They are the last three of the family of four; `sqrt`
+// (ADR 0058 A1) was the first, and the reason the family exists at all is that a
+// builtin would need an `FnId`: builtins occupy 0..=41 and user fns are
+// `42 + idx`, so a 42nd would shift every user FnId and re-bless every dump in
+// the corpus. It also pins the opaque `ptr` TYPE, which the mirror had to add as
+// scg scalar code 5 to render `(let #2 ptr …)` and `:ptr`.
+//
+// The gap this closes was invisible in a way worth recording. FIVE of the six
+// callers in the tree are `sentinel_library/std/**` modules with no `main`, so
+// every semantic oracle rejects them and only the extended REAL-PROGRAM
+// differential compared them — at `ast` alone. The SIXTH,
+// `demos/win32/messagebox.sentinel`, is a self-contained program that does run
+// the whole pipeline — but `demos/` was missing from the sweep's list of roots
+// until a review caught it, so nothing compared that one either. (It is in the
+// sweep now, and matches at every stage.) What scg did before was worse than the
+// "emits a plain call" the registry recorded: at `resolve` the unresolved name
+// printed as `(call # …)` with an EMPTY FnId, and at `mir` it printed
+// `call print_bytes`, an unrelated builtin.
+//
+// `selfhost_codegen` SKIPS this fixture, and that is why the mirror needs no
+// codegen half: `snc llvm` Errs with "ptr_of / is_null not ported (ADR 0057
+// snc-only)". `snc build` uses inkwell, so it compiles and runs.
+//
+// DELIBERATELY libc-FREE. An earlier draft handed the pointer to `strlen`, which
+// would have exercised a `ptr` crossing the FFI boundary — but a Sentinel `[u8]`
+// is not NUL-terminated, so it would have needed either an embedded NUL or the
+// `std::c::cstr` helper, and a fixture must be single-file. The extern-call path
+// is already pinned by `c57_extern_call.sentinel`; this one pins the intrinsics.
+//
+// Both pointers are non-null, so 20 + 22 = 42.
+
+fn main() -> i64 {
+    let buf: [u8] = "hello";
+    let mut mbuf: [u8] = "world";
+    let p: ptr = ptr_of(&buf);
+    let q: ptr = ptr_of_mut(&mut mbuf);
+    let a: i64 = if is_null(p) { 0 } else { 20 };
+    let b: i64 = if is_null(q) { 0 } else { 22 };
+    a + b
+}

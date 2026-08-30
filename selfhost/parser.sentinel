@@ -88,11 +88,14 @@
 // Token tags are APPEND-ONLY: resolve/decls.sentinel compares raw tag integers,
 // so inserting a tag mid-table silently mis-classifies items rather than failing.
 // Expr unary op-codes: 1 - 2 ! 3 * (deref) 4 & (ref) 5 &mut (refmut)
-// | (ADR 0058 A1) 6 sqrt. `sqrt` is a RESERVED NAME the parser rewrites at the
-// call site into a unary node, exactly as the oracle does — it must NOT become a
-// builtin, because builtins occupy FnIds 0..=41 and user fns are `42 + idx`, so a
-// 42nd builtin would shift every user FnId and re-bless every dump in the corpus.
-// (7/8/9 stay free for ADR 0057's ptr_of / ptr_of_mut / is_null.)
+// | THE RESERVED-NAME FAMILY, complete at four: 6 sqrt (ADR 0058 A1), 7 ptr_of,
+// 8 ptr_of_mut, 9 is_null (ADR 0057 Phase 1b). These are the only names the
+// oracle rewrites at a CALL SITE into a unary node instead of giving them an
+// `FnId` — and that is the whole point of the design: builtins occupy FnIds
+// 0..=41 and user fns are `42 + idx`, so a 42nd builtin would shift every user
+// FnId and re-bless every dump in the corpus. Codes 1..=5 have PREFIX syntax;
+// 6..=9 have CALL syntax, which is why the merge un-parser treats the two
+// groups differently.
 // Expr op-codes (internal; the dump emits node names + operator symbols):
 // binop 1 + 2 - 3 * 4 / 5 & 6 | 7 ^ ; cmp 8 == 9 != 10 < 11 <= 12 > 13 >= ;
 // logic 14 && 15 || ; unary 1 - 2 !.
@@ -506,6 +509,51 @@ fn is_kw_delegate(src: &[u8], start: i64, end: i64) -> bool {
 fn is_kw_sqrt(src: &[u8], start: i64, end: i64) -> bool {
     end - start == 4 && (*src)[start] == 's' && (*src)[start + 1] == 'q'
         && (*src)[start + 2] == 'r' && (*src)[start + 3] == 't'
+}
+
+// (ADR 0057 Phase 1b) The three raw-pointer intrinsics, recognised by reserved
+// name exactly as `sqrt` is. Each compares an EXACT length first, so `ptr_of` can
+// never match a prefix of `ptr_of_mut` and the order of the tests is irrelevant.
+fn is_kw_ptr_of(src: &[u8], start: i64, end: i64) -> bool {
+    end - start == 6 && (*src)[start] == 'p' && (*src)[start + 1] == 't'
+        && (*src)[start + 2] == 'r' && (*src)[start + 3] == '_'
+        && (*src)[start + 4] == 'o' && (*src)[start + 5] == 'f'
+}
+
+fn is_kw_ptr_of_mut(src: &[u8], start: i64, end: i64) -> bool {
+    end - start == 10 && (*src)[start] == 'p' && (*src)[start + 1] == 't'
+        && (*src)[start + 2] == 'r' && (*src)[start + 3] == '_'
+        && (*src)[start + 4] == 'o' && (*src)[start + 5] == 'f'
+        && (*src)[start + 6] == '_' && (*src)[start + 7] == 'm'
+        && (*src)[start + 8] == 'u' && (*src)[start + 9] == 't'
+}
+
+fn is_kw_is_null(src: &[u8], start: i64, end: i64) -> bool {
+    end - start == 7 && (*src)[start] == 'i' && (*src)[start + 1] == 's'
+        && (*src)[start + 2] == '_' && (*src)[start + 3] == 'n'
+        && (*src)[start + 4] == 'u' && (*src)[start + 5] == 'l'
+        && (*src)[start + 6] == 'l'
+}
+
+// The unary op-code a RESERVED NAME rewrites to, or 0 for any other callee. This
+// is the whole family in one place, deliberately: the oracle's own rewrite is two
+// adjacent arms of one `if` chain (crates/sentinel-syntax/src/parser.rs), and
+// splitting it across call sites is how `sqrt` came to be mirrored a slice before
+// its three siblings. The rewrite is UNCONDITIONAL by name in the oracle — a
+// user-defined `fn ptr_of` still keeps its own FnId AND still has its call sites
+// rewritten — so it is unconditional here too.
+pub fn reserved_unary_op(src: &[u8], start: i64, end: i64) -> i64 {
+    if is_kw_sqrt(src, start, end) {
+        6
+    } else if is_kw_ptr_of(src, start, end) {
+        7
+    } else if is_kw_ptr_of_mut(src, start, end) {
+        8
+    } else if is_kw_is_null(src, start, end) {
+        9
+    } else {
+        0
+    }
 }
 
 // (ADR 0058) The end of an `[eE][+-]?[0-9]+` exponent suffix at `p`, or `p` when

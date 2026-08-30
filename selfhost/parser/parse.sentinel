@@ -71,12 +71,13 @@ fn parse_atom(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i6
             // expr; only postfix `.m(args)` calls a value).
             *cur = *cur + 1;
             let cargs: Args = parse_args(k, s, e, src, cur, 5);
-            // (ADR 0058 A1) `sqrt(x)` is a RESERVED NAME the oracle rewrites at
-            // the call site into a UNARY node rather than giving it an `FnId`
-            // (a 42nd builtin would shift every user FnId). The rewrite is
-            // unconditional by name in the oracle, so it is here too.
-            if is_kw_sqrt(src, vst, ven) {
-                sqrt_unary(cargs)
+            // The RESERVED-NAME family (`sqrt`, `ptr_of`, `ptr_of_mut`,
+            // `is_null`): the oracle rewrites these four at the call site into a
+            // UNARY node rather than giving them an `FnId` — a 42nd builtin would
+            // shift every user FnId. See `reserved_unary_op`.
+            let ruop: i64 = reserved_unary_op(src, vst, ven);
+            if ruop > 0 {
+                reserved_unary(ruop, cargs)
             } else {
                 Expr::Call(slice_of(src, vst, ven), cargs)
             }
@@ -257,18 +258,18 @@ fn parse_postfix_rest(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur:
     }
 }
 
-// (ADR 0058 A1) Wrap the single argument of a `sqrt(x)` call in unary op-code 6.
-// The `Args::End` arm cannot be reached through any input a differential sees:
-// the ORACLE rejects every other arity at PARSE time with `SqrtArity`, so
-// `snc ast` exits nonzero and the comparison is skipped before scg ever runs
-// (verified — `sqrt()` and `sqrt(1.0, 2.0)` both print
-// `sentinel::parse::sqrt_arity`). It still returns a well-formed node rather
-// than aborting, on the standing "scg is dump-only and trusts oracle-valid
-// input" contract.
-fn sqrt_unary(a: Args) -> Expr {
+// Wrap the single argument of a RESERVED-NAME call in its unary op-code. The
+// `Args::End` arm cannot be reached through any input a differential sees: the
+// ORACLE rejects every other arity at PARSE time — `SqrtArity` for `sqrt`,
+// `PtrOfArity` for the other three — so `snc ast` exits nonzero and the
+// comparison is skipped before scg ever runs (verified: `sqrt()`,
+// `sqrt(1.0, 2.0)`, `ptr_of()` and `is_null(a, b)` all print a parse error). It
+// still returns a well-formed node rather than aborting, on the standing "scg is
+// dump-only and trusts oracle-valid input" contract.
+fn reserved_unary(uop: i64, a: Args) -> Expr {
     match a {
-        Args::End => Expr::Unary(6, Expr::Int(0)),
-        Args::Cell(h, t) => Expr::Unary(6, h),
+        Args::End => Expr::Unary(uop, Expr::Int(0)),
+        Args::Cell(h, t) => Expr::Unary(uop, h),
     }
 }
 

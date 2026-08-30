@@ -67,16 +67,17 @@ fn emit_expr(out: &mut Vec<u8>, c: &MergeCtx, ex: Expr) -> i64 {
             0
         },
         Expr::Unary(uop, inner) => {
-            if uop == 6 {
-                // (ADR 0058 A1) `sqrt` is the one unary op-code with no PREFIX
-                // syntax — it is a reserved-name CALL that the parser rewrote
-                // into a unary node, so the faithful un-parse is `sqrt(x)`, not
-                // the `(sqrt x)` the prefix path would print. Unreachable in any
-                // differential (`snc merge`'s Bar-A printer rejects `sqrt` as out
-                // of scope, so the oracle emits no merged text to compare), but
-                // an un-parser whose output cannot re-parse is worth no more than
-                // one that emits the wrong operator.
-                append_str(out, "sqrt(");
+            if uop >= 6 {
+                // The RESERVED-NAME family (6 sqrt / 7 ptr_of / 8 ptr_of_mut /
+                // 9 is_null) has CALL syntax, not prefix syntax: the parser
+                // rewrote a call into a unary node, so the faithful un-parse is
+                // `name(x)`, not the `(name x)` the prefix path would print.
+                // Unreachable in any differential — `snc merge`'s Bar-A printer
+                // rejects all four as out of scope, so the oracle emits no merged
+                // text to compare — but an un-parser whose output cannot re-parse
+                // is worth no more than one that emits the wrong operator.
+                append_str(out, reserved_unary_name(uop));
+                push(out, '(');
                 emit_expr(out, c, inner);
                 push(out, ')');
                 0

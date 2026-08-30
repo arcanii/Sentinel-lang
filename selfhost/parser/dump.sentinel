@@ -253,12 +253,21 @@ fn dump_expr(out: &mut Vec<u8>, ex: Expr) -> i64 {
                 "&"
             } else if uop == 5 {
                 "&mut"
-            } else {
-                // (ADR 0058 A1) op-code 6, the `sqrt` reserved-name rewrite.
-                // Note the chain now tests 5 EXPLICITLY: leaving `&mut` as the
-                // catch-all would have rendered a new op-code as `&mut` — a
-                // silent wrong symbol, not a compile error.
+            } else if uop == 6 {
                 "sqrt"
+            } else if uop == 7 {
+                "ptr_of"
+            } else if uop == 8 {
+                "ptr_of_mut"
+            } else if uop == 9 {
+                "is_null"
+            } else {
+                // Every op-code is tested EXPLICITLY and the fallback is a name
+                // that cannot re-parse. `&mut` used to be the catch-all, which
+                // silently rendered the then-new `sqrt` as a mutable borrow — a
+                // different program, not a wrong glyph. A future op-code that
+                // lands here should look like the bug it is.
+                "<unary?>"
             };
             append_str(out, usym);
             push(out, ' ');

@@ -200,14 +200,15 @@ fn sentinel_effect_checker_matches_oracle_on_corpus() {
 // self-hosted parser as a field access. The same blind spot previously hid the
 // ADR 0067 `module`/`part` lex gap.
 //
-// TWO of the three are now closed, and by the intended lifecycle in both cases —
-// the sweep found the hole, the fix landed, and a FIXTURE now pins it so the
-// corpus can never lose sight of it again: `export "C"` by
-// `tests/pass/c59_export_call.sentinel`, and the ADR 0058 float literal (with
-// `sqrt`, which A1 makes part of the same feature) by
-// `tests/pass/c58_float_math.sentinel`. What remains fixture-uncovered is the
-// ADR 0057 half of the reserved-name family: `ptr_of` / `ptr_of_mut` /
-// `is_null`.
+// ALL THREE are now closed, each by the intended lifecycle — the sweep found the
+// hole, the fix landed, and a FIXTURE now pins it so the corpus cannot lose sight
+// of it again: `export "C"` by `tests/pass/c59_export_call.sentinel`, the ADR 0058
+// float literal (with `sqrt`, which A1 makes part of the same feature) by
+// `tests/pass/c58_float_math.sentinel`, and ADR 0057's `ptr_of` / `ptr_of_mut` /
+// `is_null` by `tests/pass/c57_ptr_of.sentinel`. That is the point of this test
+// arriving at an empty or near-empty registry: the list was never the deliverable
+// on its own — converting an invisible gap into an auditable one was, and an
+// auditable gap is one somebody closes.
 //
 // TWO FORMS of each program are compared, because the stage oracles
 // (`snc lex`/`ast`/`resolve`/`types`/`effects`/`borrow`/`mir`/`ctverify`) do NO
@@ -318,14 +319,24 @@ fn collect_under(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// The real-program corpus: every `.sentinel` under `examples/`,
+/// The real-program corpus: every `.sentinel` under `demos/`, `examples/`,
 /// `sentinel_library/` and `tools/`. Programs the oracle rejects (a library
 /// module with no `main`, an unwired `use`, a not-yet-ported construct) are
 /// simply skipped, exactly as in the fixture differential above.
+///
+/// `demos/` was MISSING from this list until a review caught it, and the omission
+/// is worth remembering because it is the same species of hole this whole test
+/// exists to close — a directory of real programs nothing compared. It is small
+/// (three Win32 FFI demos) but not redundant: `demos/win32/messagebox.sentinel`
+/// is a SELF-CONTAINED single-file caller of `ptr_of`, so unlike the five
+/// `sentinel_library/std/**` modules that also use the intrinsic — which have no
+/// `main`, and so are rejected by every semantic oracle — it runs the whole
+/// pipeline. Enumerating the roots by hand is what made the omission possible;
+/// if a fifth root ever appears, it will need adding here too, in eight files.
 fn collect_programs() -> Vec<PathBuf> {
     let root = workspace_root();
     let mut out = Vec::new();
-    for sub in ["examples", "sentinel_library", "tools"] {
+    for sub in ["demos", "examples", "sentinel_library", "tools"] {
         collect_under(&root.join(sub), &mut out);
     }
     out.sort();
@@ -568,7 +579,7 @@ fn sentinel_effect_checker_matches_oracle_on_real_programs() {
     std::fs::create_dir_all(&work).expect("create work dir");
     // The semantic stages do no module discovery, so the MERGED form is what
     // supplies the multi-module programs (`delegation`, `rect_demo`,
-    // `process_ids`, `sort_search`, …) — 9 direct + 10 merged.
-    real_program_differential("effects", &checker, &work, 9, 10);
+    // `process_ids`, `sort_search`, …) — 11 direct + 11 merged.
+    real_program_differential("effects", &checker, &work, 11, 11);
     let _ = std::fs::remove_dir_all(&tmp);
 }

@@ -286,17 +286,32 @@ fn unary_sym(uop: i64) -> [u8] {
     } else if uop == 5 {
         "&mut"
     } else {
-        // (ADR 0058 A1) This table maps the PREFIX operators 1..=5 ONLY, and the
+        // This table maps the PREFIX operators 1..=5 ONLY, and the
         // fallback is deliberately a name that cannot re-parse. It used to be
         // `else { "&mut" }`, which meant the new op-code 6 (`sqrt`) re-emitted
         // `sqrt(a)` as `(&mut a)` — not a wrong GLYPH but a DIFFERENT PROGRAM,
         // one that borrow-checks differently. This was the FOURTH of the four
         // unary symbol tables in the tree and the one the first pass of this
-        // slice missed; review caught it. `sqrt` never reaches here now: it has
-        // no prefix syntax, so `emit_expr`'s Unary arm routes it to a
-        // call-syntax branch of its own. ADR 0057 reserves 7/8/9 for
-        // `ptr_of`/`ptr_of_mut`/`is_null`, which are call-shaped too — so
-        // anything arriving here is a bug, and should look like one.
+        // slice missed; review caught it. None of the RESERVED-NAME family
+        // (6..=9) reaches here: they have CALL syntax, so `emit_expr`'s Unary arm
+        // routes them to `reserved_unary_name` instead. Anything arriving here is
+        // a bug, and should look like one.
+        "<unary?>"
+    }
+}
+
+// The source NAME of a reserved-name unary op-code (6..=9) — the un-parser's
+// counterpart to `unary_sym`, kept separate because these four re-emit as CALLS.
+fn reserved_unary_name(uop: i64) -> [u8] {
+    if uop == 6 {
+        "sqrt"
+    } else if uop == 7 {
+        "ptr_of"
+    } else if uop == 8 {
+        "ptr_of_mut"
+    } else if uop == 9 {
+        "is_null"
+    } else {
         "<unary?>"
     }
 }

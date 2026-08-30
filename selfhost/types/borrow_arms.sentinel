@@ -495,12 +495,18 @@ fn dump_te_unary(out: &mut Vec<u8>, uop: i64, inner: Expr, exp: i64, src: &[u8],
                 "&"
             } else if uop == 5 {
                 "&mut"
-            } else {
-                // (ADR 0058 A1) op-code 6 = `sqrt`; codes 7/8/9 stay free for
-                // ADR 0057's ptr_of / ptr_of_mut / is_null. The result type
-                // needs no arm: the `rt` chain's `else { it }` already gives the
-                // operand's own f64, which is what the oracle types.
+            } else if uop == 6 {
+                // (ADR 0058 A1) `sqrt` needs no `rt` arm: the chain's
+                // `else { it }` already gives the operand's own f64.
                 "sqrt"
+            } else if uop == 7 {
+                "ptr_of"
+            } else if uop == 8 {
+                "ptr_of_mut"
+            } else if uop == 9 {
+                "is_null"
+            } else {
+                "<unary?>"
             };
             append_str(out, usym);
             push(out, ' ');
@@ -585,6 +591,30 @@ fn dump_te_unary(out: &mut Vec<u8>, uop: i64, inner: Expr, exp: i64, src: &[u8],
                 } else {
                     strip_ref(c, it)
                 }
+            } else if uop == 7 || uop == 8 {
+                // (ADR 0057 Phase 1b) `ptr_of(&buf)` / `ptr_of_mut(&mut buf)`
+                // yield the opaque `ptr` (scalar code 5) — NOT the operand type,
+                // which is the `&[u8]` / `&mut [u8]` borrow they take.
+                //
+                // ⚠ These are the FIRST unary ops whose result type differs from
+                // their operand's, which makes a PRE-EXISTING gap easier to hit:
+                // `dump_te_unary` never widens. Unlike `dump_te_binary` and the
+                // `Cast` arm, it writes straight into `out` instead of building a
+                // `tmp` and splicing, so a `?T` / `secret T` expectation over a
+                // unary emits the bare node with no `widen-null` / `widen-secret`
+                // wrapper. NOT introduced here — `let b: ?bool = !f;` diverges
+                // identically on a pre-slice binary, with no `ptr` involved — but
+                // `let p: ?ptr = ptr_of(&buf)` is now a natural thing to write.
+                // And the MIR consequence is bigger than one missing wrapper: the
+                // oracle emits a whole `(vN:?ptr opaque vM)` for the widen, so
+                // omitting it SHIFTS EVERY LATER VALUE NUMBER in the block (on one
+                // probe, oracle v15 vs scg v11) — the diff will look nothing like
+                // its cause. Tracked as its own item, with the sibling gap on a
+                // CALL RHS.
+                5
+            } else if uop == 9 {
+                // `is_null(p)` yields `bool`, again unrelated to its operand.
+                2
             } else {
                 it
             };
@@ -620,7 +650,17 @@ fn dump_te_unary(out: &mut Vec<u8>, uop: i64, inner: Expr, exp: i64, src: &[u8],
             // ptr <r-val>` (or, as an assign-target place, leave r's pointer + signal -1);
             // `&v`/`&mut v`→v's alloca slot (the pointer; no instruction).
             if cg_on(c) {
-                if uop == 1 {
+                if uop >= 6 {
+                    // The RESERVED-NAME family (6 sqrt / 7 ptr_of / 8 ptr_of_mut
+                    // / 9 is_null) emits nothing: their CODEGEN is snc-only, and
+                    // is unreachable here because the oracle Errs on all four
+                    // before lowering (`llvm_dump.rs` — "sqrt not ported",
+                    // "ptr_of / is_null not ported"), so the codegen
+                    // differential skips the program. Without this arm they fall
+                    // into the `&`/`&mut` alloca-slot branch at the tail, which
+                    // would emit a borrow for a call.
+                    0
+                } else if uop == 1 {
                     cg_neg(c, rt, cguk, cguv);
                     0
                 } else if uop == 2 {

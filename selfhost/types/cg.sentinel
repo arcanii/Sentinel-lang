@@ -214,6 +214,12 @@ fn cg_mangle_to(out: &mut Vec<u8>, c: &mut TyCtx, h: i64) -> i64 {
         // so this literal text is exactly what it emits. Verified byte-identical
         // on the repro above.
         append_str(out, "ty_F64")
+    } else if h == 5 {
+        // (ADR 0057) The same story one code over: `Pair<i64, ptr>` with a
+        // phantom `B` compiles in the oracle to `%Pair_i64_ty_Ptr`, and without
+        // this arm scg would abort on `idx = 5 - tbase()`. Verified against the
+        // oracle rather than assumed, exactly as `ty_F64` was.
+        append_str(out, "ty_Ptr")
     } else {
         let idx: i64 = h - tbase();
         let k: i64 = (*c).tk[idx];
@@ -257,6 +263,23 @@ fn cg_mangle_to(out: &mut Vec<u8>, c: &mut TyCtx, h: i64) -> i64 {
             }
             0
         } else {
+            // PRE-EXISTING, verified against a pre-slice scg binary, and worse
+            // than a byte diff — but NOT fixable by enumeration, which is why it
+            // is documented here rather than patched. The oracle's `mangle_type`
+            // falls to `other => format!("ty_{other:?}")`, and for a
+            // payload-bearing kind that Debug text EMBEDS THE ORACLE'S OWN
+            // INTERNER ID: `ty_Shared(SharedId(0))`, `ty_Mutex(MutexId(0))`. scg's
+            // interner ids are allocated in its own first-intern order and are
+            // deliberately independent, so it cannot reproduce that text at all.
+            // Emitting a bare `ty` means two DIFFERENT phantom kinds collide on
+            // one LLVM type name — verified: a program with both
+            // `Pair<i64, Shared<i64>>` and `Pair<i64, Mutex<i64>>` gives the
+            // oracle two distinct `%Pair_i64_ty_*` definitions and scg two
+            // IDENTICAL `%Pair_i64_ty` ones, which is invalid IR, not just
+            // different bytes. Unreachable in the corpus (nothing instantiates a
+            // generic at a container kind through a PHANTOM parameter, which is
+            // the only way a container handle reaches a mangling without a value
+            // of that type existing). Tracked as its own item.
             append_str(out, "ty")
         }
     }

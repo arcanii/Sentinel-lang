@@ -1606,6 +1606,28 @@ fn pass_c65_return_match() {
 }
 
 #[test]
+fn pass_c57_ptr_of() {
+    // ADR 0057 Phase 1b c57_ptr_of: the first corpus fixture to use the raw-pointer
+    // intrinsics, landing WITH the scg mirror of them — the pairing ADR 0057's
+    // self-hosting section asks for. `ptr_of` / `ptr_of_mut` / `is_null` are RESERVED
+    // NAMES the oracle rewrites at a call site into a UNARY node, so that they cost no
+    // `FnId` (a 42nd builtin would shift every user fn). It also pins the opaque `ptr`
+    // type, which the mirror added as scg scalar code 5.
+    //
+    // The gap was invisible because five of the six callers in the tree are
+    // `sentinel_library/std/**` modules with no `main` (every semantic oracle rejects
+    // them, so only the real-program differential compared them, and only at `ast`) —
+    // and the sixth, `demos/win32/messagebox.sentinel`, sat in a directory the sweep's
+    // root list omitted until a review caught it.
+    //
+    // `selfhost_codegen` skips this one (`snc llvm` Errs — "ptr_of / is_null not
+    // ported"), which is why the mirror needs no codegen half; `snc build` uses
+    // inkwell, so it compiles and runs. Deliberately libc-free: the extern-call path
+    // is already pinned by `c57_extern_call`. Both pointers are non-null: 20 + 22 = 42.
+    assert_eq!(run_exit("c57_ptr_of.sentinel"), 42);
+}
+
+#[test]
 fn pass_c58_float_math() {
     // ADR 0058 c58_float_math: the FIRST `f64` fixture in the corpus. A3 deferred
     // this fixture and the `scg` front-end mirror TOGETHER, because a clean-typing

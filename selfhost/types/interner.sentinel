@@ -303,8 +303,9 @@ fn gi_argend(c: &mut TyCtx, h: i64) -> i64 {
     (*c).gire[rec]
 }
 
-// Scalar codes: i64=0, i32=1, bool=2, u8=3, f64=4 (ADR 0058). -1 if `q` is not
-// a scalar name. `scalar_bits` gives f64 the 64 default; see its own note.
+// Scalar codes: i64=0, i32=1, bool=2, u8=3, f64=4 (ADR 0058), ptr=5 (ADR 0057).
+// -1 if `q` is not a scalar name. `scalar_bits` gives both f64 and ptr the 64
+// default; see its own note.
 fn scalar_code(q: &[u8]) -> i64 {
     if name_eq_lit(q, "i64") {
         0
@@ -314,6 +315,13 @@ fn scalar_code(q: &[u8]) -> i64 {
         2
     } else if name_eq_lit(q, "u8") {
         3
+    } else if name_eq_lit(q, "ptr") {
+        // (ADR 0057 Phase 1b) `ptr` is an opaque FFI address and a scalar for
+        // every purpose scg cares about: Copy (the oracle's `is_copy_type` lists
+        // `Type::Ptr` alongside the integers), drop-free, and substitution-inert.
+        // Like f64 it is a scalar CODE, never an interner kind — a handle
+        // >= tbase() would make every `ptr` value MOVE.
+        5
     } else if name_eq_lit(q, "f64") {
         // (ADR 0058) f64 is a scalar CODE, not an interner KIND. Every
         // `h < tbase()` test in the typer means "scalar" — Copy for
@@ -328,15 +336,16 @@ fn scalar_code(q: &[u8]) -> i64 {
 
 // ADR 0049: bit width of a scalar type handle — i64(0)=64, i32(1)=32, u8(3)=8.
 fn scalar_bits(h: i64) -> i64 {
-    // ⚠ (ADR 0058) f64 (code 4) falls into the `else` and answers 64. The WIDTH
-    // is right, but the caller is the Cast arm's codegen, which reads equal
-    // widths as "no conversion needed" — whereas an int<->f64 cast needs
-    // `sitofp`/`fptosi`. Unreachable today, and here is the actual guard (the
-    // first attempt at this comment named the wrong one): the ORACLE Errs on
-    // every `x as f64` / `f64 as x` it tries to lower, so the codegen
-    // differential skips before scg runs. It is NOT true that f64 cannot reach
-    // scg's codegen at all — a PHANTOM f64 generic argument does, which is why
-    // `cg_mangle_to` needed a real arm. Anyone porting f64 codegen revisits both.
+    // ⚠ f64 (code 4) and ptr (code 5) both fall into the `else` and answer 64.
+    // The WIDTH is right for each, but the caller is the Cast arm's codegen,
+    // which reads equal widths as "no conversion needed" — whereas an int<->f64
+    // cast needs `sitofp`/`fptosi`. Unreachable today, and here is the actual
+    // guard (the first attempt at this comment named the wrong one): the ORACLE
+    // Errs on every `x as f64` / `f64 as x` it tries to lower, so the codegen
+    // differential skips before scg runs. It is NOT true that these types cannot
+    // reach scg's codegen at all — a PHANTOM generic argument does, which is why
+    // `cg_mangle_to` needs a real arm for BOTH. Anyone porting f64 or ptr
+    // codegen revisits this.
     if h == 1 {
         32
     } else if h == 3 {
@@ -357,11 +366,14 @@ fn render_scalar(out: &mut Vec<u8>, h: i64) -> i64 {
     } else if h == 3 {
         append_str(out, "u8")
     } else if h == 4 {
-        // (ADR 0058) f64. A NEW branch above the `?T` fallback, never a widened
-        // test: that trailing `else` is what renders the -1 handle `fn_ref_sig`
-        // and `dump_te_fnref` produce on their reject path, so it must keep
-        // catching exactly the handles nothing else claims.
+        // (ADR 0058) f64, and (ADR 0057) ptr below it. NEW branches above the
+        // `?T` fallback, never a widened test: that trailing `else` is what
+        // renders the -1 handle `fn_ref_sig` and `dump_te_fnref` produce on their
+        // reject path, so it must keep catching exactly the handles nothing else
+        // claims.
         append_str(out, "f64")
+    } else if h == 5 {
+        append_str(out, "ptr")
     } else {
         append_str(out, "?T")
     }
@@ -1628,10 +1640,9 @@ fn fn_ret(c: &mut TyCtx, fid: i64) -> i64 {
 // even run — the same "error parity is out of scope" limitation as the
 // rest of this project, ADR 0044 D7).
 //
-// Only scg's scalar handles (`< tbase()`) are considered. That set is now FIVE:
-// i64/i32/bool/u8 plus `f64` (ADR 0058, scalar code 4), so a `Fn<f64,f64>` value
-// DOES form here — verified byte-identical against the oracle. `ptr` still has
-// no scg handle, so a `Fn<…,ptr>` still cannot.
+// Only scg's scalar handles (`< tbase()`) are considered. That set is now SIX:
+// i64/i32/bool/u8 plus `f64` (ADR 0058, code 4) and `ptr` (ADR 0057, code 5), so
+// `Fn<f64,f64>` and `Fn<ptr,ptr>` both form here.
 fn fn_ref_sig(c: &mut TyCtx, fid: i64) -> i64 {
     let idx: i64 = fid - 42;
     if (*c).uftp[idx] > 0 {

@@ -119,11 +119,26 @@ fn mir_put_uop(out: &mut Vec<u8>, uop: i64) -> i64 {
     } else if uop == 5 {
         "&mut"
     } else if uop == 6 {
-        // (ADR 0058 A1) `sqrt` — the oracle's MIR renders it through
-        // `UnaryOp::symbol()`, so `(vN:f64 unary sqrt vM)`.
+        // The RESERVED-NAME family — the oracle's MIR renders each through
+        // `UnaryOp::symbol()`, e.g. `(vN:f64 unary sqrt vM)` and
+        // `(vN:ptr unary ptr_of vM)`.
         "sqrt"
-    } else {
+    } else if uop == 7 {
+        "ptr_of"
+    } else if uop == 8 {
+        "ptr_of_mut"
+    } else if uop == 9 {
+        "is_null"
+    } else if uop == 3 {
+        // Dead but written out, so this table enumerates 1..=9 like its four
+        // siblings: a deref never reaches here at all, because `dump_te_unary`
+        // lowers `uop == 3` to MIR op 5 (a Load) and `mir_put_uop` is only
+        // called for op 2. It used to be the trailing `else`, which made this
+        // the ONE table whose fallback named a REAL operator — the same shape
+        // that let `&mut` silently render `sqrt` as a borrow one slice ago.
         "*"
+    } else {
+        "<unary?>"
     };
     append_str(out, s);
     0

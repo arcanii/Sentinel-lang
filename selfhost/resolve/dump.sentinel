@@ -133,11 +133,19 @@ fn dump_rexpr(out: &mut Vec<u8>, ex: Expr, src: &[u8], c: &mut RCtx, gb: &mut Ve
                 "&"
             } else if uop == 5 {
                 "&mut"
-            } else {
-                // (ADR 0058 A1) op-code 6 = `sqrt`. The chain now tests 5
-                // explicitly: with `&mut` as the catch-all a new op-code
-                // rendered as `&mut` — a silent wrong symbol, not an error.
+            } else if uop == 6 {
                 "sqrt"
+            } else if uop == 7 {
+                "ptr_of"
+            } else if uop == 8 {
+                "ptr_of_mut"
+            } else if uop == 9 {
+                "is_null"
+            } else {
+                // See the identical table in parser/dump.sentinel: every code is
+                // explicit and the fallback cannot re-parse, because `&mut` as a
+                // catch-all silently rendered a new op-code as a borrow.
+                "<unary?>"
             };
             append_str(out, usym);
             push(out, ' ');

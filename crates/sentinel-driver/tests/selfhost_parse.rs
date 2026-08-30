@@ -456,14 +456,15 @@ fn sentinel_parser_matches_oracle_on_corpus() {
 // self-hosted parser as a field access. The same blind spot previously hid the
 // ADR 0067 `module`/`part` lex gap.
 //
-// TWO of the three are now closed, and by the intended lifecycle in both cases —
-// the sweep found the hole, the fix landed, and a FIXTURE now pins it so the
-// corpus can never lose sight of it again: `export "C"` by
-// `tests/pass/c59_export_call.sentinel`, and the ADR 0058 float literal (with
-// `sqrt`, which A1 makes part of the same feature) by
-// `tests/pass/c58_float_math.sentinel`. What remains fixture-uncovered is the
-// ADR 0057 half of the reserved-name family: `ptr_of` / `ptr_of_mut` /
-// `is_null`.
+// ALL THREE are now closed, each by the intended lifecycle — the sweep found the
+// hole, the fix landed, and a FIXTURE now pins it so the corpus cannot lose sight
+// of it again: `export "C"` by `tests/pass/c59_export_call.sentinel`, the ADR 0058
+// float literal (with `sqrt`, which A1 makes part of the same feature) by
+// `tests/pass/c58_float_math.sentinel`, and ADR 0057's `ptr_of` / `ptr_of_mut` /
+// `is_null` by `tests/pass/c57_ptr_of.sentinel`. That is the point of this test
+// arriving at an empty or near-empty registry: the list was never the deliverable
+// on its own — converting an invisible gap into an auditable one was, and an
+// auditable gap is one somebody closes.
 //
 // TWO FORMS of each program are compared, because the stage oracles
 // (`snc lex`/`ast`/`resolve`/`types`/`effects`/`borrow`/`mir`/`ctverify`) do NO
@@ -519,34 +520,16 @@ fn sentinel_parser_matches_oracle_on_corpus() {
 /// It is a BUG when `scg` already has every shape involved and the divergence
 /// is a HOLE in dispatch it has already ported: closing it is a FIX that
 /// changes nothing downstream.
-const DEFERRED_PROGRAMS: &[(&str, &str)] = &[
-    // (The eight ADR 0058 float-literal entries are GONE — six for the literal
-    // alone and two that also carried the `sqrt` cause. The mirror landed: the
-    // parser's own tokenizer produces tag 66, `Expr::Float` keeps the RAW
-    // lexeme, and `parser::append_float` renders it the way every oracle dump
-    // does. `sqrt` came with it, since ADR 0058 A1 is what makes it a
-    // reserved-name unary rewrite rather than a builtin.)
-    //
-    // THE RESERVED-NAME FAMILY, minus the half ADR 0058 owned. `ptr_of` /
-    // `ptr_of_mut` / `is_null` (ADR 0057 Phase 1b) are the remaining three of
-    // the FOUR names the Rust parser rewrites at a call site into a UNARY node
-    // (`crates/sentinel-syntax/src/parser.rs`, two adjacent arms; `sqrt` was the
-    // fourth). The self-hosted parser has no such rewrite for them, so it emits
-    // `(call ptr_of …)`.
-    //
-    // DEFERRED, not a bug, by the criterion above: closing it means giving `scg`
-    // three more unary opcodes (7/8/9 are reserved for exactly this), which
-    // every downstream stage would then have to understand — the ADR 0057
-    // mirror slice, which that ADR defers until a corpus fixture uses it. No
-    // fixture does; the programs below are the only users in the tree, and none
-    // of them reaches a stage past `ast` (they are library modules the semantic
-    // oracles reject), so nothing downstream is affected today.
-    ("sentinel_library/std/c.sentinel", "ADR 0057 Phase 1b: `ptr_of`/`ptr_of_mut`/`is_null` are unary reserved-name rewrites in snc, plain calls in scg"),
-    ("sentinel_library/std/sys/ffi.sentinel", "ADR 0057 Phase 1b: `ptr_of`/`ptr_of_mut` are unary reserved-name rewrites in snc, plain calls in scg"),
-    ("sentinel_library/std/sys/random_unix.sentinel", "ADR 0057 Phase 1b: `ptr_of_mut` is a unary reserved-name rewrite in snc, a plain call in scg"),
-    ("sentinel_library/std/sys/random_windows.sentinel", "ADR 0057 Phase 1b: `ptr_of_mut` is a unary reserved-name rewrite in snc, a plain call in scg"),
-    ("sentinel_library/std/sys/win32.sentinel", "ADR 0057 Phase 1b: `ptr_of` is a unary reserved-name rewrite in snc, a plain call in scg"),
-];
+/// EMPTY, and the whole list emptied within two slices. It held eight ADR 0058
+/// float-literal entries (closed by the float mirror) and five ADR 0057
+/// `ptr_of` / `ptr_of_mut` / `is_null` entries (closed by this one) — the two
+/// halves of the RESERVED-NAME family plus the float literal, which is every
+/// front-end surface the real-program sweep found when it was first run. Each
+/// left the list the only way an entry may: by being FIXED, and each is now
+/// pinned in the FIXTURE corpus too (`tests/pass/c58_float_math.sentinel`,
+/// `tests/pass/c57_ptr_of.sentinel`), so the blind spot that hid them — no
+/// fixture used any of them — is closed as well.
+const DEFERRED_PROGRAMS: &[(&str, &str)] = &[];
 
 /// Programs whose divergence is a REAL BUG in the self-hosted parser, not a
 /// deferred feature — kept separate on purpose. Conflating "we chose not to
@@ -595,14 +578,24 @@ fn collect_under(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// The real-program corpus: every `.sentinel` under `examples/`,
+/// The real-program corpus: every `.sentinel` under `demos/`, `examples/`,
 /// `sentinel_library/` and `tools/`. Programs the oracle rejects (a library
 /// module with no `main`, an unwired `use`, a not-yet-ported construct) are
 /// simply skipped, exactly as in the fixture differential above.
+///
+/// `demos/` was MISSING from this list until a review caught it, and the omission
+/// is worth remembering because it is the same species of hole this whole test
+/// exists to close — a directory of real programs nothing compared. It is small
+/// (three Win32 FFI demos) but not redundant: `demos/win32/messagebox.sentinel`
+/// is a SELF-CONTAINED single-file caller of `ptr_of`, so unlike the five
+/// `sentinel_library/std/**` modules that also use the intrinsic — which have no
+/// `main`, and so are rejected by every semantic oracle — it runs the whole
+/// pipeline. Enumerating the roots by hand is what made the omission possible;
+/// if a fifth root ever appears, it will need adding here too, in eight files.
 fn collect_programs() -> Vec<PathBuf> {
     let root = workspace_root();
     let mut out = Vec::new();
-    for sub in ["examples", "sentinel_library", "tools"] {
+    for sub in ["demos", "examples", "sentinel_library", "tools"] {
         collect_under(&root.join(sub), &mut out);
     }
     out.sort();
@@ -842,6 +835,6 @@ fn sentinel_parser_matches_oracle_on_real_programs() {
     let parser = build_sentinel_parser(&tmp);
     let work = tmp.join("work");
     std::fs::create_dir_all(&work).expect("create work dir");
-    real_program_differential("ast", &parser, &work, 116, 20);
+    real_program_differential("ast", &parser, &work, 119, 21);
     let _ = std::fs::remove_dir_all(&tmp);
 }
