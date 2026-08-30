@@ -218,18 +218,18 @@ fn sentinel_borrow_checker_matches_oracle_on_corpus() {
 // (`snc lex`/`ast`/`resolve`/`types`/`effects`/`borrow`/`mir`/`ctverify`) do NO
 // module discovery — only `snc llvm` merges. A program with a `use` edge is
 // rejected outright ("`use` imports are not yet wired"), so the direct form
-// alone would leave the semantic stages seeing 9 of 116 programs:
+// alone would leave the semantic stages seeing 11 of 119 programs:
 //   (a) DIRECT — the program as written;
 //   (b) MERGED — `snc merge`'s single-file collapse of its module graph, which
 //       is exactly the shape the self-hosted `scg` consumes at the bootstrap
 //       fixed point. This is what puts REAL multi-module programs
 //       (`delegation`, `rect_demo`, `process_ids`, `sort_search`, …) through
 //       the stage at all. It is not redundant at `lex`/`ast` either, where the
-//       direct form already covers all 116: the merge qualifies every top-level
+//       direct form already covers all 119: the merge qualifies every top-level
 //       item as `module$path$item`, and `$` is an identifier-CONTINUATION
 //       character only so that text lexes (ADR 0045 8g) — no file under
-//       `examples/` + `sentinel_library/` + `tools/` and no fixture in
-//       `tests/pass` + `tests/ui` contains a `$`, so these 20 comparisons are
+//       `demos/` + `examples/` + `sentinel_library/` + `tools/` and no fixture in
+//       `tests/pass` + `tests/ui` contains a `$`, so these 21 comparisons are
 //       the only place either lexer meets one outside the fixed point itself.
 //
 // Every divergence must be either FIXED or listed below with the ADR that

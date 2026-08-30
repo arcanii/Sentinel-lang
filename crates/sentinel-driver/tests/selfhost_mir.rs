@@ -389,18 +389,18 @@ fn sentinel_ctverifier_matches_oracle_on_corpus() {
 // (`snc lex`/`ast`/`resolve`/`types`/`effects`/`borrow`/`mir`/`ctverify`) do NO
 // module discovery — only `snc llvm` merges. A program with a `use` edge is
 // rejected outright ("`use` imports are not yet wired"), so the direct form
-// alone would leave the semantic stages seeing 9 of 116 programs:
+// alone would leave the semantic stages seeing 11 of 119 programs:
 //   (a) DIRECT — the program as written;
 //   (b) MERGED — `snc merge`'s single-file collapse of its module graph, which
 //       is exactly the shape the self-hosted `scg` consumes at the bootstrap
 //       fixed point. This is what puts REAL multi-module programs
 //       (`delegation`, `rect_demo`, `process_ids`, `sort_search`, …) through
 //       the stage at all. It is not redundant at `lex`/`ast` either, where the
-//       direct form already covers all 116: the merge qualifies every top-level
+//       direct form already covers all 119: the merge qualifies every top-level
 //       item as `module$path$item`, and `$` is an identifier-CONTINUATION
 //       character only so that text lexes (ADR 0045 8g) — no file under
-//       `examples/` + `sentinel_library/` + `tools/` and no fixture in
-//       `tests/pass` + `tests/ui` contains a `$`, so these 20 comparisons are
+//       `demos/` + `examples/` + `sentinel_library/` + `tools/` and no fixture in
+//       `tests/pass` + `tests/ui` contains a `$`, so these 21 comparisons are
 //       the only place either lexer meets one outside the fixed point itself.
 //
 // Every divergence must be either FIXED or listed below with the ADR that
@@ -472,9 +472,9 @@ const MIR_KNOWN_SCG_BUGS: &[(&str, &str)] = &[];
 /// `snc ctverify` — EMPTY, but read WHY before treating that as parity
 /// evidence, because on this one stage the byte-comparison is VACUOUS.
 /// `snc ctverify` prints one `(leak <SinkKind>)` line per leak and nothing
-/// else, and not one of the 19 real-program comparisons DECLARES a `secret`
+/// else, and not one of the 22 real-program comparisons DECLARES a `secret`
 /// value (five of the source files say the word, all five only in a comment) —
-/// so every one of the 19 is `"" == ""`. Two things it therefore does
+/// so every one of the 22 is `"" == ""`. Two things it therefore does
 /// NOT show: that the self-hosted verifier DETECTS anything, and that its
 /// detection matches the oracle's. (The one true positive in the repo lives in
 /// the fixture corpus, `tests/ui/c52_secret_leak.sentinel`, which the corpus
@@ -482,14 +482,14 @@ const MIR_KNOWN_SCG_BUGS: &[(&str, &str)] = &[];
 /// non-vacuity floor for exactly this reason.)
 ///
 /// What it DOES pin, and why it earns its place: (a) no FALSE POSITIVE — if the
-/// self-hosted verifier reported a leak on any of the 19, its dump would be
+/// self-hosted verifier reported a leak on any of the 22, its dump would be
 /// non-empty and this test would fail; (b) no CRASH — scg's whole front end
 /// (lex → resolve → types → effect → borrow → ctverify) runs to completion on
-/// 19 real programs, which the crash guard checks unconditionally.
+/// 22 real-program comparisons, which the crash guard checks unconditionally.
 ///
 /// Why no secret-bearing real program reaches this stage: every one of them is
 /// multi-module, so it can only arrive via the MERGED form, and `snc merge`'s
-/// Bar-A source printer rejects `declassify` (36 of the 116 programs) and
+/// Bar-A source printer rejects `declassify` (36 of the 119 programs) and
 /// `cast` (37) — which is what every secret-bearing program in `examples/` uses.
 /// Widening that printer is the change that would make this sweep non-vacuous.
 const CTVERIFY_DEFERRED_PROGRAMS: &[(&str, &str)] = &[];

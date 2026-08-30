@@ -596,21 +596,13 @@ fn dump_te_unary(out: &mut Vec<u8>, uop: i64, inner: Expr, exp: i64, src: &[u8],
                 // yield the opaque `ptr` (scalar code 5) — NOT the operand type,
                 // which is the `&[u8]` / `&mut [u8]` borrow they take.
                 //
-                // ⚠ These are the FIRST unary ops whose result type differs from
-                // their operand's, which makes a PRE-EXISTING gap easier to hit:
-                // `dump_te_unary` never widens. Unlike `dump_te_binary` and the
-                // `Cast` arm, it writes straight into `out` instead of building a
-                // `tmp` and splicing, so a `?T` / `secret T` expectation over a
-                // unary emits the bare node with no `widen-null` / `widen-secret`
-                // wrapper. NOT introduced here — `let b: ?bool = !f;` diverges
-                // identically on a pre-slice binary, with no `ptr` involved — but
-                // `let p: ?ptr = ptr_of(&buf)` is now a natural thing to write.
-                // And the MIR consequence is bigger than one missing wrapper: the
-                // oracle emits a whole `(vN:?ptr opaque vM)` for the widen, so
-                // omitting it SHIFTS EVERY LATER VALUE NUMBER in the block (on one
-                // probe, oracle v15 vs scg v11) — the diff will look nothing like
-                // its cause. Tracked as its own item, with the sibling gap on a
-                // CALL RHS.
+                // These are the FIRST unary ops whose result type differs from
+                // their operand's, which is what made a then-open gap easy to hit:
+                // `dump_te_unary` did not widen, so a `?T` / `secret T` expectation
+                // over a unary emitted the bare node. FIXED — the `Expr::Unary`
+                // dispatch arm in borrow.sentinel now builds a temp and splices the
+                // wrapper, as `dump_te_binary` always did — so `let p: ?ptr =
+                // ptr_of(&buf)` renders correctly. See that arm for what remains.
                 5
             } else if uop == 9 {
                 // `is_null(p)` yields `bool`, again unrelated to its operand.

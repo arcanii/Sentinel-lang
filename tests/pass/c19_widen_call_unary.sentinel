@@ -1,0 +1,67 @@
+// c19_widen_call_unary: the public->`secret` (ADR 0019 D5) and public->`?T` (ADR
+// 0014 D3) WIDENINGS, over the two expression shapes `scg` used to skip.
+//
+// WHAT IT PINS. A widened binding wraps its right-hand side — `snc types` prints
+// `(widen-secret … :secret i64)` / `(widen-null … :?bool)`, and `snc mir` emits a
+// whole `(vN:?T opaque vM)` for it. `scg` applied that for a LITERAL or a plain
+// VARIABLE right-hand side but not for a CALL or a UNARY one, because the
+// `Expr::Call` and `Expr::Unary` dispatch arms handed their output straight to
+// `out` instead of building a temp and splicing the wrapper in front (the node's
+// type is known only after its children synthesize, so the wrapper cannot be
+// written first). `dump_te_binary` had always done it correctly, which is what
+// made the omission survive: `let x: ?i64 = a + 1;` was fine.
+//
+// The four cells below are {call, unary} x {secret, nullable} — the whole matrix
+// for THIS position and THESE two shapes, which is narrower than it sounds:
+//   `s`   CALL  -> secret     `n`   CALL  -> nullable
+//   `sm`  UNARY -> secret     `opt` UNARY -> nullable
+// Sibling arms still drop the same wrapper (`let v: secret i64 = p.x;`,
+// `= a[0];`, `= declassify(s);` …) and are tracked separately — see the SCOPE
+// comment on the `Expr::Unary` arm in `selfhost/types/borrow.sentinel` for the
+// full list and the repros.
+//
+// WHY IT WAS INVISIBLE — and the answer is NOT that the corpus avoids the shape.
+// Real code writes it: `let p0: secret u8 = i64_to_u8(76);` appears 18 times —
+// 16 in `examples/security/chacha20_stream.sentinel` (two per line, p0..p15),
+// 1 in `chacha20poly1305.sentinel`, 1 in
+// `sentinel_library/std/security/aead.sentinel` — because `i64_to_u8` is a
+// BUILTIN returning public `u8`. On a pre-fix binary those emit
+// `(let #0 secret u8 (call #6 …))` against the oracle's
+// `(widen-secret (call #6 …) :secret u8)`.
+// They were never COMPARED. The semantic stage oracles do no module discovery, so
+// the direct form of all three dies on `use` imports are not yet wired; and the
+// merged form — the only other way in — dies in `snc merge`'s Bar-A printer on
+// `expression `cast` is out of Bar-A scope`. Both exclusions are structural, not
+// accidental, which is why every differential stayed green while the gap sat
+// there, and is the sharpest argument yet for widening that printer (the open
+// menu's item 5): it would take the semantic sweeps from 11 real programs to
+// ~100 and pull these three in.
+// The MIR half was the nastier one: a dropped `opaque` SHIFTS EVERY LATER VALUE
+// NUMBER in the block, so the diff would have looked nothing like its cause.
+//
+// Unlike the other recent mirror fixtures this one reaches the CODEGEN
+// differential too — no `f64`, `ptr` or reserved-name intrinsic makes the oracle
+// bail — so it pins the `cg_widen` path (`{ i1 1, <op> }` for a `?T`) as well as
+// the two dumps.
+//
+// 42 + (-21) + 20 + 1 = 42.
+
+fn half(x: i64) -> i64 {
+    x / 2
+}
+
+fn main() -> i64 {
+    // CALL right-hand side, widened to `secret i64` and to `?i64`.
+    let s: secret i64 = half(84);
+    let n: ?i64 = half(40);
+    // UNARY right-hand side, widened to `?bool` and to `secret i64`.
+    let flag: bool = false;
+    let opt: ?bool = !flag;
+    let m: i64 = 21;
+    let sm: secret i64 = -m;
+    if unwrap_or(opt, false) {
+        declassify(s) + declassify(sm) + unwrap_or(n, 0) + 1
+    } else {
+        0
+    }
+}

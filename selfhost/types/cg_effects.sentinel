@@ -1729,9 +1729,24 @@ fn cg_flush_allocas_body(c: &mut TyCtx) -> i64 {
 // straight-line (`cg_eff_normal`). Mirrors the oracle's `dump_fn_named` routing through
 // `detect_let_shape`. Consumes `body`. `[pv0,pvn)` = the fn's param VarId range (the
 // let-shape capture set). The let-shape is matched structurally (single `let` with a
-// `perform` RHS) — every effecting fn the oracle EMITS with a performing statement is a
-// let-shape (its `validate_effecting_fn_body` defers the rest), so scg need not re-check
-// the i64 / pure-tail conditions (the differential only runs scg when the oracle emits).
+// `perform` RHS).
+//
+// ⚠ THAT STRUCTURAL MATCH IS NOT ENOUGH, and the comment that used to sit here said it
+// was — "every effecting fn the oracle EMITS with a performing statement is a let-shape,
+// so scg need not re-check the i64 / pure-tail conditions". Both halves of that are
+// wrong. `validate_effecting_fn_body` only defers a statement that PERFORMS, and
+// `stmt_performs` does not count a CALL to an effecting fn — so
+// `fn caller() -> i64 ! { Io } { let s: <ann> = do_work(); … }` reaches the oracle's
+// emitter. And `detect_let_shape` keys on the LET'S TYPE
+// (`if ty != Type::I64 { return None; }`), so annotating that binding `secret i64` or
+// `?i64` makes the ORACLE drop the let-shape and lower straight-line while scg still
+// emits the `kont_push` + `__resume_caller` split — a byte divergence on a program the
+// oracle accepts (exit 0), i.e. NOT excused by the differential.
+// Both sides are wrong there, which is why this is a comment and not a one-line guard:
+// the oracle's straight-line output does not assemble either (`store i64 %v0` where
+// `%v0 = call ptr @do_work()`), so it silently treats the callee's `Kont*` as an `i64`.
+// Fixing it means deciding what that shape should lower to, on BOTH sides — tracked as
+// its own item. Nothing in the corpus reaches it today.
 fn cg_emit_fn_eff(out: &mut Vec<u8>, c: &mut TyCtx, body: Expr, rty: i64, src: &[u8], name_s: i64, name_e: i64, cgpmark: i64, pv0: i64, pvn: i64, gb: &mut Vec<u8>, embed: Args, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, body_tok0: i64) -> i64 {
     // (The Sentinel match grammar has no bind-the-whole-value pattern — only
     // `Enum::Variant(..)` + `_`. So the non-let-shape branches re-wrap the moved-out
@@ -1758,9 +1773,11 @@ fn cg_emit_fn_eff(out: &mut Vec<u8>, c: &mut TyCtx, body: Expr, rty: i64, src: &
                     match rest {
                         Stmts::SEnd => {
                             // Exactly one statement. A single `let` in an EMITTED effecting fn
-                            // is the c35c let-bound-perform shape (the oracle's
-                            // `validate_effecting_fn_body` defers every other performing-let
-                            // body, so it never reaches scg) → walk its RHS as the perform.
+                            // is TREATED AS the c35c let-bound-perform shape → walk its RHS as
+                            // the perform. See the ⚠ on `cg_emit_fn_eff` above for where that
+                            // assumption breaks: a call-to-effecting RHS under a non-`i64`
+                            // annotation reaches the oracle, which then does NOT take the
+                            // let-shape. `lty` is the type to guard on if this is ever fixed.
                             match st {
                                 Stmt::SLet(lmf, lnm, lty, lval) => {
                                     cg_letshape_emit(out, c, lnm, lty, lval, tail, rty, src, name_s, name_e, pv0, pvn, gb)

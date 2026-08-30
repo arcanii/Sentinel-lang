@@ -1606,6 +1606,28 @@ fn pass_c65_return_match() {
 }
 
 #[test]
+fn pass_c19_widen_call_unary() {
+    // c19_widen_call_unary: the public->`secret` (ADR 0019 D5) and public->`?T` (ADR
+    // 0014 D3) widenings over the two right-hand-side shapes scg used to skip — a CALL
+    // and a UNARY. It pins all four cells of {call, unary} x {secret, nullable}
+    // at the LET-BINDING position — sibling arms (`Field`, `Index`,
+    // `Declassify`, …) still drop the same wrapper and are tracked separately.
+    //
+    // scg widened a LITERAL or plain VARIABLE RHS but not these two, because the
+    // `Expr::Call` / `Expr::Unary` dispatch arms wrote straight to `out` instead of
+    // building a temp and splicing the wrapper in front. `dump_te_binary` had always
+    // done it right, which is why `let x: ?i64 = a + 1;` was fine and the gap
+    // survived. Nothing in the whole tree wrote a widened call/unary binding, so no
+    // differential was red — and the MIR half was the nastier one, since a dropped
+    // `opaque` shifts every later value number in the block.
+    //
+    // Unlike the recent mirror fixtures this one reaches the CODEGEN differential
+    // too (no f64 / ptr / reserved-name intrinsic makes the oracle bail), so it pins
+    // `cg_widen` as well as the two dumps. 42 + (-21) + 20 + 1 = 42.
+    assert_eq!(run_exit("c19_widen_call_unary.sentinel"), 42);
+}
+
+#[test]
 fn pass_c57_ptr_of() {
     // ADR 0057 Phase 1b c57_ptr_of: the first corpus fixture to use the raw-pointer
     // intrinsics, landing WITH the scg mirror of them — the pairing ADR 0057's

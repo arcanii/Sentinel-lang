@@ -274,7 +274,91 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             widen_post(out, w, exp, ty, c)
             }
         },
-        Expr::Unary(uop, inner) => dump_te_unary(out, uop, inner, exp, src, c, gb),
+        // The node's own type is known only AFTER its operand synthesizes, and a
+        // `(widen-null …)` / `(widen-secret …)` wrapper must PRECEDE the node — so
+        // build into a temp and splice, exactly as `dump_te_binary` does
+        // internally. Doing it HERE rather than inside `dump_te_unary` keeps the
+        // change to the dispatch: that function writes to `out` in five places
+        // (including the recursive operand dump), all of which are redirected for
+        // free by handing it the temp.
+        //
+        // This was MISSING, and the gap predates the reserved-name work that made
+        // it easy to hit: `let b: ?bool = !f;` reproduces it with no `ptr` in
+        // sight. At MIR the cost is worse than a missing wrapper — the oracle
+        // emits a whole `(vN:?T opaque vM)` for the widen, so omitting it SHIFTED
+        // EVERY LATER VALUE NUMBER in the block.
+        //
+        // SCOPE. Call and Unary are the two shapes this FIXES — they are not the
+        // only two that were broken, and the earlier wording here said so, wrongly.
+        // What this covers is the `let`-annotation widen of ADR 0019 D5 / ADR 0014
+        // D3 for those two RHS shapes; `scg` had always mirrored it for a literal
+        // or a variable RHS.
+        //
+        // A WHOLE FAMILY OF SIBLING ARMS still takes a real `exp` and discards it.
+        // Grep `widen_pre|widen_post|widen_splice` against the arm list: only
+        // `Int`, `Bool`, `Var`, `Unary`, `Call`, `SynthZero`, `Cast`, `Char`,
+        // `Float` and `Str` widen (plus `Binary` internally, and `If` / `Block` /
+        // `Match` / `Scope`, which thread `exp` down to a leaf that does). NOT
+        // `Field`, `Index`, `Method`, `Array`, `StructLit`, `Declassify`,
+        // `Perform`, `Await`, `Qcall`, `ClassInit` or `Spawn` — and `dump_te_field`
+        // / `dump_te_method` do not widen internally either. Three of them in one
+        // program, all oracle-accepted, all diverging:
+        //   let v: secret i64 = p.x;        oracle (widen-secret (field …)), scg (field …)
+        //   let w: secret i64 = a[0];       oracle (widen-secret (index …)), scg (index …)
+        //   let n: ?i64 = declassify(s);    oracle (widen-null (declassify …)), scg bare
+        // Same three-line pattern would fix them; each needs its own probe battery,
+        // because the risk a widen fix carries is OVER-widening.
+        //
+        // AND THREE POSITIONS supply no expectation AT ALL, which is a different
+        // defect again — they are shape-INDEPENDENT (even a literal fails, which is
+        // how you tell them apart from the family above):
+        //   * a call ARGUMENT — `takes(5)` against `takes(p: secret i64)` or
+        //     `takes(p: ?i64)`;
+        //   * a `return` OPERAND, where the missing wrapper also retypes the
+        //     enclosing block (oracle `:?i64`, `scg` `:i64`);
+        //   * an ASSIGNMENT right-hand side — `let mut o: ?i64 = null; o = 42;` —
+        //     and THIS one is not merely a text divergence. Codegen emits
+        //     `store { i1, i64 } 42, ptr %v0`, which `llvm-as` rejects with
+        //     `integer constant must have integer type`: INVALID IR, where the
+        //     oracle builds the two `insertvalue`s first. (Remember `llvm-as`
+        //     EXITS 0 while printing that — read its stderr.)
+        //
+        // Their status DIFFERS, so do not fold them together. The `secret` call-arg
+        // and return widens are NOT defects: ADR 0051 A1 leaves the call-arg /
+        // return / array widens snc-side BY DESIGN ("sound, additive,
+        // codegen-no-op ergonomics; mirroring them is a low-value follow-up"), and
+        // only the OPERAND widen was mirrored. The `?T` versions have no such
+        // record — that is ADR 0014 D3's pushdown, older than 0051 and simply
+        // unmirrored — and neither does the assignment RHS in either flavour.
+        // None is reachable today, and that was checked rather than assumed: a
+        // static scan of every `.sentinel` in the tree (selfhost/ included, so the
+        // bootstrap fixed point is not at risk — ZERO hits there) finds ONE corpus
+        // site for the three positions combined, the three
+        // `seal(&cli.keyc, N, <literal>)` calls in
+        // `examples/lang/sealed_session.sentinel` — a `secret i64` parameter, i.e.
+        // the ADR-deferred half — and that file is excluded twice over: the direct
+        // form on `use` imports are not yet wired, the merged form on
+        // `expression `declassify` is out of Bar-A scope`. Every assignment into a
+        // qualified binding in the corpus already has a `secret` right-hand side,
+        // so none of them widens. Verified PRE-EXISTING (byte-identical before and
+        // after this change) and tracked as its own item.
+        Expr::Unary(uop, inner) => {
+            let mut utmp: Vec<u8> = vec_new();
+            let urt: i64 = dump_te_unary(&mut utmp, uop, inner, exp, src, c, gb);
+            // Two `_on` probes rather than `||`: each takes `&mut TyCtx`, and the
+            // lexical borrow checker reads the pair in one expression as
+            // overlapping (the same reason `dump_te_binary` spells it this way).
+            let uw: bool = if mir_on(c) {
+                widen_kind(c, exp, urt) != 0
+            } else if cg_on(c) {
+                widen_kind(c, exp, urt) != 0
+            } else {
+                false
+            };
+            mir_widen(c, uw, exp);
+            cg_widen(c, uw, exp);
+            widen_splice(out, utmp, exp, urt, c)
+        },
         Expr::Binary(bop, l, r) => dump_te_binary(out, bop, l, r, exp, src, c, gb),
         Expr::If(cnd, thn, els) => dump_te_if(out, cnd, thn, els, exp, src, c, gb),
         Expr::Block(stmts, tail) => {
@@ -299,7 +383,40 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             };
             tt
         },
-        Expr::Call(cn, ca) => dump_te_call(out, cn, ca, exp, src, c, gb),
+        // Same widen splice as the `Unary` arm above, for the same reason and
+        // with the same history: `let s: secret i64 = print(1);` emitted the bare
+        // call. `exp` is still threaded DOWN into `dump_te_call` — the generic
+        // builtins infer their type argument from it (`vec_new()`,
+        // `container_elem`) — and that is not double-work: when the callee's
+        // result already IS `exp`, `widen_kind` answers 0 and nothing wraps.
+        //
+        // ONE SUB-PATH BREAKS THAT REASONING and it is worth naming, because the
+        // sentence above would otherwise mislead whoever debugs it: a GENERIC USER
+        // FN (`dump_generic_call`, the only sub-path that does not receive `exp`).
+        // The oracle seeds the substitution from the EXPECTED type first
+        // (`unify_one(signature.return_type, exp, …)` in `check_call`), so for
+        // `fn idg<T>(x: T) -> T` under `let s: secret i64 = idg(7);` it
+        // monomorphises at `secret i64` and widens the ARGUMENT, emitting no outer
+        // wrapper at all — while scg monomorphises at `i64` and now wraps outside.
+        // So `crt` is never `exp` there and `widen_kind` never answers 0. NOT a
+        // regression: pre-fix scg diverged too, and worse — for `?bool` it emitted
+        // `store { i1, i1 } %v0` with `%v0` an `i1`, which `llvm-as` rejects, where
+        // post-fix IR assembles. Threading `exp` into `dump_generic_call` is the
+        // real fix; tracked with the other widen items.
+        Expr::Call(cn, ca) => {
+            let mut ctmp: Vec<u8> = vec_new();
+            let crt: i64 = dump_te_call(&mut ctmp, cn, ca, exp, src, c, gb);
+            let cw: bool = if mir_on(c) {
+                widen_kind(c, exp, crt) != 0
+            } else if cg_on(c) {
+                widen_kind(c, exp, crt) != 0
+            } else {
+                false
+            };
+            mir_widen(c, cw, exp);
+            cg_widen(c, cw, exp);
+            widen_splice(out, ctmp, exp, crt, c)
+        },
         Expr::SynthZero => {
             let w: bool = widen_pre(out, exp, 0, c);
             append_str(out, "(int 0");
