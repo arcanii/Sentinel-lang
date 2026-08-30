@@ -14,6 +14,68 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
+**Latest (2026-08-30) — the seven fixture-only stage differentials now sweep REAL PROGRAMS, and
+the first sweep found three unmirrored front-end surfaces the fixture corpus could not reach**
+(`34ffea0`). `selfhost_lex/parse/resolve/types/effects/borrow/mir/ctverify` compared `scg`
+against the `snc` oracle over `tests/pass` + `tests/ui` ONLY — 207 single-file fixtures, each
+written to exercise one construct. Only `selfhost_codegen` swept `examples/` +
+`sentinel_library/` + `tools/`. That asymmetry was a structural blind spot, not a hypothetical
+one: it had already hidden the ADR 0067 `module`/`part` lex gap. Each stage test gained a
+`*_matches_oracle_on_real_programs` test over all 116 real programs in TWO forms — DIRECT, and
+`snc merge`'s single-file collapse (the shape `scg` itself consumes at the fixed point). The
+merged form is load-bearing: the stage oracles do NO module discovery (only `snc llvm` merges),
+so without it the semantic stages would see 9 programs instead of 19 comparisons apiece and no
+multi-module program (`delegation`, `rect_demo`, `process_ids`, `sort_search`) would reach them
+at all; at lex/ast it adds the merge's `module$path$item` names, the only `$` identifiers either
+lexer meets outside the fixed point. **What it found:** (1) **ADR 0058 FLOAT LITERALS** — the
+self-hosted lexer has no `FloatLit`, so `2.0` lexes as `IntLit Dot IntLit` and the parser reads
+the `.` as a FIELD ACCESS: `(field (int 2) 0)` vs the oracle's `(float 2.0)`. A SILENT misparse
+across 8 programs, invisible for exactly the reason ADR 0058 A3 gave — A3 deferred the `f64`
+FIXTURE along with the mirror, and zero of the 207 fixtures contain a float literal. (2) **ADR
+0059 `export "C"`** — `dump_item` had an `extern` arm but no `export` one (fixed in `e2e5ee5`,
+below). (3) **the RESERVED-NAME family** — `sqrt` (ADR 0058 A1) and `ptr_of`/`ptr_of_mut`/
+`is_null` (ADR 0057 Phase 1b) are the only four names the Rust parser rewrites at a call site
+into a UNARY node; `scg` emits `(call …)`. `sqrt` was found by the adversarial review, hiding
+inside two entries registered only for floats. Plus ADR 0070 D3-revisit and ADR 0066 M2.3b, now
+visible three stages EARLIER than where they were first registered. `effects`, `borrow` and
+`ctverify` diverge on NOTHING. Registration follows `selfhost_codegen`'s two lists, but the
+split now carries a WRITTEN CRITERION (both lists feed one lookup, so the classification is pure
+documentation): **DEFERRED** = the oracle needs a shape `scg` lacks that a fix must thread
+downstream (a mirror slice); **BUG** = `scg` has every shape and the divergence is a hole in
+dispatch it already ported (a fix). Five guards, each mutation-proven non-vacuous: unregistered
+mismatch, staleness, UNREACHED (the oracle ceasing to emit skips a listed program BEFORE the
+comparison, which staleness cannot see), a crash guard, and an EMPTY-OUTPUT guard — a
+registration buys different bytes, never NO bytes (an adversarial review demonstrated the hole:
+a plausible half-fix for `export` that SKIPPED the item would have been waved through). Two
+limitations are stated rather than papered over: registration is cause-BLIND (whole-program),
+and the **ctverify sweep's byte-comparison is VACUOUS** — all 19 comparisons are `"" == ""`
+because no program reaching that stage declares a `secret`, so it pins no-false-positive +
+no-crash. The blocker there is `snc merge`'s Bar-A source printer, which rejects `declassify`
+(36 of 116 programs) and `cast` (37); widening it is the single change that would most enlarge
+the semantic stages' real-program coverage. Test-only; all 9 differentials + both fixed points
+untouched.
+
+**Latest (2026-08-30) — the ADR 0059 `export "C"` item-dispatch hole in `scg`'s parser is
+FIXED, ADR 0059 gains A10** (`e2e5ee5`). The sweep above found it on its first run:
+`selfhost/parser/dump.sentinel`'s `dump_item` had an `extern` arm and no `export` one, so
+`export "C" fn f(…)` fell through to `dump_fn_decl`, which reads the ABI string as the fn NAME
+and mis-sliced the parameter list — the SAME defect the `extern` arm was added to fix
+(`5c911f5`), whose own comment predicted this shape, surviving because that sweep looked at
+`extern` only and no fixture used `export`. A BUG, not the ADR 0059 mirror: the `snc ast` dump
+renders an exported fn identically to an ordinary one, so `scg` needed no new shape — only the
+missing arm (skip the two-token prefix, fall into `dump_fn_decl`; deliberately NOT
+`skip_extern_block`'s skip, which would emit nothing and lose the item).
+**`tests/pass/c59_export_call.sentinel`** closes the gap that hid it — the first corpus fixture
+to use `export` — which FIRES the trigger five ADR 0059 amendments condition the mirror
+deferral on, so the ADR gains **A10** recording what actually remains. Scope is deliberately
+narrower than the `extern` fix: the merge side is untouched because the ORACLE's own
+merge-to-source (`source_dump::emit_fn`) has no `is_export_c` branch and silently drops the
+prefix — verified end-to-end (`snc build --lib` succeeds on an export program and FAILS on that
+program's own `snc merge` output with "produced no `export \"C\"` functions") — so mirroring
+`scg`'s `emit_item` alone would BREAK merge parity, and `build_rename` raises the qualify-or-not
+question A3 answers for `merge_modules` but merge-to-source does not implement. `pass` 157→158;
+both fixed points green.
+
 **Latest (2026-07-21) — the M1.2c scg CHANNEL mirror landed: `channel_generic` + `addressed_reply`
 are byte-identical and OFF the deferred list** (`0a7075e`). scg's channels were i64-only; this
 makes them element-generic (`Channel<u8>`/`bool`/`i32` word-scalars, M1.2b-cont) and adds

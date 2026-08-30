@@ -51,9 +51,9 @@ reference as you work through the milestones.
 
 ---
 
-### ▶ RESUME HERE (2026-07-21 — a long session's slices are ALL COMMITTED, GREEN, and CLEAN; nothing is mid-flight. Pick fresh from the open menu below. The arc, newest first: **channel-of-channels shipped END-TO-END** — snc typing/codegen (`fb2f317`) + the scg mirror (`0a7075e`), so `Channel<Channel<T>>` and generic word-scalar channels are byte-identical and OFF `DEFERRED_PROGRAMS`; a **boundary-predicate SECURITY AUDIT** (`61bcac3`) swept the type system after the M1.2c review caught a **memory-safety fence bug it introduced** (a security boundary written as a coincidental intersection of two unrelated maps) — audit came back negative (one instance, fixed), `needs_drop` hardened to fail-closed, and the **B1 constant-time secret-preservation guard-rail** (`e450102`) closed the last of four findings; earlier the same day the **`extern "C"` self-host mirror** completed (resolve+parser+lexer, `5c911f5`) and **both spawn bugs** closed (`spawn <extern>` oracle IR `e17a631`, `spawn <builtin>` rejection `3791337`). NEXT: `select` (design-first), `Channel<secret T>` M1.4c-2, or extending the 7 fixture-only stage differentials — see "▶ THE OPEN MENU" below)
+### ▶ RESUME HERE (2026-08-30 — both slices are COMMITTED, four-check GREEN, tree CLEAN; nothing is mid-flight. Pick fresh from the open menu below. This session took menu item (3), **extending the seven fixture-only stage differentials to REAL programs** (`34ffea0`): they compared `scg` against the oracle over `tests/pass` + `tests/ui` only, while `selfhost_codegen` alone swept `examples/` + `sentinel_library/` + `tools/`. Each stage test now sweeps all 116 real programs in TWO forms (direct + `snc merge`'s collapse — the semantic stages do no module discovery, so the merged form is the ONLY way a multi-module program reaches them). The first sweep found THREE unmirrored front-end surfaces nothing in the fixture corpus could reach: ADR 0058 **float literals** (`2.0` lexes as `IntLit Dot IntLit` and PARSES as a field access — a silent misparse, 8 programs), ADR 0059 **`export "C"`** (the item dispatcher read the ABI string as the fn name — FIXED in `e2e5ee5`, with `tests/pass/c59_export_call.sentinel` pinning it and ADR 0059 gaining **A10**), and the **reserved-name family** `sqrt`/`ptr_of`/`ptr_of_mut`/`is_null` (unary in snc, `(call …)` in scg — 7 programs). ADR 0070 D3-revisit and ADR 0066 M2.3b are now visible three stages EARLIER than where they were registered. Both slices were adversarially reviewed before commit (6 lenses, then 4); the reviews contributed the `sqrt` cause, the ctverify vacuity disclosure, the written BUG/DEFERRED criterion, two extra guards (unreached-entry, empty-output), the ADR 0059 amendment and four comment corrections. NEXT: `select` (design-first), `Channel<secret T>`, the ADR 0058 float mirror, or widening the Bar-A source printer — see "▶ THE OPEN MENU" below)
 
-> **▶ THE OPEN MENU (2026-07-21) — real remaining work, verified against the repo. Nothing here is started.**
+> **▶ THE OPEN MENU (2026-08-30) — real remaining work, verified against the repo.**
 >   1. **`select` over channels** — the flagship concurrency gap. Its RUNTIME is already PINNED
 >      (ADR 0066 D11: a Sentinel-owned `parking_lot` `Mutex<VecDeque<i64>>`+`Condvar`+waiter
 >      registry replacing mpsc — ABI-safe, `SentinelChannel` is opaque). The SURFACE is OPEN and
@@ -66,30 +66,68 @@ reference as you work through the milestones.
 >      can be neither mlocked nor scrubbed" — under the Sentinel-owned queue it owns the nodes).
 >      Typing side already unblocked: `channel_chanid_for` secret slots 6..=9 reserved. Decide
 >      the memory policy, then implement. Natural to do WITH (1) since both need the queue.
->   3. **Extend the 7 fixture-only stage differentials to real programs** — highest-leverage
->      ROBUSTNESS work. `selfhost_lex/parse/resolve/types/borrow/effects/mir` all sweep only
->      `tests/pass`+`tests/ui` single-file fixtures (`collect_fixtures`); only `selfhost_codegen`
->      sweeps `examples/`+`sentinel_library/`+`tools/`. That blind spot hid the module/part lex
->      gap AND hides the documented `Channel<f64>` types-dump mis-render (see below). Mechanical:
->      copy the `copy_tree_contents` + real-program staging from `selfhost_codegen.rs`. Expect it
->      to surface a handful of registerable gaps on first run — that is the point.
->   4. **Named-impl qualification** (`delegation.sentinel`, the LAST `KNOWN_SCG_BUGS` entry) —
->      recording the name in the merge's `build_rename` is the missing half, but alone it CRASHES
->      scg via the unguarded `-1` at `selfhost/types/borrow.sentinel:651` (`impl_lookup` → an
->      out-of-bounds table index). Both halves must land together; the `-1` guard is worth adding
->      regardless (an unresolved impl name should be a diagnostic, not a panic).
->   5. **Type-param over-rename** (pre-existing, contrived) — scg's merge renamer has no
+>   3. **The ADR 0058 FLOAT front-end mirror** — the largest gap the new real-program
+>      differentials registered, and the one with the worst failure mode: `selfhost/lexer.sentinel`
+>      and the parser's own tokenizer have no `FloatLit`, so `2.0` lexes as `IntLit Dot IntLit`
+>      and PARSES as a field access `(field (int 2) 0)` — a SILENT misparse, not a rejection.
+>      8 real programs are registered for it (`quadratic`, `transcendental`, `str_demo`,
+>      `json`, `float`, `str`, `task_generic`, `fn_value_generic`). Closing it is a front-end
+>      slice: `FloatLit` in BOTH tokenizers → a `(float …)` dump node → the `f64` type handle
+>      downstream (scg has none: `f64` renders `i64`, unresolved renders `?T` — the same missing
+>      handle behind the documented `Channel<f64>` mis-render). ADR 0058 A3 deferred the mirror
+>      AND the `tests/pass` f64 fixture together, which is exactly why nothing saw this until
+>      the sweep; the fixture becomes addable the moment the mirror lands.
+>   4. **The RESERVED-NAME family mirror** — `sqrt` (ADR 0058 A1) and `ptr_of` / `ptr_of_mut` /
+>      `is_null` (ADR 0057 Phase 1b) are the ONLY four names the Rust parser rewrites at a call
+>      site into a UNARY node (two adjacent arms in `crates/sentinel-syntax/src/parser.rs`;
+>      `snc merge`'s Bar-A printer rejects the same four by name). scg has no such rewrite and
+>      emits `(call ptr_of …)`. 7 programs registered. Small, but it needs the four new unary
+>      opcodes threaded through resolve/types/mir/codegen to be coherent, so it is a mirror
+>      slice, not a dump patch. Pairs naturally with (3) — `sqrt` is half of it.
+>   5. **Widen `snc merge`'s Bar-A source printer** — the highest-leverage COVERAGE item.
+>      `crates/sentinel-driver/src/source_dump.rs` rejects 96 of the 116 real programs, dominated
+>      by `cast` (37) and `declassify` (36), then `ptr_of`/`sqrt` (8), `float literal` (6),
+>      `scope` (5), `return` (4). Because the stage oracles do no module discovery, the MERGED
+>      form is the only way a multi-module program reaches resolve/types/effects/borrow/mir/
+>      ctverify — so widening the printer would take those stages from 19 real-program
+>      comparisons to ~100, and would de-vacuum the ctverify sweep (today all 19 of its
+>      comparisons are `"" == ""` because no program reaching it declares a `secret`; every
+>      secret-bearing program in `examples/` is blocked by `declassify`/`cast`). Contained: it
+>      only changes output for programs `snc merge` currently REJECTS, so no existing merge
+>      output moves and both fixed points are untouched.
+>   6. **The `export "C"` MERGE side, both halves together** (ADR 0059 A10). `snc merge`
+>      silently DROPS the export prefix: `source_dump::emit_fn` has no `is_export_c` branch,
+>      exactly the lossiness `emit_externs` was added to fix ("the merge output is meant to be
+>      a faithful single-file rendering"). VERIFIED end-to-end: `snc build --lib` succeeds on
+>      an export program and then FAILS on that same program's `snc merge` output with
+>      "`build --lib` produced no `export \"C\"` functions". `scg`'s two merge dispatchers are
+>      unmirrored to match — `emit_item` drops the prefix identically (so the two agree today
+>      and no differential can see it), and `build_rename` would module-QUALIFY the symbol
+>      that ADR 0059 A3 says must stay BARE (`merge_modules` skips exports from the rename
+>      map: `if f.is_export_c { continue; }`). The halves MUST land together — mirroring
+>      `scg` alone makes its merged TEXT differ from the oracle's and breaks merge parity, and
+>      fixing the oracle alone leaves `scg` dropping the prefix. Unreachable today (nothing in
+>      the corpus, the fixtures or `selfhost/` merges an export), and `snc build` is unaffected
+>      (it merges ASTs via `merge_modules`, not text). Wants an ADR 0059 amendment for the
+>      qualify-or-not decision, plus a multi-module export program registered in the sweep.
+>   7. **Named-impl qualification** (`delegation.sentinel`, the LAST `KNOWN_SCG_BUGS` entry in
+>      `selfhost_codegen.rs`) — recording the name in the merge's `build_rename` is the missing
+>      half, but alone it CRASHES scg via the unguarded `-1` at
+>      `selfhost/types/borrow.sentinel:651` (`impl_lookup` → an out-of-bounds table index).
+>      Both halves must land together; the `-1` guard is worth adding regardless (an unresolved
+>      impl name should be a diagnostic, not a panic).
+>   8. **Type-param over-rename** (pre-existing, contrived) — scg's merge renamer has no
 >      type-param scoping, so a generic param named identically to a same-module type is wrongly
 >      qualified. The Rust `Renamer` skips in-scope type params; scg has no `tparams` set.
->
+
 > ⚠ **KNOWN-AND-TOLERATED scg-over-accepts (documented at `selfhost/types/interner.sentinel`'s
 > `is_channel` arm — do NOT "fix" blindly, they are snc-only and IR-invisible):** (a)
-> `Channel<f64>` renders `Channel<i64>` in scg's TYPES dump (scg has no f64 type handle — a
-> separately-tracked gap; LLVM byte-identical, no f64 value can flow, no corpus program — but if
-> a `Channel<f64>` fixture is ever added it FAILS the types differential unregistered: register
-> it or close scg's f64 gap first); (b) scg does not re-enforce the oracle's one-level channel
-> nesting cap. Both are the "scg is dump-only, trusts oracle-valid input" contract, like the
-> guard/return pins.
+> `Channel<f64>` renders `Channel<i64>` in scg's TYPES dump (scg has no f64 type handle — the
+> same missing handle behind menu item 3; LLVM byte-identical, no f64 value can flow, no corpus
+> program — but if a `Channel<f64>` fixture is ever added it FAILS the types differential
+> unregistered: register it or close scg's f64 gap first); (b) scg does not re-enforce the
+> oracle's one-level channel nesting cap. Both are the "scg is dump-only, trusts oracle-valid
+> input" contract, like the guard/return pins.
 
 > **▶▶ THE BOUNDARY-PREDICATE AUDIT (`61bcac3`) — what it found, so it need not be re-run.**
 > Prompted by the M1.2c fence bug (a security boundary written as `is_spawn_word_scalar(ty) &&
@@ -336,18 +374,25 @@ reference as you work through the milestones.
 > (`4dbf4b2`) on the honest ground — invariant drift whose harmlessness rests on an accident —
 > not on the overstated one. **Verify the consequence, not just the discrepancy.**
 >
-> HANDOFF STATE (verified against the repo 2026-07-21): four-check green — `cargo test
-> --workspace` = the 18 known Windows failures, zero new; `pass` **157**, `ui` **50** (this
-> session added `c57_extern_call`, `c66_spawn_extern`, `c66_spawn_builtin`, `c67_module_decl`,
-> `c66_process_channel_handle_fence`, `addressed_reply`, + the secret-preservation unit tests in
-> `sentinel-types`); all 9 differential stages byte-identical, both bootstrap fixed points hold;
-> working tree clean. abi count **51**. Interner kinds: Channel=13, Shared=17, Mutex=18,
-> Guard=19; **next free = 20**. Secret container slots 6..=9 (i64/i32/u8/bool); channel slots
-> i64=0..ptr=5, secret reservation 6..=9, channel-of-channels 10..=15 (`channel_chanid_for`).
-> `DEFERRED_PROGRAMS` = **6** (2× `fn_value` ADR 0070, 3× `sealed_*` ADR 0069,
-> `process_channel_typed` M2.3b — the PROCESS channel, still i64-only). `KNOWN_SCG_BUGS` = **1**
-> (`delegation.sentinel`, named-impl qualification). Lexer keyword table = Rust's exactly (38;
-> derive-and-diff command is in `ident_kind`'s header comment — do not eyeball it).
+> HANDOFF STATE (verified against the repo 2026-08-30): four-check green — `cargo test
+> --workspace --no-fail-fast` = **1802 passed / the 18 known Windows failures**, zero new;
+> `pass` **158**, `ui` **50** (this session added `c59_export_call`); all 9 differential stages
+> byte-identical, both bootstrap fixed points hold; working tree clean. abi count **51**.
+> Interner kinds: Channel=13, Shared=17, Mutex=18, Guard=19; **next free = 20**. Secret
+> container slots 6..=9 (i64/i32/u8/bool); channel slots i64=0..ptr=5, secret reservation
+> 6..=9, channel-of-channels 10..=15 (`channel_chanid_for`).
+> **REGISTRIES — there are now NINE, one per stage differential, not one.** In
+> `selfhost_codegen.rs` (unchanged this session): `DEFERRED_PROGRAMS` = **6** (2× `fn_value`
+> ADR 0070, 3× `sealed_*` ADR 0069, `process_channel_typed` M2.3b), `KNOWN_SCG_BUGS` = **1**
+> (`delegation.sentinel`, named-impl qualification). NEW, from the real-program sweep:
+> **lex** 8 deferred (all ADR 0058 float literals) · **ast** 13 deferred (6 float-only, 2 that
+> carry BOTH the float and the `sqrt` cause, 5 `ptr_of`-family), 0 bugs — the 3 `export`
+> entries were deleted BY THE FIX · **resolve** 2 · **types** 5 · **mir** 5 · **effects /
+> borrow / ctverify** 0. Every `KNOWN_SCG_BUGS` in the seven new registries is EMPTY. Every real-program registry has a written DEFERRED-vs-BUG criterion at its head;
+> read it before adding an entry. ⚠ The ctverify real-program sweep is **VACUOUS** by
+> construction (all 19 comparisons are `"" == ""`) — its doc says so; do not read its empty
+> registry as verifier parity. Lexer keyword table = Rust's exactly (38; derive-and-diff command
+> is in `ident_kind`'s header comment — do not eyeball it).
 > ⚠ **BOX GOTCHAS:** no `just`/`nextest` here (use raw `cargo`); the MSVC+LLVM env recipe is in
 > the `build-environment-windows` auto-memory (vcvars64 into the session + `LLVM_SYS_180_PREFIX=
 > G:\llvm-18`); run `cargo build` before `cargo test` (test does NOT regenerate the runtime
