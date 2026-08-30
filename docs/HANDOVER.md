@@ -51,6 +51,18 @@ reference as you work through the milestones.
 
 ---
 
+> ⚠ **ADR 0072 LANDED WITHOUT THE ADVERSARIAL REVIEW.** The five-lens review
+> (`wf_dc254647-26a`: over-refusal, boundary-holes, parity, correctness, prose) was launched
+> and then STOPPED before any lens returned, at the maintainer's call, and the slice was
+> committed on the four-check plus hand verification instead. Everything claimed for it below
+> was checked by hand and is reproducible — but the change touches BOTH back ends and moves
+> the oracle, which is exactly the class the review exists for. **If anything in the effects
+> path looks wrong, suspect this first, and consider running that review retroactively.** The
+> hand checks that did happen: four-check green (1811 passed / exactly the 18 known Windows
+> failures); both bootstrap fixed points green; a sweep of every effect-bearing corpus program
+> confirming nothing pre-existing is newly refused; oracle-vs-scg byte-equality on the new
+> fixture at types, mir and llvm; and the secret-taint check in both directions.
+
 ### ▶ RESUME HERE (2026-08-30 — SIX slices are COMMITTED, four-check GREEN, tree CLEAN; nothing is mid-flight. Pick fresh from the open menu below. The arc: menu item (3) — **extending the seven fixture-only stage differentials to REAL programs** (`34ffea0`) — found three unmirrored front-end surfaces nothing in the fixture corpus could reach, and the session then CLOSED ALL THREE, each pinned by a new fixture: **ADR 0059 `export "C"`** (`e2e5ee5`, ADR 0059 **A10**), **ADR 0058 FLOATS** (`339f437` + `3eeb34a`, ADR 0058 **A8**) and **ADR 0057's `ptr_of` / `ptr_of_mut` / `is_null`** (`e565a34`, ADR 0057 **A10**) — which completes the RESERVED-NAME family (`sqrt` + the three, scg unary op-codes 6..=9) and leaves `selfhost_parse.rs`'s registry EMPTY. scg now has `f64` and `ptr` as scalar codes 4 and 5. The sixth slice then closed the first of the PRE-EXISTING defects that probing had surfaced: **a widened `secret T` / `?T` binding now gets its wrapper when the RHS is a CALL or a UNARY** (`34e1a8f`) — at MIR that wrapper is a whole extra value, so its absence had been shifting every later value number, and REAL programs write the shape 18 times without any differential being able to see them. ⚠ TWO REVIEWS FOUND HOLES IN THE HARNESS ITSELF — the sweeps had missed the `demos/` root entirely (it is in all eight now: 119 direct + 21 merged at lex/ast, 11 + 11 at the semantic stages), and every differential SKIPS a program the oracle rejects, so "scg accepts what snc rejects" is untested by construction (filed). Every slice was adversarially reviewed before commit, and the reviews earned it: a reachable `scg` abort, a fourth unary table where `sqrt` rendered as `&mut`, that missing root, an INVALID-IR assignment widen, and several false claims of mine. NEXT: `select` (design-first), `Channel<secret T>`, f64/ptr CODEGEN, widening the Bar-A source printer, or the EIGHT filed defects (menu item 4 is now a durable register — start at D1, the snc miscompile) — see "▶ THE OPEN MENU" below)
 
 > **▶ THE OPEN MENU (2026-08-30) — real remaining work, verified against the repo.**
@@ -82,22 +94,17 @@ reference as you work through the milestones.
 >      now has. Also worth doing with it: `examples/math/quadratic.sentinel` and
 >      `sentinel_library/std/math/float.sentinel` currently reach only lex/ast, because
 >      `snc merge`'s Bar-A printer rejects both a float literal and `sqrt` (menu item 5).
->   4. **THE FILED-DEFECT REGISTER — EIGHT items (D1-D8), each verified against a pre-slice binary,
+>   4. **THE FILED-DEFECT REGISTER — EIGHT items (D1-D8); **D1 is DONE**, the rest verified against a pre-slice binary,
 >      NONE registered in any `DEFERRED_PROGRAMS` / `KNOWN_SCG_BUGS` list because no corpus
 >      program reaches them.** They were also filed as task chips, but chips are ephemeral UI;
 >      THIS list is the record. Ordered by what they cost if left.
 >
->      **D1 — ⚠ `snc build` MISCOMPILES a qualified `let` in an effecting fn. In the SHIPPED
->      compiler, silently.** `fn caller() -> i64 ! { Io } { let s: secret i64 = do_work();
->      declassify(s) }` returns a RAW POINTER as its exit status, varying run to run with ASLR;
->      the `let s: i64` twin returns 42 every time. No diagnostic either way. `detect_let_shape`
->      (`crates/sentinel-codegen/src/lib.rs:9704`, and the twin at
->      `crates/sentinel-driver/src/llvm_dump.rs:4364`) bails on any non-`i64` LET TYPE, while
->      `validate_effecting_fn_body` does NOT defer the body — `stmt_performs` treats a CALL to an
->      effecting fn as non-performing — so the straight-line path stores the callee's `Kont*` as
->      an `i64`. The `?i64` twin fails LOUDLY at build (inkwell's verifier); the `secret` one is
->      the silent one. BOTH SIDES ARE WRONG: `snc`'s IR does not assemble, `scg`'s does. So it is
->      oracle-moving — ADR first, and do NOT reflexively "mirror the oracle".
+>      **D1 — DONE (`5609fb7`, ADR 0072).** `snc build` used to miscompile a qualified `let`
+>      in an effecting fn, returning a raw pointer as the program's answer. Fixed, and the
+>      shape now LOWERS rather than merely being refused. The audit that cleared it found the
+>      same hole had five more faces — a silently DROPPED effect, a 7-byte OOB read off a
+>      narrow captured param, an inkwell panic, a verifier abort, invalid IR at exit 0 — all
+>      closed by the same gate. Four scg gaps it exposed are filed separately (see the chips).
 >
 >      **D2 — the widen FAMILY.** `Field`, `Index`, `Method`, `Array`, `StructLit`, `Declassify`,
 >      `Perform`, `Await`, `Qcall`, `ClassInit`, `Spawn` all take a real `exp` and discard it,
@@ -444,9 +451,10 @@ reference as you work through the milestones.
 > not on the overstated one. **Verify the consequence, not just the discrepancy.**
 >
 > HANDOFF STATE (verified against the repo 2026-08-30): four-check green — `cargo test
-> --workspace --no-fail-fast` = **1805 passed / the 18 known Windows failures**, zero new;
-> `pass` **161**, `ui` **50** (this session added `c59_export_call`, `c58_float_math`,
-> `c57_ptr_of`, `c19_widen_call_unary`); all 9 differential stages byte-identical, both bootstrap fixed points hold;
+> --workspace --no-fail-fast` = **1811 passed / the 18 known Windows failures**, zero new;
+> `pass` **162**, `ui` **54** (this session added `c59_export_call`, `c58_float_math`,
+> `c57_ptr_of`, `c19_widen_call_unary`, `c35_effecting_let_secret` + the four
+> `ui/c35_effecting_*` boundary fixtures); all 9 differential stages byte-identical, both bootstrap fixed points hold;
 > working tree clean. abi count **51**. **scg scalar codes: i64=0, i32=1, bool=2, u8=3,
 > f64=4 (ADR 0058), ptr=5 (ADR 0057); unary op-codes 1..=5 are the PREFIX operators and
 > 6..=9 the CALL-shaped RESERVED-NAME family (6 sqrt, 7 ptr_of, 8 ptr_of_mut, 9 is_null) —

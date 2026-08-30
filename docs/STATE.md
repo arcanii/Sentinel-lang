@@ -14,6 +14,42 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
+**Latest (2026-08-31) — D1 is CLOSED: `snc` no longer miscompiles an effecting fn, and the
+boundary that let it is now an EXPLICIT fail-closed list** (`5609fb7`, **ADR 0072 ACCEPTED** by the documented
+rhythm — fixtures landed, both fixed points green — though ⚠ the adversarial review was
+stopped before returning and this landed on the four-check plus hand verification; pinned by `tests/pass/c35_effecting_let_secret` + four `tests/ui/c35_effecting_*`).
+This was the register's D1: `snc build` on
+`fn caller() -> i64 ! { Io } { let s: secret i64 = do_work(); declassify(s) }` produced a
+binary whose exit status was a RAW POINTER, varying run to run with ASLR, with no diagnostic.
+It now returns 42 deterministically — the shape is LOWERED CORRECTLY, not merely refused.
+**ONE HOLE, SIX FACES, AND ONLY THE FIRST WAS KNOWN.** A 116-cell audit found the same
+fall-through also silently DROPPED an effect (`do_work(); 42` — a handler's `print` never ran
+while the program still exited 42), read 7 BYTES OUT OF BOUNDS off a captured `u8` param
+(exit -1341102038 for 42), crashed the compiler with an inkwell panic on `do_work() + 1`,
+tripped the LLVM verifier on `sink(do_work())`, and made `snc llvm` emit invalid IR while
+exiting 0. Two of the six were silent.
+**THE ROOT CAUSE IS THE REPO'S OWN ANTI-PATTERN, one it had already been bitten by:**
+`validate_effecting_fn_body` decided "can we lower this?" by walking for `perform` NODES,
+while the `Kont*` ABI substitution that creates the hazard is keyed on the CALLEE'S SIGNATURE
+— two predicates maintained for different purposes, intersected into a safety fence. So a
+literal `perform` failed CLOSED everywhere and a CALL to an effecting fn failed OPEN
+everywhere. The audit measured it: the same 16 programs gave 15 clean rejections with a
+`perform` RHS and 15 unsafe or crashing outcomes with a call RHS.
+**THE FIX is one match arm plus an allow-list.** `expr_performs` → `expr_suspends`, true also
+for a call to a kont-ABI fn; the replacement was TOTAL — after threading the program through,
+not one caller still wanted the perform-only meaning, in either back end. `fits_kont_slot` is
+then the explicit allow-list (`i64`, `secret i64` — the seam is one `i64`), applied to the
+let's type AND to every captured var, the latter being the half that was checked by nothing
+at all. `secret i64` is admitted rather than refused because it IS that i64.
+**`scg` NEEDED ZERO CHANGES** — it never had the `i64` restriction, so the fixed oracle
+converges on what the self-hosted compiler was already emitting (verified byte-identical at
+types, mir and llvm). And no `selfhost/*.sentinel` source declares an effect, so **neither
+bootstrap fixed point can move.**
+The refusal names the rule it broke rather than restating a general one — `?i64` gets "a
+`let` bound to a suspension must be `i64` or `secret i64`", a narrow capture gets "`n` is
+captured across the continuation … `u8` would be read out of bounds".
+`pass` 161 → 162, `ui` 50 → 54.
+
 **Latest (2026-08-30) — the filed call/unary widen defect is CLOSED: a widened binding now
 gets its wrapper when the right-hand side is a CALL or a UNARY** — and the review that cleared
 it surfaced SIX more defects, one of them a silent MISCOMPILE in `snc` itself (all filed below) (`34e1a8f`,

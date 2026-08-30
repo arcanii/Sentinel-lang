@@ -1,6 +1,10 @@
 # ADR 0072: The effecting-fn continuation boundary is an explicit fail-closed list
 
-Status: **PROPOSED** (2026-08-31) — supersedes an unratified implementation shortcut.
+Status: **ACCEPTED** (2026-08-31) — supersedes an unratified implementation shortcut.
+Landed in `5609fb7`: fixtures in place, four-check green, both bootstrap fixed points
+byte-identical. ⚠ The five-lens adversarial review was launched and STOPPED before any
+lens returned, at the maintainer's call; this rests on the four-check plus the hand
+verification recorded under Consequences.
 Governs the `Kont*`-ABI lowering of effecting fns first pinned by [ADR 0020](0020-handler-runtime-and-perform-lowering.md) D7/D9.
 
 ## Context
@@ -202,5 +206,4 @@ oracle's version — assembles cleanly; and the accept/reject drift between inkw
 
 ## Amendments
 
-_(none yet — this ADR moves to ACCEPTED once the fixtures land and both bootstrap fixed
-points are re-verified green.)_
+_(none yet.)_
