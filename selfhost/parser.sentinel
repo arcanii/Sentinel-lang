@@ -272,6 +272,21 @@ pub fn is_extern_kw(src: &[u8], start: i64, end: i64) -> bool {
         && (*src)[start + 5] == 'n'
 }
 
+// (ADR 0059) Is `src[start..end]` the identifier `export`? Like `extern` above,
+// this tokenizer has no `export` KEYWORD, so an `export "C" fn ...` item is
+// recognised by TEXT at the item lead. (`selfhost/lexer.sentinel` DOES tag
+// `Export`, because that stage mirrors the Rust keyword table; the two
+// tokenizers differ here by design.)
+pub fn is_export_kw(src: &[u8], start: i64, end: i64) -> bool {
+    end - start == 6
+        && (*src)[start] == 'e'
+        && (*src)[start + 1] == 'x'
+        && (*src)[start + 2] == 'p'
+        && (*src)[start + 3] == 'o'
+        && (*src)[start + 4] == 'r'
+        && (*src)[start + 5] == 't'
+}
+
 // Keyword-atom recognition (mirrors `is_fn_kw` — byte-compare in place, no
 // allocation): `true` / `false` / `null` lex as identifiers but parse to the
 // `BoolLit` / `NullLit` nodes the oracle emits, NOT to `(var ...)`.

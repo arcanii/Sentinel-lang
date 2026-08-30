@@ -448,13 +448,17 @@ fn sentinel_parser_matches_oracle_on_corpus() {
 // fixtures written to exercise ONE construct each. Until this test, only
 // `selfhost_codegen.rs` swept `examples/` + `sentinel_library/` + `tools/`,
 // which left every UPSTREAM stage differential structurally blind to divergence
-// in real programs. That is not hypothetical: NOTHING in the fixture corpus
-// uses `export "C"`, a float literal, or any of the four reserved-name
-// intrinsics (`sqrt` / `ptr_of` / `ptr_of_mut` / `is_null`) — `snc lex` reports
-// zero `FloatLit` tokens across all 207 fixtures — so three separate unmirrored
-// front-end surfaces had never once been compared, and one of them (`2.0`) is
-// SILENTLY misparsed by the self-hosted parser as a field access. The same
-// blind spot previously hid the ADR 0067 `module`/`part` lex gap.
+// in real programs. That is not hypothetical: when this test was written NOTHING
+// in the fixture corpus used `export "C"`, a float literal, or any of the four
+// reserved-name intrinsics (`sqrt` / `ptr_of` / `ptr_of_mut` / `is_null`) — so
+// three separate unmirrored front-end surfaces had never once been compared, and
+// one of them (`2.0`) is SILENTLY misparsed by the self-hosted parser as a field
+// access. The same blind spot previously hid the ADR 0067 `module`/`part` lex
+// gap. `export "C"` is no longer among them, and that IS the intended lifecycle:
+// the sweep found the hole, the fix landed, and `tests/pass/c59_export_call`
+// now pins it in the FIXTURE corpus. A float literal and the four reserved names
+// remain fixture-uncovered — `snc lex` still reports zero `FloatLit` tokens
+// across the whole corpus.
 //
 // TWO FORMS of each program are compared, because the stage oracles
 // (`snc lex`/`ast`/`resolve`/`types`/`effects`/`borrow`/`mir`/`ctverify`) do NO
@@ -566,23 +570,15 @@ const DEFERRED_PROGRAMS: &[(&str, &str)] = &[
 /// `--lib`, the multi-module symbol policy), never the dump arm — the same
 /// reason `selfhost/lexer.sentinel` already carries the `export` / `module` /
 /// `part` keywords whose features are unported.
-const KNOWN_SCG_BUGS: &[(&str, &str)] = &[
-    // ADR 0059 `export "C" fn` — a BUG by the criterion above, not a deferred
-    // mirror: the oracle's ast dump renders an exported fn EXACTLY like an
-    // ordinary one, so `scg` needs no new shape at all — only the item
-    // dispatcher's missing arm. `dump_item` has an `extern` arm but NO
-    // `export` one, so `export` falls through to `dump_fn_decl`, which reads
-    // the ABI string as the fn NAME and then mis-slices the parameter list:
-    // `(fn "C" ((param sha256_oneshot msg) (param : (arr u8))) …)` where the
-    // oracle emits `(fn sha256_oneshot ((param msg (ref (arr u8)))) …)`. This
-    // is the SAME defect the `extern` arm was added to fix (5c911f5) — its own
-    // comment predicted this shape — and it survived that pass because the
-    // completeness sweep looked at `extern` only, and because no fixture in
-    // tests/pass or tests/ui uses `export "C"`.
-    ("examples/export/crypto_lib.sentinel", "ADR 0059: dump_item has no `export \"C\"` arm (reads the ABI string as the fn name)"),
-    ("examples/export/ct_select.sentinel", "ADR 0059: dump_item has no `export \"C\"` arm"),
-    ("examples/export/digest_lib.sentinel", "ADR 0059: dump_item has no `export \"C\"` arm"),
-];
+///
+/// EMPTY. The three `examples/export/*` programs used to head this list — the
+/// ADR 0059 `export "C"` item-dispatch hole, where `dump_item` had an `extern`
+/// arm but no `export` one, so `export` fell through to `dump_fn_decl`, which
+/// read the ABI string as the fn NAME. It is DELETED, not re-labelled, which is
+/// the only way an entry may leave: `selfhost/parser/dump.sentinel` grew the
+/// arm, and `tests/pass/c59_export_call.sentinel` now pins it in the FIXTURE
+/// corpus so the gap that hid it (no fixture used `export`) is closed too.
+const KNOWN_SCG_BUGS: &[(&str, &str)] = &[];
 
 /// The deferral reason for `key` (a repo-relative, forward-slashed path, with a
 /// ` (merged)` suffix for the merged form) — `None` when the program is not

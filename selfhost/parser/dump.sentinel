@@ -1117,6 +1117,45 @@ fn dump_item(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &
         // declaration); this one was invisible for the same reason — until
         // `tests/pass/c57_extern_call.sentinel` no fixture used `extern` at all.
         skip_extern_block(k, cur)
+    } else if lead == 2 && is_export_kw(src, (*s)[*cur], (*e)[*cur]) {
+        // (ADR 0059) `export "C" fn ...` -- a C-ABI export. The ORACLE's `snc
+        // ast` dump renders an exported fn EXACTLY like an ordinary one (the
+        // export flag is not part of the dump), so the whole fix is to skip the
+        // two-token `export "C"` prefix and fall into `dump_fn_decl` with the
+        // cursor on `fn`.
+        //
+        // NOT `skip_extern_block`'s treatment: an extern block declares FOREIGN
+        // symbols the oracle omits entirely, so skipping it is right; an export
+        // declares an ordinary Sentinel fn the oracle DOES dump, so skipping it
+        // would emit nothing and lose the item. Like the extern arm, this MUST
+        // precede the `fn` fallthrough -- without it `export` fell through to
+        // `dump_fn_decl`, which read the ABI string as the fn NAME and
+        // mis-sliced the parameter list, emitting
+        // `(fn "C" ((param ct_choose cond) (param : ,) ...)`. The extern arm's
+        // own comment predicted this shape; the gap survived that pass because
+        // no fixture used `export`, and because the completeness sweep looked
+        // at `extern` only. The real-program stage differential found it.
+        //
+        // SCOPE, deliberately: the `extern` fix touched all THREE item
+        // dispatchers (this one, the merge's `emit_item`, and its
+        // `build_rename`); this one touches only this dispatcher, and that is
+        // not an oversight. The merge side cannot be mirrored on its own,
+        // because the ORACLE's own merge-to-source
+        // (crates/sentinel-driver/src/source_dump.rs, `emit_fn`) has NO
+        // `is_export_c` branch and silently re-emits an exported fn as a plain
+        // `fn` -- verified: `snc build --lib` succeeds on an export program and
+        // then FAILS on that same program's `snc merge` output with "produced no
+        // `export "C"` functions". So teaching `emit_item` to re-emit the prefix
+        // would make scg's merged TEXT differ from the oracle's and BREAK merge
+        // parity. The oracle half has to land first, and it carries a real
+        // design question (`merge_modules` deliberately keeps an exported fn OUT
+        // of the rename map so it keeps its bare C symbol --
+        // crates/sentinel-resolve/src/lib.rs `if f.is_export_c { continue; }` --
+        // while scg's `build_rename` has no such arm and would qualify it).
+        // Tracked as one item in HANDOVER's open menu. Unreachable today: no
+        // program in the corpus, the fixtures, or `selfhost/` merges an export.
+        *cur = *cur + 2;
+        dump_fn_decl(out, k, s, e, src, cur)
     } else if lead == 58 {
         dump_use_decl(out, k, s, e, src, cur)
     } else if lead == 64 {

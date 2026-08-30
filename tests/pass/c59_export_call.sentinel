@@ -1,0 +1,60 @@
+// ADR 0059 c59_export_call: an `export "C"` C-ABI export, CALLED from Sentinel in
+// the same file, so the fixture both builds-and-runs and enters every self-host
+// STAGE differential (lex / ast / resolve / types / effects / borrow / mir /
+// ctverify / codegen — each sweeps the FIXTURE corpus, `tests/pass` + `tests/ui`,
+// alongside the real-program corpus, `examples/` + `sentinel_library/` + `tools/`).
+// NOT `selfhost_merge`, which exercises only the compiler's own sources: the merge
+// side of `export` is deliberately still unmirrored, see below.
+//
+// WHY IT EXISTS: `export` had no fixture at all, and that gap made the self-hosted
+// parser's `export` handling structurally untestable. It hid a real defect —
+// `dump_item` had an `extern` arm but no `export` one, so `export` fell through to
+// `dump_fn_decl`, which read the ABI string as the fn NAME and mis-sliced the
+// parameter list (`(fn "C" ((param ct_choose cond) …)`). Exactly the shape the
+// `extern` arm was added to fix, and invisible for exactly the same reason. The
+// real-program differential (examples/export/*) found it; this fixture pins it in
+// the corpus so it cannot come back.
+//
+// WHAT IS STILL DEFERRED (ADR 0059): the export FEATURE mirror in `scg` — the
+// `--lib` / `--emit-header` / shared-object modes, the multi-module symbol
+// policy, and the whole MERGE side (neither `selfhost/merge/emit.sentinel`'s
+// `emit_item` nor `selfhost/merge/engine.sentinel`'s `build_rename` has an
+// `export` arm; the note on the new arm in `selfhost/parser/dump.sentinel` says
+// why mirroring them NOW would break merge parity rather than restore it).
+//
+// This fixture stays inside the case `scg` does reproduce, and the discriminator
+// is the ABI SHAPE, not the module count: an export whose parameters and return
+// are the public value ABI (`i64` / `f64`) emits exactly the symbol an ordinary
+// fn of the same name would (`@c59_ct_choose`), so `scg` matches the oracle by
+// treating it as an ordinary fn. Be precise about WHY, per stage: the new
+// `dump_item` arm buys `snc ast` parity and nothing else — `scg`'s COMPILE path
+// never calls `dump_item`, and reaches the same place by a different route (its
+// merge swallows `export` and the ABI string through the unknown-token
+// fallthrough, so codegen only ever sees an ordinary fn). Reverting the arm
+// leaves this fixture's `.ll` byte-identical and reddens only the ast
+// differential. An export with a `&[u8]` parameter or a `[u8]` return does NOT
+// (`export_needs_c_wrapper`, crates/sentinel-codegen): the body moves to
+// `<name>__sentinel_impl` and the bare symbol becomes a generated C wrapper — in
+// a single-file build too. `scg` does not model that, and no fixture covers it.
+//
+// The exported body is the ADR 0059 headline: a branch-free constant-time select
+// over `secret` values behind a plain public `i64` API. c59_ct_choose(1, 42, 7) = 42.
+//
+// The symbol carries the `c59_` fixture prefix DELIBERATELY: an export emits a
+// bare external-linkage C symbol, and this fixture is linked against the runtime
+// staticlib, so a name under the runtime's reserved `sentinel_` prefix would be a
+// duplicate-symbol hazard the day a runtime slice claims it (the ABI has grown
+// 40 -> 51 symbols across the ADR 0071 slices alone), and the failure would name
+// the runtime link rather than this fixture.
+
+export "C" fn c59_ct_choose(cond: i64, a: i64, b: i64) -> i64 {
+    let mask: secret i64 = 0 - cond;
+    let notmask: secret i64 = mask ^ (0 - 1);
+    let sa: secret i64 = a;
+    let sb: secret i64 = b;
+    declassify((sa & mask) | (sb & notmask))
+}
+
+fn main() -> i64 {
+    c59_ct_choose(1, 42, 7)
+}

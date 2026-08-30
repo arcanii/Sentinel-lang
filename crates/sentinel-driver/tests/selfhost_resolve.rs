@@ -323,13 +323,17 @@ fn sentinel_resolver_matches_oracle_on_corpus() {
 // fixtures written to exercise ONE construct each. Until this test, only
 // `selfhost_codegen.rs` swept `examples/` + `sentinel_library/` + `tools/`,
 // which left every UPSTREAM stage differential structurally blind to divergence
-// in real programs. That is not hypothetical: NOTHING in the fixture corpus
-// uses `export "C"`, a float literal, or any of the four reserved-name
-// intrinsics (`sqrt` / `ptr_of` / `ptr_of_mut` / `is_null`) — `snc lex` reports
-// zero `FloatLit` tokens across all 207 fixtures — so three separate unmirrored
-// front-end surfaces had never once been compared, and one of them (`2.0`) is
-// SILENTLY misparsed by the self-hosted parser as a field access. The same
-// blind spot previously hid the ADR 0067 `module`/`part` lex gap.
+// in real programs. That is not hypothetical: when this test was written NOTHING
+// in the fixture corpus used `export "C"`, a float literal, or any of the four
+// reserved-name intrinsics (`sqrt` / `ptr_of` / `ptr_of_mut` / `is_null`) — so
+// three separate unmirrored front-end surfaces had never once been compared, and
+// one of them (`2.0`) is SILENTLY misparsed by the self-hosted parser as a field
+// access. The same blind spot previously hid the ADR 0067 `module`/`part` lex
+// gap. `export "C"` is no longer among them, and that IS the intended lifecycle:
+// the sweep found the hole, the fix landed, and `tests/pass/c59_export_call`
+// now pins it in the FIXTURE corpus. A float literal and the four reserved names
+// remain fixture-uncovered — `snc lex` still reports zero `FloatLit` tokens
+// across the whole corpus.
 //
 // TWO FORMS of each program are compared, because the stage oracles
 // (`snc lex`/`ast`/`resolve`/`types`/`effects`/`borrow`/`mir`/`ctverify`) do NO

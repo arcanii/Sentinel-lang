@@ -1606,6 +1606,38 @@ fn pass_c65_return_match() {
 }
 
 #[test]
+fn pass_c59_export_call() {
+    // ADR 0059 c59_export_call: an `export "C"` C-ABI export CALLED from Sentinel
+    // in the same file, so it both builds-and-runs and enters every self-host
+    // STAGE differential (each sweeps the fixture corpus, tests/pass + tests/ui,
+    // alongside the real-program corpus — `selfhost_merge` is the exception: it
+    // sweeps only the compiler's own sources, and the merge side of `export` is
+    // deliberately still unmirrored).
+    //
+    // WHY IT EXISTS: `export` had NO fixture, and that gap made the self-hosted
+    // parser's `export` handling structurally untestable — the same shape as the
+    // `extern` gap c57_extern_call closes. It hid a real defect: `dump_item` had an
+    // `extern` arm but no `export` one, so `export` fell through to `dump_fn_decl`,
+    // which read the ABI string as the fn NAME and mis-sliced the parameter list.
+    // The real-program stage differential found it; this fixture pins it.
+    //
+    // The discriminator is the ABI SHAPE, not the module count: an export whose
+    // params and return are the public value ABI emits exactly the symbol an
+    // ordinary fn of the same name would, so `scg` reproduces the oracle by
+    // treating it as one — at ast because of the new `dump_item` arm, and at
+    // codegen because scg's merge drops the prefix before codegen ever sees it.
+    // An export with a `&[u8]` param or a `[u8]` return gets
+    // a generated C wrapper plus a `<name>__sentinel_impl` body instead
+    // (`export_needs_c_wrapper`), which `scg` does not model. ADR 0059's
+    // `--lib` / `--emit-header` / multi-module symbol-policy mirror stays
+    // deferred, as does the whole merge side.
+    //
+    // The body is the ADR 0059 headline: a branch-free constant-time select over
+    // `secret` values behind a public `i64` API. c59_ct_choose(1, 42, 7) = 42.
+    assert_eq!(run_exit("c59_export_call.sentinel"), 42);
+}
+
+#[test]
 fn pass_c57_extern_call() {
     // ADR 0057 c57_extern_call: an `extern "C"` foreign import called through a safe
     // Sentinel wrapper. The FIRST fixture in `tests/` to use `extern` at all — that

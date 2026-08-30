@@ -1,6 +1,6 @@
 # ADR 0059: A C-ABI export — calling Sentinel from C / C++ / Rust / Python
 
-Status: **ACCEPTED-WITH-AMENDMENTS (A1–A9).** Implemented `snc`-side: the `export "C"`
+Status: **ACCEPTED-WITH-AMENDMENTS (A1–A10).** Implemented `snc`-side: the `export "C"`
 annotation, the `--lib` static-archive build mode (no `main`, now MULTI-MODULE via `use`),
 the `--shared` SHARED-library mode (`.dylib`, A9 — for `dlopen` / `ctypes`),
 `--emit-header`, and the secret-fence. **Phase 1a** = the value-only ABI (`i64`/`f64`) with a constant-time
@@ -186,7 +186,9 @@ archive-vs-link step differs.
 - **driver** — a `--lib` build mode (no `main`; archive the object(s) + the runtime
   staticlib into a `.a`); `--emit-header` (generate the C header from the exported
   signatures); later `--shared` (PIC + shared link).
-- **scg mirror** — deferred until the first `export` fixture.
+- **scg mirror** — deferred until the first `export` fixture. **(That trigger has now
+  fired — see A10: the fixture exists, and the mirror it turned out to require was a
+  single dispatcher arm. The FEATURE mirror is still deferred.)**
 
 ## Scope (what a first increment would land)
 
@@ -318,3 +320,34 @@ struct exports, and the Python/Rust generators are deferred to later phases.
   path, and the Python/Rust binding generators (which now have their substrate). The `scg`
   mirror stays deferred (driver-only; the emitted object is byte-identical — only the link
   step differs, so the ADR 0045 differential is untouched).
+
+- **A10 — the "first `export` fixture" trigger has FIRED, and the mirror it required was ONE
+  dispatcher arm.** A5/A6/A9 each defer the `scg` mirror on the stated precondition that *no
+  corpus or `selfhost` source uses `export`*, so every differential is byte-identical by
+  construction. That precondition no longer holds: **`tests/pass/c59_export_call.sentinel`**
+  is the first corpus fixture to use `export`. It did not, however, find the gap — the
+  extended real-program stage differential did (it sweeps `examples/` +
+  `sentinel_library/` + `tools/`, where `examples/export/*` live), and the fixture was
+  added afterwards to pin the fix in the corpus, closing the blind spot that let the gap
+  exist. **What was actually wrong** was not a missing feature but a hole in an
+  already-ported dispatcher: `selfhost/parser/dump.sentinel`'s `dump_item` had an `extern`
+  arm and no `export` one, so `export "C" fn f(…)` fell through to `dump_fn_decl`, which
+  read the ABI string as the fn NAME and mis-sliced the parameter list. The `snc ast` dump
+  renders an exported fn EXACTLY like an ordinary one, so the whole mirror is: skip the
+  two-token `export "C"` prefix, then dump the fn.
+  **Why the fixed points stayed byte-identical anyway** (and why adding the fixture was
+  safe): for a SINGLE-FILE **value-ABI** export the oracle emits the same bare symbol with
+  the same linkage an ordinary fn of that name would — the generated C wrapper appears only
+  under `export_needs_c_wrapper` (a `&[u8]` param or `[u8]` return, A6/A7), which the
+  fixture deliberately avoids.
+  **STILL deferred**, and now recorded rather than assumed: `--lib` / `--emit-header` /
+  `--shared`, the buffer-ABI wrapper, the multi-module bare-symbol policy — and the whole
+  **MERGE side**, which is a genuine defect on the `snc` side, not only a missing mirror:
+  `source_dump::emit_fn` has no `is_export_c` branch, so `snc merge` silently re-emits an
+  exported fn as a plain `fn`. Verified end-to-end: `snc build --lib` succeeds on an export
+  program and then FAILS on that same program's `snc merge` output with "`build --lib`
+  produced no `export \"C\"` functions". `scg`'s merge dispatchers (`emit_item`,
+  `build_rename`) have no `export` arm either, and `build_rename` would module-QUALIFY a
+  symbol A3 says must stay bare. The two halves must land together — mirroring `scg` alone
+  would make its merged TEXT differ from the oracle's and break merge parity — so this is
+  tracked as one item, not split.
