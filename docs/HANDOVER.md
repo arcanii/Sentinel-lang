@@ -89,10 +89,16 @@ reference as you work through the milestones.
 > predicate that defines a boundary by intersecting two unrelated maps.**
 >
 > **▶ NEXT on this track, in order:**
->   1. **The scg mirror for M1.2c** — registered in `DEFERRED_PROGRAMS`
->      (`addressed_reply.sentinel`). scg hardcodes `mk_channel(c, 0)` and its channel lowering
->      has no encode/decode at all, so it shares a cause with the M1.2b-cont generic-element
->      gap — do BOTH in one slice.
+>   1. **✅ DONE — the scg channel-element mirror** (`0a7075e`, M1.2b-cont + M1.2c together):
+>      element-generic channel typing + send/recv encode/decode; `channel_generic` +
+>      `addressed_reply` are byte-identical and OFF `DEFERRED_PROGRAMS`. It also needed an
+>      ORACLE extension (the text backend errored on channel-of-channels — no `Channel` arm in
+>      send/recv; a channel element is a `ptr`, ptrtoint/inttoptr, matching inkwell). ⚠ Two
+>      known scg-over-accepts, both snc-only (documented at the `is_channel` arm): `Channel<f64>`
+>      mis-renders `Channel<i64>` in the TYPES dump (scg's pre-existing no-f64-handle gap; LLVM
+>      identical, no corpus program) and the one-level nesting cap is not re-enforced. If a
+>      `Channel<f64>` fixture is ever added, it will fail the types differential unregistered —
+>      register it or close scg's f64 gap first.
 >   2. **`select`** — runtime PINNED (D11: a Sentinel-owned `parking_lot` queue; ABI-safe
 >      because `SentinelChannel` is declared fully opaque, so the four C-ABI signatures stay
 >      byte-identical and existing codegen does not churn). Surface still OPEN and worth

@@ -14,6 +14,23 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
+**Latest (2026-07-21) — the M1.2c scg CHANNEL mirror landed: `channel_generic` + `addressed_reply`
+are byte-identical and OFF the deferred list** (`0a7075e`). scg's channels were i64-only; this
+makes them element-generic (`Channel<u8>`/`bool`/`i32` word-scalars, M1.2b-cont) and adds
+channel-of-channels (`Channel<Channel<T>>`, M1.2c) — typing (element-generic `is_channel`,
+`channel_new` from the expected type, a `recv` reader emitting `(targs <elem>)`) + codegen (send
+ENCODE / recv DECODE: i64 no-op, i32/bool/u8 zext/trunc, a channel handle ptrtoint/inttoptr).
+**The task also required an ORACLE extension** (oracle-moving): the `snc llvm` text backend had
+no `Channel` arm in channel send/recv and ERRORED on channel-of-channels where inkwell (matching
+on the pointer VALUE) succeeded — so `addressed_reply` was being SKIPPED by the differential, not
+compared. Added `Type::Ptr | Type::Channel(_) => ptrtoint`/`inttoptr`. Verified byte-identical
+oracle≡scg on channel_generic, channel-of-channels, `Channel<i32>`, and the composed
+`Channel<Channel<u8>>`; all 9 differentials green, both fixed points hold, full suite = known 18.
+An adversarial review found one LOW pre-existing divergence (documented, not diff-introduced):
+`Channel<f64>` mis-renders `Channel<i64>` in scg's TYPES dump — a symptom of scg's separately
+-tracked no-f64-handle gap (LLVM byte-identical, no f64 value can flow, no such program in the
+corpus). scg also doesn't re-enforce the oracle's one-level nesting cap (an snc-only rejection).
+
 **Latest (2026-07-21) — the audit's B1 CONSTANT-TIME guard-rail landed** (`e450102`), a
 fail-closed defense-in-depth test closing the last of the audit's four findings. The
 `secret_leak` check reads taint OFF the type (`is_secret == matches!(ty, Secret(_))`), so it is
