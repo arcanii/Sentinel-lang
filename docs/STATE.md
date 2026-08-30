@@ -14,6 +14,23 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
+**Latest (2026-07-21) — the audit's B1 CONSTANT-TIME guard-rail landed** (`e450102`), a
+fail-closed defense-in-depth test closing the last of the audit's four findings. The
+`secret_leak` check reads taint OFF the type (`is_secret == matches!(ty, Secret(_))`), so it is
+sound only if every operator re-wraps a secret result; a new op that forgot would silently
+disarm the check. The test pins secret-preservation OPERATOR BY OPERATOR by routing each op's
+result into a real constant-time SINK (a preserved secret trips `SecretBranch`/`SecretDivisor`/
+`SecretFloat`), and is fail-closed — each operator family is matched EXHAUSTIVELY, so a new
+`BinOp`/`CmpOp`/`UnaryOp`/`LogicOp` variant is a compile error until classified (it already caught
+3 `UnaryOp` variants a grep missed). Deliberately a test, not a runtime assert — a secret sink
+(`arr[secret]`) type-checks with a public result + secret operand, so a central assert would
+false-positive on the checker's hottest path. Validated by a mutation test (`result_secret =
+false` → "SECRET DROPPED by BinOp::Add", reverted), a self-check that found+fixed two holes
+(Deref preserves secret → now tested; Vec read is a separate site from Array), and a 3-lens
+review that found NO live defect. Test-only; all 9 differentials + both fixed points untouched.
+**All four audit findings now resolved** (B1 guard-rail, B2 `needs_drop` fail-closed, B3
+comment de-coupling, B4 left test-pinned).
+
 **Latest (2026-07-21) — boundary-predicate SECURITY-HYGIENE audit** (`61bcac3`), prompted by
 the M1.2c review's memory-safety finding (a security fence written as a coincidental
 intersection of two unrelated predicates, which silently widened when one input changed

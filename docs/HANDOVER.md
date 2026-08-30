@@ -63,9 +63,12 @@ reference as you work through the milestones.
 > AS the intersection were de-coupled. Routed onward: **B1 — the constant-time verify reads
 > taint off `Type`, so a future operator that forgets to re-wrap `secret` could silently disarm
 > the leak check** (same mode as the bug, NOT live — the primary SecretBranch/Divisor/
-> ShiftAmount rejections are eager + explicit; filed as a defense-in-depth guard-rail task,
-> needs its own review because it touches the constant-time guarantee). B4 (`secret_scalar_slot`
-> position invariant) left — explicit + test-pinned. **The lesson that generalises: a security
+> ShiftAmount rejections are eager + explicit). **✅ B1 DONE** (`e450102`): a fail-closed
+> secret-preservation TEST (not a runtime assert — a secret sink type-checks with a public
+> result + secret operand, so a central assert would false-positive on the hot path). Each
+> operator family is matched EXHAUSTIVELY (new variant = compile error until classified);
+> mutation-proven non-vacuous; a 3-lens review found no live defect. B4 (`secret_scalar_slot`
+> position invariant) left — explicit + test-pinned. **All four audit findings now resolved.** **The lesson that generalises: a security
 > boundary must be an explicit list, never a derived intersection of two maps maintained for
 > other purposes — and each such boundary must be pinned by a rejection fixture.**
 
