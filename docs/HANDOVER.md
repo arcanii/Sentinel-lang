@@ -51,7 +51,7 @@ reference as you work through the milestones.
 
 ---
 
-### ▶ RESUME HERE (2026-08-30 — both slices are COMMITTED, four-check GREEN, tree CLEAN; nothing is mid-flight. Pick fresh from the open menu below. This session took menu item (3), **extending the seven fixture-only stage differentials to REAL programs** (`34ffea0`): they compared `scg` against the oracle over `tests/pass` + `tests/ui` only, while `selfhost_codegen` alone swept `examples/` + `sentinel_library/` + `tools/`. Each stage test now sweeps all 116 real programs in TWO forms (direct + `snc merge`'s collapse — the semantic stages do no module discovery, so the merged form is the ONLY way a multi-module program reaches them). The first sweep found THREE unmirrored front-end surfaces nothing in the fixture corpus could reach: ADR 0058 **float literals** (`2.0` lexes as `IntLit Dot IntLit` and PARSES as a field access — a silent misparse, 8 programs), ADR 0059 **`export "C"`** (the item dispatcher read the ABI string as the fn name — FIXED in `e2e5ee5`, with `tests/pass/c59_export_call.sentinel` pinning it and ADR 0059 gaining **A10**), and the **reserved-name family** `sqrt`/`ptr_of`/`ptr_of_mut`/`is_null` (unary in snc, `(call …)` in scg — 7 programs). ADR 0070 D3-revisit and ADR 0066 M2.3b are now visible three stages EARLIER than where they were registered. Both slices were adversarially reviewed before commit (6 lenses, then 4); the reviews contributed the `sqrt` cause, the ctverify vacuity disclosure, the written BUG/DEFERRED criterion, two extra guards (unreached-entry, empty-output), the ADR 0059 amendment and four comment corrections. NEXT: `select` (design-first), `Channel<secret T>`, the ADR 0058 float mirror, or widening the Bar-A source printer — see "▶ THE OPEN MENU" below)
+### ▶ RESUME HERE (2026-08-30 — four slices are COMMITTED, four-check GREEN, tree CLEAN; nothing is mid-flight. Pick fresh from the open menu below. The arc: menu item (3) — **extending the seven fixture-only stage differentials to REAL programs** (`34ffea0`) — found three unmirrored front-end surfaces nothing in the fixture corpus could reach, and the session then CLOSED TWO of them. **ADR 0059 `export "C"`** (`e2e5ee5`): the item dispatcher read the ABI string as the fn name; fixed, pinned by `tests/pass/c59_export_call.sentinel`, ADR 0059 gains **A10**. **ADR 0058 FLOATS** (`339f437` + `3eeb34a`): `2.0` lexed as `IntLit Dot IntLit` and PARSED as a field access — a silent misparse across 8 programs — now mirrored end to end through lex/ast/resolve/types/mir, with `f64` as scg SCALAR CODE 4, `sqrt` as A1's unary rewrite, a shared `append_float` that reproduces Rust's `{:?}` from decimal text with no `f64` anywhere, and `tests/pass/c58_float_math.sentinel` — the fixture ADR 0058 A3 said was impossible until the mirror landed. ADR 0058 gains **A8**; the `Channel<f64>` known-and-tolerated over-accept is closed as a side effect. Every slice was adversarially reviewed before commit; the reviews found a reachable `scg` ABORT, a fourth unary symbol table where `sqrt` rendered as `&mut`, and several false claims of mine. NEXT: `select` (design-first), `Channel<secret T>`, f64 CODEGEN, or widening the Bar-A source printer — see "▶ THE OPEN MENU" below)
 
 > **▶ THE OPEN MENU (2026-08-30) — real remaining work, verified against the repo.**
 >   1. **`select` over channels** — the flagship concurrency gap. Its RUNTIME is already PINNED
@@ -66,24 +66,34 @@ reference as you work through the milestones.
 >      can be neither mlocked nor scrubbed" — under the Sentinel-owned queue it owns the nodes).
 >      Typing side already unblocked: `channel_chanid_for` secret slots 6..=9 reserved. Decide
 >      the memory policy, then implement. Natural to do WITH (1) since both need the queue.
->   3. **The ADR 0058 FLOAT front-end mirror** — the largest gap the new real-program
->      differentials registered, and the one with the worst failure mode: `selfhost/lexer.sentinel`
->      and the parser's own tokenizer have no `FloatLit`, so `2.0` lexes as `IntLit Dot IntLit`
->      and PARSES as a field access `(field (int 2) 0)` — a SILENT misparse, not a rejection.
->      8 real programs are registered for it (`quadratic`, `transcendental`, `str_demo`,
->      `json`, `float`, `str`, `task_generic`, `fn_value_generic`). Closing it is a front-end
->      slice: `FloatLit` in BOTH tokenizers → a `(float …)` dump node → the `f64` type handle
->      downstream (scg has none: `f64` renders `i64`, unresolved renders `?T` — the same missing
->      handle behind the documented `Channel<f64>` mis-render). ADR 0058 A3 deferred the mirror
->      AND the `tests/pass` f64 fixture together, which is exactly why nothing saw this until
->      the sweep; the fixture becomes addable the moment the mirror lands.
->   4. **The RESERVED-NAME family mirror** — `sqrt` (ADR 0058 A1) and `ptr_of` / `ptr_of_mut` /
->      `is_null` (ADR 0057 Phase 1b) are the ONLY four names the Rust parser rewrites at a call
->      site into a UNARY node (two adjacent arms in `crates/sentinel-syntax/src/parser.rs`;
->      `snc merge`'s Bar-A printer rejects the same four by name). scg has no such rewrite and
->      emits `(call ptr_of …)`. 7 programs registered. Small, but it needs the four new unary
->      opcodes threaded through resolve/types/mir/codegen to be coherent, so it is a mirror
->      slice, not a dump patch. Pairs naturally with (3) — `sqrt` is half of it.
+>   3. **ADR 0058 f64 CODEGEN** — the front-end mirror is DONE (`339f437` + `3eeb34a`, ADR 0058
+>      A8), so what is left is the back end, and it is a JOINT `snc`+`scg` slice rather than a
+>      mirror: the `snc llvm` TEXT oracle itself Errs on every float literal
+>      (`float literal not ported`) and on `llvm_ty(F64)`, which is precisely why the codegen
+>      differential skips float programs today and why the front-end mirror needed no codegen
+>      half. Doing it means teaching the text oracle `fadd`/`fsub`/`fmul`/`fdiv`/`fneg`/`fcmp`
+>      (A5's predicate table: `oeq`/`olt`/`ole`/`ogt`/`oge` but `une` for `!=`),
+>      `sitofp`/`fptosi`, `llvm.sqrt.f64` and a `double` constant — then mirroring all of it.
+>      THREE traps are already signposted in `selfhost/` for whoever takes it: `scalar_bits(4)`
+>      answers 64, so the Cast arm's width-equality test reads an int↔f64 cast as a no-op;
+>      the four word-scalar encode/decode chains in `cg_effects.sentinel` DEFAULT an unknown
+>      handle to "pointer", so an f64 element would get `ptrtoint`/`inttoptr` (invalid IR on a
+>      `double`) instead of `bitcast`; and `cg_mangle_to` needed a real `ty_F64` arm, which it
+>      now has. Also worth doing with it: `examples/math/quadratic.sentinel` and
+>      `sentinel_library/std/math/float.sentinel` currently reach only lex/ast, because
+>      `snc merge`'s Bar-A printer rejects both a float literal and `sqrt` (menu item 5).
+>   4. **The ADR 0057 half of the RESERVED-NAME family** — `ptr_of` / `ptr_of_mut` / `is_null`
+>      are three of the FOUR names the Rust parser rewrites at a call site into a UNARY node
+>      (two adjacent arms in `crates/sentinel-syntax/src/parser.rs`); `sqrt` was the fourth and
+>      landed with the ADR 0058 mirror, so the SHAPE of this slice is now demonstrated
+>      end-to-end — copy it. scg has no rewrite for the three and emits `(call ptr_of …)`;
+>      5 programs registered at `ast`. Unary op-codes **7/8/9 are reserved** for them, and the
+>      four symbol tables that must each gain an arm are `parser/dump.sentinel`,
+>      `resolve/dump.sentinel`, `types/borrow_arms.sentinel` and `types/mir.sentinel` — plus
+>      `merge.sentinel`'s `unary_sym`, which is CALL-shaped like `sqrt` and so needs the
+>      call-syntax branch in `merge/emit.sentinel`, not a prefix symbol. (That fourth table was
+>      missed the first time and rendered `sqrt` as `&mut`; its fallback is now a name that
+>      cannot re-parse, so a repeat fails loudly.)
 >   5. **Widen `snc merge`'s Bar-A source printer** — the highest-leverage COVERAGE item.
 >      `crates/sentinel-driver/src/source_dump.rs` rejects 96 of the 116 real programs, dominated
 >      by `cast` (37) and `declassify` (36), then `ptr_of`/`sqrt` (8), `float literal` (6),
@@ -121,13 +131,19 @@ reference as you work through the milestones.
 >      qualified. The Rust `Renamer` skips in-scope type params; scg has no `tparams` set.
 
 > ⚠ **KNOWN-AND-TOLERATED scg-over-accepts (documented at `selfhost/types/interner.sentinel`'s
-> `is_channel` arm — do NOT "fix" blindly, they are snc-only and IR-invisible):** (a)
-> `Channel<f64>` renders `Channel<i64>` in scg's TYPES dump (scg has no f64 type handle — the
-> same missing handle behind menu item 3; LLVM byte-identical, no f64 value can flow, no corpus
-> program — but if a `Channel<f64>` fixture is ever added it FAILS the types differential
-> unregistered: register it or close scg's f64 gap first); (b) scg does not re-enforce the
-> oracle's one-level channel nesting cap. Both are the "scg is dump-only, trusts oracle-valid
-> input" contract, like the guard/return pins.
+> `is_channel` arm — do NOT "fix" blindly, they are snc-only and IR-invisible):** scg does not
+> re-enforce the oracle's one-level channel nesting cap. That is the "scg is dump-only, trusts
+> oracle-valid input" contract, like the guard/return pins.
+> (The `Channel<f64>`-renders-`Channel<i64>` entry that used to head this list is **CLOSED** —
+> the ADR 0058 mirror made `f64` scalar code 4, so it now renders correctly, verified at
+> `types` and `mir`. `?f64` and `Fn<f64,f64>` came with it.)
+> ⚠ **A DIFFERENT, still-open over-accept in the same function, and NOT an f64 matter:** the
+> `is_shared` / `is_mutex` arms are element-HARDCODED — they call `collect_tyargs` only to
+> discard it and intern `mk_shared(c, 0)` — so `Shared<T>` / `Mutex<T>` render `<i64>` for
+> EVERY non-i64 element (`Shared<u8>` diverges identically; verified). Pre-existing ADR 0071
+> scope, unregistered because no corpus program annotates one. Making the two arms
+> element-generic is a 2-line mirror of the `is_channel` arm, but it touches refcount/drop
+> typing, so it wants its own slice.
 
 > **▶▶ THE BOUNDARY-PREDICATE AUDIT (`61bcac3`) — what it found, so it need not be re-run.**
 > Prompted by the M1.2c fence bug (a security boundary written as `is_spawn_word_scalar(ty) &&
@@ -375,9 +391,13 @@ reference as you work through the milestones.
 > not on the overstated one. **Verify the consequence, not just the discrepancy.**
 >
 > HANDOFF STATE (verified against the repo 2026-08-30): four-check green — `cargo test
-> --workspace --no-fail-fast` = **1802 passed / the 18 known Windows failures**, zero new;
-> `pass` **158**, `ui` **50** (this session added `c59_export_call`); all 9 differential stages
-> byte-identical, both bootstrap fixed points hold; working tree clean. abi count **51**.
+> --workspace --no-fail-fast` = **1803 passed / the 18 known Windows failures**, zero new;
+> `pass` **159**, `ui` **50** (this session added `c59_export_call` + `c58_float_math`); all 9
+> differential stages byte-identical, both bootstrap fixed points hold; working tree clean.
+> abi count **51**. **scg scalar codes: i64=0, i32=1, bool=2, u8=3, f64=4 (ADR 0058); unary
+> op-codes 1..=5 are the prefix operators, 6 is `sqrt`, and 7/8/9 are RESERVED for ADR 0057's
+> `ptr_of`/`ptr_of_mut`/`is_null`. Parser token tags run 1..66 and are APPEND-ONLY** (resolve's
+> decl scanner compares raw tag integers, so inserting one mid-table mis-classifies silently).
 > Interner kinds: Channel=13, Shared=17, Mutex=18, Guard=19; **next free = 20**. Secret
 > container slots 6..=9 (i64/i32/u8/bool); channel slots i64=0..ptr=5, secret reservation
 > 6..=9, channel-of-channels 10..=15 (`channel_chanid_for`).
@@ -385,10 +405,12 @@ reference as you work through the milestones.
 > `selfhost_codegen.rs` (unchanged this session): `DEFERRED_PROGRAMS` = **6** (2× `fn_value`
 > ADR 0070, 3× `sealed_*` ADR 0069, `process_channel_typed` M2.3b), `KNOWN_SCG_BUGS` = **1**
 > (`delegation.sentinel`, named-impl qualification). NEW, from the real-program sweep:
-> **lex** 8 deferred (all ADR 0058 float literals) · **ast** 13 deferred (6 float-only, 2 that
-> carry BOTH the float and the `sqrt` cause, 5 `ptr_of`-family), 0 bugs — the 3 `export`
-> entries were deleted BY THE FIX · **resolve** 2 · **types** 5 · **mir** 5 · **effects /
-> borrow / ctverify** 0. Every `KNOWN_SCG_BUGS` in the seven new registries is EMPTY. Every real-program registry has a written DEFERRED-vs-BUG criterion at its head;
+> **lex** 0 · **ast** 5 (the `ptr_of` family — the 8 float entries and the 3 `export` entries
+> were all deleted BY FIXES) · **resolve** 0 · **types** 4 · **mir** 4 · **effects / borrow /
+> ctverify** 0. Every `KNOWN_SCG_BUGS` in the seven new registries is EMPTY. The only
+> multi-cause entry left is `fn_value_generic` (types + mir), NARROWED by the float mirror from
+> float+ADR-0070 down to ADR 0070 alone — when a slice closes one cause of a multi-cause entry,
+> EDIT it down, never delete it. Every real-program registry has a written DEFERRED-vs-BUG criterion at its head;
 > read it before adding an entry. ⚠ The ctverify real-program sweep is **VACUOUS** by
 > construction (all 19 comparisons are `"" == ""`) — its doc says so; do not read its empty
 > registry as verifier parity. Lexer keyword table = Rust's exactly (38; derive-and-diff command

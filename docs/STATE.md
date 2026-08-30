@@ -14,6 +14,39 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
+**Latest (2026-08-30) — the ADR 0058 `f64` FRONT-END mirror lands, discharging A3's deferral:
+`scg` reproduces the oracle on floats at every front-end stage, and
+`tests/pass/c58_float_math.sentinel` is the first `f64` fixture in the corpus** (`339f437` the
+lexer half, `3eeb34a` the rest, ADR 0058 **A8**). Before it, `2.0` lexed as `IntLit Dot IntLit`
+and the parser read the `.` as a FIELD ACCESS — `(field (int 2) 0)` where the oracle emits
+`(float 2.0)` — a SILENT misparse across 8 real programs. A3 had deferred the mirror AND the
+fixture together and said why they were coupled; what actually forced it was the real-program
+sweep below, which compared those 8 programs for the first time.
+**Scope is FRONT END only, and that is sufficient by construction:** `snc llvm` Errs on every
+float LITERAL it lowers, so the codegen differential skips every float program. State that
+guard as the literal check and no other — the oracle does NOT refuse `F64` as such, and getting
+it wrong cost a real defect during implementation (a phantom `f64` generic argument reaches
+`scg`'s codegen, where `cg_mangle_to` had no scalar-4 arm and ABORTED on a program the oracle
+compiles). **Four load-bearing choices:** `f64` is a scg SCALAR CODE (4), never a new interner
+KIND (every `h < tbase()` test *means* "scalar" — a kind would have made every f64 value MOVE
+and polluted the borrow dump); `sqrt` is A1's call-site rewrite to unary op-code 6, never a
+builtin (builtins are FnIds 0..=41 and user fns `42 + idx`, so a 42nd would shift every user
+FnId); `Expr::Float` carries the RAW LEXEME (the ast dump has no `src`, and a future codegen
+must decode from the original bytes); and the rendering lives in ONE shared `append_float`, not
+three copies that would drift. **The formatter** reproduces Rust's `{:?}` from decimal TEXT with
+no `f64` anywhere — selfhost sources may not contain a float — and is exact for at most 15
+significant digits over a normal double; beyond that (>15 digits, overflow, subnormal) it is
+NOT, and all three were run to confirm the failure is a LOUD unregistered mismatch, never wrong
+code. A 197-literal fuzz matches everywhere in-domain. RESULT: lex/ast/resolve/effects/borrow/
+ctverify diverge on NOTHING; types and mir keep exactly the three registered entries
+(`fn_value_generic` NARROWED from two causes to one). Both fixed points hold. The
+**`Channel<f64>` mis-render that HANDOVER carried as a known-and-tolerated over-accept is
+CLOSED** as a side effect, along with `?f64` and `Fn<f64,f64>`. A 5-lens review found three
+defects that would have shipped — the `cg_mangle_to` abort, a false "`snc llvm` Errs on `F64`"
+claim repeated in four places, and a FOURTH unary symbol table (`merge.sentinel`) where `sqrt`
+rendered as `&mut`, turning `sqrt(a)` into `(&mut a)`: a different, borrow-checking program.
+`pass` 157 → 159.
+
 **Latest (2026-08-30) — the seven fixture-only stage differentials now sweep REAL PROGRAMS, and
 the first sweep found three unmirrored front-end surfaces the fixture corpus could not reach**
 (`34ffea0`). `selfhost_lex/parse/resolve/types/effects/borrow/mir/ctverify` compared `scg`
@@ -36,7 +69,9 @@ FIXTURE along with the mirror, and zero of the 207 fixtures contain a float lite
 below). (3) **the RESERVED-NAME family** — `sqrt` (ADR 0058 A1) and `ptr_of`/`ptr_of_mut`/
 `is_null` (ADR 0057 Phase 1b) are the only four names the Rust parser rewrites at a call site
 into a UNARY node; `scg` emits `(call …)`. `sqrt` was found by the adversarial review, hiding
-inside two entries registered only for floats. Plus ADR 0070 D3-revisit and ADR 0066 M2.3b, now
+inside two entries registered only for floats. **(1) and the `sqrt` half of (3) are now CLOSED**
+— see the ADR 0058 mirror below; (2) closed in `e2e5ee5`; the `ptr_of` half of (3) is still
+registered, which is menu item 4. Plus ADR 0070 D3-revisit and ADR 0066 M2.3b, now
 visible three stages EARLIER than where they were first registered. `effects`, `borrow` and
 `ctverify` diverge on NOTHING. Registration follows `selfhost_codegen`'s two lists, but the
 split now carries a WRITTEN CRITERION (both lists feed one lookup, so the classification is pure
@@ -91,7 +126,8 @@ oracle≡scg on channel_generic, channel-of-channels, `Channel<i32>`, and the co
 An adversarial review found one LOW pre-existing divergence (documented, not diff-introduced):
 `Channel<f64>` mis-renders `Channel<i64>` in scg's TYPES dump — a symptom of scg's separately
 -tracked no-f64-handle gap (LLVM byte-identical, no f64 value can flow, no such program in the
-corpus). scg also doesn't re-enforce the oracle's one-level nesting cap (an snc-only rejection).
+corpus). **[CLOSED 2026-08-30 by the ADR 0058 mirror above: `f64` is scalar code 4, so
+`Channel<f64>` now renders correctly.]** scg also doesn't re-enforce the oracle's one-level nesting cap (an snc-only rejection).
 
 **Latest (2026-07-21) — the audit's B1 CONSTANT-TIME guard-rail landed** (`e450102`), a
 fail-closed defense-in-depth test closing the last of the audit's four findings. The

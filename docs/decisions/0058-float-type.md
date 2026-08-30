@@ -1,6 +1,6 @@
 # ADR 0058: A 64-bit floating-point type (`f64`) — public-only
 
-Status: **ACCEPTED-WITH-AMENDMENTS (A1–A7).** Implemented `snc`-side in four staged
+Status: **ACCEPTED-WITH-AMENDMENTS (A1–A8).** Implemented `snc`-side in four staged
 commits (lexer → `Type::F64` + arithmetic/casts → float literals → `sqrt`) plus a
 demonstrator. The design below stands; the amendments at the end record where the
 implementation refined it. This was the ADR-first design gate for "math functions" beyond
@@ -190,3 +190,43 @@ integer min/max/clamp.
   public-only) numeric module — the float counterpart to `std::math::num`. The example
   `examples/math/quadratic.sentinel` solves the quadratic formula and a 3-4-5 triangle
   across the module boundary.
+
+- **A8 — A3's deferral is DISCHARGED: the `scg` FRONT-END mirror and the
+  `tests/pass` fixture landed together, exactly as A3 said they must.** The mirror is
+  `339f437` (the lexer half) + `3eeb34a` (parser / resolve / types / mir), and the
+  fixture is **`tests/pass/c58_float_math.sentinel`**, the first `f64` fixture in the
+  corpus. What forced the issue was not this ADR but the extended real-program stage
+  differentials (`34ffea0`): the eight `examples/` + `sentinel_library/` programs that
+  use floats had never been compared, because A3 deferred the fixture along with the
+  mirror and the differentials swept only `tests/pass` + `tests/ui`. The first sweep
+  showed `2.0` lexing as `IntLit Dot IntLit` and PARSING as a field access —
+  `(field (int 2) 0)` — a silent misparse, not a rejection.
+  **Scope: FRONT END only, and that is sufficient by construction.** `snc llvm` Errs on
+  every float LITERAL it lowers, so the codegen differential skips every float program
+  and no codegen mirror is needed — which is also why the fixture is safe. State that
+  guard as the LITERAL check and no other: the oracle does NOT refuse `F64` as such
+  (`Channel<f64>` and a phantom `f64` generic argument both lower cleanly), and getting
+  this wrong cost a real defect during implementation — `cg_mangle_to` had no scalar-4
+  arm, so `struct Pair<A, B> { a: A }` used as `Pair<i64, f64>` made `scg` ABORT on a
+  program the oracle compiles to `%Pair_i64_ty_F64`. It now mirrors the oracle's own
+  defensive `ty_F64`.
+  **Two decisions worth carrying forward.** (i) `f64` is a scg SCALAR CODE (4), never a
+  new interner KIND: every `h < tbase()` test in the self-hosted typer *means* "scalar"
+  (Copy, drop-free, `Fn<T,R>`-eligible, substitution-inert), so a kind would have made
+  every f64 value MOVE and polluted the borrow dump. (ii) A1's reserved-name rewrite is
+  what makes `sqrt` free of an `FnId` — builtins occupy 0..=41 and user fns are
+  `42 + idx`, so a 42nd builtin would shift every user FnId and re-bless every dump.
+  **The formatter is the interesting artefact.** The dumps print a float by VALUE
+  (Rust's `{:?}`), so the mirror must reproduce shortest-round-trip formatting *from
+  decimal text with no `f64` anywhere* — selfhost sources may not contain a float, or
+  the oracle would Err on them. It is exact for at most 15 significant digits over a
+  normal double (DBL_DIG = 15 means no shorter decimal shares the double), and NOT
+  exact beyond that: >15 digits, overflow (`1.8e308` → `inf`) and subnormals all differ,
+  each verified to fail as a LOUD unregistered differential mismatch rather than as
+  wrong code.
+  **Side effect:** the `Channel<f64>` mis-render that HANDOVER carried as a
+  known-and-tolerated `scg` over-accept is CLOSED, and `?f64` / `Fn<f64,f64>` now render
+  correctly too. **A6 is partly stale:** it says `?f64` is out of scope, but ADR 0066
+  M1.2b later added `NullableInner::F64`, so `?f64` is accepted — `[f64]` and `Vec<f64>`
+  remain rejected. **Still deferred:** f64 CODEGEN in `scg` (and with it the `snc llvm`
+  text backend's own F64 support), `f32`, and float ⇄ string.
