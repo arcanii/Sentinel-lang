@@ -51,7 +51,23 @@ reference as you work through the milestones.
 
 ---
 
-### ▶ RESUME HERE (2026-07-21 — **ADR 0066 M1.2c CHANNEL-OF-CHANNELS ships** (`fb2f317`), closing the M1.4-0 addressed-reply wall; `select`'s runtime is PINNED but unbuilt. The review caught a **memory-safety break this introduced** (a security fence coupled to an unrelated type-map) pre-commit — fixed + pinned by a ui fixture. Earlier the same day: the `extern "C"` mirror completed and both spawn bugs closed)
+### ▶ RESUME HERE (2026-07-21 — **ADR 0066 M1.2c CHANNEL-OF-CHANNELS ships** (`fb2f317`), closing the M1.4-0 addressed-reply wall; `select`'s runtime is PINNED but unbuilt. The review caught a **memory-safety break this introduced** (a security fence coupled to an unrelated type-map) pre-commit — fixed + pinned by a ui fixture; a follow-up boundary-predicate AUDIT (`61bcac3`) then swept the type system for the same shape [negative — one instance, fixed] and hardened `needs_drop` to fail closed. Earlier the same day: the `extern "C"` mirror completed and both spawn bugs closed)
+
+> **▶▶ THE BOUNDARY-PREDICATE AUDIT (`61bcac3`) — what it found, so it need not be re-run.**
+> Prompted by the M1.2c fence bug (a security boundary written as `is_spawn_word_scalar(ty) &&
+> ty.to_nullable_inner().is_some()` — a coincidental intersection that widened silently). Swept
+> every value-admission / ownership / constant-time boundary. RESULT: the exact conjunction
+> shape exists in ONE place (the fixed `is_process_channel_elem`); every other value-admission
+> fence is a default-closed explicit list. Fixed: `needs_drop` (the only fence that failed OPEN,
+> `_ => false`) is now exhaustive like `is_copy_type`; two doc-comments that described their list
+> AS the intersection were de-coupled. Routed onward: **B1 — the constant-time verify reads
+> taint off `Type`, so a future operator that forgets to re-wrap `secret` could silently disarm
+> the leak check** (same mode as the bug, NOT live — the primary SecretBranch/Divisor/
+> ShiftAmount rejections are eager + explicit; filed as a defense-in-depth guard-rail task,
+> needs its own review because it touches the constant-time guarantee). B4 (`secret_scalar_slot`
+> position invariant) left — explicit + test-pinned. **The lesson that generalises: a security
+> boundary must be an explicit list, never a derived intersection of two maps maintained for
+> other purposes — and each such boundary must be pinned by a rejection fixture.**
 
 > **▶▶ M1.2c LANDED — what a resuming session needs.** `Channel<Channel<T>>`, ONE level, at
 > fixed `ChanId`s 10..=15; 6..=9 are RESERVED for M1.4c-2 `Channel<secret T>` (the map and the

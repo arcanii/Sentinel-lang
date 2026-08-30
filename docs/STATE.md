@@ -14,6 +14,24 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
+**Latest (2026-07-21) — boundary-predicate SECURITY-HYGIENE audit** (`61bcac3`), prompted by
+the M1.2c review's memory-safety finding (a security fence written as a coincidental
+intersection of two unrelated predicates, which silently widened when one input changed
+elsewhere). The audit swept every value-admission / ownership / constant-time boundary in the
+type system, borrow checker, MIR, and codegen for the same SHAPE. **Headline: negative** — that
+exact conjunction exists in exactly one place (the already-fixed `is_process_channel_elem`), and
+every value-admission fence (process / FFI / spawn / channel / shared / mutex / guard / sealed /
+Fn) is a **default-closed explicit `matches!` list**. Two actionable residuals closed: (1)
+`needs_drop` was the ONE safety classifier that failed OPEN (`_ => false`) — a future refcounted
+handle would have silently leaked; it is now an exhaustive match like its sibling `is_copy_type`,
+so a new `Type` is a compile error there (behavior unchanged — selfhost_codegen byte-identical
+proves no drop emission moved); (2) two doc-comments that described their explicit list AS the
+coincidental intersection were rewritten so each boundary owns its own list. Two findings routed
+onward: B1 (constant-time verify reads taint off `Type`, so a future op forgetting to re-wrap
+`secret` could disarm the leak check — same mode, NOT live: the primary SecretBranch/Divisor/
+ShiftAmount rejections are eager + explicit) is a filed defense-in-depth task for a guard-rail;
+B4 (`secret_scalar_slot` position invariant) is explicit + test-pinned. pass 151, all green.
+
 **Latest (2026-07-21) — ADR 0066 M1.2c: CHANNEL-OF-CHANNELS ships, closing the M1.4-0
 addressed-reply expressiveness wall** (`fb2f317`). `Channel<Channel<T>>` (one level) lets a
 request carry its own reply channel, so each worker waits on exactly ONE channel and replies
