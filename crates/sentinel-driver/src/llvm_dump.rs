@@ -4749,6 +4749,47 @@ fn needs_drop(ty: Type, program: &TypedProgram) -> bool {
                 needs_drop(f.ty.substitute(&inst_args, &mut insts, &mut refs), program)
             })
         }
-        _ => false,
+        // Everything else owns no scope-exit drop. This is EXHAUSTIVE on purpose —
+        // it was `_ => false`, the one safety classifier in the compiler that failed
+        // OPEN: a future refcounted/resource-owning handle added to `Type` would have
+        // silently defaulted to "no drop" and LEAKED (or, if also `Copy` with a
+        // clone-on-copy, gone refcount-unbalanced). Its sibling `is_copy_type`
+        // (sentinel-borrow-check) is already an exhaustive match for exactly this
+        // reason; listing every variant here brings the pair into line, so a NEW
+        // `Type` forces a compile error at this arm rather than a silent leak. Match
+        // the categories to `is_copy_type` when you add one.
+        //   - word scalars: no heap payload.
+        Type::I64
+        | Type::I32
+        | Type::U8
+        | Type::Bool
+        | Type::F64
+        | Type::U128
+        // secret wraps only word scalars (a droppable inner is unrepresentable),
+        // so a `secret T` carries nothing to free.
+        | Type::Secret(_)
+        //   - leaked/borrowed pointers + handles: a `ptr`/`&T` owns nothing; the
+        //     concurrency + Fn handles are `Copy` and deliberately LEAKED
+        //     (`needs_drop == false` is their defining trait — the refcounted
+        //     `Shared`/`Mutex`/`Guard` above are the exceptions, not these). A `Kont`
+        //     is freed by the runtime frame chain, not a scope drop.
+        | Type::Ptr
+        | Type::Ref(_)
+        | Type::Fn(_)
+        | Type::Task(_)
+        | Type::Channel(_)
+        | Type::Process
+        | Type::SealedChannel
+        | Type::Kont(_)
+        //   - a class instance boxes nothing droppable at 1.0 (explicit-drop
+        //     rewriting is deferred post-1.0; unchanged from the prior `_ => false`).
+        | Type::Class(_)
+        //   - abstract types are monomorphized/substituted away before codegen.
+        | Type::TypeParam(_)
+        | Type::TraitSelf(_)
+        //   - `?Guard` already returned true above; every other nullable payload
+        //     (`?scalar`/`?ptr`/`?Channel`/`?Ref`/…) is Copy/leaked, so the
+        //     nullable box itself frees nothing.
+        | Type::Nullable(_) => false,
     }
 }

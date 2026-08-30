@@ -307,14 +307,19 @@ pub struct KontData {
 
 /// ADR 0070 (generalized): identifier for a `Fn<T,R>` value signature —
 /// **not** an interner-table index (unlike `RefId`/`SecretId`/`KontId`).
-/// `(param_ty, ret_ty)` are both restricted to word-scalars
-/// (`is_spawn_word_scalar` ∩ has-`NullableInner`, the same 6-element set
-/// `Channel<T>`'s M1.2b-cont generalization uses), so the id is computed
-/// ARITHMETICALLY as `param_index * 6 + ret_index` (see
-/// [`fn_value_sig_id_for`] / [`fn_value_sig_param_ret`]) — avoiding
-/// threading an interner table through `resolve_type_expr`'s full
-/// recursion (the way `channel_chanid_for`/`channel_elem_for` avoid
+/// `(param_ty, ret_ty)` are both restricted to the six word-scalars
+/// (`i64`/`i32`/`u8`/`bool`/`f64`/`ptr`) by the EXPLICIT list in
+/// [`fn_value_word_scalar_index`], so the id is computed ARITHMETICALLY as
+/// `param_index * 6 + ret_index` (see [`fn_value_sig_id_for`] /
+/// [`fn_value_sig_param_ret`]) — avoiding threading an interner table through
+/// `resolve_type_expr`'s full recursion (the way `channel_chanid_for` avoids
 /// threading `channels` through `check_call`).
+///
+/// ⚠ That set happens to coincide with `is_spawn_word_scalar ∩
+/// has-NullableInner` today, but do NOT "de-dup" the explicit list into that
+/// intersection: it was exactly such a coincidental intersection
+/// (`is_process_channel_elem`) that silently widened the cross-process fence
+/// when `Channel` gained a `?T` form. Each set that matters owns its own list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FnValueSigId(pub u32);
 
@@ -1548,8 +1553,17 @@ pub fn is_process_channel_elem(ty: Type) -> bool {
 /// pre-interned at FIXED [`ChanId`]s 0..=5 during channel-builtin signature setup,
 /// so a `Channel<T>` annotation maps to a stable `ChanId` WITHOUT threading the
 /// `channels` interner through the checker (the snag the generic-channel design
-/// avoids). Returns the fixed `ChanId` index for a word-scalar `elem`, or `None`
-/// for a non-channel element. The set matches [`is_process_channel_elem`].
+/// avoids). Returns the fixed `ChanId` index for a supported `elem`, or `None`
+/// otherwise.
+///
+/// ⚠ This set is DELIBERATELY BROADER than [`is_process_channel_elem`] and the
+/// two must NOT be re-coupled. An IN-PROCESS channel may carry another channel
+/// handle (ADR 0066 M1.2c, the nested `Channel<Channel<E>>` slots below); a
+/// process PIPE may not (a handle is a process-local address — see
+/// `is_process_channel_elem`'s warning). They happened to be the same six
+/// word-scalars before M1.2c, and a since-removed comment here claimed they
+/// "match" — that coupling is exactly what silently widened the cross-process
+/// fence. Each boundary owns its own explicit set.
 pub fn channel_chanid_for(elem: Type) -> Option<u32> {
     match elem {
         Type::I64 => Some(0),
