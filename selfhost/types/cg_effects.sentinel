@@ -526,23 +526,47 @@ fn cg_emit_call(c: &mut TyCtx, src: &[u8], fid: i64, snap: i64, rty: i64) -> i64
         cg_reg(c, cn_d);
         0
     } else if fid == 22 {
-        // (ADR 0066 M1.2) send(ch, v) -> i64 status.
+        // (ADR 0066 M1.2 / M1.2b-cont / M1.2c) send(ch, v) -> i64 status. ENCODE the
+        // value into the channel's i64 slot by its element type (the M1.1 encode):
+        // i64 no-op / i32,bool,u8 `zext` / a channel HANDLE (channel-of-channels)
+        // `ptrtoint`. The encode is emitted HERE, before the send's own dst, so
+        // register numbering matches the oracle. (`f64` has no scg handle — the
+        // pre-existing gap — so it cannot occur; the `else` is the ptr/channel case.)
         let cs_chk: i64 = (*c).cgak[snap];
         let cs_chv: i64 = (*c).cgav[snap];
         let cs_vk: i64 = (*c).cgak[snap + 1];
         let cs_vv: i64 = (*c).cgav[snap + 1];
+        let cs_vt: i64 = (*c).cgat[snap + 1];
+        let cs_enc: i64 = if cs_vt == 0 {
+            0 - 1
+        } else if cs_vt == 1 || cs_vt == 2 || cs_vt == 3 {
+            cg_conv(c, "zext", cs_vt, cs_vk, cs_vv, 0)
+        } else {
+            cg_conv(c, "ptrtoint", cs_vt, cs_vk, cs_vv, 0)
+        };
         let cs_d: i64 = cg_dst(c);
         cgo_str(c, "call i64 @sentinel_channel_send(ptr ");
         cgo_operand(c, cs_chk, cs_chv);
         cgo_str(c, ", i64 ");
-        cgo_operand(c, cs_vk, cs_vv);
+        if cs_enc == 0 - 1 {
+            cgo_operand(c, cs_vk, cs_vv)
+        } else {
+            cgo_str(c, "%v");
+            cgo_int(c, cs_enc)
+        };
         cgo_str(c, ")\n");
         (*c).cg_used_channelsend = true;
         cg_reg(c, cs_d);
         0
     } else if fid == 23 {
-        // (ADR 0066 M1.2) recv(ch) -> ?i64: write to a stack out-slot, build the
-        // `{ i1 valid, i64 value }` from the i64 status (valid = status == 0).
+        // (ADR 0066 M1.2 / M1.2b-cont / M1.2c) recv(ch) -> ?<elem>: read the i64
+        // frame from a stack out-slot (always i64 — the runtime frame width is
+        // fixed), DECODE it into the element (i64 no-op / i32,bool,u8 `trunc` / a
+        // channel handle `inttoptr`), then build `{ i1 valid, <ety> value }`
+        // (valid = status == 0). The element comes off recv's `?<elem>` return
+        // type; `<ety>` (= `cgo_ty(elem)`) is `ptr` for a channel-of-channels
+        // element, giving `{ i1, ptr }` = `?Channel`.
+        let cr_elem: i64 = nullable_inner_of(c, rty);
         let cr_chk: i64 = (*c).cgak[snap];
         let cr_chv: i64 = (*c).cgav[snap];
         let cr_slot: i64 = cg_alloca(c, 0);
@@ -557,18 +581,31 @@ fn cg_emit_call(c: &mut TyCtx, src: &[u8], fid: i64, snap: i64, rty: i64) -> i64
         cgo_str(c, "icmp eq i64 %v");
         cgo_int(c, cr_status);
         cgo_str(c, ", 0\n");
-        let cr_value: i64 = cg_dst(c);
+        let cr_raw: i64 = cg_dst(c);
         cgo_str(c, "load i64, ptr %v");
         cgo_int(c, cr_slot);
         cg_putc(c, '\n');
+        let cr_value: i64 = if cr_elem == 0 {
+            cr_raw
+        } else if cr_elem == 1 || cr_elem == 2 || cr_elem == 3 {
+            cg_conv(c, "trunc", 0, 0, cr_raw, cr_elem)
+        } else {
+            cg_conv(c, "inttoptr", 0, 0, cr_raw, cr_elem)
+        };
         let cr_o0: i64 = cg_dst(c);
-        cgo_str(c, "insertvalue { i1, i64 } undef, i1 %v");
+        cgo_str(c, "insertvalue { i1, ");
+        cgo_ty(c, cr_elem);
+        cgo_str(c, " } undef, i1 %v");
         cgo_int(c, cr_valid);
         cgo_str(c, ", 0\n");
         let cr_o1: i64 = cg_dst(c);
-        cgo_str(c, "insertvalue { i1, i64 } %v");
+        cgo_str(c, "insertvalue { i1, ");
+        cgo_ty(c, cr_elem);
+        cgo_str(c, " } %v");
         cgo_int(c, cr_o0);
-        cgo_str(c, ", i64 %v");
+        cgo_str(c, ", ");
+        cgo_ty(c, cr_elem);
+        cgo_str(c, " %v");
         cgo_int(c, cr_value);
         cgo_str(c, ", 1\n");
         cg_reg(c, cr_o1);

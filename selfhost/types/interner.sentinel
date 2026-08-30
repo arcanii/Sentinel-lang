@@ -706,6 +706,10 @@ fn container_elem(c: &mut TyCtx, h: i64) -> i64 {
             (*c).ta[idx]
         } else if k == 19 {
             (*c).ta[idx]
+        } else if k == 13 {
+            // (ADR 0066 M1.2b-cont / M1.2c) a `Channel<T>` element — lets `recv`
+            // read its element off the channel handle for the `(targs)` + decode.
+            (*c).ta[idx]
         } else {
             0 - 1
         }
@@ -1303,11 +1307,32 @@ fn type_of_typeexpr(c: &mut TyCtx, t: TypeE, gb: &mut Vec<u8>) -> i64 {
                 };
                 mk_vec(c, velem)
             } else if is_channel {
-                // resolve (and free) the type args like `Vec`; the element
-                // type is `i64` at the M1.2b minimum, so the handle is 0.
+                // (ADR 0066 M1.2b-cont / M1.2c) element-generic, mirroring `is_vec`
+                // above: resolve the `<…>` type arg — a word scalar (i32/u8/bool) or
+                // a nested `Channel<…>` handle — instead of hardcoding `i64`.
+                //
+                // Two oracle-rejections this does NOT re-enforce (both snc-only, like
+                // the guard/return pins — scg is dump-only and trusts oracle-valid
+                // input; the differential skips anything the oracle rejects):
+                //  * `Channel<f64>` — scg has no `f64` type handle (a pre-existing,
+                //    separately-tracked gap), so `collect_tyargs` maps `f64` to 0 and
+                //    this renders `Channel<i64>` in the TYPES dump where the oracle
+                //    renders `Channel<f64>`. No f64 VALUE can flow (scg has no f64
+                //    literal/codegen), and channel_new/close lower element-agnostically
+                //    (a ptr), so the LLVM IR is byte-identical — the mismatch is the
+                //    annotation label only. No `Channel<f64>` program exists in the
+                //    corpus, so no differential observes it.
+                //  * depth > 1 (`Channel<Channel<Channel<…>>>`) — the oracle caps
+                //    nesting at one level (`channel_chanid_for`); scg interns any depth
+                //    structurally. Oracle-rejected, so differential-skipped.
                 let mut cav: Vec<i64> = vec_new();
                 collect_tyargs(c, ga, gb, &mut cav);
-                mk_channel(c, 0)
+                let celem: i64 = if len(cav) > 0 {
+                    cav[0]
+                } else {
+                    0
+                };
+                mk_channel(c, celem)
             } else if is_fn {
                 let mut fav: Vec<i64> = vec_new();
                 collect_tyargs(c, ga, gb, &mut fav);

@@ -632,6 +632,39 @@ fn dump_container_call(out: &mut Vec<u8>, fid: i64, ca: Args, src: &[u8], c: &mu
     }
 }
 
+// (ADR 0066 M1.2b-cont / M1.2c) recv(ch) -> ?<elem>: the container READER shape
+// (like shared_get) — buffer the channel arg, read its element off the handle
+// (`container_elem`, now channel-aware), emit `(targs <elem>)` for a NON-i64
+// element so the typed dump matches the oracle's `type_args` (recorded by
+// `check_call` for a non-i64 recv), and return `?<elem>`. The i64 case emits no
+// targs, keeping every pre-M1.2b fixture byte-identical. An `<elem>` that is
+// itself a `Channel<…>` (channel-of-channels, M1.2c) rides through unchanged —
+// `render_type` recurses and the interner is structural.
+fn dump_channel_recv(out: &mut Vec<u8>, ca: Args, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
+    let mut abuf: Vec<u8> = vec_new();
+    let ht: i64 = dump_args_capture_first(&mut abuf, ca, false, src, c, gb);
+    let elem: i64 = if ht == 0 - 1 {
+        0 - 1
+    } else {
+        container_elem(c, ht)
+    };
+    if elem == 0 - 1 {
+        append_str(out, vec_to_array(abuf));
+        builtin_ret(c, 23)
+    } else {
+        if elem == 0 {
+            0
+        } else {
+            append_str(out, " (targs ");
+            render_type(out, elem, c);
+            push(out, ')');
+            0
+        };
+        append_str(out, vec_to_array(abuf));
+        mk_nullable(c, elem)
+    }
+}
+
 // (4c-1) struct-literal fields: emit each field's VALUE positionally (the names
 // are dropped — the typed StructLit is nameless/positional). Source order. (4h) for
 // a GENERIC struct-lit (`gen`), the field's declared type is SUBSTITUTED with the

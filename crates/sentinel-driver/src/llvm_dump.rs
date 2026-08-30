@@ -3561,7 +3561,11 @@ impl Emit<'_> {
                     writeln!(self.body, "  %v{e} = bitcast double {val} to i64").unwrap();
                     format!("%v{e}")
                 }
-                Type::Ptr => {
+                // ADR 0066 M1.2c: a `Channel<Channel<T>>` element is a channel
+                // HANDLE — a `ptr`, encoded like `Type::Ptr` (this is exactly what
+                // inkwell does, matching on the pointer VALUE). Lets a request carry
+                // its own reply channel (the addressed-reply pattern).
+                Type::Ptr | Type::Channel(_) => {
                     let e = self.fresh();
                     writeln!(self.body, "  %v{e} = ptrtoint ptr {val} to i64").unwrap();
                     format!("%v{e}")
@@ -3744,7 +3748,11 @@ impl Emit<'_> {
                     writeln!(self.body, "  %v{d} = bitcast i64 %v{raw} to double").unwrap();
                     format!("%v{d}")
                 }
-                Type::Ptr => {
+                // ADR 0066 M1.2c: a channel-of-channels element decodes back to a
+                // channel HANDLE (a `ptr`), exactly like `Type::Ptr` — `ety` is
+                // "ptr", so the `?T` is `{ i1, ptr }` (= `?Channel`, the
+                // NullableInner::Channel added on the typing side).
+                Type::Ptr | Type::Channel(_) => {
                     let d = self.fresh();
                     writeln!(self.body, "  %v{d} = inttoptr i64 %v{raw} to ptr").unwrap();
                     format!("%v{d}")

@@ -1051,6 +1051,21 @@ fn dump_te_call(out: &mut Vec<u8>, cn: [u8], ca: Args, exp: i64, src: &[u8], c: 
                     // call's type is dynamic (the `apply` shape). This is what lets
                     // a SECRET element flow through the containers.
                     dump_container_call(out, fid, ca, src, c, gb)
+                } else if fid == 21 {
+                    // (ADR 0066 M1.2b-cont) channel_new() -> Channel<elem>: the
+                    // element is the EXPECTED type's element (mirroring the oracle,
+                    // which reads `expected_return`), else i64. No args to dump.
+                    dump_targs(out, ca, src, c, gb);
+                    let cn_elem: i64 = container_elem(c, exp);
+                    if cn_elem == 0 - 1 {
+                        mk_channel(c, 0)
+                    } else {
+                        mk_channel(c, cn_elem)
+                    }
+                } else if fid == 23 {
+                    // (ADR 0066 M1.2b-cont / M1.2c) recv(ch) -> ?<elem>: the element
+                    // comes from the channel arg's handle (the reader shape).
+                    dump_channel_recv(out, ca, src, c, gb)
                 } else {
                     dump_targs(out, ca, src, c, gb);
                     fn_ret(c, fid)

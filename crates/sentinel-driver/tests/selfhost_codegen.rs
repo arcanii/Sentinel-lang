@@ -673,24 +673,17 @@ const DEFERRED_PROGRAMS: &[(&str, &str)] = &[
     ("examples/lang/sealed_bytes.sentinel", "ADR 0069 M2.4c-1: sealed stdlib snc-only (SealedChannel param i64 vs ptr)"),
     ("examples/lang/sealed_channel.sentinel", "ADR 0069 M2.4a: sealed stdlib snc-only (SealedChannel param i64 vs ptr)"),
     ("examples/lang/sealed_session.sentinel", "ADR 0069 M2.4b-crypto: sealed stdlib snc-only"),
-    // ADR 0066 M1.2b-cont: generic word-scalar CHANNEL elements are snc-only
-    // (scg's channel paths are i64-only, and differential-clean for i64).
-    // NOTE both channel entries below are worse than a name/shape difference:
-    // scg emits INVALID IR for them, passing the raw narrow element where the
-    // runtime symbol takes an i64 (`call i64 @sentinel_channel_send(ptr %v2,
-    // i64 %v3)` with `%v3` an i8) — it is missing the zext ENCODE that the
-    // generic-element design specifies. The oracle's IR for both verifies
-    // cleanly, so this is scg-side.
-    ("examples/lang/channel_generic.sentinel", "ADR 0066 M1.2b-cont: generic channel elements are snc-only — scg emits INVALID IR (missing the zext encode: i8 passed as i64)"),
-    // ADR 0066 M1.2c (D6a): channel-of-channels. Same root cause as the entry
-    // above and deferred on the same precedent — scg's channel typing hardcodes
-    // `mk_channel(c, 0)` (element always i64) and its lowering has no
-    // encode/decode at all, so a `Channel<Channel<i64>>` types as `Channel<i64>`
-    // there. The snc side is complete (typing + both back ends); the mirror is
-    // its own slice, together with the M1.2b-cont element work it shares a cause
-    // with.
-    ("examples/lang/addressed_reply.sentinel", "ADR 0066 M1.2c: channel-of-channels is snc-only — scg hardcodes an i64 channel element (shares the M1.2b-cont mirror gap)"),
-    // ADR 0066 M2.3b: generic word-scalar elements for the process channel.
+    // (ADR 0066 M1.2b-cont `channel_generic` + M1.2c `addressed_reply` were here —
+    // generic word-scalar channel elements and channel-of-channels, both snc-only
+    // because scg's channel typing hardcoded an i64 element and its lowering had no
+    // encode/decode. Both are DELETED, not re-labelled: the scg mirror landed
+    // (element-generic channel typing + send/recv encode/decode), so both are now
+    // byte-identical to the oracle. The oracle itself was extended in the same slice
+    // — its text backend had never learned to send a channel HANDLE, so it errored
+    // on channel-of-channels where inkwell succeeded.)
+    // ADR 0066 M2.3b: generic word-scalar elements for the process channel — STILL
+    // deferred: this is the PROCESS channel (process_send/process_recv, fids 29/30),
+    // which the M1.2 in-process-channel mirror did not touch.
     ("examples/lang/process_channel_typed.sentinel", "ADR 0066 M2.3b: generic process-channel elements are snc-only — scg emits INVALID IR (missing the zext encode: i8 passed as i64)"),
 ];
 
