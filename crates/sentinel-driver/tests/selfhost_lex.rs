@@ -179,23 +179,14 @@ fn sentinel_lexer_matches_oracle_on_corpus() {
 /// It is a BUG when `scg` already has every shape involved and the divergence
 /// is a HOLE in dispatch it has already ported: closing it is a FIX that
 /// changes nothing downstream.
-const DEFERRED_PROGRAMS: &[(&str, &str)] = &[
-    // ADR 0058 floats are snc-only in the self-host: `selfhost/lexer.sentinel`
-    // has no `FloatLit` token, so `2.0` lexes as `IntLit Dot IntLit` — three
-    // tokens where the oracle emits one. SEVERITY: this is not a rejection but
-    // a SILENT re-tokenization, and downstream (`selfhost/parser`) it becomes a
-    // FIELD ACCESS (`(field (int 2) 0)`); see selfhost_parse.rs. No fixture in
-    // tests/pass or tests/ui contains a float literal, which is why the fixture
-    // differential never saw it.
-    ("examples/lang/fn_value_generic.sentinel", "ADR 0058: no FloatLit in selfhost/lexer.sentinel (`2.0` -> IntLit Dot IntLit)"),
-    ("examples/lang/task_generic.sentinel", "ADR 0058: no FloatLit in selfhost/lexer.sentinel"),
-    ("examples/math/quadratic.sentinel", "ADR 0058: no FloatLit in selfhost/lexer.sentinel"),
-    ("examples/math/transcendental.sentinel", "ADR 0058: no FloatLit in selfhost/lexer.sentinel"),
-    ("examples/text/str_demo.sentinel", "ADR 0058: no FloatLit in selfhost/lexer.sentinel"),
-    ("sentinel_library/std/data/json.sentinel", "ADR 0058: no FloatLit in selfhost/lexer.sentinel"),
-    ("sentinel_library/std/math/float.sentinel", "ADR 0058: no FloatLit in selfhost/lexer.sentinel"),
-    ("sentinel_library/std/text/str.sentinel", "ADR 0058: no FloatLit in selfhost/lexer.sentinel"),
-];
+///
+/// EMPTY. Eight programs used to be listed here for the ADR 0058 float-literal
+/// gap — `selfhost/lexer.sentinel` had no `FloatLit`, so `2.0` lexed as
+/// `IntLit Dot IntLit`. They are DELETED, not re-labelled: the mirror landed.
+/// At THIS stage it was the cheap half — `snc lex` prints the raw source span,
+/// so the lexer needs only the oracle's token regex and no float FORMATTING
+/// (that is the parser's problem, where the oracle prints the decoded value).
+const DEFERRED_PROGRAMS: &[(&str, &str)] = &[];
 
 /// Programs whose divergence is a REAL BUG in the self-hosted stage, not a
 /// deferred feature — kept separate on purpose. Conflating "we chose not to

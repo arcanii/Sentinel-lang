@@ -32,6 +32,68 @@ fn is_ident_cont(c: u8) -> bool {
     is_ident_start(c) || is_digit(c) || c == '$'
 }
 
+// (ADR 0058) The end of an `[eE][+-]?[0-9]+` exponent suffix beginning at `p`,
+// or `p` itself when there is none. A marker with no digit after the optional
+// sign is NOT an exponent: `1e` is `IntLit` then `Ident`, exactly as logos'
+// longest-match gives the Rust lexer.
+fn exp_end(src: &[u8], n: i64, p: i64) -> i64 {
+    if p < n && ((*src)[p] == 'e' || (*src)[p] == 'E') {
+        let mut q: i64 = p + 1;
+        if q < n && ((*src)[q] == '+' || (*src)[q] == '-') {
+            q = q + 1;
+            0
+        } else {
+            0
+        };
+        if q < n && is_digit((*src)[q]) {
+            let mut r: i64 = q;
+            while r < n && is_digit((*src)[r]) {
+                r = r + 1;
+            }
+            r
+        } else {
+            p
+        }
+    } else {
+        p
+    }
+}
+
+// (ADR 0058) Given `de` = the position just past a literal's LEADING digits,
+// return the end of a FLOAT literal, or `de` unchanged when the token is a
+// plain `IntLit`. Mirrors the oracle's regex
+// `[0-9]+(\.[0-9]+([eE][+-]?[0-9]+)?|[eE][+-]?[0-9]+)`
+// (crates/sentinel-syntax/src/lexer.rs). Two guards carry the whole ambiguity
+// the oracle's own comment calls out, and both are load-bearing:
+//   * a `.` counts only when a DIGIT follows it — so tuple-ish field access
+//     `p.0` stays `Ident Dot IntLit`, and a trailing `2.` stays `IntLit Dot`;
+//   * a leading digit is required by construction (this is only reached from
+//     the digit arm), so `.5` is `Dot IntLit`, never a float.
+fn float_end(src: &[u8], n: i64, de: i64) -> i64 {
+    let mut fe: i64 = de;
+    let mut isf: bool = false;
+    if de < n && (*src)[de] == '.' && de + 1 < n && is_digit((*src)[de + 1]) {
+        fe = de + 2;
+        while fe < n && is_digit((*src)[fe]) {
+            fe = fe + 1;
+        }
+        isf = true;
+        0
+    } else {
+        0
+    };
+    // The exponent may follow a fraction (`2.5e-3`) or the leading digits
+    // alone (`1e9`); with neither fraction nor exponent this is an `IntLit`.
+    let ex: i64 = exp_end(src, n, fe);
+    if ex > fe {
+        ex
+    } else if isf {
+        fe
+    } else {
+        de
+    }
+}
+
 // Append the decimal rendering of `x` (>= 0) to `out`.
 fn append_int(out: &mut Vec<u8>, x: i64) -> i64 {
     if x == 0 {
@@ -222,15 +284,22 @@ fn main() -> i64 {
             while de < n && is_digit(src[de]) {
                 de = de + 1;
             }
-            emit_head(&mut out, "IntLit", start, de);
+            // (ADR 0058) `FloatLit` when a fraction and/or an exponent follows,
+            // `IntLit` otherwise. Both are value-bearing, and the lexeme is the
+            // RAW SOURCE SLICE either way — `snc lex` prints the span verbatim,
+            // so no float formatting is needed at this stage (that is the
+            // parser's job, where the oracle prints the DECODED value).
+            let fd: i64 = float_end(&src, n, de);
+            let knd: [u8] = if fd > de { "FloatLit" } else { "IntLit" };
+            emit_head(&mut out, knd, start, fd);
             push(&mut out, ' ');
             let mut dq: i64 = start;
-            while dq < de {
+            while dq < fd {
                 push(&mut out, src[dq]);
                 dq = dq + 1;
             }
             push(&mut out, '\n');
-            de
+            fd
         } else if is_ident_start(b) {
             let mut ie: i64 = start;
             while ie < n && is_ident_cont(src[ie]) {
