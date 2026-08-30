@@ -15524,4 +15524,309 @@ fn main() -> i64 {
             "got {err:?}"
         );
     }
+
+    // ===== ADR 0019 / boundary-predicate audit (2026-07-21) B1: secret preservation =====
+    //
+    // The constant-time leak check (`sentinel-mir::verify_constant_time`) reads
+    // taint OFF the type — `is_secret(v) == matches!(v.ty, Type::Secret(_))`. That
+    // is sound ONLY IF every operator consuming a secret VALUE re-wraps its result
+    // as `secret`. That property is maintained by each operator's result-typing
+    // rule, scattered across this checker; an operator that forgot to re-wrap would
+    // type a secret-derived value PUBLIC and silently DISARM the leak check for it —
+    // the highest-stakes structural analog of the coincidental-fence bug the audit
+    // chased (a safety guarantee resting on a property that unrelated code must keep
+    // maintaining).
+    //
+    // These tests pin the invariant OPERATOR BY OPERATOR and FAIL CLOSED: each
+    // operator family is matched EXHAUSTIVELY (no wildcard), so a new
+    // `BinOp`/`CmpOp`/`UnaryOp`/`LogicOp` variant is a COMPILE ERROR in the helper
+    // below until its secret behaviour is declared. The detector is a real
+    // constant-time SINK — a secret reaching a branch / divisor / shift amount is
+    // rejected — so an op is proven to have preserved `secret` iff routing its
+    // result into a sink is rejected. A sink, NOT a `-> secret T` return: the
+    // implicit `T -> secret T` widening would let a PUBLIC result masquerade as
+    // secret and hide a dropped taint.
+    //
+    // Why a test and not a runtime `debug_assert!` in the checker: a secret sink
+    // (`arr[secret]`) types SUCCESSFULLY with a public result and a secret operand
+    // (the leak is caught later, in MIR), so a central "secret operand => secret
+    // result" assert would false-positive on the compiler's hottest path. The
+    // exhaustive-match test gets the fail-closed property with none of that risk.
+
+    /// The just-typed program must be REJECTED by a constant-time secret-leak
+    /// rejection — proof the secret survived to the sink. `Ok`, or a non-secret
+    /// error, means the operator under test DROPPED `secret`.
+    fn assert_secret_reaches_sink(src: &str, what: &str) {
+        let prog = parse(src).expect("parse");
+        let resolved = resolve(&prog).expect("resolve");
+        match check(&resolved) {
+            Err(TypeError::SecretBranch { .. })
+            | Err(TypeError::SecretDivisor { .. })
+            | Err(TypeError::SecretShiftAmount { .. })
+            | Err(TypeError::SecretFloat { .. }) => {}
+            Ok(_) => panic!(
+                "SECRET DROPPED by {what}: its result reached a constant-time sink \
+                 with NO leak rejection — `secret_leak` is disarmed for this op. A \
+                 CONSTANT-TIME REGRESSION."
+            ),
+            Err(other) => panic!(
+                "{what}: expected a secret-leak rejection but got {other:?} — a \
+                 test-construction problem, not (necessarily) a compiler bug"
+            ),
+        }
+    }
+
+    /// EXHAUSTIVE (no wildcard) — a new `BinOp` is a compile error here until its
+    /// secret behaviour is declared. Routes `a <op> b` (secret) into a sink.
+    fn binop_sink_program(op: BinOp) -> String {
+        let via_branch = |expr: &str| {
+            format!(
+                "fn f(a: secret i64, b: secret i64) -> i64 {{ let z: i64 = 0; \
+                 let one: i64 = 1; if {expr} > z {{ 1 }} else {{ 0 }} }}\n\
+                 fn main() -> i64 {{ 0 }}"
+            )
+        };
+        match op {
+            BinOp::Add => via_branch("(a + b)"),
+            BinOp::Sub => via_branch("(a - b)"),
+            BinOp::Mul => via_branch("(a * b)"),
+            BinOp::BitAnd => via_branch("(a & b)"),
+            BinOp::BitOr => via_branch("(a | b)"),
+            BinOp::BitXor => via_branch("(a ^ b)"),
+            // A secret DIVISOR is itself the sink (SecretDivisor). `a / b` both
+            // secret trips it, so a secret cannot pass a division into public.
+            BinOp::Div => {
+                "fn f(a: secret i64, b: secret i64) -> i64 { a / b }\n\
+                 fn main() -> i64 { 0 }"
+                    .to_string()
+            }
+            // The shift AMOUNT is public (a secret amount is its own sink,
+            // SecretShiftAmount); the shifted VALUE's secret must survive.
+            BinOp::Shl => via_branch("(a << one)"),
+            BinOp::Shr => via_branch("(a >> one)"),
+        }
+    }
+
+    #[test]
+    fn secret_is_preserved_by_every_binop() {
+        // ⚠ This array must name EVERY BinOp. The forcing function is
+        // `binop_sink_program`'s exhaustive match: a new variant fails to compile
+        // THERE, sending the author to that fn — where this array sits in view so
+        // it is extended in lockstep. (Stable Rust has no `variant_count` and we
+        // add no enum-iteration dependency, so the compile break forces the
+        // DECLARATION and adjacency forces the EXECUTION; there is no fully
+        // automatic guarantee the loop runs a newly added variant.)
+        for op in [
+            BinOp::Add,
+            BinOp::Sub,
+            BinOp::Mul,
+            BinOp::Div,
+            BinOp::BitAnd,
+            BinOp::BitOr,
+            BinOp::BitXor,
+            BinOp::Shl,
+            BinOp::Shr,
+        ] {
+            assert_secret_reaches_sink(&binop_sink_program(op), &format!("BinOp::{op:?}"));
+        }
+    }
+
+    /// EXHAUSTIVE — `a <cmp> b` (both secret) is a secret bool → branch.
+    fn cmpop_sink_program(op: CmpOp) -> String {
+        let via_branch = |expr: &str| {
+            format!(
+                "fn f(a: secret i64, b: secret i64) -> i64 {{ if {expr} {{ 1 }} else {{ 0 }} }}\n\
+                 fn main() -> i64 {{ 0 }}"
+            )
+        };
+        match op {
+            CmpOp::Eq => via_branch("a == b"),
+            CmpOp::Ne => via_branch("a != b"),
+            CmpOp::Lt => via_branch("a < b"),
+            CmpOp::Le => via_branch("a <= b"),
+            CmpOp::Gt => via_branch("a > b"),
+            CmpOp::Ge => via_branch("a >= b"),
+        }
+    }
+
+    #[test]
+    fn secret_is_preserved_by_every_cmpop() {
+        for op in [CmpOp::Eq, CmpOp::Ne, CmpOp::Lt, CmpOp::Le, CmpOp::Gt, CmpOp::Ge] {
+            assert_secret_reaches_sink(&cmpop_sink_program(op), &format!("CmpOp::{op:?}"));
+        }
+    }
+
+    /// EXHAUSTIVE — `a <op> b` (both secret bool) short-circuits through a branch.
+    fn logicop_sink_program(op: LogicOp) -> String {
+        let via_branch = |expr: &str| {
+            format!(
+                "fn f(a: secret bool, b: secret bool) -> i64 {{ if {expr} {{ 1 }} else {{ 0 }} }}\n\
+                 fn main() -> i64 {{ 0 }}"
+            )
+        };
+        match op {
+            LogicOp::And => via_branch("a && b"),
+            LogicOp::Or => via_branch("a || b"),
+        }
+    }
+
+    #[test]
+    fn secret_is_preserved_by_every_logicop() {
+        for op in [LogicOp::And, LogicOp::Or] {
+            assert_secret_reaches_sink(&logicop_sink_program(op), &format!("LogicOp::{op:?}"));
+        }
+    }
+
+    /// EXHAUSTIVE classification of a `UnaryOp`'s secret behaviour.
+    enum UnarySecret {
+        /// A value op: routing its secret result into a sink must be rejected.
+        Sink(&'static str),
+        /// Not a secret-value-propagating op (each arm below states why).
+        NotApplicable,
+    }
+
+    fn classify_unary(op: UnaryOp) -> UnarySecret {
+        match op {
+            UnaryOp::Neg => UnarySecret::Sink(
+                "fn f(a: secret i64) -> i64 { let z: i64 = 0; if (-a) > z { 1 } else { 0 } }\n\
+                 fn main() -> i64 { 0 }",
+            ),
+            UnaryOp::Not => UnarySecret::Sink(
+                "fn f(a: secret bool) -> i64 { if !a { 1 } else { 0 } }\n\
+                 fn main() -> i64 { 0 }",
+            ),
+            // f64-only; `secret f64` is unrepresentable (the SecretFloat fence),
+            // so a secret never reaches `sqrt`.
+            UnaryOp::Sqrt => UnarySecret::NotApplicable,
+            // Deref IS a secret-value propagation site: `*(&secret T)` yields a
+            // `secret T`, so a deref that dropped the taint would leak. Test it
+            // (this construction also exercises `Ref`, since it needs `&a`).
+            UnaryOp::Deref => UnarySecret::Sink(
+                "fn f(a: secret i64) -> i64 { let z: i64 = 0; let r: &secret i64 = &a; \
+                 if (*r) > z { 1 } else { 0 } }\nfn main() -> i64 { 0 }",
+            ),
+            // `Ref`/`RefMut` produce a REFERENCE, not a scalar value; `&(secret T)`
+            // keeps `secret` in the ref's inner, which is observed (and thus
+            // covered) by the `Deref` case above — if `&` dropped the taint, the
+            // deref there would be public and its test would fail.
+            UnaryOp::Ref | UnaryOp::RefMut => UnarySecret::NotApplicable,
+            // ADR 0057 FFI pointer ops. `ptr_of`/`ptr_of_mut` require a PUBLIC
+            // `[u8]` referent — a `[secret u8]` is rejected (`PtrOfArg`, the FFI
+            // fence), so a secret is fenced at entry and never reaches the `ptr`
+            // result. `is_null`'s operand is a public `ptr`; a secret scalar
+            // cannot be one. Verified against the arms in `check_expr`.
+            UnaryOp::PtrOf | UnaryOp::PtrOfMut | UnaryOp::IsNull => UnarySecret::NotApplicable,
+        }
+    }
+
+    #[test]
+    fn secret_is_preserved_by_every_unaryop() {
+        for op in [
+            UnaryOp::Neg,
+            UnaryOp::Not,
+            UnaryOp::Sqrt,
+            UnaryOp::Ref,
+            UnaryOp::RefMut,
+            UnaryOp::Deref,
+            UnaryOp::PtrOf,
+            UnaryOp::PtrOfMut,
+            UnaryOp::IsNull,
+        ] {
+            match classify_unary(op) {
+                UnarySecret::Sink(src) => {
+                    assert_secret_reaches_sink(src, &format!("UnaryOp::{op:?}"))
+                }
+                UnarySecret::NotApplicable => {}
+            }
+        }
+    }
+
+    #[test]
+    fn secret_is_preserved_by_cast() {
+        // Widening `secret i32 as i64` stays secret → SecretBranch.
+        assert_secret_reaches_sink(
+            "fn f(a: secret i32) -> i64 { let z: i64 = 0; if (a as i64) > z { 1 } else { 0 } }\n\
+             fn main() -> i64 { 0 }",
+            "cast (secret i32 as i64)",
+        );
+        // The f64 fence: `secret as f64` is rejected (a `secret f64` cannot exist),
+        // which is itself proof the cast SEES the secret rather than dropping it.
+        assert_secret_reaches_sink(
+            "fn f(a: secret i64) -> i64 { let x: f64 = a as f64; 0 }\n\
+             fn main() -> i64 { 0 }",
+            "cast (secret i64 as f64)",
+        );
+    }
+
+    #[test]
+    fn secret_is_preserved_by_array_element_read() {
+        // Reading a `[secret i64]` element yields `secret i64` → SecretBranch.
+        assert_secret_reaches_sink(
+            "fn f(a: secret i64) -> i64 { let arr: [secret i64] = [a]; let z: i64 = 0; \
+             if arr[0] > z { 1 } else { 0 } }\nfn main() -> i64 { 0 }",
+            "array secret-element read",
+        );
+    }
+
+    #[test]
+    fn secret_is_preserved_by_vec_element_read() {
+        // `Vec<secret i64>` indexing is a SEPARATE propagation site from `[T]`
+        // (VecElem::Secret vs ArrayElem::Secret); a `Vec<secret i64>` element read
+        // yields `secret i64` → SecretBranch.
+        assert_secret_reaches_sink(
+            "fn f() -> i64 { let v: Vec<secret i64> = vec_new(); let z: i64 = 0; \
+             if v[0] > z { 1 } else { 0 } }\nfn main() -> i64 { 0 }",
+            "vec secret-element read",
+        );
+    }
+
+    #[test]
+    fn secret_is_preserved_by_structural_projections() {
+        // Beyond the value OPERATORS, `secret` also flows through PROJECTION and
+        // JOIN sites, each with its own result-typing rule that could regress:
+        //   * struct-field read     — `s.x` where `x: secret i64`
+        //   * if-expression join    — `if p { sa } else { sb }`
+        //   * function call/return  — `g(sa)` where `g -> secret i64`
+        // These are NOT exhaustively enumerable the way the operator enums are, so
+        // this is a representative (not fail-closed) pin — a named subset the audit
+        // verified preserve `secret` today, kept so a regression in any of them is
+        // caught. (block-tail and enum-payload behave identically; add them here if
+        // one ever regresses.)
+        assert_secret_reaches_sink(
+            "struct S { x: secret i64 }\n\
+             fn f(a: secret i64) -> i64 { let s: S = S { x: a }; let z: i64 = 0; \
+             if s.x > z { 1 } else { 0 } }\nfn main() -> i64 { 0 }",
+            "struct field read",
+        );
+        assert_secret_reaches_sink(
+            "fn f(a: secret i64, b: secret i64, p: bool) -> i64 { let z: i64 = 0; \
+             let w: secret i64 = if p { a } else { b }; if w > z { 1 } else { 0 } }\n\
+             fn main() -> i64 { 0 }",
+            "if-expression join",
+        );
+        assert_secret_reaches_sink(
+            "fn g(x: secret i64) -> secret i64 { x }\n\
+             fn f(a: secret i64) -> i64 { let z: i64 = 0; if g(a) > z { 1 } else { 0 } }\n\
+             fn main() -> i64 { 0 }",
+            "function call/return",
+        );
+    }
+
+    #[test]
+    fn declassify_drops_secret() {
+        // The one sanctioned exception: `declassify` DROPS `secret`, so its result
+        // may reach a branch WITHOUT a leak. Pinned so a change that accidentally
+        // made declassify PRESERVE secret (breaking the only escape hatch) is also
+        // caught — it would turn this `Ok` into a SecretBranch.
+        let prog = parse(
+            "fn f(a: secret i64) -> i64 { let z: i64 = 0; if declassify(a) > z { 1 } else { 0 } }\n\
+             fn main() -> i64 { 0 }",
+        )
+        .expect("parse");
+        let resolved = resolve(&prog).expect("resolve");
+        check(&resolved).expect(
+            "declassify(secret) must type-check — it is the sanctioned way to drop \
+             `secret`, so its result reaching a branch is NOT a leak",
+        );
+    }
 }
