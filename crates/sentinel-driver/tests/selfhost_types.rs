@@ -329,13 +329,18 @@ fn sentinel_typer_matches_oracle_on_corpus() {
 // in the fixture corpus used `export "C"`, a float literal, or any of the four
 // reserved-name intrinsics (`sqrt` / `ptr_of` / `ptr_of_mut` / `is_null`) — so
 // three separate unmirrored front-end surfaces had never once been compared, and
-// one of them (`2.0`) is SILENTLY misparsed by the self-hosted parser as a field
-// access. The same blind spot previously hid the ADR 0067 `module`/`part` lex
-// gap. `export "C"` is no longer among them, and that IS the intended lifecycle:
-// the sweep found the hole, the fix landed, and `tests/pass/c59_export_call`
-// now pins it in the FIXTURE corpus. A float literal and the four reserved names
-// remain fixture-uncovered — `snc lex` still reports zero `FloatLit` tokens
-// across the whole corpus.
+// one of them, the float literal `2.0`, was SILENTLY misparsed by the
+// self-hosted parser as a field access. The same blind spot previously hid the
+// ADR 0067 `module`/`part` lex gap.
+//
+// TWO of the three are now closed, and by the intended lifecycle in both cases —
+// the sweep found the hole, the fix landed, and a FIXTURE now pins it so the
+// corpus can never lose sight of it again: `export "C"` by
+// `tests/pass/c59_export_call.sentinel`, and the ADR 0058 float literal (with
+// `sqrt`, which A1 makes part of the same feature) by
+// `tests/pass/c58_float_math.sentinel`. What remains fixture-uncovered is the
+// ADR 0057 half of the reserved-name family: `ptr_of` / `ptr_of_mut` /
+// `is_null`.
 //
 // TWO FORMS of each program are compared, because the stage oracles
 // (`snc lex`/`ast`/`resolve`/`types`/`effects`/`borrow`/`mir`/`ctverify`) do NO
@@ -368,8 +373,11 @@ fn sentinel_typer_matches_oracle_on_corpus() {
 // does. What still fires for a listed program: a crash, the entry going stale
 // by matching, and the entry never being reached. So keep the lists short,
 // prefer fixing a listed program over letting it accumulate causes, and when a
-// program does have several, NAME them all (`examples/math/quadratic.sentinel`
-// carries two).
+// program does have several, NAME them all — and when a slice closes only ONE of
+// them, EDIT the entry down rather than deleting it. (`quadratic.sentinel` was
+// the worked example of a two-cause entry until the ADR 0058 mirror closed both
+// of its causes at once; `fn_value_generic.sentinel` is the live one, narrowed
+// by that same slice from float+ADR-0070 down to ADR 0070 alone.)
 
 /// Programs whose divergence is a KNOWN, deliberately-deferred feature gap,
 /// each with the ADR that defers it. A listed program is still COMPARED — the
@@ -397,14 +405,13 @@ const DEFERRED_PROGRAMS: &[(&str, &str)] = &[
     // three stages EARLIER, which is where a fix has to land.
     ("examples/lang/fn_value.sentinel", "ADR 0070 D3-revisit: a direct call of a Fn-typed var types as a kont resume in scg"),
     ("examples/lang/fn_value.sentinel (merged)", "ADR 0070 D3-revisit: a direct call of a Fn-typed var types as a kont resume in scg"),
-    // TWO causes at once, and the reason both must be named: the float literal
-    // (ADR 0058 — inherited from the parser) AND the ADR 0070 D3-revisit direct
-    // call in `apply_bool`. scg additionally has no `f64` TYPE handle, so every
-    // `f64` annotation renders `i64` and an unresolved operand renders `?T` —
-    // the same missing handle documented at `selfhost/types/interner.sentinel`
-    // for `Channel<f64>`.
-    ("examples/lang/fn_value_generic.sentinel", "ADR 0058 (no FloatLit + no f64 type handle) AND ADR 0070 D3-revisit (`apply_bool` uses direct-call sugar)"),
-    ("examples/lang/task_generic.sentinel", "ADR 0058: no FloatLit + no f64 type handle in scg (`f64` renders `i64`, unresolved renders `?T`)"),
+    // This entry USED to carry two causes; the ADR 0058 half is closed (`f64` is
+    // now scalar code 4 and the literal renders through `parser::append_float`),
+    // so it is NARROWED rather than deleted — the ADR 0070 direct-call cause is
+    // still live, and the remaining diff is exactly one line, `apply_bool`'s
+    // `(resume-kont …)` where the oracle has `(call #37 …)`. (Its sibling
+    // `task_generic.sentinel` was float-only and IS deleted.)
+    ("examples/lang/fn_value_generic.sentinel", "ADR 0070 D3-revisit: `apply_bool` uses direct-call sugar, which scg types as a kont resume"),
     // ADR 0066 M2.3b: generic word-scalar elements for the PROCESS channel
     // (process_send/process_recv) are snc-only — scg types `process_recv` as
     // `?i64` where the oracle types `?u8` / `?i32`.

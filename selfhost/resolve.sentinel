@@ -104,6 +104,7 @@ use parser::skip_effect_row;
 use parser::dump_type;
 use parser::append_str;
 use parser::append_int;
+use parser::append_float;
 use parser::append_slice;
 
 // The resolve context: every symbol table + the local scope, as flat parallel

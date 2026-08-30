@@ -1606,6 +1606,31 @@ fn pass_c65_return_match() {
 }
 
 #[test]
+fn pass_c58_float_math() {
+    // ADR 0058 c58_float_math: the FIRST `f64` fixture in the corpus. A3 deferred
+    // this fixture and the `scg` front-end mirror TOGETHER, because a clean-typing
+    // f64 fixture is auto-scanned by the front-end self-host differentials (which
+    // run scg on anything the oracle accepts) — so it was impossible until the
+    // mirror landed, and now that it has, this is what pins the mirror in the
+    // corpus. `selfhost_codegen` skips it because the oracle Errs on every float
+    // LITERAL it tries to lower (which is why the mirror needs no codegen half —
+    // note it is NOT that `snc llvm` refuses `F64` as such: a phantom f64 generic
+    // argument lowers cleanly); `snc build` uses inkwell, so it compiles and runs.
+    //
+    // Exercises the ADR 0058 scope: `f64`, float literals, `+ - * /`, unary `-`,
+    // comparisons, the int<->float `as` casts, and `sqrt`. Every value that
+    // PARTICIPATES IN THE ARITHMETIC is exactly representable in binary64
+    // (integers, halves, quarters), so the exit code cannot drift with rounding;
+    // the one inexact literal (1e-9) is only compared, never accumulated. Three literals are deliberately written in forms
+    // whose RENDERING differs from the source text (`0.250`, `00.5`,
+    // `0.000000001`), which pins the formatter's trailing-zero strip,
+    // leading-zero strip and switch-to-exponential paths permanently.
+    //
+    // 5.0 * 8.0 * 1.0 + 2.0 = 42.0.
+    assert_eq!(run_exit("c58_float_math.sentinel"), 42);
+}
+
+#[test]
 fn pass_c59_export_call() {
     // ADR 0059 c59_export_call: an `export "C"` C-ABI export CALLED from Sentinel
     // in the same file, so it both builds-and-runs and enters every self-host

@@ -61,6 +61,7 @@ use parser::parse_type;
 use parser::slice_of;
 use parser::skip_effect_row;
 use parser::append_int;
+use parser::append_float;
 use parser::append_str;
 use parser::append_slice;
 

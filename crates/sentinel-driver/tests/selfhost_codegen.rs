@@ -373,10 +373,13 @@ fn sentinel_codegen_matches_oracle_on_corpus() {
 
 /// (8f) The Sentinel codegen emits its OWN front-end stages byte-identically to `snc
 /// llvm` — a step toward the bootstrap fixed-point: the compiler compiling its own
-/// source. `lexer.sentinel` (390 lines) and `parser.sentinel` (2590 lines) are the
-/// self-contained stages (no `use`), so they lower through the single-file pipeline;
-/// they exercise the WHOLE Bar-A construct set at real scale (4.4k + 21.6k `.ll` lines)
-/// far beyond the small corpus fixtures. The multi-module stages (types/codegen/…) need
+/// source. `lexer.sentinel` and `parser.sentinel` are the self-contained stages (no
+/// `use`), so they lower through the single-file pipeline; they exercise the WHOLE
+/// Bar-A construct set at real scale — thousands of `.ll` lines each — far beyond the
+/// small corpus fixtures. (This sentence used to quote line counts for both, and both
+/// had rotted: `parser.sentinel`'s was pre-ADR-0067, from before the file was split
+/// into parts. A count asserted in prose is worth nothing here; `wc -l` is worth
+/// everything.) The multi-module stages (types/codegen/…) need
 /// the merged path (a later slice). This is the headline (8f) regression guard.
 #[test]
 fn sentinel_codegen_matches_oracle_on_selfhost_stages() {

@@ -1169,6 +1169,40 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             cg_widen(c, w, exp);
             widen_post(out, w, exp, 3, c)
         },
+        // (ADR 0058) float literal → `(float <D> :f64)`. Widens like any other
+        // scalar leaf: only the NULLABLE widen can fire, because `secret f64` is
+        // a type error the oracle rejects outright, while `?f64` IS reachable —
+        // ADR 0066 M1.2b added `NullableInner::F64`, which makes A6's "`?f64` is
+        // out of scope" stale. `lx` is consumed by `append_float` (by value, like
+        // `append_str`), so unlike the `Str` arm below it needs no `sink_name`.
+        Expr::Float(lx) => {
+            let w: bool = widen_pre(out, exp, 4, c);
+            append_str(out, "(float ");
+            append_float(out, lx);
+            close_ty(out, 4, c);
+            // MIR: the oracle never prints a float's VALUE — a literal lowers to
+            // `(vN:f64 opaque)`, no operands — so no formatting is needed here.
+            if mir_on(c) {
+                let mc: i64 = (*c).mir_cur;
+                let d: i64 = mir_emit_opaque0(c, mc, 4);
+                (*c).lastval = d;
+                0
+            } else {
+                0
+            };
+            // No `cg_on` arm ON PURPOSE: f64 codegen is out of scope (ADR 0058
+            // A3), and THIS arm is unreachable from codegen because the oracle
+            // Errs on every float LITERAL it tries to lower, so the codegen
+            // differential skips the program before scg runs. State it that way
+            // and no other: it is NOT true that `snc llvm` refuses `F64` as
+            // such. A PHANTOM f64 generic argument (`struct Pair<A, B> { a: A }`
+            // used as `Pair<i64, f64>`) lowers cleanly and DOES reach scg's
+            // codegen — which is why `cg_mangle_to` carries a real `h == 4` arm
+            // rather than a comment.
+            mir_widen(c, w, exp);
+            cg_widen(c, w, exp);
+            widen_post(out, w, exp, 4, c)
+        },
         // (4i) string literal `"…"` → `(str b0 b1 … :[u8])` (the decoded bytes, ADR 0033
         // D2: a string IS a `[u8]`). ⚠ `sb` is an owned `[u8]` only INDEXED in the byte
         // loop → `sink_name` it (by value) after, else it leaks (the parser's

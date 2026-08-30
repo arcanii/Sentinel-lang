@@ -356,6 +356,10 @@ fn cg_walk_ex(c: &mut TyCtx, ex: Expr, collect: bool, out: &mut Vec<i64>, gb: &m
         Expr::Bool(b) => { let _b: bool = b; 0 },
         Expr::Null => 0,
         Expr::Char(ch) => { let _ch: i64 = ch; 0 },
+        // (ADR 0058) Sink the owned lexeme. This walker has a `_` catch-all,
+        // so the arm is needed for CORRECTNESS, not to compile: without it
+        // a float would fall through and leak, silently.
+        Expr::Float(lx) => { sink_name(gb, lx); 0 },
         Expr::Str(by) => { sink_name(gb, by); 0 },
         Expr::Var(nm) => {
             if collect {

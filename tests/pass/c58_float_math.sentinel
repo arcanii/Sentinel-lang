@@ -1,0 +1,58 @@
+// ADR 0058 c58_float_math: the FIRST `f64` fixture in the corpus.
+//
+// A3 deferred this fixture AND the `scg` mirror together, and explained why they
+// are coupled: a clean-typing `f64` fixture is auto-scanned by the front-end
+// self-host differentials (lex / ast / resolve / types / effects / borrow / mir /
+// ctverify), which run `scg` on anything the Rust oracle ACCEPTS — and the oracle
+// accepts valid `f64`. So this fixture was impossible until the mirror landed,
+// and now that it has, the fixture is what pins the mirror in the corpus.
+// (`selfhost_codegen` skips it because the oracle Errs on every float LITERAL it
+// tries to lower — which is also why the mirror needs no codegen half. State it
+// that way and no other: `snc llvm` does NOT refuse `F64` as such, and a phantom
+// f64 generic argument reaches scg's codegen, which is why `cg_mangle_to` carries
+// a real `ty_F64` arm. `snc build` uses inkwell, so this fixture compiles and runs.)
+//
+// EVERY VALUE THAT PARTICIPATES IN THE ARITHMETIC is exactly representable in
+// binary64 — integers, halves and quarters only — so the result is exact, not
+// approximate, and the exit code cannot drift with rounding. `sqrt(25.0)` is
+// exact because IEEE-754 square root is correctly rounded and 25 is a perfect
+// square. The one literal that is NOT exactly representable is `tiny` (1e-9 is
+// not a dyadic rational); it is therefore only COMPARED against zero, never
+// accumulated — the blanket claim this comment used to make was false, and a
+// review caught it.
+//
+// THE LITERAL FORMS ARE PART OF THE POINT. The dumps print a float by VALUE
+// (Rust's `{:?}`), not by source text, so three literals below are written in
+// forms whose rendering differs from what is typed — they pin the formatter's
+// three interesting paths in the corpus permanently:
+//   * `0.250`      renders `0.25`  — trailing-zero strip
+//   * `00.5`       renders `0.5`   — leading-zero strip
+//   * `0.000000001` renders `1e-9` — the switch to exponential form below 1e-4
+// Without them the corpus would exercise only literals that happen to render as
+// written, which is exactly the blind spot that let the gap exist for so long.
+
+fn hypot_sq(x: f64, y: f64) -> f64 {
+    x * x + y * y
+}
+
+fn main() -> i64 {
+    // sqrt + the 3-4-5 triangle: sqrt(9.0 + 16.0) = 5.0.
+    let five: f64 = sqrt(hypot_sq(3.0, 4.0));
+    // division: 20.0 / 2.5 = 8.0.
+    let eight: f64 = 20.0 / 2.5;
+    let prod: f64 = five * eight;
+    // unary negate + a comparison. Floats are a PUBLIC-only domain (there is no
+    // `secret f64`), so branching on one is fine — the constant-time discipline
+    // is untouched by this fixture.
+    let two: i64 = if -prod < 0.0 { 2 } else { 0 };
+    // subtraction + the quarter/half literals, which also pin the zero-stripping
+    // renderings: 0.250 + 0.250 + 0.5 = 1.0, so `scale` is 1.0.
+    let scale: f64 = 0.250 + 0.250 + 00.5;
+    // a below-1e-4 literal, compared rather than accumulated so the exactness of
+    // the total is unaffected; `1e-9 > 0.0` is true.
+    let tiny: f64 = 0.000000001;
+    let bump: i64 = if tiny > 0.0 { 0 } else { 100 };
+    // i64 -> f64 and back: 40.0 * 1.0 + 2.0 = 42.0.
+    let total: f64 = prod * scale + (two as f64);
+    total as i64 + bump
+}

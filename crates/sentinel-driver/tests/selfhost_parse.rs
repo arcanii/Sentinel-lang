@@ -452,13 +452,18 @@ fn sentinel_parser_matches_oracle_on_corpus() {
 // in the fixture corpus used `export "C"`, a float literal, or any of the four
 // reserved-name intrinsics (`sqrt` / `ptr_of` / `ptr_of_mut` / `is_null`) — so
 // three separate unmirrored front-end surfaces had never once been compared, and
-// one of them (`2.0`) is SILENTLY misparsed by the self-hosted parser as a field
-// access. The same blind spot previously hid the ADR 0067 `module`/`part` lex
-// gap. `export "C"` is no longer among them, and that IS the intended lifecycle:
-// the sweep found the hole, the fix landed, and `tests/pass/c59_export_call`
-// now pins it in the FIXTURE corpus. A float literal and the four reserved names
-// remain fixture-uncovered — `snc lex` still reports zero `FloatLit` tokens
-// across the whole corpus.
+// one of them, the float literal `2.0`, was SILENTLY misparsed by the
+// self-hosted parser as a field access. The same blind spot previously hid the
+// ADR 0067 `module`/`part` lex gap.
+//
+// TWO of the three are now closed, and by the intended lifecycle in both cases —
+// the sweep found the hole, the fix landed, and a FIXTURE now pins it so the
+// corpus can never lose sight of it again: `export "C"` by
+// `tests/pass/c59_export_call.sentinel`, and the ADR 0058 float literal (with
+// `sqrt`, which A1 makes part of the same feature) by
+// `tests/pass/c58_float_math.sentinel`. What remains fixture-uncovered is the
+// ADR 0057 half of the reserved-name family: `ptr_of` / `ptr_of_mut` /
+// `is_null`.
 //
 // TWO FORMS of each program are compared, because the stage oracles
 // (`snc lex`/`ast`/`resolve`/`types`/`effects`/`borrow`/`mir`/`ctverify`) do NO
@@ -491,8 +496,11 @@ fn sentinel_parser_matches_oracle_on_corpus() {
 // does. What still fires for a listed program: a crash, the entry going stale
 // by matching, and the entry never being reached. So keep the lists short,
 // prefer fixing a listed program over letting it accumulate causes, and when a
-// program does have several, NAME them all (`examples/math/quadratic.sentinel`
-// carries two).
+// program does have several, NAME them all — and when a slice closes only ONE of
+// them, EDIT the entry down rather than deleting it. (`quadratic.sentinel` was
+// the worked example of a two-cause entry until the ADR 0058 mirror closed both
+// of its causes at once; `fn_value_generic.sentinel` is the live one, narrowed
+// by that same slice from float+ADR-0070 down to ADR 0070 alone.)
 
 /// Programs whose divergence is a KNOWN, deliberately-deferred feature gap,
 /// each with the ADR that defers it. A listed program is still COMPARED — the
@@ -512,42 +520,23 @@ fn sentinel_parser_matches_oracle_on_corpus() {
 /// is a HOLE in dispatch it has already ported: closing it is a FIX that
 /// changes nothing downstream.
 const DEFERRED_PROGRAMS: &[(&str, &str)] = &[
-    // ADR 0058 floats are snc-only in the self-host. The parser's own tokenizer
-    // has no `FloatLit`, so `2.0` arrives as `IntLit Dot IntLit` and
-    // `parse_postfix_rest` reads the `.` as a FIELD ACCESS: the oracle's
-    // `(float 2.0)` becomes `(field (int 2) 0)`. SEVERITY: a silent misparse,
-    // not a rejection — as severe as the `extern` bug was, though DEFERRED
-    // rather than a bug by the criterion above, and invisible for exactly the
-    // same reason (no fixture in tests/pass or tests/ui has a float literal;
-    // ADR 0058 A3 deferred the fixture ALONG WITH the mirror, which is what
-    // made a real-program sweep the only way to see it). Closing it is a
-    // front-end mirror slice: `FloatLit` in both tokenizers, a `(float …)` dump
-    // node, then the `f64` type handle downstream (which scg also lacks — see
-    // selfhost_types.rs).
-    ("examples/lang/fn_value_generic.sentinel", "ADR 0058: no FloatLit in the selfhost parser (`2.0` parses as a field access)"),
-    ("examples/lang/task_generic.sentinel", "ADR 0058: no FloatLit in the selfhost parser"),
-    ("examples/math/transcendental.sentinel", "ADR 0058: no FloatLit in the selfhost parser"),
-    ("examples/text/str_demo.sentinel", "ADR 0058: no FloatLit in the selfhost parser"),
-    ("sentinel_library/std/data/json.sentinel", "ADR 0058: no FloatLit in the selfhost parser"),
-    ("sentinel_library/std/text/str.sentinel", "ADR 0058: no FloatLit in the selfhost parser"),
-    // TWO INDEPENDENT causes, and both must be named: these two also call
-    // `sqrt`, which is the OTHER half of the RESERVED-NAME family below. When
-    // the ADR 0058 float mirror lands it closes only the literal, so the right
-    // move then is to EDIT these two entries down to the `sqrt` cause, not to
-    // delete them — deleting would leave both programs red with no registered
-    // explanation.
-    ("examples/math/quadratic.sentinel", "ADR 0058: no FloatLit in the selfhost parser AND the `sqrt` reserved-name rewrite is unmirrored (`(call sqrt …)` vs `(unary sqrt …)`)"),
-    ("sentinel_library/std/math/float.sentinel", "ADR 0058: no FloatLit in the selfhost parser AND the `sqrt` reserved-name rewrite is unmirrored"),
-    // THE RESERVED-NAME FAMILY, complete and explicit: `sqrt` (ADR 0058 A1) and
-    // `ptr_of` / `ptr_of_mut` / `is_null` (ADR 0057 Phase 1b) are the ONLY four
-    // names the Rust parser rewrites at the call site into a UNARY node
-    // (`crates/sentinel-syntax/src/parser.rs`, two adjacent arms — there are no
-    // others; `snc merge`'s Bar-A printer rejects the same four by name). The
-    // self-hosted parser has no such rewrite, so it emits `(call ptr_of …)`.
+    // (The eight ADR 0058 float-literal entries are GONE — six for the literal
+    // alone and two that also carried the `sqrt` cause. The mirror landed: the
+    // parser's own tokenizer produces tag 66, `Expr::Float` keeps the RAW
+    // lexeme, and `parser::append_float` renders it the way every oracle dump
+    // does. `sqrt` came with it, since ADR 0058 A1 is what makes it a
+    // reserved-name unary rewrite rather than a builtin.)
     //
-    // DEFERRED, not a bug, by the criterion above: closing it means giving
-    // `scg` four new unary opcodes, which every downstream stage
-    // (resolve/types/mir/codegen) would then have to understand — the ADR 0057
+    // THE RESERVED-NAME FAMILY, minus the half ADR 0058 owned. `ptr_of` /
+    // `ptr_of_mut` / `is_null` (ADR 0057 Phase 1b) are the remaining three of
+    // the FOUR names the Rust parser rewrites at a call site into a UNARY node
+    // (`crates/sentinel-syntax/src/parser.rs`, two adjacent arms; `sqrt` was the
+    // fourth). The self-hosted parser has no such rewrite for them, so it emits
+    // `(call ptr_of …)`.
+    //
+    // DEFERRED, not a bug, by the criterion above: closing it means giving `scg`
+    // three more unary opcodes (7/8/9 are reserved for exactly this), which
+    // every downstream stage would then have to understand — the ADR 0057
     // mirror slice, which that ADR defers until a corpus fixture uses it. No
     // fixture does; the programs below are the only users in the tree, and none
     // of them reaches a stage past `ast` (they are library modules the semantic

@@ -493,8 +493,14 @@ fn dump_te_unary(out: &mut Vec<u8>, uop: i64, inner: Expr, exp: i64, src: &[u8],
                 "*"
             } else if uop == 4 {
                 "&"
-            } else {
+            } else if uop == 5 {
                 "&mut"
+            } else {
+                // (ADR 0058 A1) op-code 6 = `sqrt`; codes 7/8/9 stay free for
+                // ADR 0057's ptr_of / ptr_of_mut / is_null. The result type
+                // needs no arm: the `rt` chain's `else { it }` already gives the
+                // operand's own f64, which is what the oracle types.
+                "sqrt"
             };
             append_str(out, usym);
             push(out, ' ');

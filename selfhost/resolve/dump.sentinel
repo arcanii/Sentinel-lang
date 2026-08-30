@@ -79,6 +79,14 @@ fn dump_rexpr(out: &mut Vec<u8>, ex: Expr, src: &[u8], c: &mut RCtx, gb: &mut Ve
             push(out, ')');
             0
         },
+        // (ADR 0058) `(float <D>)` — byte-identical to the ast dump, and
+        // rendered by the same `parser::append_float`, so the two cannot drift.
+        Expr::Float(lx) => {
+            append_str(out, "(float ");
+            append_float(out, lx);
+            push(out, ')');
+            0
+        },
         Expr::Str(sb) => {
             append_str(out, "(str");
             let sn: i64 = len(sb);
@@ -123,8 +131,13 @@ fn dump_rexpr(out: &mut Vec<u8>, ex: Expr, src: &[u8], c: &mut RCtx, gb: &mut Ve
                 "*"
             } else if uop == 4 {
                 "&"
-            } else {
+            } else if uop == 5 {
                 "&mut"
+            } else {
+                // (ADR 0058 A1) op-code 6 = `sqrt`. The chain now tests 5
+                // explicitly: with `&mut` as the catch-all a new op-code
+                // rendered as `&mut` — a silent wrong symbol, not an error.
+                "sqrt"
             };
             append_str(out, usym);
             push(out, ' ');

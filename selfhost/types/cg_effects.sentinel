@@ -326,6 +326,15 @@ fn cg_emit_spawn_wrapper(c: &mut TyCtx, fid: i64, src: &[u8]) -> i64 {
             cgo_int(c, cr);
             cgo_str(c, " to i64\n")
         } else {
+            // (ADR 0058) Handle 4 (f64) reaches this `else` and would be encoded
+            // as a POINTER. Unreachable, on the same verified guard as the
+            // channel send/recv pair below (see the long note at `fid == 22`):
+            // the oracle Errs before lowering any program that could produce an
+            // f64 here -- `spawn` of an f64-returning fn needs `llvm_ty(F64)`
+            // and is refused with "type not yet ported". The residual is the
+            // SHAPE: these chains ask "is it 0/1/2/3?" and DEFAULT to pointer,
+            // rather than asking positively whether the handle is a container
+            // (`>= tbase()`). Anyone porting f64 codegen inverts that test.
             cgo_str(c, "ptrtoint ptr %v");
             cgo_int(c, cr);
             cgo_str(c, " to i64\n")
@@ -530,8 +539,18 @@ fn cg_emit_call(c: &mut TyCtx, src: &[u8], fid: i64, snap: i64, rty: i64) -> i64
         // value into the channel's i64 slot by its element type (the M1.1 encode):
         // i64 no-op / i32,bool,u8 `zext` / a channel HANDLE (channel-of-channels)
         // `ptrtoint`. The encode is emitted HERE, before the send's own dst, so
-        // register numbering matches the oracle. (`f64` has no scg handle — the
-        // pre-existing gap — so it cannot occur; the `else` is the ptr/channel case.)
+        // register numbering matches the oracle. The `else` is the ptr/channel case.
+        //
+        // (ADR 0058 UPDATE — this comment used to say `f64` "has no scg handle so
+        // it cannot occur"; the first half is now false, since `f64` is scalar
+        // code 4. The CONCLUSION still holds, on a different and verified guard:
+        // an f64 element needs an f64 VALUE, and every way to make one — a
+        // literal, an `as f64` cast — is Err'd by the oracle before lowering, so
+        // no such program is ever compared. A `Channel<f64>` that is only created
+        // and closed DOES lower, and matches byte-for-byte; verified. If f64
+        // values ever reach here, both this arm and the `recv` twin below need a
+        // `bitcast`, NOT the pointer `ptrtoint`/`inttoptr` fallback — that pair
+        // on a `double` is invalid IR, not merely different bytes.)
         let cs_chk: i64 = (*c).cgak[snap];
         let cs_chv: i64 = (*c).cgav[snap];
         let cs_vk: i64 = (*c).cgak[snap + 1];
@@ -590,6 +609,9 @@ fn cg_emit_call(c: &mut TyCtx, src: &[u8], fid: i64, snap: i64, rty: i64) -> i64
         } else if cr_elem == 1 || cr_elem == 2 || cr_elem == 3 {
             cg_conv(c, "trunc", 0, 0, cr_raw, cr_elem)
         } else {
+            // (ADR 0058) The decode twin of the `fid == 22` encode: handle 4
+            // lands here too and would be decoded as a pointer. Same guard,
+            // same residual -- see the note there.
             cg_conv(c, "inttoptr", 0, 0, cr_raw, cr_elem)
         };
         let cr_o0: i64 = cg_dst(c);

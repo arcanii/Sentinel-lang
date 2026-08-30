@@ -44,6 +44,18 @@ fn emit_expr(out: &mut Vec<u8>, c: &MergeCtx, ex: Expr) -> i64 {
             push(out, '\'');
             0
         },
+        // (ADR 0058) Re-emit the float literal's ORIGINAL text — the faithful
+        // un-parse, and the only choice that could ever round-trip. Unreachable
+        // through any differential: `snc merge`'s Bar-A source printer REFUSES a
+        // float ("expression `float literal` is out of Bar-A scope"), so the
+        // oracle produces no merged text for a float program and there is
+        // nothing to compare against; `selfhost_merge` only ever merges the
+        // compiler's own sources, which contain no floats by construction (they
+        // may not — scg has no f64 codegen).
+        Expr::Float(lx) => {
+            append_str(out, lx);
+            0
+        },
         Expr::Str(sb) => {
             push(out, '"');
             emit_str_body(out, sb);
@@ -55,12 +67,27 @@ fn emit_expr(out: &mut Vec<u8>, c: &MergeCtx, ex: Expr) -> i64 {
             0
         },
         Expr::Unary(uop, inner) => {
-            push(out, '(');
-            append_str(out, unary_sym(uop));
-            push(out, ' ');
-            emit_expr(out, c, inner);
-            push(out, ')');
-            0
+            if uop == 6 {
+                // (ADR 0058 A1) `sqrt` is the one unary op-code with no PREFIX
+                // syntax — it is a reserved-name CALL that the parser rewrote
+                // into a unary node, so the faithful un-parse is `sqrt(x)`, not
+                // the `(sqrt x)` the prefix path would print. Unreachable in any
+                // differential (`snc merge`'s Bar-A printer rejects `sqrt` as out
+                // of scope, so the oracle emits no merged text to compare), but
+                // an un-parser whose output cannot re-parse is worth no more than
+                // one that emits the wrong operator.
+                append_str(out, "sqrt(");
+                emit_expr(out, c, inner);
+                push(out, ')');
+                0
+            } else {
+                push(out, '(');
+                append_str(out, unary_sym(uop));
+                push(out, ' ');
+                emit_expr(out, c, inner);
+                push(out, ')');
+                0
+            }
         },
         Expr::Binary(bop, l, r) => {
             push(out, '(');

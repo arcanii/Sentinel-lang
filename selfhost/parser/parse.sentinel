@@ -12,6 +12,14 @@ fn parse_atom(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i6
         let ien: i64 = (*e)[*cur];
         *cur = *cur + 1;
         Expr::Int(parse_int(src, ist, ien))
+    } else if tag == 66 {
+        // (ADR 0058) A float literal keeps its RAW LEXEME; the dumps render it
+        // through the one shared `append_float`, so ast / resolve / types cannot
+        // drift, and a future f64 codegen still has the original bytes.
+        let fst: i64 = (*s)[*cur];
+        let fen: i64 = (*e)[*cur];
+        *cur = *cur + 1;
+        Expr::Float(slice_of(src, fst, fen))
     } else if tag == 62 {
         // Char literal — decode the single body byte at start+1.
         let cst: i64 = (*s)[*cur];
@@ -63,7 +71,15 @@ fn parse_atom(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i6
             // expr; only postfix `.m(args)` calls a value).
             *cur = *cur + 1;
             let cargs: Args = parse_args(k, s, e, src, cur, 5);
-            Expr::Call(slice_of(src, vst, ven), cargs)
+            // (ADR 0058 A1) `sqrt(x)` is a RESERVED NAME the oracle rewrites at
+            // the call site into a UNARY node rather than giving it an `FnId`
+            // (a 42nd builtin would shift every user FnId). The rewrite is
+            // unconditional by name in the oracle, so it is here too.
+            if is_kw_sqrt(src, vst, ven) {
+                sqrt_unary(cargs)
+            } else {
+                Expr::Call(slice_of(src, vst, ven), cargs)
+            }
         } else if (*k)[*cur] == 6 && (*k)[*cur + 1] == 2 && (*k)[*cur + 2] == 31 {
             // `Name { field : ... }` — a struct literal. The `{ Ident :`
             // lookahead is the disambiguation (vs the Rust parser's
@@ -238,6 +254,21 @@ fn parse_postfix_rest(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur:
         parse_postfix_rest(k, s, e, src, cur, Expr::Index(acc, idx))
     } else {
         acc
+    }
+}
+
+// (ADR 0058 A1) Wrap the single argument of a `sqrt(x)` call in unary op-code 6.
+// The `Args::End` arm cannot be reached through any input a differential sees:
+// the ORACLE rejects every other arity at PARSE time with `SqrtArity`, so
+// `snc ast` exits nonzero and the comparison is skipped before scg ever runs
+// (verified — `sqrt()` and `sqrt(1.0, 2.0)` both print
+// `sentinel::parse::sqrt_arity`). It still returns a well-formed node rather
+// than aborting, on the standing "scg is dump-only and trusts oracle-valid
+// input" contract.
+fn sqrt_unary(a: Args) -> Expr {
+    match a {
+        Args::End => Expr::Unary(6, Expr::Int(0)),
+        Args::Cell(h, t) => Expr::Unary(6, h),
     }
 }
 

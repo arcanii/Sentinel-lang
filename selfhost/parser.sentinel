@@ -84,8 +84,15 @@
 // 43 return | 44 ; 45 let 46 mut 47 while 48 break 49 continue | 50 ? 51 secret
 // | (2d top-level decls) 52 struct 53 enum 54 trait 55 impl 56 class 57 effect
 // 58 use 59 pub 60 as 61 for | (2d-8 literals) 62 CharLit 63 StringLit |
-// (ADR 0067 multi-file modules) 64 module 65 part.
-// Expr unary op-codes: 1 - 2 ! 3 * (deref) 4 & (ref) 5 &mut (refmut).
+// (ADR 0067 multi-file modules) 64 module 65 part | (ADR 0058) 66 FloatLit.
+// Token tags are APPEND-ONLY: resolve/decls.sentinel compares raw tag integers,
+// so inserting a tag mid-table silently mis-classifies items rather than failing.
+// Expr unary op-codes: 1 - 2 ! 3 * (deref) 4 & (ref) 5 &mut (refmut)
+// | (ADR 0058 A1) 6 sqrt. `sqrt` is a RESERVED NAME the parser rewrites at the
+// call site into a unary node, exactly as the oracle does — it must NOT become a
+// builtin, because builtins occupy FnIds 0..=41 and user fns are `42 + idx`, so a
+// 42nd builtin would shift every user FnId and re-bless every dump in the corpus.
+// (7/8/9 stay free for ADR 0057's ptr_of / ptr_of_mut / is_null.)
 // Expr op-codes (internal; the dump emits node names + operator symbols):
 // binop 1 + 2 - 3 * 4 / 5 & 6 | 7 ^ ; cmp 8 == 9 != 10 < 11 <= 12 > 13 >= ;
 // logic 14 && 15 || ; unary 1 - 2 !.
@@ -101,6 +108,13 @@ part dump;
 
 pub enum Expr {
     Int(i64),
+    // (ADR 0058) A float literal, carrying the RAW LEXEME — not the rendered
+    // text. The three dumps that print it (ast / resolve / types) each call the
+    // one shared `append_float`, so the rendering cannot drift between them; and
+    // a future f64 codegen must decode the VALUE from these original bytes,
+    // never from the rendered string, which is exact only inside the domain
+    // `append_float` documents.
+    Float([u8]),
     Bool(bool),
     Null,
     Char(i64),
@@ -484,6 +498,71 @@ fn is_kw_delegate(src: &[u8], start: i64, end: i64) -> bool {
         && (*src)[start + 5] == 'a' && (*src)[start + 6] == 't' && (*src)[start + 7] == 'e'
 }
 
+// (ADR 0058) Is `src[start..end]` the reserved name `sqrt`? A1 makes `sqrt(x)`
+// a call-site rewrite to a UNARY node rather than a builtin fn, so that it costs
+// no `FnId`. The oracle applies it UNCONDITIONALLY by name — a user-defined
+// `fn sqrt` still keeps its own FnId and still has its call sites rewritten —
+// so this must be unconditional too.
+fn is_kw_sqrt(src: &[u8], start: i64, end: i64) -> bool {
+    end - start == 4 && (*src)[start] == 's' && (*src)[start + 1] == 'q'
+        && (*src)[start + 2] == 'r' && (*src)[start + 3] == 't'
+}
+
+// (ADR 0058) The end of an `[eE][+-]?[0-9]+` exponent suffix at `p`, or `p` when
+// there is none. Mirrors `exp_end` in selfhost/lexer.sentinel — the two
+// tokenizers are separate by design, so the scan is stated in both.
+fn exp_end(src: &[u8], n: i64, p: i64) -> i64 {
+    if p < n && ((*src)[p] == 'e' || (*src)[p] == 'E') {
+        let mut q: i64 = p + 1;
+        if q < n && ((*src)[q] == '+' || (*src)[q] == '-') {
+            q = q + 1;
+            0
+        } else {
+            0
+        };
+        if q < n && is_digit((*src)[q]) {
+            let mut r: i64 = q;
+            while r < n && is_digit((*src)[r]) {
+                r = r + 1;
+            }
+            r
+        } else {
+            p
+        }
+    } else {
+        p
+    }
+}
+
+// (ADR 0058) Given `de` = the position just past a literal's LEADING digits,
+// the end of a FLOAT literal, or `de` when the token is a plain integer.
+// Mirrors the oracle's regex `[0-9]+(\.[0-9]+([eE][+-]?[0-9]+)?|[eE][+-]?[0-9]+)`:
+// a `.` counts only when a DIGIT follows (so `p.0` stays field access and `2.`
+// stays `IntLit Dot`), and an exponent marker only when a digit follows the
+// optional sign (so `1e` stays `IntLit Ident`).
+fn float_end(src: &[u8], n: i64, de: i64) -> i64 {
+    let mut fe: i64 = de;
+    let mut isf: bool = false;
+    if de < n && (*src)[de] == '.' && de + 1 < n && is_digit((*src)[de + 1]) {
+        fe = de + 2;
+        while fe < n && is_digit((*src)[fe]) {
+            fe = fe + 1;
+        }
+        isf = true;
+        0
+    } else {
+        0
+    };
+    let ex: i64 = exp_end(src, n, fe);
+    if ex > fe {
+        ex
+    } else if isf {
+        fe
+    } else {
+        de
+    }
+}
+
 // Append the decimal rendering of `x` (>= 0) to `out`.
 pub fn append_int(out: &mut Vec<u8>, x: i64) -> i64 {
     if x == 0 {
@@ -505,6 +584,184 @@ pub fn append_int(out: &mut Vec<u8>, x: i64) -> i64 {
         }
         0
     }
+}
+
+// Append `digits[from..=to]` to `out`.
+fn append_digits(out: &mut Vec<u8>, digits: &Vec<u8>, from: i64, to: i64) -> i64 {
+    let mut i: i64 = from;
+    while i <= to {
+        push(out, (*digits)[i]);
+        i = i + 1;
+    }
+    0
+}
+
+// (ADR 0058) Render the significant digits `digits[lo..=hi]` with the decimal
+// point after `point` of them (value = 0.<digits> * 10^point) the way the ORACLE
+// renders a float — see `append_float` for the rules and the exactness domain.
+fn append_float_body(out: &mut Vec<u8>, digits: &Vec<u8>, lo: i64, hi: i64, point: i64) -> i64 {
+    let k: i64 = hi - lo + 1;
+    // The SCIENTIFIC exponent: value = d.ddd * 10^sci.
+    let sci: i64 = point - 1;
+    if sci >= 0 - 4 && sci <= 15 {
+        if point <= 0 {
+            // The point sits left of every digit: `0.` + padding + digits.
+            append_str(out, "0.");
+            let mut z: i64 = 0;
+            while z < 0 - point {
+                push(out, '0');
+                z = z + 1;
+            }
+            append_digits(out, digits, lo, hi)
+        } else if point >= k {
+            // The point sits right of every digit: digits + padding + `.0`.
+            append_digits(out, digits, lo, hi);
+            let mut y: i64 = 0;
+            while y < point - k {
+                push(out, '0');
+                y = y + 1;
+            }
+            append_str(out, ".0")
+        } else {
+            append_digits(out, digits, lo, lo + point - 1);
+            push(out, '.');
+            append_digits(out, digits, lo + point, hi)
+        }
+    } else {
+        // Exponential: `d[.ddd]e<sci>`, and note the mantissa never carries a
+        // trailing `.0` (the oracle prints `1e16`, not `1.0e16`).
+        push(out, (*digits)[lo]);
+        if k > 1 {
+            push(out, '.');
+            append_digits(out, digits, lo + 1, hi)
+        } else {
+            0
+        };
+        push(out, 'e');
+        if sci < 0 {
+            push(out, '-');
+            append_int(out, 0 - sci)
+        } else {
+            append_int(out, sci)
+        }
+    }
+}
+
+// (ADR 0058) Append a float literal the way EVERY oracle dump prints one —
+// `format!("{:?}", f64::from_bits(bits))` — working only on the literal's
+// decimal TEXT — it has no choice: `selfhost/*.sentinel` may not itself contain a
+// float, because the oracle Errs on every float LITERAL it tries to lower
+// (`float literal not ported`, llvm_dump.rs) and that would break the
+// selfhost_codegen differential on the compiler's own sources. So there is no
+// double anywhere to format from. (State the guard as the LITERAL check and no
+// other: `snc llvm` does not refuse `F64` as such — `Channel<f64>` and a phantom
+// f64 generic argument both lower cleanly.) `lex` is the RAW LEXEME the tokenizer
+// matched, taken by value and consumed like `append_str`'s argument.
+//
+// Rust's Debug prints the SHORTEST decimal that round-trips to the same
+// binary64, positionally iff the scientific exponent `sci` is in [-4, 15] and as
+// `<mantissa>e<sci>` otherwise. All four bounds are pinned against the oracle:
+//   1000000000000000.0 -> 1000000000000000.0   (sci = 15, positional)
+//   10000000000000000.0 -> 1e16                (sci = 16, exponential)
+//   0.0001 -> 0.0001                           (sci = -4, positional)
+//   0.00001 -> 1e-5                            (sci = -5, exponential)
+//
+// EXACTNESS DOMAIN — read before trusting the output. For at most 15 SIGNIFICANT
+// digits over a NORMAL double the shortest round-tripping decimal IS the
+// literal's own digits with leading/trailing zeros stripped, so no binary64
+// arithmetic is needed and this is exact (DBL_DIG = 15: two distinct <=15-digit
+// decimals cannot share a double, so no shorter decimal lies in the interval).
+// It is NOT exact outside that, in three ways, each confirmed against the oracle:
+//   * more than 15 significant digits — the oracle rounds to the nearest double
+//     and prints its 17-digit shortest form (`1.234567890123456789` ->
+//     `1.2345678901234567`);
+//   * a magnitude that overflows (`1.8e308` -> `inf`);
+//   * a subnormal (`1.23456789012345e-320` -> `1.2347e-320`).
+// So the domain is: at most 15 significant digits AND `sci` within [-307, 307].
+// The whole 116-program corpus sits far inside it (at most 10 digits, `sci` in
+// [-9, 6]). OUTSIDE it the failure mode is a LOUD, unregistered stage-differential
+// mismatch naming the program — never wrong code, because no float value reaches
+// codegen at all (`snc llvm` refuses f64, so the codegen differential skips every
+// float program). That containment is a property of ADR 0058 A3, not of this
+// function: whoever ports f64 codegen must decode from `Expr::Float`'s RAW bytes.
+pub fn append_float(out: &mut Vec<u8>, lex: [u8]) -> i64 {
+    let n: i64 = len(lex);
+    // Split the lexeme. The regex guarantees leading digits, a fraction of at
+    // least one digit when a `.` is present, and an exponent of at least one
+    // digit when a marker is present — so no malformed-input arm is needed.
+    let mut digits: Vec<u8> = vec_new();
+    let mut i: i64 = 0;
+    while i < n && is_digit(lex[i]) {
+        push(&mut digits, lex[i]);
+        i = i + 1;
+    }
+    // `point` = how many of `digits` precede the decimal point, i.e.
+    // value = 0.<digits> * 10^point. The exponent folds straight into it.
+    let mut point: i64 = len(digits);
+    if i < n && lex[i] == '.' {
+        i = i + 1;
+        while i < n && is_digit(lex[i]) {
+            push(&mut digits, lex[i]);
+            i = i + 1;
+        }
+        0
+    } else {
+        0
+    };
+    if i < n && (lex[i] == 'e' || lex[i] == 'E') {
+        i = i + 1;
+        let mut eneg: bool = false;
+        if i < n && (lex[i] == '+' || lex[i] == '-') {
+            eneg = lex[i] == '-';
+            i = i + 1;
+            0
+        } else {
+            0
+        };
+        // SATURATING: the regex allows unboundedly many exponent digits, and an
+        // i64 overflow here would wrap to a negative `sci` whose `0 - sci` then
+        // breaks `append_int`'s `x >= 0` precondition. 1000000 is far outside
+        // the finite double range, so saturating changes no in-domain answer.
+        let mut ev: i64 = 0;
+        while i < n && is_digit(lex[i]) {
+            if ev < 1000000 {
+                ev = ev * 10 + (u8_to_i64(lex[i]) - 48);
+                0
+            } else {
+                0
+            };
+            i = i + 1;
+        }
+        point = if eneg { point - ev } else { point + ev };
+        0
+    } else {
+        0
+    };
+    // Strip leading zeros — each one moves the point one place LEFT — then
+    // trailing zeros, which sit right of the point and do NOT move it. Swapping
+    // either rule is a silent wrong answer on exactly `00.5` and `1.230e2`.
+    let dn: i64 = len(digits);
+    let mut lo: i64 = 0;
+    while lo < dn && digits[lo] == '0' {
+        lo = lo + 1;
+        point = point - 1;
+    }
+    let mut out2: Vec<u8> = vec_new();
+    if lo == dn {
+        // Every digit was a zero. This MUST precede the trailing-zero strip,
+        // which would otherwise run off the front. The oracle prints `0.0` for
+        // `0.0`, `0.000`, `000.000`, `0e0` and `0.0e-5` alike.
+        append_str(&mut out2, "0.0");
+        0
+    } else {
+        let mut hi: i64 = dn - 1;
+        while hi > lo && digits[hi] == '0' {
+            hi = hi - 1;
+        }
+        append_float_body(&mut out2, &digits, lo, hi, point)
+    };
+    append_str(out, vec_to_array(out2));
+    0
 }
 
 // Append the literal bytes of `s` (moved in + consumed) to `out`.
@@ -651,10 +908,13 @@ pub fn tokenize(src: &[u8], n: i64, kinds: &mut Vec<i64>, starts: &mut Vec<i64>,
             while de < n && is_digit((*src)[de]) {
                 de = de + 1;
             }
-            push(kinds, 1);
+            // (ADR 0058) tag 66 `FloatLit` when a fraction and/or an exponent
+            // follows, tag 1 `Int` otherwise.
+            let fd: i64 = float_end(src, n, de);
+            push(kinds, if fd > de { 66 } else { 1 });
             push(starts, start);
-            push(ends, de);
-            de
+            push(ends, fd);
+            fd
         } else if is_ident_start(b) {
             let mut ie: i64 = start;
             while ie < n && is_ident_cont((*src)[ie]) {

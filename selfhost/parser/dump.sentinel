@@ -227,6 +227,14 @@ fn dump_expr(out: &mut Vec<u8>, ex: Expr) -> i64 {
             push(out, ')');
             0
         },
+        // (ADR 0058) `(float <D>)` — the rendering lives in `parser::append_float`,
+        // the single site all three dumps share.
+        Expr::Float(lx) => {
+            append_str(out, "(float ");
+            append_float(out, lx);
+            push(out, ')');
+            0
+        },
         Expr::Var(nm) => {
             append_str(out, "(var ");
             append_str(out, nm);
@@ -243,8 +251,14 @@ fn dump_expr(out: &mut Vec<u8>, ex: Expr) -> i64 {
                 "*"
             } else if uop == 4 {
                 "&"
-            } else {
+            } else if uop == 5 {
                 "&mut"
+            } else {
+                // (ADR 0058 A1) op-code 6, the `sqrt` reserved-name rewrite.
+                // Note the chain now tests 5 EXPLICITLY: leaving `&mut` as the
+                // catch-all would have rendered a new op-code as `&mut` — a
+                // silent wrong symbol, not a compile error.
+                "sqrt"
             };
             append_str(out, usym);
             push(out, ' ');

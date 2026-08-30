@@ -118,6 +118,10 @@ fn mir_put_uop(out: &mut Vec<u8>, uop: i64) -> i64 {
         "&"
     } else if uop == 5 {
         "&mut"
+    } else if uop == 6 {
+        // (ADR 0058 A1) `sqrt` — the oracle's MIR renders it through
+        // `UnaryOp::symbol()`, so `(vN:f64 unary sqrt vM)`.
+        "sqrt"
     } else {
         "*"
     };

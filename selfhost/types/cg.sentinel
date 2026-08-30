@@ -197,6 +197,23 @@ fn cg_mangle_to(out: &mut Vec<u8>, c: &mut TyCtx, h: i64) -> i64 {
         append_str(out, "bool")
     } else if h == 3 {
         append_str(out, "u8")
+    } else if h == 4 {
+        // (ADR 0058) f64 as a generic type ARGUMENT. This arm is REACHABLE and
+        // was found by review, after a first attempt documented it as
+        // "unreachable" — it is not, and the repro is small:
+        //     struct Pair<A, B> { a: A }
+        //     fn main() -> i64 { let p: Pair<i64, f64> = Pair { a: 42 }; p.a }
+        // `B` is phantom, so no f64 VALUE and no f64 field type ever exist, and
+        // the oracle compiles it happily to `%Pair_i64_ty_F64` — only the
+        // MANGLED NAME mentions f64. Without this arm the `else` below computes
+        // `idx = 4 - tbase() = -96` and scg ABORTS with an out-of-bounds index
+        // on a program the oracle accepts.
+        //
+        // `ty_F64` is not invented: the oracle's `mangle_type` has no F64 arm
+        // either and falls to its defensive `other => format!("ty_{other:?}")`,
+        // so this literal text is exactly what it emits. Verified byte-identical
+        // on the repro above.
+        append_str(out, "ty_F64")
     } else {
         let idx: i64 = h - tbase();
         let k: i64 = (*c).tk[idx];

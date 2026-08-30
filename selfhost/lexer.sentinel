@@ -4,7 +4,7 @@
 // prints the SAME canonical token dump as the Rust `snc lex` oracle
 // (ADR 0038 D4): one line per token `<KIND> <start> <end> [<lexeme>]`
 // (KIND = the variant name; spans = byte offsets; lexeme only for the
-// value-bearing variants Ident/IntLit/StringLit/CharLit), then `EOF`.
+// value-bearing variants Ident/IntLit/FloatLit/StringLit/CharLit), then `EOF`.
 //
 // The differential test diffs this output against `snc lex` over the
 // fixture corpus. This dogfoods the post-1.0 language: `[u8]`/`u8` (D.2),

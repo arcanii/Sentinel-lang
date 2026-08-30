@@ -303,7 +303,8 @@ fn gi_argend(c: &mut TyCtx, h: i64) -> i64 {
     (*c).gire[rec]
 }
 
-// Scalar codes: i64=0, i32=1, bool=2, u8=3. -1 if `q` is not a scalar name.
+// Scalar codes: i64=0, i32=1, bool=2, u8=3, f64=4 (ADR 0058). -1 if `q` is not
+// a scalar name. `scalar_bits` gives f64 the 64 default; see its own note.
 fn scalar_code(q: &[u8]) -> i64 {
     if name_eq_lit(q, "i64") {
         0
@@ -313,6 +314,13 @@ fn scalar_code(q: &[u8]) -> i64 {
         2
     } else if name_eq_lit(q, "u8") {
         3
+    } else if name_eq_lit(q, "f64") {
+        // (ADR 0058) f64 is a scalar CODE, not an interner KIND. Every
+        // `h < tbase()` test in the typer means "scalar" — Copy for
+        // `is_move_type`, drop-free, `Fn<T,R>`-eligible, substitution-inert
+        // — and a handle >= tbase() would instead make every f64 value MOVE,
+        // polluting the borrow dump, and be rejected by `fn_ref_sig`.
+        4
     } else {
         0 - 1
     }
@@ -320,6 +328,15 @@ fn scalar_code(q: &[u8]) -> i64 {
 
 // ADR 0049: bit width of a scalar type handle — i64(0)=64, i32(1)=32, u8(3)=8.
 fn scalar_bits(h: i64) -> i64 {
+    // ⚠ (ADR 0058) f64 (code 4) falls into the `else` and answers 64. The WIDTH
+    // is right, but the caller is the Cast arm's codegen, which reads equal
+    // widths as "no conversion needed" — whereas an int<->f64 cast needs
+    // `sitofp`/`fptosi`. Unreachable today, and here is the actual guard (the
+    // first attempt at this comment named the wrong one): the ORACLE Errs on
+    // every `x as f64` / `f64 as x` it tries to lower, so the codegen
+    // differential skips before scg runs. It is NOT true that f64 cannot reach
+    // scg's codegen at all — a PHANTOM f64 generic argument does, which is why
+    // `cg_mangle_to` needed a real arm. Anyone porting f64 codegen revisits both.
     if h == 1 {
         32
     } else if h == 3 {
@@ -339,6 +356,12 @@ fn render_scalar(out: &mut Vec<u8>, h: i64) -> i64 {
         append_str(out, "bool")
     } else if h == 3 {
         append_str(out, "u8")
+    } else if h == 4 {
+        // (ADR 0058) f64. A NEW branch above the `?T` fallback, never a widened
+        // test: that trailing `else` is what renders the -1 handle `fn_ref_sig`
+        // and `dump_te_fnref` produce on their reject path, so it must keep
+        // catching exactly the handles nothing else claims.
+        append_str(out, "f64")
     } else {
         append_str(out, "?T")
     }
@@ -1311,20 +1334,21 @@ fn type_of_typeexpr(c: &mut TyCtx, t: TypeE, gb: &mut Vec<u8>) -> i64 {
                 // above: resolve the `<…>` type arg — a word scalar (i32/u8/bool) or
                 // a nested `Channel<…>` handle — instead of hardcoding `i64`.
                 //
-                // Two oracle-rejections this does NOT re-enforce (both snc-only, like
-                // the guard/return pins — scg is dump-only and trusts oracle-valid
-                // input; the differential skips anything the oracle rejects):
-                //  * `Channel<f64>` — scg has no `f64` type handle (a pre-existing,
-                //    separately-tracked gap), so `collect_tyargs` maps `f64` to 0 and
-                //    this renders `Channel<i64>` in the TYPES dump where the oracle
-                //    renders `Channel<f64>`. No f64 VALUE can flow (scg has no f64
-                //    literal/codegen), and channel_new/close lower element-agnostically
-                //    (a ptr), so the LLVM IR is byte-identical — the mismatch is the
-                //    annotation label only. No `Channel<f64>` program exists in the
-                //    corpus, so no differential observes it.
-                //  * depth > 1 (`Channel<Channel<Channel<…>>>`) — the oracle caps
-                //    nesting at one level (`channel_chanid_for`); scg interns any depth
-                //    structurally. Oracle-rejected, so differential-skipped.
+                // `Channel<f64>` USED TO be documented here as a tolerated
+                // over-accept: with no `f64` handle, `collect_tyargs` mapped the
+                // name to 0 and this rendered `Channel<i64>` where the oracle
+                // renders `Channel<f64>`. The ADR 0058 mirror CLOSED it —
+                // `scalar_code` now answers 4 for `f64` and `render_scalar`
+                // prints it, so `Channel<f64>` renders correctly (verified
+                // against the oracle at `types` and `mir`). Nothing here needed
+                // changing for that: this arm was already element-generic.
+                //
+                // One oracle-rejection this still does NOT re-enforce (snc-only,
+                // like the guard/return pins — scg is dump-only and trusts
+                // oracle-valid input; the differential skips whatever the oracle
+                // rejects): depth > 1 (`Channel<Channel<Channel<…>>>`), where the
+                // oracle caps nesting at one level (`channel_chanid_for`) and scg
+                // interns any depth structurally.
                 let mut cav: Vec<i64> = vec_new();
                 collect_tyargs(c, ga, gb, &mut cav);
                 let celem: i64 = if len(cav) > 0 {
@@ -1604,10 +1628,10 @@ fn fn_ret(c: &mut TyCtx, fid: i64) -> i64 {
 // even run — the same "error parity is out of scope" limitation as the
 // rest of this project, ADR 0044 D7).
 //
-// Only scg's 4 existing scalar handles (i64/i32/bool/u8, all `< tbase()`)
-// are considered — scg's type system has no `f64`/`ptr` handle yet (a
-// separate, pre-existing gap), so a `Fn<f64,f64>`-style value can't be
-// formed here regardless.
+// Only scg's scalar handles (`< tbase()`) are considered. That set is now FIVE:
+// i64/i32/bool/u8 plus `f64` (ADR 0058, scalar code 4), so a `Fn<f64,f64>` value
+// DOES form here — verified byte-identical against the oracle. `ptr` still has
+// no scg handle, so a `Fn<…,ptr>` still cannot.
 fn fn_ref_sig(c: &mut TyCtx, fid: i64) -> i64 {
     let idx: i64 = fid - 42;
     if (*c).uftp[idx] > 0 {
