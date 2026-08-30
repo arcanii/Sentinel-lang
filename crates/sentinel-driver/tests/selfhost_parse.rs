@@ -439,3 +439,424 @@ fn sentinel_parser_matches_oracle_on_corpus() {
         mismatches.join("\n")
     );
 }
+
+// ---------------------------------------------------------------------------
+// The EXTENDED program differential: REAL programs, not just the curated
+// single-file fixture corpus.
+//
+// `collect_fixtures` above sweeps only `tests/pass` + `tests/ui` — single-file
+// fixtures written to exercise ONE construct each. Until this test, only
+// `selfhost_codegen.rs` swept `examples/` + `sentinel_library/` + `tools/`,
+// which left every UPSTREAM stage differential structurally blind to divergence
+// in real programs. That is not hypothetical: NOTHING in the fixture corpus
+// uses `export "C"`, a float literal, or any of the four reserved-name
+// intrinsics (`sqrt` / `ptr_of` / `ptr_of_mut` / `is_null`) — `snc lex` reports
+// zero `FloatLit` tokens across all 207 fixtures — so three separate unmirrored
+// front-end surfaces had never once been compared, and one of them (`2.0`) is
+// SILENTLY misparsed by the self-hosted parser as a field access. The same
+// blind spot previously hid the ADR 0067 `module`/`part` lex gap.
+//
+// TWO FORMS of each program are compared, because the stage oracles
+// (`snc lex`/`ast`/`resolve`/`types`/`effects`/`borrow`/`mir`/`ctverify`) do NO
+// module discovery — only `snc llvm` merges. A program with a `use` edge is
+// rejected outright ("`use` imports are not yet wired"), so the direct form
+// alone would leave the semantic stages seeing 9 of 116 programs:
+//   (a) DIRECT — the program as written;
+//   (b) MERGED — `snc merge`'s single-file collapse of its module graph, which
+//       is exactly the shape the self-hosted `scg` consumes at the bootstrap
+//       fixed point. This is what puts REAL multi-module programs
+//       (`delegation`, `rect_demo`, `process_ids`, `sort_search`, …) through
+//       the stage at all. It is not redundant at `lex`/`ast` either, where the
+//       direct form already covers all 116: the merge qualifies every top-level
+//       item as `module$path$item`, and `$` is an identifier-CONTINUATION
+//       character only so that text lexes (ADR 0045 8g) — no file under
+//       `examples/` + `sentinel_library/` + `tools/` and no fixture in
+//       `tests/pass` + `tests/ui` contains a `$`, so these 20 comparisons are
+//       the only place either lexer meets one outside the fixed point itself.
+//
+// Every divergence must be either FIXED or listed below with the ADR that
+// defers it (`DEFERRED_PROGRAMS`) or its diagnosis (`KNOWN_SCG_BUGS`). The list
+// IS the deliverable — it converts an invisible gap into an auditable one, and
+// a listed program that starts matching FAILS the test, so the list cannot rot.
+//
+// ONE LIMITATION, stated because it is not obvious and is inherited from
+// `selfhost_codegen.rs`: registration is keyed by PROGRAM PATH and is
+// cause-BLIND. A listed program's byte-difference is excused wholesale, so a
+// SECOND, unrelated divergence introduced into an already-listed file would NOT
+// fail this test — though the identical construct added to any unlisted file
+// does. What still fires for a listed program: a crash, the entry going stale
+// by matching, and the entry never being reached. So keep the lists short,
+// prefer fixing a listed program over letting it accumulate causes, and when a
+// program does have several, NAME them all (`examples/math/quadratic.sentinel`
+// carries two).
+
+/// Programs whose divergence is a KNOWN, deliberately-deferred feature gap,
+/// each with the ADR that defers it. A listed program is still COMPARED — the
+/// self-hosted stage is RUN, so a crash still fails the test — but its
+/// byte-difference is not a failure. Deleting an entry is how a mirror slice
+/// records that it closed the gap; an entry the sweep never REACHES fails the
+/// test too, because an unreached entry is as stale as a matching one.
+///
+/// THE LINE BETWEEN THE TWO LISTS, stated because `deferred_reason` chains
+/// them: the classification changes NOTHING about whether the test passes, so
+/// it is pure documentation — which is exactly why a reader has to be able to
+/// apply it to a NEW divergence. A divergence is DEFERRED when reproducing the
+/// oracle needs a shape `scg` does not have (a token, an AST node, a type
+/// handle) that a fix would then have to thread through every downstream stage:
+/// closing it is a MIRROR SLICE, and the ADR cited says the mirror is deferred.
+/// It is a BUG when `scg` already has every shape involved and the divergence
+/// is a HOLE in dispatch it has already ported: closing it is a FIX that
+/// changes nothing downstream.
+const DEFERRED_PROGRAMS: &[(&str, &str)] = &[
+    // ADR 0058 floats are snc-only in the self-host. The parser's own tokenizer
+    // has no `FloatLit`, so `2.0` arrives as `IntLit Dot IntLit` and
+    // `parse_postfix_rest` reads the `.` as a FIELD ACCESS: the oracle's
+    // `(float 2.0)` becomes `(field (int 2) 0)`. SEVERITY: a silent misparse,
+    // not a rejection — as severe as the `extern` bug was, though DEFERRED
+    // rather than a bug by the criterion above, and invisible for exactly the
+    // same reason (no fixture in tests/pass or tests/ui has a float literal;
+    // ADR 0058 A3 deferred the fixture ALONG WITH the mirror, which is what
+    // made a real-program sweep the only way to see it). Closing it is a
+    // front-end mirror slice: `FloatLit` in both tokenizers, a `(float …)` dump
+    // node, then the `f64` type handle downstream (which scg also lacks — see
+    // selfhost_types.rs).
+    ("examples/lang/fn_value_generic.sentinel", "ADR 0058: no FloatLit in the selfhost parser (`2.0` parses as a field access)"),
+    ("examples/lang/task_generic.sentinel", "ADR 0058: no FloatLit in the selfhost parser"),
+    ("examples/math/transcendental.sentinel", "ADR 0058: no FloatLit in the selfhost parser"),
+    ("examples/text/str_demo.sentinel", "ADR 0058: no FloatLit in the selfhost parser"),
+    ("sentinel_library/std/data/json.sentinel", "ADR 0058: no FloatLit in the selfhost parser"),
+    ("sentinel_library/std/text/str.sentinel", "ADR 0058: no FloatLit in the selfhost parser"),
+    // TWO INDEPENDENT causes, and both must be named: these two also call
+    // `sqrt`, which is the OTHER half of the RESERVED-NAME family below. When
+    // the ADR 0058 float mirror lands it closes only the literal, so the right
+    // move then is to EDIT these two entries down to the `sqrt` cause, not to
+    // delete them — deleting would leave both programs red with no registered
+    // explanation.
+    ("examples/math/quadratic.sentinel", "ADR 0058: no FloatLit in the selfhost parser AND the `sqrt` reserved-name rewrite is unmirrored (`(call sqrt …)` vs `(unary sqrt …)`)"),
+    ("sentinel_library/std/math/float.sentinel", "ADR 0058: no FloatLit in the selfhost parser AND the `sqrt` reserved-name rewrite is unmirrored"),
+    // THE RESERVED-NAME FAMILY, complete and explicit: `sqrt` (ADR 0058 A1) and
+    // `ptr_of` / `ptr_of_mut` / `is_null` (ADR 0057 Phase 1b) are the ONLY four
+    // names the Rust parser rewrites at the call site into a UNARY node
+    // (`crates/sentinel-syntax/src/parser.rs`, two adjacent arms — there are no
+    // others; `snc merge`'s Bar-A printer rejects the same four by name). The
+    // self-hosted parser has no such rewrite, so it emits `(call ptr_of …)`.
+    //
+    // DEFERRED, not a bug, by the criterion above: closing it means giving
+    // `scg` four new unary opcodes, which every downstream stage
+    // (resolve/types/mir/codegen) would then have to understand — the ADR 0057
+    // mirror slice, which that ADR defers until a corpus fixture uses it. No
+    // fixture does; the programs below are the only users in the tree, and none
+    // of them reaches a stage past `ast` (they are library modules the semantic
+    // oracles reject), so nothing downstream is affected today.
+    ("sentinel_library/std/c.sentinel", "ADR 0057 Phase 1b: `ptr_of`/`ptr_of_mut`/`is_null` are unary reserved-name rewrites in snc, plain calls in scg"),
+    ("sentinel_library/std/sys/ffi.sentinel", "ADR 0057 Phase 1b: `ptr_of`/`ptr_of_mut` are unary reserved-name rewrites in snc, plain calls in scg"),
+    ("sentinel_library/std/sys/random_unix.sentinel", "ADR 0057 Phase 1b: `ptr_of_mut` is a unary reserved-name rewrite in snc, a plain call in scg"),
+    ("sentinel_library/std/sys/random_windows.sentinel", "ADR 0057 Phase 1b: `ptr_of_mut` is a unary reserved-name rewrite in snc, a plain call in scg"),
+    ("sentinel_library/std/sys/win32.sentinel", "ADR 0057 Phase 1b: `ptr_of` is a unary reserved-name rewrite in snc, a plain call in scg"),
+];
+
+/// Programs whose divergence is a REAL BUG in the self-hosted parser, not a
+/// deferred feature — kept separate on purpose. Conflating "we chose not to
+/// port this yet" with "this is wrong" is precisely the invisible-gap problem
+/// this test exists to end, so an entry here must carry its DIAGNOSIS and is a
+/// debt marker to be deleted by a fix, never by a re-label.
+///
+/// A BUG entry may still cite an ADR that DEFERS a mirror; that is not a
+/// contradiction. ADR 0057 / 0059 defer the FEATURE mirror (typing, codegen,
+/// `--lib`, the multi-module symbol policy), never the dump arm — the same
+/// reason `selfhost/lexer.sentinel` already carries the `export` / `module` /
+/// `part` keywords whose features are unported.
+const KNOWN_SCG_BUGS: &[(&str, &str)] = &[
+    // ADR 0059 `export "C" fn` — a BUG by the criterion above, not a deferred
+    // mirror: the oracle's ast dump renders an exported fn EXACTLY like an
+    // ordinary one, so `scg` needs no new shape at all — only the item
+    // dispatcher's missing arm. `dump_item` has an `extern` arm but NO
+    // `export` one, so `export` falls through to `dump_fn_decl`, which reads
+    // the ABI string as the fn NAME and then mis-slices the parameter list:
+    // `(fn "C" ((param sha256_oneshot msg) (param : (arr u8))) …)` where the
+    // oracle emits `(fn sha256_oneshot ((param msg (ref (arr u8)))) …)`. This
+    // is the SAME defect the `extern` arm was added to fix (5c911f5) — its own
+    // comment predicted this shape — and it survived that pass because the
+    // completeness sweep looked at `extern` only, and because no fixture in
+    // tests/pass or tests/ui uses `export "C"`.
+    ("examples/export/crypto_lib.sentinel", "ADR 0059: dump_item has no `export \"C\"` arm (reads the ABI string as the fn name)"),
+    ("examples/export/ct_select.sentinel", "ADR 0059: dump_item has no `export \"C\"` arm"),
+    ("examples/export/digest_lib.sentinel", "ADR 0059: dump_item has no `export \"C\"` arm"),
+];
+
+/// The deferral reason for `key` (a repo-relative, forward-slashed path, with a
+/// ` (merged)` suffix for the merged form) — `None` when the program is not
+/// registered and must therefore match the oracle byte-for-byte.
+fn deferred_reason(key: &str) -> Option<&'static str> {
+    DEFERRED_PROGRAMS
+        .iter()
+        .chain(KNOWN_SCG_BUGS.iter())
+        .find(|(p, _)| *p == key)
+        .map(|(_, why)| *why)
+}
+
+/// Recursively collect `.sentinel` files under `dir`.
+fn collect_under(dir: &Path, out: &mut Vec<PathBuf>) {
+    if !dir.is_dir() {
+        return;
+    }
+    for entry in std::fs::read_dir(dir).expect("read dir") {
+        let path = entry.expect("dir entry").path();
+        if path.is_dir() {
+            collect_under(&path, out);
+        } else if path.extension().and_then(|e| e.to_str()) == Some("sentinel") {
+            out.push(path);
+        }
+    }
+}
+
+/// The real-program corpus: every `.sentinel` under `examples/`,
+/// `sentinel_library/` and `tools/`. Programs the oracle rejects (a library
+/// module with no `main`, an unwired `use`, a not-yet-ported construct) are
+/// simply skipped, exactly as in the fixture differential above.
+fn collect_programs() -> Vec<PathBuf> {
+    let root = workspace_root();
+    let mut out = Vec::new();
+    for sub in ["examples", "sentinel_library", "tools"] {
+        collect_under(&root.join(sub), &mut out);
+    }
+    out.sort();
+    out
+}
+
+/// Copy `src`'s CONTENTS into `dst` recursively (so `sentinel_library/std`
+/// lands at `<dst>/std`). Mirrors `selfhost_codegen.rs`'s staging, which is
+/// what makes `use std::…` / `use Sentinel::…` resolve for `snc merge`: module
+/// discovery roots at the entry file's parent directory.
+fn copy_tree_contents(src: &Path, dst: &Path) {
+    std::fs::create_dir_all(dst).expect("create dst");
+    for entry in std::fs::read_dir(src).expect("read_dir") {
+        let entry = entry.expect("dir entry");
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        if from.is_dir() {
+            copy_tree_contents(&from, &to);
+        } else {
+            std::fs::copy(&from, &to).expect("copy file");
+        }
+    }
+}
+
+/// Compare `bin` (a compiled self-hosted stage, which reads `./input.sentinel`)
+/// against `snc <oracle_cmd>` over every real program, in both the direct and
+/// the merged form.
+///
+/// The two coverage guards exist so that a staging regression which silently
+/// stops emitting fails loudly instead of passing vacuously, and they are
+/// deliberately of different KINDS:
+///   * `expect_direct` is EXACT. The direct form does no module discovery at
+///     all, so the set of programs the oracle emits for is platform-invariant;
+///     an exact count therefore catches a comparison disappearing even when it
+///     was not registered (a floor with slack would absorb it). Growing the
+///     corpus bumps this number — the same deliberate act `examples.rs` already
+///     requires of a new example.
+///   * `min_merged` is a FLOOR. `snc merge` selects target-conditional modules
+///     through `host_target_os()` (ADR 0062), so in principle another host can
+///     merge a different set. In practice it is exact: every ADR-0062
+///     conditional module in the tree (`std/sys/random_unix` /
+///     `random_windows`) fails merge-to-source identically on both, so the
+///     floor is set to today's actual count.
+fn real_program_differential(
+    oracle_cmd: &str,
+    bin: &Path,
+    work: &Path,
+    expect_direct: usize,
+    min_merged: usize,
+) {
+    let root = workspace_root();
+    // Stage the first-party libraries next to the entry so `use std::…` /
+    // `use Sentinel::…` resolves when `snc merge` collapses the module graph.
+    copy_tree_contents(&root.join("sentinel_library"), work);
+    let input = work.join("input.sentinel");
+
+    let programs = collect_programs();
+    assert!(
+        programs.len() > 50,
+        "expected a substantial program corpus, got {}",
+        programs.len()
+    );
+
+    let mut direct_emitted = 0usize;
+    let mut merged_emitted = 0usize;
+    let mut mismatches: Vec<String> = Vec::new();
+    let mut stale: Vec<String> = Vec::new();
+    let mut crashed: Vec<String> = Vec::new();
+    let mut silent: Vec<String> = Vec::new();
+    let mut reached: Vec<String> = Vec::new();
+    for program in &programs {
+        let rel = program
+            .strip_prefix(&root)
+            .expect("under root")
+            .to_string_lossy()
+            .replace('\\', "/");
+        let bytes = std::fs::read(program).expect("read program");
+        for merged_form in [false, true] {
+            std::fs::write(&input, &bytes).expect("stage input");
+            let key = if merged_form {
+                format!("{rel} (merged)")
+            } else {
+                rel.clone()
+            };
+            if merged_form {
+                let merged = Command::new(env!("CARGO_BIN_EXE_snc"))
+                    .arg("merge")
+                    .arg(&input)
+                    .output()
+                    .expect("run snc merge");
+                // `snc merge`'s merge-to-source is a Bar-A subset printer, so a
+                // program outside it simply has no merged form.
+                if !merged.status.success() {
+                    continue;
+                }
+                std::fs::write(&input, &merged.stdout).expect("stage the merged input");
+            }
+            let oracle = Command::new(env!("CARGO_BIN_EXE_snc"))
+                .arg(oracle_cmd)
+                .arg(&input)
+                .output()
+                .expect("run the oracle");
+            if !oracle.status.success() {
+                continue; // not in the emitted subset
+            }
+            if merged_form {
+                merged_emitted += 1;
+            } else {
+                direct_emitted += 1;
+            }
+            reached.push(key.clone());
+            let sentinel = Command::new(bin)
+                .current_dir(work)
+                .output()
+                .expect("run the self-hosted stage");
+            // Checked INDEPENDENTLY of byte-equality, and — unlike anything in
+            // `selfhost_codegen` — NOT excused by registration: a registered
+            // entry buys different BYTES, never a stage that aborts and never a
+            // stage that emits NOTHING (the empty-output guard below).
+            // `selfhost_codegen`'s llvm-validity check is the ancestor of both,
+            // but note it EXEMPTS registered programs, which is the hole an
+            // adversarial review demonstrated here: a plausible half-fix that
+            // made a registered construct emit nothing would exit 0, differ
+            // from the oracle, and be waved through. A text dump has no
+            // `llvm-as` to validate its shape; non-emptiness is the part of
+            // that check which does transfer.
+            if !sentinel.status.success() {
+                crashed.push(format!(
+                    "  {key}: exit {:?} — {}",
+                    sentinel.status.code(),
+                    String::from_utf8_lossy(&sentinel.stderr)
+                        .lines()
+                        .next()
+                        .unwrap_or("<no stderr>")
+                ));
+            }
+            let registered = deferred_reason(&key).is_some();
+            if oracle.stdout == sentinel.stdout {
+                if registered {
+                    stale.push(format!(
+                        "  {key} now MATCHES the oracle — delete it from \
+                         DEFERRED_PROGRAMS / KNOWN_SCG_BUGS"
+                    ));
+                }
+                continue;
+            }
+            if registered {
+                // A registration buys DIFFERENT bytes, never NO bytes. Every
+                // registered key emits a non-empty dump today, and a change
+                // that made one emit nothing would otherwise be invisible:
+                // exit 0 (no crash), bytes differ (no staleness), key present
+                // (no unreached), registered (no mismatch).
+                if sentinel.stdout.is_empty() {
+                    silent.push(format!(
+                        "  {key}: the self-hosted stage emitted NOTHING (the oracle emitted {} bytes)",
+                        oracle.stdout.len()
+                    ));
+                }
+                continue; // a registered gap: an ADR-deferred feature or a tracked bug
+            }
+            mismatches.push(format!(
+                "  {key} (oracle {} bytes vs sentinel {} bytes)",
+                oracle.stdout.len(),
+                sentinel.stdout.len()
+            ));
+        }
+    }
+
+    // An entry the sweep never REACHED is as stale as one that now matches, and
+    // it fails in a way `stale` cannot see: when the oracle stops emitting for a
+    // program the loop `continue`s BEFORE the comparison, so the entry is
+    // neither exercised nor flagged and quietly becomes dead weight. Neither
+    // count guard substitutes for it: `expect_direct` is exact but reports only
+    // that a NUMBER moved (and a compensating corpus addition hides even that),
+    // `min_merged` is a `>=` floor so a lost merged comparison can be absorbed
+    // by a host that merges one more, and neither notices a registry key whose
+    // PATH is simply wrong. This is the guard that names the dead entry.
+    let unreached: Vec<String> = DEFERRED_PROGRAMS
+        .iter()
+        .chain(KNOWN_SCG_BUGS.iter())
+        .filter(|(p, _)| !reached.iter().any(|r| r == p))
+        .map(|(p, _)| format!("  {p} was never compared (the oracle no longer emits for it, or the path is wrong)"))
+        .collect();
+    assert!(
+        unreached.is_empty(),
+        "{} registered program(s) were never reached by the sweep — an unreached \
+         entry is as stale as a matching one:\n{}",
+        unreached.len(),
+        unreached.join("\n")
+    );
+    assert_eq!(
+        direct_emitted, expect_direct,
+        "the DIRECT-form comparison count changed ({direct_emitted} vs the expected \
+         {expect_direct}) — the direct form does no module discovery, so this is \
+         platform-invariant: either a program stopped being emitted (a regression, \
+         even for an unregistered one) or the corpus grew (bump the number)"
+    );
+    assert!(
+        merged_emitted >= min_merged,
+        "the MERGED-form comparison count fell to {merged_emitted}, below the \
+         floor of {min_merged} — `snc merge` stopped collapsing programs it used to"
+    );
+    assert!(
+        crashed.is_empty(),
+        "the self-hosted stage exited nonzero on {} real program(s) — a registered \
+         byte-divergence excuses different bytes, never a crash:\n{}",
+        crashed.len(),
+        crashed.join("\n")
+    );
+    assert!(
+        silent.is_empty(),
+        "the self-hosted stage emitted EMPTY output for {} REGISTERED program(s) — a \
+         registered byte-divergence excuses different bytes, never no bytes:\n{}",
+        silent.len(),
+        silent.join("\n")
+    );
+    assert!(
+        stale.is_empty(),
+        "DEFERRED_PROGRAMS / KNOWN_SCG_BUGS is stale:\n{}",
+        stale.join("\n")
+    );
+    assert!(
+        mismatches.is_empty(),
+        "the self-hosted stage diverged from `snc {oracle_cmd}` on {}/{} emitted \
+         real program(s) NOT registered as deferred:\n{}",
+        mismatches.len(),
+        direct_emitted + merged_emitted,
+        mismatches.join("\n")
+    );
+}
+
+#[test]
+fn sentinel_parser_matches_oracle_on_real_programs() {
+    let tmp = std::env::temp_dir().join(format!("snc_selfhost_parse_prog_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).expect("create temp dir");
+    let parser = build_sentinel_parser(&tmp);
+    let work = tmp.join("work");
+    std::fs::create_dir_all(&work).expect("create work dir");
+    real_program_differential("ast", &parser, &work, 116, 20);
+    let _ = std::fs::remove_dir_all(&tmp);
+}
