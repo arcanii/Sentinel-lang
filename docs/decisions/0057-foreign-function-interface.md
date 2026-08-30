@@ -1,6 +1,6 @@
 # ADR 0057: A foreign-function interface (`extern "C"`) for native OS bindings
 
-Status: **ACCEPTED-WITH-AMENDMENTS (A1–A9).** Phase 1 is implemented `snc`-side as a
+Status: **ACCEPTED-WITH-AMENDMENTS (A1–A10).** Phase 1 is implemented `snc`-side as a
 **value-only ABI** (public `i64` + `f64`), which already unlocks the libc identity calls
 and the whole libm math family. **Phase 1b (A6)** adds the **`ptr` opaque type +
 `ptr_of`/`ptr_of_mut`**, so a Sentinel buffer's data pointer can cross to a pointer-taking
@@ -331,3 +331,35 @@ both bootstrap fixed points byte-identical).
   via `GetSystemMetrics`). NOT oracle-moving — the annotation never reaches the emitted IR or
   the `snc ast`/`lex` dumps, so both fixed points are unaffected and no `selfhost` mirror is
   needed. Implemented on branch `std-c-cstring`; pending the macOS four-check.
+
+- **A10 — the Phase 1b INTRINSIC mirror landed, paired with its fixture; the FEATURE
+  mirror is still deferred.** The "Self-hosting" section says the `scg`
+  parser/resolve/types/codegen mirror "lands alongside that fixture". Two increments of
+  that have now happened, and it is worth separating them: `extern` blocks were mirrored
+  with `tests/pass/c57_extern_call.sentinel` (`5c911f5`, plus the `export "C"` dispatcher
+  fix in `e2e5ee5`), and **`ptr_of` / `ptr_of_mut` / `is_null` + the `ptr` TYPE** are
+  mirrored here with **`tests/pass/c57_ptr_of.sentinel`**.
+  **What this half actually required** was smaller than "parser/resolve/types/codegen",
+  because ADR 0058 A1 had already established the shape: these three are RESERVED NAMES
+  the oracle rewrites at a CALL SITE into a unary node, which is precisely how they avoid
+  an `FnId` (builtins occupy 0..=41, user fns are `42 + idx`, so a 42nd builtin would
+  shift every user FnId). With `sqrt` they are the complete family of four, at scg unary
+  op-codes 6..=9. `ptr` became scg SCALAR CODE 5 — a scalar, never an interner kind,
+  because every `h < tbase()` test in the self-hosted typer *means* "scalar", and this
+  ADR's own note that `ptr` "adds one `Type` variant … so no `FnId` shift" has the same
+  spirit. The oracle's `is_copy_type` lists `Type::Ptr` with the integers, which is what
+  makes the scalar treatment correct rather than merely convenient.
+  **NO codegen half was needed, and the reason is precise:** `snc llvm` Errs on all three
+  ("ptr_of / is_null not ported (ADR 0057 snc-only)") and on a `ptr` TYPE ("type not yet
+  ported: Ptr"), so the codegen differential skips every program that uses them. That is
+  the same structure ADR 0058 A8 records for floats. It does NOT mean `ptr` cannot reach
+  scg's codegen at all: a PHANTOM generic argument does (`struct Pair<A, B> { a: A }` used
+  as `Pair<i64, ptr>` compiles to `%Pair_i64_ty_Ptr`), so `cg_mangle_to` carries a real
+  `ty_Ptr` arm — added pre-emptively here after the identical trap one scalar code over
+  was found by review during the float mirror.
+  **What the gap cost while it was open**, recorded because the registry understated it:
+  scg did not merely emit `(call ptr_of …)`. The name resolved to nothing, so `resolve`
+  printed `(call # …)` with an EMPTY FnId and `mir` printed `call print_bytes` — an
+  unrelated builtin reached by indexing a name table at a negative callee.
+  **STILL DEFERRED:** f64/ptr CODEGEN in `scg` (and the `snc llvm` text backend's own
+  support for both), and the caller-provides-buffer convention of A7.

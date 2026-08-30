@@ -51,7 +51,7 @@ reference as you work through the milestones.
 
 ---
 
-### ▶ RESUME HERE (2026-08-30 — four slices are COMMITTED, four-check GREEN, tree CLEAN; nothing is mid-flight. Pick fresh from the open menu below. The arc: menu item (3) — **extending the seven fixture-only stage differentials to REAL programs** (`34ffea0`) — found three unmirrored front-end surfaces nothing in the fixture corpus could reach, and the session then CLOSED TWO of them. **ADR 0059 `export "C"`** (`e2e5ee5`): the item dispatcher read the ABI string as the fn name; fixed, pinned by `tests/pass/c59_export_call.sentinel`, ADR 0059 gains **A10**. **ADR 0058 FLOATS** (`339f437` + `3eeb34a`): `2.0` lexed as `IntLit Dot IntLit` and PARSED as a field access — a silent misparse across 8 programs — now mirrored end to end through lex/ast/resolve/types/mir, with `f64` as scg SCALAR CODE 4, `sqrt` as A1's unary rewrite, a shared `append_float` that reproduces Rust's `{:?}` from decimal text with no `f64` anywhere, and `tests/pass/c58_float_math.sentinel` — the fixture ADR 0058 A3 said was impossible until the mirror landed. ADR 0058 gains **A8**; the `Channel<f64>` known-and-tolerated over-accept is closed as a side effect. Every slice was adversarially reviewed before commit; the reviews found a reachable `scg` ABORT, a fourth unary symbol table where `sqrt` rendered as `&mut`, and several false claims of mine. NEXT: `select` (design-first), `Channel<secret T>`, f64 CODEGEN, or widening the Bar-A source printer — see "▶ THE OPEN MENU" below)
+### ▶ RESUME HERE (2026-08-30 — five slices are COMMITTED, four-check GREEN, tree CLEAN; nothing is mid-flight. Pick fresh from the open menu below. The arc: menu item (3) — **extending the seven fixture-only stage differentials to REAL programs** (`34ffea0`) — found three unmirrored front-end surfaces nothing in the fixture corpus could reach, and the session then CLOSED ALL THREE, each pinned by a new fixture: **ADR 0059 `export "C"`** (`e2e5ee5`, ADR 0059 **A10**), **ADR 0058 FLOATS** (`339f437` + `3eeb34a`, ADR 0058 **A8**) and **ADR 0057's `ptr_of` / `ptr_of_mut` / `is_null`** (`e565a34`, ADR 0057 **A10**). The last of those completes the RESERVED-NAME family (`sqrt` + the three, scg unary op-codes 6..=9) and leaves `selfhost_parse.rs`'s registry EMPTY. scg now has `f64` and `ptr` as scalar codes 4 and 5. ⚠ THE LAST REVIEW FOUND A HOLE IN THE HARNESS ITSELF — the sweeps had missed the `demos/` root entirely; it is in all eight now, and the counts moved to 119 direct + 21 merged at lex/ast and 11 + 11 at the semantic stages. Every slice was adversarially reviewed before commit, and the reviews earned it: a reachable `scg` abort, a fourth unary table where `sqrt` rendered as `&mut`, that missing root, and several false claims of mine. NEXT: `select` (design-first), `Channel<secret T>`, f64/ptr CODEGEN, widening the Bar-A source printer, or the two filed pre-existing defects — see "▶ THE OPEN MENU" below)
 
 > **▶ THE OPEN MENU (2026-08-30) — real remaining work, verified against the repo.**
 >   1. **`select` over channels** — the flagship concurrency gap. Its RUNTIME is already PINNED
@@ -82,18 +82,20 @@ reference as you work through the milestones.
 >      now has. Also worth doing with it: `examples/math/quadratic.sentinel` and
 >      `sentinel_library/std/math/float.sentinel` currently reach only lex/ast, because
 >      `snc merge`'s Bar-A printer rejects both a float literal and `sqrt` (menu item 5).
->   4. **The ADR 0057 half of the RESERVED-NAME family** — `ptr_of` / `ptr_of_mut` / `is_null`
->      are three of the FOUR names the Rust parser rewrites at a call site into a UNARY node
->      (two adjacent arms in `crates/sentinel-syntax/src/parser.rs`); `sqrt` was the fourth and
->      landed with the ADR 0058 mirror, so the SHAPE of this slice is now demonstrated
->      end-to-end — copy it. scg has no rewrite for the three and emits `(call ptr_of …)`;
->      5 programs registered at `ast`. Unary op-codes **7/8/9 are reserved** for them, and the
->      four symbol tables that must each gain an arm are `parser/dump.sentinel`,
->      `resolve/dump.sentinel`, `types/borrow_arms.sentinel` and `types/mir.sentinel` — plus
->      `merge.sentinel`'s `unary_sym`, which is CALL-shaped like `sqrt` and so needs the
->      call-syntax branch in `merge/emit.sentinel`, not a prefix symbol. (That fourth table was
->      missed the first time and rendered `sqrt` as `&mut`; its fallback is now a name that
->      cannot re-parse, so a repeat fails loudly.)
+>   4. **Two PRE-EXISTING scg defects, both filed as task chips, both verified against a
+>      pre-slice binary** (found while probing the ADR 0057 mirror; neither is registered in
+>      any list, because nothing in the corpus reaches them). (a) scg never emits the widening
+>      wrapper when a `secret T` / `?T` binding's RHS is a **call** or a **unary** —
+>      `let b: ?bool = !f;` reproduces it with no `ptr` involved — and at MIR the dropped
+>      `opaque` SHIFTS EVERY LATER VALUE NUMBER, so the diff looks nothing like its cause.
+>      `dump_te_unary` writes straight into `out` where `dump_te_binary` builds a `tmp` and
+>      splices; that asymmetry is the lead. (b) `cg_mangle_to`'s bare-`ty` fallback makes two
+>      DIFFERENT phantom generic arguments collide on ONE LLVM type name
+>      (`Pair<i64, Shared<i64>>` and `Pair<i64, Mutex<i64>>` both give `%Pair_i64_ty`) —
+>      duplicate type definitions, i.e. invalid IR. That one is NOT fixable by enumeration the
+>      way `ty_F64` / `ty_Ptr` were: the oracle's fallback embeds its OWN interner ids
+>      (`ty_Shared(SharedId(0))`), which scg's independent numbering cannot reproduce, so it
+>      needs a decision about which side moves.
 >   5. **Widen `snc merge`'s Bar-A source printer** — the highest-leverage COVERAGE item.
 >      `crates/sentinel-driver/src/source_dump.rs` rejects 96 of the 116 real programs, dominated
 >      by `cast` (37) and `declassify` (36), then `ptr_of`/`sqrt` (8), `float literal` (6),
@@ -391,13 +393,19 @@ reference as you work through the milestones.
 > not on the overstated one. **Verify the consequence, not just the discrepancy.**
 >
 > HANDOFF STATE (verified against the repo 2026-08-30): four-check green — `cargo test
-> --workspace --no-fail-fast` = **1803 passed / the 18 known Windows failures**, zero new;
-> `pass` **159**, `ui` **50** (this session added `c59_export_call` + `c58_float_math`); all 9
-> differential stages byte-identical, both bootstrap fixed points hold; working tree clean.
-> abi count **51**. **scg scalar codes: i64=0, i32=1, bool=2, u8=3, f64=4 (ADR 0058); unary
-> op-codes 1..=5 are the prefix operators, 6 is `sqrt`, and 7/8/9 are RESERVED for ADR 0057's
-> `ptr_of`/`ptr_of_mut`/`is_null`. Parser token tags run 1..66 and are APPEND-ONLY** (resolve's
-> decl scanner compares raw tag integers, so inserting one mid-table mis-classifies silently).
+> --workspace --no-fail-fast` = **1804 passed / the 18 known Windows failures**, zero new;
+> `pass` **160**, `ui` **50** (this session added `c59_export_call`, `c58_float_math`,
+> `c57_ptr_of`); all 9 differential stages byte-identical, both bootstrap fixed points hold;
+> working tree clean. abi count **51**. **scg scalar codes: i64=0, i32=1, bool=2, u8=3,
+> f64=4 (ADR 0058), ptr=5 (ADR 0057); unary op-codes 1..=5 are the PREFIX operators and
+> 6..=9 the CALL-shaped RESERVED-NAME family (6 sqrt, 7 ptr_of, 8 ptr_of_mut, 9 is_null) —
+> every one of the five symbol tables now enumerates them all and falls back to a
+> non-re-parseable `<unary?>`, because a real operator as the catch-all is what once rendered
+> `sqrt` as `&mut`. Parser token tags run 1..66 and are APPEND-ONLY** (resolve's decl scanner
+> compares raw tag integers, so inserting one mid-table mis-classifies silently). **The
+> real-program sweeps take FOUR roots — `demos/`, `examples/`, `sentinel_library/`, `tools/`
+> — enumerated by hand in eight files; `demos/` was missing until 2026-08-30, so add any new
+> root to all eight.**
 > Interner kinds: Channel=13, Shared=17, Mutex=18, Guard=19; **next free = 20**. Secret
 > container slots 6..=9 (i64/i32/u8/bool); channel slots i64=0..ptr=5, secret reservation
 > 6..=9, channel-of-channels 10..=15 (`channel_chanid_for`).
@@ -405,12 +413,13 @@ reference as you work through the milestones.
 > `selfhost_codegen.rs` (unchanged this session): `DEFERRED_PROGRAMS` = **6** (2× `fn_value`
 > ADR 0070, 3× `sealed_*` ADR 0069, `process_channel_typed` M2.3b), `KNOWN_SCG_BUGS` = **1**
 > (`delegation.sentinel`, named-impl qualification). NEW, from the real-program sweep:
-> **lex** 0 · **ast** 5 (the `ptr_of` family — the 8 float entries and the 3 `export` entries
-> were all deleted BY FIXES) · **resolve** 0 · **types** 4 · **mir** 4 · **effects / borrow /
-> ctverify** 0. Every `KNOWN_SCG_BUGS` in the seven new registries is EMPTY. The only
-> multi-cause entry left is `fn_value_generic` (types + mir), NARROWED by the float mirror from
-> float+ADR-0070 down to ADR 0070 alone — when a slice closes one cause of a multi-cause entry,
-> EDIT it down, never delete it. Every real-program registry has a written DEFERRED-vs-BUG criterion at its head;
+> **lex** 0 · **ast** 0 · **resolve** 0 · **types** 4 · **mir** 4 · **effects / borrow /
+> ctverify** 0, and every `KNOWN_SCG_BUGS` is EMPTY. Everything the first sweep registered has
+> been FIXED rather than re-labelled: 8 float entries, 5 `ptr_of`-family entries and 3
+> `export` entries are gone, each pinned by a fixture on the way out. What remains at types +
+> mir is ADR 0070 D3-revisit (×2) and ADR 0066 M2.3b. The only multi-cause entry left is
+> `fn_value_generic`, NARROWED by the float mirror from float+ADR-0070 down to ADR 0070 alone
+> — when a slice closes one cause of a multi-cause entry, EDIT it down, never delete it. Every real-program registry has a written DEFERRED-vs-BUG criterion at its head;
 > read it before adding an entry. ⚠ The ctverify real-program sweep is **VACUOUS** by
 > construction (all 19 comparisons are `"" == ""`) — its doc says so; do not read its empty
 > registry as verifier parity. Lexer keyword table = Rust's exactly (38; derive-and-diff command

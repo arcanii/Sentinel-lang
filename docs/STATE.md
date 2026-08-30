@@ -14,6 +14,37 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
+**Latest (2026-08-30) — ADR 0057's `ptr_of` / `ptr_of_mut` / `is_null` are mirrored, so the
+RESERVED-NAME family is COMPLETE and `selfhost_parse.rs`'s registry is EMPTY** (`e565a34`,
+ADR 0057 **A10**). With `sqrt` these are the only four names the oracle rewrites at a CALL
+SITE into a unary node instead of giving them an `FnId` — the design that keeps them from
+shifting every user FnId (builtins 0..=41, user fns `42 + idx`). They are scg unary op-codes
+6..=9, and `ptr` became scg **SCALAR CODE 5** (never an interner kind: every `h < tbase()`
+test in the typer *means* "scalar", and the oracle's `is_copy_type` lists `Type::Ptr` with
+the integers). Two things `sqrt` had not needed: RESULT TYPES that differ from the operand's
+(`ptr_of` yields `ptr`, not the `&[u8]` it takes; `is_null` yields `bool`), and the `ptr`
+type itself. No codegen half — `snc llvm` Errs on all three and on a `ptr` type — but
+`cg_mangle_to` still gained a real `ty_Ptr` arm, because a PHANTOM generic argument reaches
+codegen even when no `ptr` value exists; that was added pre-emptively, the identical trap one
+scalar code over having been found by review during the float mirror.
+**What the gap cost while open was worse than its registry entry said:** not just
+`(call ptr_of …)` at `ast`, but `(call # …)` with an EMPTY FnId at `resolve` and
+`call print_bytes` — an unrelated builtin — at `mir`.
+**The review found a hole in the HARNESS itself:** the real-program sweeps enumerated
+`examples/` + `sentinel_library/` + `tools/` and MISSED **`demos/`** — three Win32 FFI
+programs nothing had ever compared, and the same species of blind spot the sweeps exist to
+close. It also falsified this slice's own "the only callers are five library modules" claim:
+`demos/win32/messagebox.sentinel` is a sixth caller AND a self-contained program, so unlike
+the five it runs the whole pipeline. All three demos match at every stage; all eight sweeps
+now take four roots (119 direct + 21 merged at lex/ast, 11 + 11 at the semantic stages).
+**TWO PRE-EXISTING defects were filed rather than folded in**, each verified against a
+pre-slice binary: scg never widens when a `secret T` / `?T` binding's RHS is a CALL or a
+UNARY (at MIR the dropped `opaque` shifts every later value number), and `cg_mangle_to`'s
+bare-`ty` fallback makes two DIFFERENT phantom generic arguments collide on one LLVM type
+name — duplicate type definitions, i.e. invalid IR, and NOT fixable by enumeration the way
+`ty_F64`/`ty_Ptr` were, because the oracle's fallback embeds its own interner ids.
+`pass` 159 → 160.
+
 **Latest (2026-08-30) — the ADR 0058 `f64` FRONT-END mirror lands, discharging A3's deferral:
 `scg` reproduces the oracle on floats at every front-end stage, and
 `tests/pass/c58_float_math.sentinel` is the first `f64` fixture in the corpus** (`339f437` the
