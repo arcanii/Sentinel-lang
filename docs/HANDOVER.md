@@ -51,7 +51,45 @@ reference as you work through the milestones.
 
 ---
 
-### ▶ RESUME HERE (2026-07-21 — **ADR 0066 M1.2c CHANNEL-OF-CHANNELS ships** (`fb2f317`), closing the M1.4-0 addressed-reply wall; `select`'s runtime is PINNED but unbuilt. The review caught a **memory-safety break this introduced** (a security fence coupled to an unrelated type-map) pre-commit — fixed + pinned by a ui fixture; a follow-up boundary-predicate AUDIT (`61bcac3`) then swept the type system for the same shape [negative — one instance, fixed] and hardened `needs_drop` to fail closed. Earlier the same day: the `extern "C"` mirror completed and both spawn bugs closed)
+### ▶ RESUME HERE (2026-07-21 — a long session's slices are ALL COMMITTED, GREEN, and CLEAN; nothing is mid-flight. Pick fresh from the open menu below. The arc, newest first: **channel-of-channels shipped END-TO-END** — snc typing/codegen (`fb2f317`) + the scg mirror (`0a7075e`), so `Channel<Channel<T>>` and generic word-scalar channels are byte-identical and OFF `DEFERRED_PROGRAMS`; a **boundary-predicate SECURITY AUDIT** (`61bcac3`) swept the type system after the M1.2c review caught a **memory-safety fence bug it introduced** (a security boundary written as a coincidental intersection of two unrelated maps) — audit came back negative (one instance, fixed), `needs_drop` hardened to fail-closed, and the **B1 constant-time secret-preservation guard-rail** (`e450102`) closed the last of four findings; earlier the same day the **`extern "C"` self-host mirror** completed (resolve+parser+lexer, `5c911f5`) and **both spawn bugs** closed (`spawn <extern>` oracle IR `e17a631`, `spawn <builtin>` rejection `3791337`). NEXT: `select` (design-first), `Channel<secret T>` M1.4c-2, or extending the 7 fixture-only stage differentials — see "▶ THE OPEN MENU" below)
+
+> **▶ THE OPEN MENU (2026-07-21) — real remaining work, verified against the repo. Nothing here is started.**
+>   1. **`select` over channels** — the flagship concurrency gap. Its RUNTIME is already PINNED
+>      (ADR 0066 D11: a Sentinel-owned `parking_lot` `Mutex<VecDeque<i64>>`+`Condvar`+waiter
+>      registry replacing mpsc — ABI-safe, `SentinelChannel` is opaque). The SURFACE is OPEN and
+>      must be decided BEFORE code: a select returns TWO things (which arm fired + the value)
+>      where `?T` carries one; receive-only is complete while channels are unbounded; and it
+>      should be pinned together with the `Sender`/`Receiver` split (D11) since that re-types it.
+>      Design-first (ADR amendment → then build). The pinned queue also unblocks (2).
+>   2. **`Channel<secret T>` (M1.4c-2)** — the SAME parking_lot queue rewrite unblocks it (today
+>      it is gated on "in-transit values sit in mpsc nodes Sentinel does not allocate, so they
+>      can be neither mlocked nor scrubbed" — under the Sentinel-owned queue it owns the nodes).
+>      Typing side already unblocked: `channel_chanid_for` secret slots 6..=9 reserved. Decide
+>      the memory policy, then implement. Natural to do WITH (1) since both need the queue.
+>   3. **Extend the 7 fixture-only stage differentials to real programs** — highest-leverage
+>      ROBUSTNESS work. `selfhost_lex/parse/resolve/types/borrow/effects/mir` all sweep only
+>      `tests/pass`+`tests/ui` single-file fixtures (`collect_fixtures`); only `selfhost_codegen`
+>      sweeps `examples/`+`sentinel_library/`+`tools/`. That blind spot hid the module/part lex
+>      gap AND hides the documented `Channel<f64>` types-dump mis-render (see below). Mechanical:
+>      copy the `copy_tree_contents` + real-program staging from `selfhost_codegen.rs`. Expect it
+>      to surface a handful of registerable gaps on first run — that is the point.
+>   4. **Named-impl qualification** (`delegation.sentinel`, the LAST `KNOWN_SCG_BUGS` entry) —
+>      recording the name in the merge's `build_rename` is the missing half, but alone it CRASHES
+>      scg via the unguarded `-1` at `selfhost/types/borrow.sentinel:651` (`impl_lookup` → an
+>      out-of-bounds table index). Both halves must land together; the `-1` guard is worth adding
+>      regardless (an unresolved impl name should be a diagnostic, not a panic).
+>   5. **Type-param over-rename** (pre-existing, contrived) — scg's merge renamer has no
+>      type-param scoping, so a generic param named identically to a same-module type is wrongly
+>      qualified. The Rust `Renamer` skips in-scope type params; scg has no `tparams` set.
+>
+> ⚠ **KNOWN-AND-TOLERATED scg-over-accepts (documented at `selfhost/types/interner.sentinel`'s
+> `is_channel` arm — do NOT "fix" blindly, they are snc-only and IR-invisible):** (a)
+> `Channel<f64>` renders `Channel<i64>` in scg's TYPES dump (scg has no f64 type handle — a
+> separately-tracked gap; LLVM byte-identical, no f64 value can flow, no corpus program — but if
+> a `Channel<f64>` fixture is ever added it FAILS the types differential unregistered: register
+> it or close scg's f64 gap first); (b) scg does not re-enforce the oracle's one-level channel
+> nesting cap. Both are the "scg is dump-only, trusts oracle-valid input" contract, like the
+> guard/return pins.
 
 > **▶▶ THE BOUNDARY-PREDICATE AUDIT (`61bcac3`) — what it found, so it need not be re-run.**
 > Prompted by the M1.2c fence bug (a security boundary written as `is_spawn_word_scalar(ty) &&
@@ -262,9 +300,6 @@ reference as you work through the milestones.
 >     `impl_lookup` → `impl_trait_of` → `trait_method_index` passes an unguarded `-1` into a
 >     table index. Both halves must land together (and that unguarded `-1` is worth fixing
 >     regardless — any unresolved impl name is an index panic, not a diagnostic).
->   - **The other stage differentials still have the real-program blind spot** —
->     types/mir/borrow/effects/resolve all use the fixture-only `collect_fixtures`. Extending
->     them is mechanical now that the staging pattern exists in `selfhost_codegen.rs`.
 >   - **Type-param over-rename** (pre-existing, contrived trigger): scg's renamer has no
 >     type-param scoping, so a generic param named identically to a same-module struct/enum/
 >     trait/class is wrongly qualified. The trait/class arm widened its reach. The Rust
@@ -301,14 +336,22 @@ reference as you work through the milestones.
 > (`4dbf4b2`) on the honest ground — invariant drift whose harmlessness rests on an accident —
 > not on the overstated one. **Verify the consequence, not just the discrepancy.**
 >
-> HANDOFF STATE: four-check green (18 known Windows failures, zero new; `pass` 151 incl.
-> `c57_extern_call` + `c66_spawn_extern` + `c67_module_decl`; `ui` 47 incl.
-> `c66_spawn_builtin`); all 9 differential stages byte-identical, both bootstrap fixed points
-> hold; working tree clean. abi count **51**.
-> Interner kinds: Shared=17, Mutex=18, Guard=19; next free = 20. Secret container slots:
-> 6..=9 (i64/i32/u8/bool). `KNOWN_SCG_BUGS` is down to ONE entry (`delegation.sentinel`, the
-> named-impl qualification). Lexer keyword table = Rust's exactly (38; derive-and-diff command
-> is in `ident_kind`'s header comment — do not eyeball it). **Token kinds, VERIFIED against
+> HANDOFF STATE (verified against the repo 2026-07-21): four-check green — `cargo test
+> --workspace` = the 18 known Windows failures, zero new; `pass` **157**, `ui` **50** (this
+> session added `c57_extern_call`, `c66_spawn_extern`, `c66_spawn_builtin`, `c67_module_decl`,
+> `c66_process_channel_handle_fence`, `addressed_reply`, + the secret-preservation unit tests in
+> `sentinel-types`); all 9 differential stages byte-identical, both bootstrap fixed points hold;
+> working tree clean. abi count **51**. Interner kinds: Channel=13, Shared=17, Mutex=18,
+> Guard=19; **next free = 20**. Secret container slots 6..=9 (i64/i32/u8/bool); channel slots
+> i64=0..ptr=5, secret reservation 6..=9, channel-of-channels 10..=15 (`channel_chanid_for`).
+> `DEFERRED_PROGRAMS` = **6** (2× `fn_value` ADR 0070, 3× `sealed_*` ADR 0069,
+> `process_channel_typed` M2.3b — the PROCESS channel, still i64-only). `KNOWN_SCG_BUGS` = **1**
+> (`delegation.sentinel`, named-impl qualification). Lexer keyword table = Rust's exactly (38;
+> derive-and-diff command is in `ident_kind`'s header comment — do not eyeball it).
+> ⚠ **BOX GOTCHAS:** no `just`/`nextest` here (use raw `cargo`); the MSVC+LLVM env recipe is in
+> the `build-environment-windows` auto-memory (vcvars64 into the session + `LLVM_SYS_180_PREFIX=
+> G:\llvm-18`); run `cargo build` before `cargo test` (test does NOT regenerate the runtime
+> staticlib). **Token kinds, VERIFIED against
 > `selfhost/parser.sentinel`** (an unverified list caused a miscompile): `(`=4, `)`=5, `{`=6,
 > `}`=7, `+`=9, `-`=10, `*`=11, `/`=12, `==`=13, `!=`=14, ident=2, fn=3, `;`=44, struct=52,
 > enum=53, trait=54, impl=55, class=56, effect=57, use=58, pub=59, string=63.
