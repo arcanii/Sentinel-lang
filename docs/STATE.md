@@ -14,6 +14,81 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
+**Latest (2026-08-30) — the filed call/unary widen defect is CLOSED: a widened binding now
+gets its wrapper when the right-hand side is a CALL or a UNARY** — and the review that cleared
+it surfaced SIX more defects, one of them a silent MISCOMPILE in `snc` itself (all filed below) (`34e1a8f`,
+pinned by `tests/pass/c19_widen_call_unary.sentinel`). `snc types` prints
+`(widen-secret … :secret i64)` / `(widen-null … :?bool)` around such an RHS and `snc mir` emits
+a whole `(vN:?T opaque vM)`; scg did it for a LITERAL or a plain VARIABLE but not for those two,
+so `let s: secret i64 = half(84);` and `let b: ?bool = !f;` emitted the bare node. This is the
+`let`-annotation widen of ADR 0019 D5 / ADR 0014 D3 — NOT one of ADR 0051 A1's snc-side
+positions. **The MIR half was the nastier one** — the wrapper is an extra VALUE there, so
+omitting it SHIFTED EVERY LATER VALUE NUMBER in the block (one probe: oracle `v15`, scg `v11`),
+and the diff would have looked nothing like its cause.
+**REAL CODE WRITES THE SHAPE — the corpus did not avoid it, it was never COMPARED,** and the
+difference matters because "no fixture reaches it" was the assumption that let it sit:
+`let p0: secret u8 = i64_to_u8(76);` appears **18 times** (16 in
+`examples/security/chacha20_stream.sentinel`, two per line for p0..p15; 1 in
+`chacha20poly1305.sentinel`; 1 in `sentinel_library/std/security/aead.sentinel`), because
+`i64_to_u8` is a BUILTIN returning public `u8`. All three files are excluded from both
+differential forms — direct on "`use` imports are not yet wired", merged on "expression `cast`
+is out of Bar-A scope" — which is the sharpest argument yet for widening the Bar-A printer
+(open menu item 5).
+The fix is two dispatch arms in `dump_texpr` that were one-line delegations; each now builds
+into a local `tmp` and finishes with the four lines `dump_te_binary` has always run at its own
+tail (`widen_kind` → `mir_widen` → `cg_widen` → `widen_splice`). Doing it at the DISPATCH
+rather than inside `dump_te_unary` / `dump_te_call` is the point of the shape: handing them the
+temp redirects ALL of their output for free, recursive operand and argument dumps included.
+**The risk a widening fix creates is OVER-widening, so it was attacked rather than assumed
+away:** a battery over every position that can carry an expectation matches the oracle
+byte-for-byte — a call whose result is ALREADY `?i64` (correctly not double-wrapped), a call
+returning `secret i64` into a `secret i64` binding, a struct-literal field, both `if` branches,
+a block tail, a `match` arm (nullable and secret), and a unary. No regressions across 119 real
+programs + 210 fixtures; the new fixture is the first of the recent mirror fixtures to reach
+the CODEGEN differential too, so it pins the `cg_widen` path as well as the two dumps.
+**WHAT REMAINS is a different thing and must not be folded in:** this fixed the two SHAPES that
+failed to widen against an expectation they were GIVEN. **THREE POSITIONS supply no expectation
+at all** — a call ARGUMENT, a `return` OPERAND (where the missing wrapper also retypes the
+enclosing block), and an ASSIGNMENT right-hand side — all shape-INDEPENDENT, so a literal
+reproduces each. The `secret` call-arg and return widens are **NOT defects**: ADR 0051 A1
+leaves them snc-side BY DESIGN and mirrors only the operand widen. The `?T` versions are ADR
+0014 D3's older pushdown with no such record. **The ASSIGNMENT RHS was not previously known and
+is the worst of the three:** `let mut o: ?i64 = null; o = 42;` makes scg emit
+`store { i1, i64 } 42, ptr %v0`, which `llvm-as` rejects with "integer constant must have
+integer type" — INVALID IR, not a text divergence. A static scan of every `.sentinel` in the
+tree finds ZERO hits under `selfhost/` (no fixed point at risk) and one corpus site for all
+three, itself excluded from both differential forms.
+**The review found MORE than the slice fixed, and one of them is in `snc` ITSELF.** All filed,
+all verified against a pre-slice binary, none folded in:
+- ⚠ **`snc` MISCOMPILES a qualified `let` in an effecting fn** — `snc build` on
+  `fn caller() -> i64 ! { Io } { let s: secret i64 = do_work(); declassify(s) }` produces a
+  binary whose exit status is a RAW POINTER — it varies run to run with ASLR (783502784,
+  -453424688, -1557444048 on three consecutive runs) where the `let s: i64` twin returns 42
+  every time, with NO diagnostic either way. `detect_let_shape` keys on the LET'S TYPE
+  (`if ty != Type::I64 { return None; }`) while `validate_effecting_fn_body` does not defer the
+  body — `stmt_performs` treats a CALL to an effecting fn as non-performing — so the
+  straight-line path stores the callee's `Kont*` as an `i64`. `snc llvm` shows it
+  (`%v0 = call ptr @do_work()` then `store i64 %v0`), and `llvm-as` rejects that. The `?i64`
+  twin fails LOUDLY at build; the `secret` one is silent, which is what makes it the priority.
+  Both sides are wrong — `scg` keeps the let-shape and its IR *does* assemble — so this is
+  oracle-moving and needs an ADR, not a mirror.
+- **A whole FAMILY of `dump_texpr` arms drops the same widen this slice fixed** — `Field`,
+  `Index`, `Method`, `Array`, `StructLit`, `Declassify`, `Perform`, `Await`, `Qcall`,
+  `ClassInit`, `Spawn`. `let v: secret i64 = p.x;`, `= a[0];` and `= declassify(s);` all diverge
+  in one program. The slice's own comment claimed Call and Unary were "the two shapes that
+  failed to widen"; that was wrong and is corrected at the site.
+- **A generic USER fn inverts the widen**: the oracle seeds `T` from the EXPECTED type and
+  widens the ARGUMENT (`let s: secret i64 = idg(7)` monomorphises at `secret i64`, no outer
+  wrapper) where scg monomorphises at `i64` and wraps outside. The fix strictly improved it —
+  pre-fix scg emitted `store { i1, i1 } %v0` with `%v0` an `i1`, which `llvm-as` rejects; post-fix
+  IR assembles — but it still diverges.
+- **A handler arm's `resume-kont` is typed from the op's declared result**, not from the handled
+  computation, so it reads `:i64` where the oracle reads `:secret i64`.
+- **scg OVER-ACCEPTS `{ …; return e; }`**, which `snc`'s parser rejects, and synthesizes a `0`
+  tail. Structurally invisible: every differential skips a program the ORACLE rejects, so the
+  whole class "scg accepts what snc rejects" has no test at all.
+`pass` 160 → 161.
+
 **Latest (2026-08-30) — ADR 0057's `ptr_of` / `ptr_of_mut` / `is_null` are mirrored, so the
 RESERVED-NAME family is COMPLETE and `selfhost_parse.rs`'s registry is EMPTY** (`e565a34`,
 ADR 0057 **A10**). With `sqrt` these are the only four names the oracle rewrites at a CALL
@@ -85,10 +160,10 @@ against the `snc` oracle over `tests/pass` + `tests/ui` ONLY — 207 single-file
 written to exercise one construct. Only `selfhost_codegen` swept `examples/` +
 `sentinel_library/` + `tools/`. That asymmetry was a structural blind spot, not a hypothetical
 one: it had already hidden the ADR 0067 `module`/`part` lex gap. Each stage test gained a
-`*_matches_oracle_on_real_programs` test over all 116 real programs in TWO forms — DIRECT, and
+`*_matches_oracle_on_real_programs` test over all 119 real programs in TWO forms — DIRECT, and
 `snc merge`'s single-file collapse (the shape `scg` itself consumes at the fixed point). The
 merged form is load-bearing: the stage oracles do NO module discovery (only `snc llvm` merges),
-so without it the semantic stages would see 9 programs instead of 19 comparisons apiece and no
+so without it the semantic stages would see 11 programs instead of 22 comparisons apiece and no
 multi-module program (`delegation`, `rect_demo`, `process_ids`, `sort_search`) would reach them
 at all; at lex/ast it adds the merge's `module$path$item` names, the only `$` identifiers either
 lexer meets outside the fixed point. **What it found:** (1) **ADR 0058 FLOAT LITERALS** — the
@@ -114,10 +189,10 @@ comparison, which staleness cannot see), a crash guard, and an EMPTY-OUTPUT guar
 registration buys different bytes, never NO bytes (an adversarial review demonstrated the hole:
 a plausible half-fix for `export` that SKIPPED the item would have been waved through). Two
 limitations are stated rather than papered over: registration is cause-BLIND (whole-program),
-and the **ctverify sweep's byte-comparison is VACUOUS** — all 19 comparisons are `"" == ""`
+and the **ctverify sweep's byte-comparison is VACUOUS** — all 22 comparisons are `"" == ""`
 because no program reaching that stage declares a `secret`, so it pins no-false-positive +
 no-crash. The blocker there is `snc merge`'s Bar-A source printer, which rejects `declassify`
-(36 of 116 programs) and `cast` (37); widening it is the single change that would most enlarge
+(36 of 119 programs) and `cast` (37); widening it is the single change that would most enlarge
 the semantic stages' real-program coverage. Test-only; all 9 differentials + both fixed points
 untouched.
 
