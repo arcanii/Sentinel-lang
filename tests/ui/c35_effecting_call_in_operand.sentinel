@@ -1,0 +1,33 @@
+// C3.5 / ADR 0072 (negative): a call to an effecting fn inside a larger expression.
+//
+// `do_work() + 1` needs the perform's frame reified around the `+ 1`, which is the
+// c35d embedded shape — but c35d only recognises a literal `perform`, so a CALL in the
+// same position matched nothing.
+//
+// Before ADR 0072 this did not produce a diagnostic. It produced an INTERNAL COMPILER
+// CRASH: `snc build` panicked inside inkwell with "Found PointerValue … but expected
+// the IntValue variant", because the straight-line emitter asked for the `i64` the
+// call's declared type promised and got the `Kont*` the ABI actually returns. A panic
+// on a legal user program violates the project's own rule against `unwrap`/`panic!` on
+// user-program input, which is why the refusal — not the crash — is the fixture.
+//
+// The `perform Io.read() + 1` spelling of this program compiles and runs, and always
+// did. That contrast is the whole defect in one line.
+
+effect Io {
+    read() -> i64;
+}
+
+fn do_work() -> i64 ! { Io } {
+    perform Io.read()
+}
+
+fn caller() -> i64 ! { Io } {
+    do_work() + 1
+}
+
+fn main() -> i64 {
+    handle caller() with {
+        Io.read(k) => k(41)
+    }
+}

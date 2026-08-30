@@ -1,0 +1,34 @@
+// C3.5 / ADR 0072 (negative): a `?i64` let bound to an effecting call.
+//
+// This is the boundary fixture for ADR 0072 D3. The let-shape reifies its frame
+// through a continuation that carries exactly ONE `i64` (`SentinelKont.arg`), and
+// `?i64` is `{ i1, i64 }` — sixteen bytes. Unlike `secret i64`, which lowers to that
+// same i64 and IS admitted (tests/pass/c35_effecting_let_secret), a nullable cannot
+// cross the seam: `WidenToNullable` CONSTRUCTS a value rather than being identity, so
+// an 8-byte store would fill the payload and leave the `valid` discriminant
+// uninitialised.
+//
+// Refusing is the point. Before ADR 0072 this reached the straight-line emitter and
+// produced `insertvalue { i1, i64 } %v1, i64 %v0, 1` with `%v0` a `ptr` — invalid IR
+// from `snc llvm` (which nonetheless exited 0) and an LLVM verifier abort from
+// `snc build`. Widening the accepted list here means widening the SEAM first, not
+// relaxing this check.
+
+effect Io {
+    read() -> i64;
+}
+
+fn do_work() -> i64 ! { Io } {
+    perform Io.read()
+}
+
+fn caller() -> i64 ! { Io } {
+    let s: ?i64 = do_work();
+    unwrap_or(s, 0)
+}
+
+fn main() -> i64 {
+    handle caller() with {
+        Io.read(k) => k(42)
+    }
+}

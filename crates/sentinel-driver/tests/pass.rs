@@ -1606,6 +1606,32 @@ fn pass_c65_return_match() {
 }
 
 #[test]
+fn pass_c35_effecting_let_secret() {
+    // ADR 0072 c35_effecting_let_secret: an effecting fn whose single `let` carries a
+    // `secret i64` annotation — the shape that made `snc build` return a RAW POINTER.
+    //
+    // An effecting fn returns a `*mut SentinelKont`, not its declared type. Adding one
+    // qualifier used to defeat both guards on the let-shape at once: `detect_let_shape`
+    // demanded exactly `i64`, and `tail_produces_kont` could not see through the
+    // `secret` widen. Matching no shape, the body fell through to the generic emitter,
+    // which lowered `do_work()` as though it returned `i64` — so the continuation was
+    // stored into an i64 slot and returned as the answer. The exit status was a heap
+    // address that VARIED RUN TO RUN with ASLR, with no diagnostic at any stage.
+    //
+    // It hid because `llvm-as` rejects `store i64 <a ptr>` but `module.verify()`
+    // cannot: under LLVM 18 opaque pointers that store is well-formed. The text oracle
+    // emitted something invalid while the shipped compiler emitted something that
+    // linked, ran, and lied.
+    //
+    // `secret i64` is ADMITTED rather than merely refused because it is the seam's
+    // i64: `secret T` lowers identically to `T` and the widen is value-level identity.
+    // Both RHS forms are covered — with a `WidenToSecret` node (`widened`) and without
+    // one (`exact`). Everything that does NOT fit that single i64 is refused instead;
+    // see the `c35_effecting_*` fixtures in tests/ui. 20 + 22 = 42.
+    assert_eq!(run_exit("c35_effecting_let_secret.sentinel"), 42);
+}
+
+#[test]
 fn pass_c19_widen_call_unary() {
     // c19_widen_call_unary: the public->`secret` (ADR 0019 D5) and public->`?T` (ADR
     // 0014 D3) widenings over the two right-hand-side shapes scg used to skip — a CALL

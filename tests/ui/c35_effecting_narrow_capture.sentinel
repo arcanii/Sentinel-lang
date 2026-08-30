@@ -1,0 +1,32 @@
+// C3.5 / ADR 0072 D4 (negative): a let-shape whose CAPTURED param is narrower than
+// the frame slot.
+//
+// The let's own type was the only thing the old detector checked. The captured vars
+// cross the same seam and were checked by nothing at all — the captured-state struct
+// is a flat `i64[N]`, and the parent fills each slot with an 8-byte load out of the
+// param's own alloca. A `u8` param gives `alloca i8`, so that load reads SEVEN BYTES
+// PAST IT, and the adjacent stack flows into the arithmetic.
+//
+// Measured, before ADR 0072: this program returned -1341102038 instead of 42,
+// deterministically, with no diagnostic. The oracle emitted the same out-of-bounds
+// pair, and so did the self-hosted `scg` — all three back ends agreed on reading off
+// the end of the alloca.
+//
+// It is refused now because the fail-closed boundary covers both halves of the frame.
+// A boundary that gates the resumed value but not the captures is not fail-closed;
+// this fixture is what keeps the two from drifting apart again.
+
+effect Io {
+    read() -> i64;
+}
+
+fn work(n: u8) -> i64 ! { Io } {
+    let v: i64 = perform Io.read();
+    v + u8_to_i64(n)
+}
+
+fn main() -> i64 {
+    handle work(i64_to_u8(2)) with {
+        Io.read(k) => k(40)
+    }
+}

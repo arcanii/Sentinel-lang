@@ -54,7 +54,7 @@ use sentinel_resolve::{
     VEC_NEW_FN_ID, VEC_TO_ARRAY_FN_ID, WRITE_FILE_FN_ID,
 };
 use sentinel_types::{
-    NullableInner, Type, TypedBlock, TypedExpr, TypedExprKind, TypedFnDef, TypedFnSignature,
+    type_display, NullableInner, Type, TypedBlock, TypedExpr, TypedExprKind, TypedFnDef, TypedFnSignature,
     TypedHandlerArm, TypedMatchArm, TypedParam, TypedPattern, TypedPatternBinding, TypedProgram,
     TypedReturnArm, TypedStmt, TypedStmtKind,
 };
@@ -3051,14 +3051,19 @@ impl Emit<'_> {
         // CONTROL FLOW (an `if`/`match` branch, or a non-tail `let`) — not a clean
         // kont, yet not pure either, so it would store the perform's `Kont*` into
         // the `i64` merge slot and miscompile. Mirrors inkwell's `lower_handle_inner`
-        // (`!handle_body_produces_kont && expr_performs`). A pure body / an early
+        // (`!handle_body_produces_kont && expr_suspends`). A pure body / an early
         // `return` is fine. Erroring here makes `snc llvm` skip the fixture in the
         // differential exactly as `snc build` rejects it.
-        if !body_is_kont && expr_performs(body) {
+        // ADR 0072: `expr_suspends`, so a body that CALLS an effecting fn through
+        // control flow or in an operand position is refused too. It used to walk
+        // straight through and `add`/`store` the callee's `Kont*` into the `i64`
+        // merge slot — the same silent miscompile as the fn-body case, inherited here
+        // because `handle_body_produces_kont` reuses the fn-tail predicate.
+        if !body_is_kont && expr_suspends(body, self.program) {
             return Err(
-                "a `handle` body that performs must do so directly (a `perform`, a \
-                 call to an effecting fn, or a nested `handle`); a perform through \
-                 control flow is not yet supported"
+                "a `handle` body that suspends must do so directly (a `perform`, a \
+                 call to an effecting fn, or a nested `handle`); suspending through \
+                 control flow or inside a larger expression is not yet supported"
                     .to_string(),
             );
         }
@@ -4202,7 +4207,8 @@ fn produces_kont(expr: &TypedExpr, program: &TypedProgram) -> bool {
         TypedExprKind::Perform { .. } => true,
         TypedExprKind::Call { id, .. } => uses_kont_abi(program.signature(*id), program),
         TypedExprKind::Block(b) => {
-            !b.stmts.iter().any(|s| stmt_performs(&s.kind)) && produces_kont(&b.tail, program)
+            !b.stmts.iter().any(|s| stmt_suspends(&s.kind, program))
+                && produces_kont(&b.tail, program)
         }
         _ => false,
     }
@@ -4224,6 +4230,64 @@ fn uses_kont_abi(sig: &TypedFnSignature, program: &TypedProgram) -> bool {
     })
 }
 
+/// ADR 0020 D7 / ADR 0072: does a value of this type fit the ONE `i64` a continuation
+/// carries? `SentinelKont.arg` is an `i64` and `sentinel_kont_pure(value: i64)` takes
+/// one; the captured-state struct is a flat `i64[N]` written and read with 8-byte
+/// loads. So this is the width of BOTH seams a reified frame crosses.
+///
+/// It is an EXPLICIT ALLOW-LIST with a default deny, deliberately — not a predicate
+/// derived from some other map. `secret i64` is in because `secret T` lowers
+/// IDENTICALLY to `T` (ADR 0019 D12, ADR 0045 A23) and the secret widen is value-level
+/// identity (ADR 0051 A2), so it already IS that i64. Everything else is out, and each
+/// for a measured reason: `?i64` is `{i1, i64}` — 16 bytes, so the payload would be
+/// stored and the `valid` flag left uninitialised; `bool` / `i32` / `u8` are NARROWER,
+/// so an 8-byte load reads past their alloca (a captured `u8` returns -1341102038 in
+/// place of 42); structs and arrays are aggregates that are not integers at all.
+/// Widening this list means widening the SEAM first — see ADR 0072.
+fn fits_kont_slot(ty: Type, program: &TypedProgram) -> bool {
+    match ty {
+        Type::I64 => true,
+        Type::Secret(id) => program.secrets[id.0 as usize].inner == Type::I64,
+        _ => false,
+    }
+}
+
+/// ADR 0072: peel a `secret` widen off a let's RHS before asking whether it produces a
+/// kont. `WidenToSecret` is value-level identity in BOTH back ends (it shares its arm
+/// with `Declassify`), so it changes nothing about what crosses the continuation — but
+/// left in place it hides the `Call` underneath from `produces_kont`, which is one of
+/// the two ways `let s: secret i64 = do_work();` used to reach straight-line lowering.
+fn strip_secret_widen(expr: &TypedExpr) -> &TypedExpr {
+    match &expr.kind {
+        TypedExprKind::WidenToSecret(inner) => strip_secret_widen(inner),
+        _ => expr,
+    }
+}
+
+/// ADR 0072: every captured var must also fit the frame's `i64[N]` slots — the parent
+/// writes each with an 8-byte load out of the binding's own alloca, so a narrower one
+/// is read out of bounds.
+///
+/// A capture can be bound TWO ways, and both must be listed explicitly: a fn PARAM, or
+/// — in the chained shape — an EARLIER LET of the same chain, whose type this shape has
+/// already gated. Looking only at `params` is the very anti-pattern this fix exists to
+/// remove, one level down: it answers "unfit" for a legitimate chained capture and
+/// silently declines a shape that lowers correctly. Anything bound neither way is
+/// unfit, which turns what would otherwise be a later hard error into a clean deferral.
+fn captures_fit_kont_slots(
+    f: &TypedFnDef,
+    captured: &[VarId],
+    own_lets: &[(VarId, Type)],
+    program: &TypedProgram,
+) -> bool {
+    captured.iter().all(|cid| {
+        if let Some(p) = f.params.iter().find(|p| p.id == *cid) {
+            return fits_kont_slot(p.ty, program);
+        }
+        own_lets.iter().any(|(id, ty)| id == cid && fits_kont_slot(*ty, program))
+    })
+}
+
 /// Bar B / effects (c35b) — validate that an effecting fn's body is a shape codegen can
 /// lower at this sub-phase: no top-level (or nested-block) statement may itself
 /// `perform`, and the tail must either produce a kont (direct `perform` / call-to-
@@ -4233,49 +4297,134 @@ fn uses_kont_abi(sig: &TypedFnSignature, program: &TypedProgram) -> bool {
 /// needs per-eval-site frame reification (c35c+) and Errs here so the fixture defers.
 /// Mirrors inkwell `validate_effecting_fn_body`.
 fn validate_effecting_fn_body(f: &TypedFnDef, program: &TypedProgram) -> Result<(), String> {
+    // ADR 0072: `suspends`, not `performs`. A CALL to an effecting fn suspends exactly
+    // as a `perform` does — it returns a `Kont*` under the effecting-fn ABI — but that
+    // ABI substitution is keyed on the callee's SIGNATURE (`uses_kont_abi`), which a
+    // walk over `perform` NODES cannot see. That asymmetry is the whole defect: a
+    // literal `perform` failed closed at every gate below while the identical program
+    // written with a call fell straight through to the generic emitter, which stored
+    // the `Kont*` as if it were the statement's declared type.
     for stmt in &f.body.stmts {
-        if stmt_performs(&stmt.kind) {
+        if stmt_suspends(&stmt.kind, program) {
             return Err(format!(
-                "effecting fn `{}` body has a performing statement (deferred to c35c+)",
-                f.name
+                "effecting fn `{}` cannot be lowered: {}",
+                f.name,
+                unlowerable_reason(f, program)
             ));
         }
     }
     let tail = &f.body.tail;
-    if produces_kont(tail, program) || !expr_performs(tail) {
+    if produces_kont(tail, program) || !expr_suspends(tail, program) {
         Ok(())
     } else {
         Err(format!(
-            "effecting fn `{}` tail mixes perform with pure context (deferred to c35c+)",
-            f.name
+            "effecting fn `{}` cannot be lowered: {}",
+            f.name,
+            unlowerable_reason(f, program)
         ))
     }
 }
 
-/// Does this statement contain a `perform` (transitively)? (c35b validation helper.)
-fn stmt_performs(kind: &TypedStmtKind) -> bool {
-    match kind {
-        TypedStmtKind::Let { value, .. } => expr_performs(value),
-        TypedStmtKind::Assign { target, value } => expr_performs(target) || expr_performs(value),
-        TypedStmtKind::While { cond, body } => {
-            expr_performs(cond)
-                || body.stmts.iter().any(|s| stmt_performs(&s.kind))
-                || expr_performs(&body.tail)
+/// ADR 0072: say WHICH rule a body broke, rather than restating the general one — the
+/// generic "must be a direct perform or call" text is actively wrong for two of the
+/// refusals (`let s: ?i64 = do_work();` IS a let bound to an effecting call, and a
+/// narrow captured param has nothing to do with the body's shape).
+///
+/// Deliberately re-derived from the same predicates rather than threaded out of the
+/// detectors: a wrong string here is cosmetic, a wrong ANSWER there is a miscompile,
+/// so keeping them apart means this can never widen what is accepted. Mirrors
+/// `sentinel_codegen::unlowerable_reason` — both back ends are user-facing and must
+/// agree on the text.
+fn unlowerable_reason(f: &TypedFnDef, program: &TypedProgram) -> String {
+    if f.body.stmts.len() == 1 {
+        if let TypedStmtKind::Let { id, value, ty, .. } = &f.body.stmts[0].kind {
+            if produces_kont(strip_widens_for_reason(value), program)
+                && !expr_suspends(&f.body.tail, program)
+            {
+                if !fits_kont_slot(*ty, program) {
+                    return format!(
+                        "a `let` bound to a suspension must be `i64` or `secret i64`; \
+                         `{}` does not fit the continuation's single i64 slot",
+                        type_display(*ty, Some(program))
+                    );
+                }
+                let bad = collect_captured_vars(&f.body.tail, *id)
+                    .into_iter()
+                    .find_map(|cid| {
+                        f.params
+                            .iter()
+                            .find(|p| p.id == cid)
+                            .filter(|p| !fits_kont_slot(p.ty, program))
+                            .map(|p| (p.name.clone(), p.ty))
+                    });
+                if let Some((name, ty)) = bad {
+                    return format!(
+                        "`{name}` is captured across the continuation, so it must be \
+                         `i64` or `secret i64`; `{}` would be read out of bounds",
+                        type_display(ty, Some(program))
+                    );
+                }
+            }
         }
-        TypedStmtKind::Break | TypedStmtKind::Continue => false,
-        TypedStmtKind::Expr(e) => expr_performs(e),
+    }
+    "a `perform` or a call to an effecting fn appears outside tail position, which \
+     needs a reified frame"
+        .to_string()
+}
+
+/// ADR 0072: peel BOTH widen kinds — reason-building only.
+///
+/// [`strip_secret_widen`] is what the DETECTOR uses, and it must stay secret-only: a
+/// nullable widen is not value-level identity, so seeing through it there would admit
+/// a `{i1,i64}` into an i64 slot. Here the question is merely "was this structurally a
+/// let bound to a suspension?", so that the refusal can name the type rule instead of
+/// falling back to the generic message. Widening what is ACCEPTED and widening what is
+/// EXPLAINED are different jobs; keeping two functions is what stops the second from
+/// quietly becoming the first.
+fn strip_widens_for_reason(expr: &TypedExpr) -> &TypedExpr {
+    match &expr.kind {
+        TypedExprKind::WidenToSecret(inner) | TypedExprKind::WidenToNullable(inner) => {
+            strip_widens_for_reason(inner)
+        }
+        _ => expr,
     }
 }
 
-/// Does this expression contain a `perform` / `k(v)` (transitively)? (c35b validation
-/// helper — mirrors inkwell `expr_performs`; total over every `TypedExprKind`.)
-fn expr_performs(expr: &TypedExpr) -> bool {
+/// Does this statement SUSPEND — contain a `perform` **or a call to an effecting fn**
+/// (transitively)? See [`expr_suspends`]. (ADR 0072.)
+fn stmt_suspends(kind: &TypedStmtKind, program: &TypedProgram) -> bool {
+    match kind {
+        TypedStmtKind::Let { value, .. } => expr_suspends(value, program),
+        TypedStmtKind::Assign { target, value } => {
+            expr_suspends(target, program) || expr_suspends(value, program)
+        }
+        TypedStmtKind::While { cond, body } => {
+            expr_suspends(cond, program)
+                || body.stmts.iter().any(|s| stmt_suspends(&s.kind, program))
+                || expr_suspends(&body.tail, program)
+        }
+        TypedStmtKind::Break | TypedStmtKind::Continue => false,
+        TypedStmtKind::Expr(e) => expr_suspends(e, program),
+    }
+}
+
+/// ADR 0072: does this expression SUSPEND — contain a `perform` / `k(v)`, **or a call
+/// to a fn that uses the `Kont*` ABI**, transitively?
+///
+/// This replaced a perform-only `expr_performs`, and the replacement was total: after
+/// threading `program` through, NOT ONE caller still wanted the perform-only meaning.
+/// That is the shape of the bug it fixes — every gate already meant "does this
+/// suspend", and a call to an effecting fn suspends just as hard as a `perform`, but
+/// it says so only in the callee's SIGNATURE, which a walk over `perform` nodes cannot
+/// read. Total over every `TypedExprKind`: a wildcard arm here would let a new variant
+/// hide a suspension point, which is exactly how this class stayed open.
+fn expr_suspends(expr: &TypedExpr, program: &TypedProgram) -> bool {
     match &expr.kind {
         TypedExprKind::Perform { .. } | TypedExprKind::ResumeKont { .. } => true,
         TypedExprKind::Handle { body, arms, return_arm, .. } => {
-            expr_performs(body)
-                || arms.iter().any(|a| expr_performs(&a.body))
-                || return_arm.as_deref().is_some_and(|ra| expr_performs(&ra.body))
+            expr_suspends(body, program)
+                || arms.iter().any(|a| expr_suspends(&a.body, program))
+                || return_arm.as_deref().is_some_and(|ra| expr_suspends(&ra.body, program))
         }
         TypedExprKind::IntLit(_)
         | TypedExprKind::FloatLit(_)
@@ -4290,41 +4439,50 @@ fn expr_performs(expr: &TypedExpr) -> bool {
         | TypedExprKind::WidenToSecret(inner)
         | TypedExprKind::Cast(inner)
         | TypedExprKind::Return(inner)
-        | TypedExprKind::Declassify(inner) => expr_performs(inner),
+        | TypedExprKind::Declassify(inner) => expr_suspends(inner, program),
         TypedExprKind::Binary(_, l, r)
         | TypedExprKind::Cmp(_, l, r)
-        | TypedExprKind::Logic(_, l, r) => expr_performs(l) || expr_performs(r),
+        | TypedExprKind::Logic(_, l, r) => expr_suspends(l, program) || expr_suspends(r, program),
         TypedExprKind::Block(b) => {
-            b.stmts.iter().any(|s| stmt_performs(&s.kind)) || expr_performs(&b.tail)
+            b.stmts.iter().any(|s| stmt_suspends(&s.kind, program)) || expr_suspends(&b.tail, program)
         }
         TypedExprKind::If { cond, then_branch, else_branch } => {
-            expr_performs(cond)
-                || then_branch.stmts.iter().any(|s| stmt_performs(&s.kind))
-                || expr_performs(&then_branch.tail)
-                || else_branch.stmts.iter().any(|s| stmt_performs(&s.kind))
-                || expr_performs(&else_branch.tail)
+            expr_suspends(cond, program)
+                || then_branch.stmts.iter().any(|s| stmt_suspends(&s.kind, program))
+                || expr_suspends(&then_branch.tail, program)
+                || else_branch.stmts.iter().any(|s| stmt_suspends(&s.kind, program))
+                || expr_suspends(&else_branch.tail, program)
         }
-        TypedExprKind::Call { args, .. } => args.iter().any(expr_performs),
-        TypedExprKind::StructLit { fields, .. } => fields.iter().any(expr_performs),
-        TypedExprKind::FieldAccess { target, .. } => expr_performs(target),
-        TypedExprKind::ArrayLit { elements, .. } => elements.iter().any(expr_performs),
-        TypedExprKind::Index { target, index, .. } => expr_performs(target) || expr_performs(index),
+        // ADR 0072 — THE ARM THAT WAS MISSING, and the whole of the miscompile.
+        // Under the effecting-fn ABI a call to a `Kont*`-returning fn suspends
+        // exactly as a `perform` does, but nothing about the CALL NODE says so: it is
+        // a property of the callee's SIGNATURE. So every gate that walked for
+        // `perform` nodes waved these through to a straight-line emitter that stored
+        // the returned `Kont*` as if it were the call's declared type.
+        TypedExprKind::Call { id, args, .. } => {
+            uses_kont_abi(program.signature(*id), program)
+                || args.iter().any(|a| expr_suspends(a, program))
+        }
+        TypedExprKind::StructLit { fields, .. } => fields.iter().any(|a| expr_suspends(a, program)),
+        TypedExprKind::FieldAccess { target, .. } => expr_suspends(target, program),
+        TypedExprKind::ArrayLit { elements, .. } => elements.iter().any(|a| expr_suspends(a, program)),
+        TypedExprKind::Index { target, index, .. } => expr_suspends(target, program) || expr_suspends(index, program),
         TypedExprKind::MethodCall { target, args, .. } => {
-            expr_performs(target) || args.iter().any(expr_performs)
+            expr_suspends(target, program) || args.iter().any(|a| expr_suspends(a, program))
         }
-        TypedExprKind::ClassInit { args, .. } => args.iter().any(expr_performs),
+        TypedExprKind::ClassInit { args, .. } => args.iter().any(|a| expr_suspends(a, program)),
         TypedExprKind::ImplMethodCall { target, args, .. } => {
-            expr_performs(target) || args.iter().any(expr_performs)
+            expr_suspends(target, program) || args.iter().any(|a| expr_suspends(a, program))
         }
-        TypedExprKind::QualifiedCall { args, .. } => args.iter().any(expr_performs),
+        TypedExprKind::QualifiedCall { args, .. } => args.iter().any(|a| expr_suspends(a, program)),
         TypedExprKind::Scope { body, .. } => {
-            body.stmts.iter().any(|s| stmt_performs(&s.kind)) || expr_performs(&body.tail)
+            body.stmts.iter().any(|s| stmt_suspends(&s.kind, program)) || expr_suspends(&body.tail, program)
         }
-        TypedExprKind::Spawn { call, .. } => expr_performs(call),
-        TypedExprKind::Await { task_expr, .. } => expr_performs(task_expr),
-        TypedExprKind::EnumConstruct { args, .. } => args.iter().any(expr_performs),
+        TypedExprKind::Spawn { call, .. } => expr_suspends(call, program),
+        TypedExprKind::Await { task_expr, .. } => expr_suspends(task_expr, program),
+        TypedExprKind::EnumConstruct { args, .. } => args.iter().any(|a| expr_suspends(a, program)),
         TypedExprKind::Match { scrutinee, arms, .. } => {
-            expr_performs(scrutinee) || arms.iter().any(|a| expr_performs(&a.body))
+            expr_suspends(scrutinee, program) || arms.iter().any(|a| expr_suspends(&a.body, program))
         }
     }
 }
@@ -4353,15 +4511,30 @@ fn detect_let_shape<'a>(f: &'a TypedFnDef, program: &TypedProgram) -> Option<Let
         _ => return None,
     };
     // The RHS must produce a Kont (a direct `perform` / call-to-effecting) — the C3.5(b)
-    // `produces_kont` predicate; the tail must be pure; MVP-restricted to an i64 let (the
-    // single SentinelKont `arg` slot carries the resumed value).
-    if !produces_kont(value, program) {
+    // `produces_kont` predicate, applied UNDER any `secret` widen (ADR 0072), which is
+    // value-level identity and so cannot change what crosses the continuation.
+    if !produces_kont(strip_secret_widen(value), program) {
         return None;
     }
-    if expr_performs(&f.body.tail) {
+    // The tail must not itself suspend. `expr_suspends`, not `expr_performs`: a tail
+    // that calls an effecting fn needs a second frame, which this shape cannot build.
+    if expr_suspends(&f.body.tail, program) {
         return None;
     }
-    if ty != Type::I64 {
+    // ADR 0072 — THE FAIL-CLOSED BOUNDARY. Both the resumed value and every captured
+    // var cross an `i64`-wide seam, so both are checked against the same explicit
+    // allow-list. Declining here is safe BECAUSE `validate_effecting_fn_body` now
+    // refuses what falls past: before that gate learned to see effecting calls, a
+    // decline meant silently emitting `store i64 <a Kont*>` instead.
+    if !fits_kont_slot(ty, program) {
+        return None;
+    }
+    if !captures_fit_kont_slots(
+        f,
+        &collect_captured_vars(&f.body.tail, let_id),
+        &[(let_id, ty)],
+        program,
+    ) {
         return None;
     }
     Some(LetShapeInfo { let_id, let_ty: ty, rhs: value, tail: &f.body.tail })
@@ -4565,18 +4738,32 @@ fn detect_chained_lets_shape<'a>(
             _ => return None,
         };
         // Each RHS must produce a Kont (direct `perform` / call-to-effecting) so the
-        // next resumer can be pushed onto it; MVP-restricted to i64 lets (the kont's
-        // single `arg` slot carries the resumed value) — same as c35c/c35d.
-        if !produces_kont(value, program) {
+        // next resumer can be pushed onto it — under any `secret` widen, and gated by
+        // the same [`fits_kont_slot`] allow-list as c35c (ADR 0072).
+        if !produces_kont(strip_secret_widen(value), program) {
             return None;
         }
-        if ty != Type::I64 {
+        if !fits_kont_slot(ty, program) {
             return None;
         }
         lets.push((id, ty, value));
     }
-    if expr_performs(&f.body.tail) {
+    if expr_suspends(&f.body.tail, program) {
         return None;
+    }
+    // Every chained resumer rebuilds the next frame from `i64[N]` slots, so the same
+    // capture width rule applies at every level.
+    let own_lets: Vec<(VarId, Type)> = lets.iter().map(|(id, ty, _)| (*id, *ty)).collect();
+    for level in 0..lets.len() {
+        let info = ChainedLetsInfo { lets: lets.clone(), tail: &f.body.tail };
+        if !captures_fit_kont_slots(
+            f,
+            &compute_chained_captures(&info, level),
+            &own_lets,
+            program,
+        ) {
+            return None;
+        }
     }
     Some(ChainedLetsInfo { lets, tail: &f.body.tail })
 }
@@ -4690,7 +4877,7 @@ fn walk_collect_var_refs(expr: &TypedExpr, acc: &mut Vec<VarId>) {
             walk_collect_var_refs(index, acc);
         }
         // Literals reference no vars; spawn/await/handle/match can't appear in a c35c
-        // pure tail (`expr_performs` would have rejected them in `detect_let_shape`).
+        // pure tail (`expr_suspends` would have rejected them in `detect_let_shape`).
         // A `Perform` (the c35d embedded tail) is INTENTIONALLY skipped — its subtree
         // is the parent's to lower, so its arg vars are not part of the captured set
         // (matching inkwell's walk over the placeholder-SUBSTITUTED tail).

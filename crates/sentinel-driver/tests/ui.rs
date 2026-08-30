@@ -86,6 +86,16 @@ ui_snapshot!(c34_handle_undefined_op, "c34_handle_undefined_op.sentinel");
 ui_snapshot!(c34_handle_duplicate_arm, "c34_handle_duplicate_arm.sentinel");
 ui_snapshot!(c34_kont_used_as_value, "c34_kont_used_as_value.sentinel");
 
+// ---- C3.5 / ADR 0072: the effecting-fn continuation boundary, fail-closed ----
+// One fixture per way a body can miss the four lowerable shapes. Each of these used
+// to be ACCEPTED and mis-lowered rather than refused — two silently (a raw pointer
+// returned as the answer; an effect dropped so a handler never ran), one as an
+// out-of-bounds stack read, one as an inkwell panic. The diagnostics are the fix.
+ui_snapshot!(c35_effecting_call_in_statement, "c35_effecting_call_in_statement.sentinel");
+ui_snapshot!(c35_effecting_call_in_operand, "c35_effecting_call_in_operand.sentinel");
+ui_snapshot!(c35_effecting_let_nullable, "c35_effecting_let_nullable.sentinel");
+ui_snapshot!(c35_effecting_narrow_capture, "c35_effecting_narrow_capture.sentinel");
+
 // ---- C3.7 effect-check rejection ----
 ui_snapshot!(c37_perform_outside_handle, "c37_perform_outside_handle.sentinel");
 

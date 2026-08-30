@@ -1,0 +1,39 @@
+// C3.5 / ADR 0072 (negative): a call to an effecting fn in STATEMENT position.
+//
+// `do_work()` suspends — under the `Kont*` ABI it returns a continuation, not an
+// `i64` — so discarding it in statement position needs the same frame reification a
+// let-bound perform does. It is refused rather than lowered.
+//
+// THIS ONE IS WORTH READING TWICE, because the old behaviour was not a crash or a
+// wrong number but a MISSING EFFECT. The program compiled, exited 42, and the
+// handler's `print(7)` never ran: the continuation was allocated, dropped on the
+// floor, and `caller` returned a pure 42 as though the perform had happened. Empty
+// stdout, correct-looking exit code, no diagnostic anywhere.
+//
+// The mechanism is the one ADR 0072 exists to close: the gate walked for `perform`
+// NODES, while the ABI substitution that creates the continuation is keyed on the
+// CALLEE'S SIGNATURE. Write the identical program with `perform Io.read()` in place
+// of `do_work()` and it was rejected cleanly — the two spellings failed in opposite
+// directions.
+
+effect Io {
+    read() -> i64;
+}
+
+fn do_work() -> i64 ! { Io } {
+    perform Io.read()
+}
+
+fn caller() -> i64 ! { Io } {
+    do_work();
+    42
+}
+
+fn main() -> i64 {
+    handle caller() with {
+        Io.read(k) => {
+            print(7);
+            k(42)
+        }
+    }
+}

@@ -1,0 +1,12 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c35_effecting_narrow_capture.sentinel\")"
+---
+sentinel::codegen::effecting_fn_body_not_direct
+
+  × effecting fn `work` cannot be lowered: `n` is captured across the
+  │ continuation, so it must be `i64` or `secret i64`; `u8` would be read out
+  │ of bounds
+  help: an effecting fn returns a continuation, so only the shapes ADR 0072
+        enumerates can be lowered; reshape the body, or wait for the wider
+        seam that ADR 0072 defers

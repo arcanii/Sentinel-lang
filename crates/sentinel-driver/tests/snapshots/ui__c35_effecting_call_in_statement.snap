@@ -1,0 +1,11 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c35_effecting_call_in_statement.sentinel\")"
+---
+sentinel::codegen::effecting_fn_body_not_direct
+
+  × effecting fn `caller` cannot be lowered: a `perform` or a call to an
+  │ effecting fn appears outside tail position, which needs a reified frame
+  help: an effecting fn returns a continuation, so only the shapes ADR 0072
+        enumerates can be lowered; reshape the body, or wait for the wider
+        seam that ADR 0072 defers
