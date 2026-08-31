@@ -174,7 +174,11 @@ fn type_fn(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u
         cg_emit_fn_eff(out, c, body, rty, src, name_s, name_e, cgpmark, cg_pv0, cg_pvn, gb, embed, k, s, e, body_tok0);
         0
     } else {
+        // (ADR 0014 D3 / ADR 0051 A5) publish the return type for any `return e` inside.
+        let svfr: i64 = (*c).fnret;
+        (*c).fnret = rty;
         dump_texpr(out, body, rty, src, c, gb);
+        (*c).fnret = svfr;
         // (8d-drops) free the param frame (frame 0) — AFTER the body-block drops (emitted
         // inside the Block arm), BEFORE `curfn` is cleared (cg_is_moved keys on it).
         if cg_on(c) {

@@ -25,27 +25,36 @@ fn dump_cargs(out: &mut Vec<u8>, a: Args, src: &[u8], c: &mut TyCtx, gb: &mut Ve
     // only at let-init / user-fn call-arg / spawn).
     let svu: bool = (*c).cg_ufarg;
     (*c).cg_ufarg = false;
-    dump_targs(out, a, src, c, gb);
+    dump_targs(out, a, 0 - 1, 0, src, c, gb);
     (*c).cg_ufarg = svu;
     (*c).consuming = svc;
     0
 }
 
-fn dump_targs(out: &mut Vec<u8>, a: Args, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
+// `pfid` = the callee's user FnId when its declared param types should be pushed down
+// onto the arguments as expectations (ADR 0014 D3's `?T` pushdown and ADR 0051 A5's
+// `secret` one), or -1 for every other caller — an array literal, a construct, a builtin,
+// a spawn target. `pidx` is the current argument's position.
+//
+// The expectation is what makes `takes(5)` against `takes(p: ?i64)` emit
+// `(widen-null (int 5 :i64) :?i64)` instead of the bare literal. Passing -1 here is what
+// it did before, for every callee.
+fn dump_targs(out: &mut Vec<u8>, a: Args, pfid: i64, pidx: i64, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
     match a {
         Args::End => 0,
         Args::Cell(x, rest) => {
             push(out, ' ');
             // (6/N) args INHERIT the caller's consuming context (the call arm sets it —
             // user-fn/construct args consume, builtin args do not).
-            let cg_argty: i64 = dump_texpr(out, x, 0 - 1, src, c, gb);
+            let aexp: i64 = fn_param_ty(c, pfid, pidx);
+            let cg_argty: i64 = dump_texpr(out, x, aexp, src, c, gb);
             mir_collect(c);
             // (ADR 0071 M1.4a slice 3) rc++ a named-`Shared` arg into a user-fn
             // owning param (gated by `cg_ufarg`), re-threading to the clone before
             // it is collected. A no-op for every non-Shared / non-user-fn arg.
             cg_clone_shared_arg(c, cg_argty);
             cg_collect(c, cg_argty);
-            dump_targs(out, rest, src, c, gb)
+            dump_targs(out, rest, pfid, pidx + 1, src, c, gb)
         },
     }
 }
@@ -69,7 +78,7 @@ fn dump_array_elems(out: &mut Vec<u8>, a: Args, src: &[u8], c: &mut TyCtx, gb: &
             // (8c-2) codegen: collect the FIRST element's operand (the rest collect
             // via `dump_targs`); the array arm emits the alloc+stores over them.
             cg_collect(c, t0);
-            dump_targs(out, rest, src, c, gb);
+            dump_targs(out, rest, 0 - 1, 0, src, c, gb);
             t0
         },
     }
@@ -503,7 +512,7 @@ fn dump_apply_call(out: &mut Vec<u8>, ca: Args, src: &[u8], c: &mut TyCtx, gb: &
                     let xt: i64 = dump_texpr(out, x, param_ty, src, c, gb);
                     mir_collect(c);
                     cg_collect(c, xt);
-                    dump_targs(out, rest2, src, c, gb);
+                    dump_targs(out, rest2, 0 - 1, 0, src, c, gb);
                     0
                 },
                 Args::End => 0,
@@ -557,7 +566,7 @@ fn dump_args_capture_first(out: &mut Vec<u8>, a: Args, consume_rest: bool, src: 
             cg_collect(c, t0);
             let svc: bool = (*c).consuming;
             if consume_rest { (*c).consuming = true; 0 } else { 0 };
-            dump_targs(out, rest, src, c, gb);
+            dump_targs(out, rest, 0 - 1, 0, src, c, gb);
             (*c).consuming = svc;
             t0
         },

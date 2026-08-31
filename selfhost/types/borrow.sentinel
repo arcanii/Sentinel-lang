@@ -309,39 +309,50 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
         // Same three-line pattern would fix them; each needs its own probe battery,
         // because the risk a widen fix carries is OVER-widening.
         //
-        // AND THREE POSITIONS supply no expectation AT ALL, which is a different
-        // defect again — they are shape-INDEPENDENT (even a literal fails, which is
-        // how you tell them apart from the family above):
-        //   * a call ARGUMENT — `takes(5)` against `takes(p: secret i64)` or
-        //     `takes(p: ?i64)`;
-        //   * a `return` OPERAND, where the missing wrapper also retypes the
-        //     enclosing block (oracle `:?i64`, `scg` `:i64`);
-        //   * an ASSIGNMENT right-hand side — `let mut o: ?i64 = null; o = 42;` —
-        //     and THIS one is not merely a text divergence. Codegen emits
+        // THREE POSITIONS used to supply no expectation AT ALL — a different defect
+        // from the family above, and shape-INDEPENDENT (even a literal failed, which
+        // is how you told them apart). All three are now CLOSED (ADR 0014 D3 / ADR
+        // 0051 A5, `tests/pass/c19_widen_arg_return_assign`):
+        //   * a call ARGUMENT now gets the callee's declared param type, via
+        //     `dump_targs`'s `pfid`/`pidx` and `fn_param_ty` — for a USER fn only.
+        //     ⚠ A BUILTIN's argument still gets no expectation, and that is a
+        //     LIMITATION, not the oracle's behaviour: the oracle widens there too
+        //     (`let y: i64 = unwrap_or(5, 0);`), and scg emits `extractvalue i64 5, 0`,
+        //     which `llvm-as` rejects. Filed as its own slice — the builtin arms infer
+        //     their type argument from the ARGUMENTS, not from an expectation;
+        //   * a `return` OPERAND gets the enclosing fn's return type, carried on
+        //     `fnret`. That also fixed the enclosing BLOCK's type, since a block is
+        //     typed by its tail: dropping the wrapper made it `:i64` where the
+        //     oracle says `:?i64`;
+        //   * an ASSIGNMENT right-hand side gets the assigned place's type, which
+        //     the Assign arm already had in hand as `ttgt`. This was the only one
+        //     that was not merely a text divergence — it emitted
         //     `store { i1, i64 } 42, ptr %v0`, which `llvm-as` rejects with
-        //     `integer constant must have integer type`: INVALID IR, where the
-        //     oracle builds the two `insertvalue`s first. (Remember `llvm-as`
-        //     EXITS 0 while printing that — read its stderr.)
+        //     `integer constant must have integer type`. (The repo's lore says `llvm-as`
+        //     exits 0 while printing such a message; MEASURED on this LLVM 18 build it
+        //     exits 1 for BOTH a parse error and a "does not verify as correct!"
+        //     verifier failure. Read stderr anyway — the harness does — but the exit
+        //     code is usable here.)
         //
-        // Their status DIFFERS, so do not fold them together. The `secret` call-arg
-        // and return widens are NOT defects: ADR 0051 A1 leaves the call-arg /
-        // return / array widens snc-side BY DESIGN ("sound, additive,
-        // codegen-no-op ergonomics; mirroring them is a low-value follow-up"), and
-        // only the OPERAND widen was mirrored. The `?T` versions have no such
-        // record — that is ADR 0014 D3's pushdown, older than 0051 and simply
-        // unmirrored — and neither does the assignment RHS in either flavour.
-        // None is reachable today, and that was checked rather than assumed: a
-        // static scan of every `.sentinel` in the tree (selfhost/ included, so the
-        // bootstrap fixed point is not at risk — ZERO hits there) finds ONE corpus
-        // site for the three positions combined, the three
-        // `seal(&cli.keyc, N, <literal>)` calls in
-        // `examples/lang/sealed_session.sentinel` — a `secret i64` parameter, i.e.
-        // the ADR-deferred half — and that file is excluded twice over: the direct
-        // form on `use` imports are not yet wired, the merged form on
-        // `expression `declassify` is out of Bar-A scope`. Every assignment into a
-        // qualified binding in the corpus already has a `secret` right-hand side,
-        // so none of them widens. Verified PRE-EXISTING (byte-identical before and
-        // after this change) and tracked as its own item.
+        // "Call argument" means a plain `f(x)`: a METHOD / impl-method / qualified-call
+        // argument goes through its own path and still passes no expectation.
+        //
+        // ADR 0051 A1 had deferred the `secret` call-arg and return widens BY DESIGN;
+        // A5 amends that rather than contradicting it silently, because the same
+        // missing machinery also dropped ADR 0014 D3's `?T` pushdown, which no ADR
+        // ever deferred, and because the assignment position emitted invalid IR.
+        // A1's THIRD deferral — the ARRAY widen — is still in force, and is really two
+        // gaps: a whole array VALUE (`let s: [secret u8] = b;`) that `widen_kind` does
+        // not implement at all, and an array LITERAL, where the oracle widens each
+        // ELEMENT — so `widen_kind` handles that one and only the element expectation
+        // is unthreaded, putting it in the arm family below.
+        //
+        // What remains open here is the FAMILY above, not these positions. Note the
+        // two interact: an argument or assignment whose VALUE is a `StructLit`, a
+        // `Field`, an `Index` and so on now RECEIVES the expectation and still
+        // discards it — so `takes(P { x: 1 })` against `takes(p: ?P)` diverges. That
+        // is the arm family, not the threading, and it reproduces through a plain
+        // `let` with no call or assignment involved.
         Expr::Unary(uop, inner) => {
             let mut utmp: Vec<u8> = vec_new();
             let urt: i64 = dump_te_unary(&mut utmp, uop, inner, exp, src, c, gb);
@@ -1122,7 +1133,12 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             append_str(out, "(return ");
             let svc: bool = (*c).consuming;
             (*c).consuming = true;
-            let it: i64 = dump_texpr(out, ri, 0 - 1, src, c, gb);
+            // (ADR 0014 D3 / ADR 0051 A5) the operand is checked against the ENCLOSING
+            // fn's return type, the same expectation the body's tail gets. `it` then
+            // comes back WIDENED, which is what also fixes the enclosing block's type —
+            // a block is typed by its tail, so a dropped wrapper here retyped the whole
+            // block `:i64` where the oracle says `:?i64`.
+            let it: i64 = dump_texpr(out, ri, (*c).fnret, src, c, gb);
             (*c).consuming = svc;
             close_ty(out, it, c);
             if mir_on(c) {
@@ -1424,7 +1440,7 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
                         // target is always a user fn, so gate `cg_ufarg` on).
                         let svu: bool = (*c).cg_ufarg;
                         (*c).cg_ufarg = true;
-                        dump_targs(out, sca, src, c, gb);
+                        dump_targs(out, sca, 0 - 1, 0, src, c, gb);
                         (*c).cg_ufarg = svu;
                         (*c).consuming = svc;
                         (*c).cg_collecting = cg_col;

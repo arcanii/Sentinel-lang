@@ -366,7 +366,11 @@ fn tmethod(buf: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u
     let mbody: Expr = parse_block(k, s, e, src, cur);
     render_type(buf, mrth, c);
     push(buf, ' ');
+    // (ADR 0014 D3 / ADR 0051 A5) same for a method body.
+    let svmfr: i64 = (*c).fnret;
+    (*c).fnret = mrth;
     dump_texpr(buf, mbody, mrth, src, c, gb);
+    (*c).fnret = svmfr;
     push(buf, ')');
     // (Bar B / classes) cg: the method DEFINE (`<ret> @<sym>(ptr self, params)`) → cgcls.
     if cg_on(c) {

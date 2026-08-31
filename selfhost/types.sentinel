@@ -153,6 +153,13 @@ struct TyCtx {
     imns: Vec<i64>,   // impl name start (0,0 slot for a default/unnamed impl)
     imne: Vec<i64>,   // impl name end
     imtid: Vec<i64>,  // the impl's TraitId
+    // (ADR 0014 D3 / ADR 0051 A5) the ENCLOSING fn/method's declared return type, or -1
+    // outside a body. A `return e` is checked against it exactly as a tail expression is,
+    // so the operand needs the same expectation the body itself got — without this the
+    // wrapper was dropped AND the enclosing block was retyped (`:i64` where the oracle
+    // says `:?i64`), because the block's type is its tail's. Saved/restored around each
+    // body so a nested item cannot leak its return type outward.
+    fnret: i64,
     imcid: Vec<i64>,  // the impl's target ClassId, or -1 when the target is not a class
     // (ADR 0023 D7 / A4) the impl's target StructId, or -1 when the target is not a
     // struct. AT MOST ONE of `imcid[i]` / `imsid[i]` is >= 0 — NOT exactly one: a target

@@ -526,7 +526,13 @@ fn dump_tstmt(out: &mut Vec<u8>, s: Stmt, src: &[u8], c: &mut TyCtx, gb: &mut Ve
             };
             (*c).consuming = true;
             push(out, ' ');
-            dump_texpr(out, aval, 0 - 1, src, c, gb);
+            // (ADR 0014 D3 / ADR 0051 A5) the RHS is checked against the assigned PLACE's
+            // type, which the target walk above already computed as `ttgt`. This was the
+            // only one of the three positions whose absence produced INVALID IR rather
+            // than a text divergence: `let mut o: ?i64 = null; o = 42;` emitted
+            // `store { i1, i64 } 42, ptr %v0` — an aggregate store of a bare integer,
+            // which `llvm-as` rejects with "integer constant must have integer type".
+            dump_texpr(out, aval, ttgt, src, c, gb);
             // (7c) MIR: a plain-Var target rebinds var_defs to the RHS; a field/`*`-deref
             // store (no precise IR) funnels the value through Opaque (a store sink, typed
             // as the target).

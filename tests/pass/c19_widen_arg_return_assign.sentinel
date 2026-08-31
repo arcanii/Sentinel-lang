@@ -1,0 +1,98 @@
+// c19_widen_arg_return_assign: the three expression positions that supplied NO expected
+// type, so the widening wrapper was dropped in each.
+//
+// WHAT IT PINS. A widened context wraps its value — `snc types` prints
+// `(widen-secret … :secret i64)` / `(widen-null … :?i64)`. `scg` threaded the expectation
+// into a `let` annotation, a branch, a block tail and a `match` arm, but not into:
+//
+//   1. A CALL ARGUMENT. The callee's declared parameter type is the expectation.
+//      `takes_n(5)` against `takes_n(p: ?i64)` emitted the bare literal.
+//   2. A `return` OPERAND. The enclosing fn's return type is the expectation — and the
+//      missing wrapper did double damage, because a block is typed by its TAIL: dropping
+//      it also RETYPED the enclosing block `:i64` where the oracle says `:?i64`.
+//   3. An ASSIGNMENT right-hand side. The assigned place's type is the expectation, and
+//      this is the one that was not merely a text divergence — an integer assigned into
+//      a `?i64` binding emitted `store { i1, i64 } <the integer>, ptr %v0`, an aggregate
+//      store of a bare integer, which `llvm-as` rejects with "integer constant must have
+//      integer type".
+//      (⚠ `llvm-as` EXITS 0 while printing that, so it is stderr that tells you.)
+//
+// All three were SHAPE-INDEPENDENT — a plain literal reproduced each — which is what
+// distinguishes them from the earlier call/unary gap (`c19_widen_call_unary`), where the
+// expectation WAS supplied and only certain right-hand-side shapes ignored it.
+//
+// THE TWO FLAVOURS HAVE DIFFERENT PROVENANCE, and the fixture covers both:
+//   * `?T` is ADR 0014 D3's expected-type pushdown, which the oracle has always done and
+//     `scg` simply never mirrored.
+//   * `secret` is ADR 0051, whose A1 deliberately left the call-arg / return / array
+//     widens snc-side. A5 mirrors the first two; the ARRAY widen stays deferred, and
+//     deliberately is not exercised here — `widen_kind` does not implement `[u8]` ->
+//     `[secret u8]` at all, which a `let`-annotated array shows just as well.
+//
+// ⚠ THIS FIXTURE'S ORACLE IR DOES NOT ASSEMBLE, and that is a PRE-EXISTING `snc` bug, not
+// a defect in the fixture or in scg. ANY `return` in a fn whose return type is NULLABLE
+// makes `snc llvm` emit `ret { i1, i64 } 0` for the synthesized fall-through — measured:
+// `fn rn() -> ?i64 { return 5 }` alone reproduces it, the same fn WITHOUT a `return` is
+// clean, and the `secret i64` twin is clean (secret lowers to i64). `ret_n` below is
+// therefore the one cell that cannot avoid it, and it is kept because it is the cell that
+// matters most — the return position is the one whose missing wrapper also RETYPED the
+// enclosing block. Nothing fails as a result: the codegen differential compares oracle
+// against scg (byte-identical here) and only flags scg when the ORACLE's IR is valid, and
+// `snc build` uses inkwell, which compiles and runs this correctly. Filed separately; when
+// it is fixed, this fixture's oracle IR should start assembling, which is a good check.
+//
+// WHAT THIS FIXTURE DOES NOT COVER, so nobody reads it as more than it is: an argument
+// or assignment whose VALUE is a `struct` literal, a field read, an index, or another
+// arm that receives the expectation and discards it. Those diverge through a plain `let`
+// too, so they are the sibling arm-family gap, not this one.
+//
+// 10 + 10 + 5 + 3 + 14 = 42.
+
+fn takes_s(p: secret i64) -> i64 {
+    declassify(p)
+}
+
+fn takes_n(p: ?i64) -> i64 {
+    unwrap_or(p, 0)
+}
+
+// Mixed kinds either side of the widened params, so a mis-indexed expectation shows up
+// as a wrong wrapper rather than a missing one.
+fn takes_mixed(a: i64, b: secret i64, c: bool, d: ?i64) -> i64 {
+    a + declassify(b) + unwrap_or(d, 0)
+}
+
+// 2. RETURN OPERAND, nullable — the arm whose absence also retyped the block.
+fn ret_n(b: bool) -> ?i64 {
+    if b {
+        return 5
+    } else {
+        7
+    }
+}
+
+// 2. RETURN OPERAND, secret.
+fn ret_s(b: bool) -> secret i64 {
+    if b {
+        return 3
+    } else {
+        4
+    }
+}
+
+fn main() -> i64 {
+    // 1. CALL ARGUMENT — public literals into a `secret i64` and a `?i64` parameter.
+    let a: i64 = takes_s(5) + takes_n(5);            // 10
+    let b: i64 = takes_mixed(1, 2, true, 7);         // 10
+    // 2. RETURN OPERAND, both flavours.
+    let c: i64 = unwrap_or(ret_n(true), 0);          // 5
+    let d: i64 = declassify(ret_s(true));            // 3
+    // 3. ASSIGNMENT RHS — the invalid-IR one, both flavours. The nullable case is the
+    // one whose store used to come out as `store { i1, i64 } 10, ptr %v…`.
+    let mut o: ?i64 = null;
+    o = 10;
+    let mut s: secret i64 = 0;
+    s = 4;
+    let e: i64 = unwrap_or(o, 0) + declassify(s);    // 14
+    a + b + c + d + e
+}

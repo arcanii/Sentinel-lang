@@ -1606,6 +1606,28 @@ fn pass_c65_return_match() {
 }
 
 #[test]
+fn pass_c19_widen_arg_return_assign() {
+    // ADR 0014 D3 / ADR 0051 A5 c19_widen_arg_return_assign: the three positions that
+    // supplied NO expected type, so `scg` dropped the widening wrapper in each — a call
+    // ARGUMENT (the callee's param type), a `return` OPERAND (the fn's return type), and
+    // an ASSIGNMENT right-hand side (the assigned place's type).
+    //
+    // All three were SHAPE-INDEPENDENT — a plain literal reproduced each — which is what
+    // separates them from `c19_widen_call_unary`, where the expectation WAS supplied and
+    // only certain RHS shapes ignored it. The return case did double damage: a block is
+    // typed by its tail, so the dropped wrapper also retyped the enclosing block `:i64`
+    // where the oracle says `:?i64`. The assignment case was the only one that was not
+    // merely a text divergence — `o = 42` into a `?i64` binding emitted
+    // `store { i1, i64 } 42, ptr %v0`, which `llvm-as` rejects.
+    //
+    // Both flavours, because their provenance differs: `?T` is ADR 0014 D3's pushdown
+    // that scg never mirrored, `secret` is ADR 0051 whose A1 deferred it by design (A5
+    // amends that for these two positions; the ARRAY widen stays deferred and is
+    // deliberately not exercised here). 10 + 10 + 5 + 3 + 14 = 42.
+    assert_eq!(run_exit("c19_widen_arg_return_assign.sentinel"), 42);
+}
+
+#[test]
 fn pass_c42_impl_for_struct() {
     // ADR 0023 D7 / A4 c42_impl_for_struct: a trait impl whose target is a STRUCT.
     //

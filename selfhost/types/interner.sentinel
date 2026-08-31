@@ -1641,6 +1641,34 @@ fn fn_lookup(c: &mut TyCtx, src: &[u8], q: &[u8]) -> i64 {
     }
 }
 
+// (ADR 0014 D3 / ADR 0051 A5) the declared type of user fn `fid`'s param `i`, or -1
+// when there is none — a BUILTIN (`fid < 42`), or an index past the param list.
+//
+// ⚠ -1 FOR A BUILTIN IS A LIMITATION, NOT THE ORACLE'S BEHAVIOUR. The oracle DOES widen a
+// builtin's argument: `let y: i64 = unwrap_or(5, 0);` gives
+// `(call #1 (targs i64) (widen-null (int 5 :i64) :?i64) …)`, and scg drops it and emits
+// `extractvalue i64 5, 0` — INVALID IR. (A bare `unwrap_or(5, 0)` in tail position IS
+// rejected, but for an unrelated reason: generic inference with no context. Do not
+// generalise from it — that mistake is why this comment exists.)
+//
+// The builtin arms are not merely unthreaded, they infer their type argument from the
+// ARGUMENTS rather than from an expectation, which is the same shape as the generic
+// user-fn item. Fixing it is its own slice; -1 here preserves today's behaviour exactly.
+fn fn_param_ty(c: &mut TyCtx, fid: i64, i: i64) -> i64 {
+    if fid < 42 {
+        0 - 1
+    } else {
+        let idx: i64 = fid - 42;
+        let ps: i64 = (*c).ufps[idx];
+        let pe: i64 = (*c).ufpe[idx];
+        if ps + i < pe {
+            (*c).ufpp[ps + i]
+        } else {
+            0 - 1
+        }
+    }
+}
+
 // The return-type handle for a resolved FnId.
 fn fn_ret(c: &mut TyCtx, fid: i64) -> i64 {
     if fid < 42 {

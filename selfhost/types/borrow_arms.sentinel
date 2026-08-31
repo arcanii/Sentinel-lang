@@ -1093,7 +1093,7 @@ fn dump_te_call(out: &mut Vec<u8>, cn: [u8], ca: Args, exp: i64, src: &[u8], c: 
                     // (ADR 0066 M1.2b-cont) channel_new() -> Channel<elem>: the
                     // element is the EXPECTED type's element (mirroring the oracle,
                     // which reads `expected_return`), else i64. No args to dump.
-                    dump_targs(out, ca, src, c, gb);
+                    dump_targs(out, ca, 0 - 1, 0, src, c, gb);
                     let cn_elem: i64 = container_elem(c, exp);
                     if cn_elem == 0 - 1 {
                         mk_channel(c, 0)
@@ -1105,7 +1105,10 @@ fn dump_te_call(out: &mut Vec<u8>, cn: [u8], ca: Args, exp: i64, src: &[u8], c: 
                     // comes from the channel arg's handle (the reader shape).
                     dump_channel_recv(out, ca, src, c, gb)
                 } else {
-                    dump_targs(out, ca, src, c, gb);
+                    // (ADR 0014 D3 / ADR 0051 A5) push the callee's declared param
+                    // types down onto the args. `fn_param_ty` answers -1 for a builtin,
+                    // so this is a no-op for everything but a user fn.
+                    dump_targs(out, ca, fid, 0, src, c, gb);
                     fn_ret(c, fid)
                 };
                 (*c).consuming = svf;
