@@ -633,6 +633,70 @@ C4.1 A2 amendment that deferred general `Self` in type
 position). The interner is in place for the eventual lift; no
 substitution paths exercise it yet.
 
+**A4 — D7's STRUCT half was never mirrored into the
+self-hosted compiler.** D7 says `Self` inside an
+`impl as Trait for Type` body is `Type::Class(class_id)` **or**
+`Type::Struct(struct_id)`. The Rust `snc` has always done both;
+`scg` did only the first. Its impl table recorded a ClassId and
+had no struct counterpart, so a struct target left -1 wherever
+the target was consulted, and the gap showed up twice:
+
+- the types dump emitted the literal `" class#"` and then the
+  id — and with -1 the id printed as NOTHING, because
+  `append_int`'s `while v > 0` loop produces no digits for a
+  negative value. `scg` said `class#` where the oracle says
+  `struct#0`: a tag that lost its id rather than showing a
+  wrong one.
+- `self` was bound as `mk_class(c, -1)`, a type that is neither
+  a struct nor a class, so a `self.<field>` read fell to
+  `class_field_index(c, -1, …)` and the stage ABORTED with
+  `index out of bounds: idx=-1, len=0`.
+- and a THIRD, found by probing rather than reported, which is
+  the only one of the three that picks a WRONG answer rather
+  than an absent or crashing one: receiver-typed impl-method
+  DISPATCH keyed on the class id alone. A struct receiver has
+  `cid == -1`, and every struct-target impl also records
+  `imcid == -1`, so the FIRST struct-target impl matched EVERY
+  struct receiver. With a single struct in the program that is
+  correct by accident — which is exactly why the obvious repro
+  misses it — and with two, scg dispatched to the wrong impl.
+  The same lookup was wrong a second, independent way: it
+  returned the first matching TARGET, where D6 Path 1 routes
+  receiver-typed dispatch through the DEFAULT impl only (with a
+  named impl as a type's sole impl, the oracle rejects
+  `x.go(..)` outright). So a named impl declared BEFORE the
+  default one was dispatched to instead — and THAT half was
+  pre-existing and reproduced on CLASS receivers too, untouched
+  by the struct work. Re-keying the lookup fixes both.
+
+Fixed by recording the StructId alongside the ClassId
+(`imsid`, ImplId-parallel with `imcid`; AT MOST one of the pair
+is >= 0 — a name resolving to neither leaves both -1, which the
+oracle rejects outright so no differential sees it — class
+checked first, as the oracle's resolver does).
+The first two then fall out of dispatches that already existed:
+the printer picks its tag from whichever id is set, and
+`dump_te_field` was already testing `struct_of_handle(..) >= 0`,
+so it needed no change at all. The third needed the lookup
+itself re-keyed — `impl_for_class(cid, q)` becomes
+`impl_for_target(cid, sid, q)`, matching on whichever id the
+RECEIVER has and, importantly, matching NOTHING when it has
+neither rather than falling onto the first class-less impl.
+Pinned by `tests/pass/c42_impl_for_struct`, which interleaves
+struct and class targets, default and named, AND uses two
+DISTINCT structs — the two id vectors are parallel, so a
+one-sided push shifts every later impl's target, and a single
+struct would make the dispatch bug invisible.
+
+Nothing in the corpus had a struct-target impl, which is why
+every differential was green while this sat there. Note also,
+found while pinning it: `snc build` (inkwell) compiles and runs
+such a program, but the TEXT oracle `snc llvm` refuses it with
+`impl on a non-class target` — so the two Rust back ends
+disagree about whether it is compilable, and the codegen
+differential skips it. That asymmetry is pre-existing and filed
+separately; it is why A4 is a FRONT-END mirror only.
+
 These amendments don't block subsequent sub-phases. C4.3
 (delegation) and C4.4 (structured concurrency) compose with the
 shipped Path 1 + Path 2 dispatch without depending on Path 3.

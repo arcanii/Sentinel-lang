@@ -14,6 +14,48 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
+**Latest (2026-08-31) — `scg` handles a trait impl whose target is a STRUCT; the register's
+D8 is closed** (`0fef8a4`, **ADR 0023 A4**, pinned by `tests/pass/c42_impl_for_struct`).
+ADR 0023 D7 has always said `Self` inside an `impl as Trait for Type` body is
+`Type::Class(class_id)` **or** `Type::Struct(struct_id)`. The self-hosted compiler mirrored
+only the class half: its impl table recorded a ClassId and had no struct counterpart, so a
+struct target left -1 wherever it was consulted.
+**THREE SYMPTOMS, and the third was NOT in the report — it was found by probing, and it is
+the only one that produces a WRONG answer rather than an absent or crashing one:**
+- the types dump printed `class#` with NO id, because `append_int`'s `while v > 0` loop emits
+  nothing for -1, where the oracle prints `struct#0`;
+- `self` bound as `mk_class(c, -1)` sent `self.<field>` into `class_field_index(c, -1, …)` and
+  the stage ABORTED (`index out of bounds: idx=-1, len=0`);
+- and receiver-typed impl-method DISPATCH keyed on the class id ALONE. A struct receiver has
+  `cid == -1` and every struct-target impl also records `imcid == -1`, so the FIRST struct
+  impl matched EVERY struct receiver. **With one struct in the program that is correct by
+  accident** — which is exactly why the reported repro missed it — and with two it dispatches
+  to the wrong impl. The same lookup was wrong a SECOND, independent way: it returned the
+  first matching TARGET where ADR 0023 D6 Path 1 routes receiver-typed dispatch through the
+  DEFAULT impl only, so a named impl declared before the default one won. That half was
+  PRE-EXISTING and reproduced on CLASS receivers too, untouched by the struct work —
+  re-keying the lookup fixed both.
+The fix records the StructId alongside the ClassId (`imsid`, ImplId-parallel with `imcid`,
+pushed at BOTH recording sites; AT MOST one of the pair is >= 0 — a name resolving to neither
+leaves both -1, which the oracle rejects outright so no differential sees it — class checked
+first as the oracle's resolver does). The first two symptoms then fall out of dispatches that already
+existed — `dump_te_field` was ALREADY testing `struct_of_handle(..) >= 0` and needed no change
+at all — while the third needed the lookup re-keyed: `impl_for_class(cid, q)` becomes
+`impl_for_target(cid, sid, q)`, matching on whichever id the RECEIVER has and matching NOTHING
+when it has neither.
+**Nothing in the corpus had a struct-target impl**, which is why every differential was green.
+The new fixture's shape is entirely load-bearing: five impls interleaving struct and class
+targets because the id vectors are ImplId-parallel (a one-sided push shifts every later impl);
+TWO DISTINCT structs because with one the wrong dispatch is right by accident; and `Sink`'s
+NAMED impl declared BEFORE its default one so the Path 1 rule is actually exercised.
+**Scope is FRONT END, for a measured reason:** `snc build` (inkwell) compiles and runs such a
+program — the fixture exits 42 — but the TEXT oracle `snc llvm` REFUSES it outright ("impl on
+a non-class target"), so the codegen differential skips the fixture and scg's codegen for the
+shape cannot be compared against anything. That back-end disagreement is pre-existing and
+filed; the two scg codegen sites that would abort on it are commented rather than fixed blind,
+since the correct output is unverifiable while the oracle refuses.
+`pass` 162 → 163.
+
 **Latest (2026-08-31) — D1 is CLOSED: `snc` no longer miscompiles an effecting fn, and the
 boundary that let it is now an EXPLICIT fail-closed list** (`5609fb7`, **ADR 0072 ACCEPTED** by the documented
 rhythm — fixtures landed, both fixed points green — though ⚠ the adversarial review was

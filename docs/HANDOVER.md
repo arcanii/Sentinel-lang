@@ -51,6 +51,13 @@ reference as you work through the milestones.
 
 ---
 
+> ⚠ **ADR 0023 A4 (`0fef8a4`) LANDED ON A PARTIAL REVIEW.** Its four-lens review ran and
+> THREE lenses reported; every finding was verified by hand and acted on, and it earned its
+> keep — the Path 1 default-impl dispatch bug came from it, as did four prose corrections
+> including a false invariant. The FOURTH lens never returned and was stopped. What that
+> leaves unexamined is unknown by definition, so if the trait/impl typing path misbehaves,
+> re-run `wf_950fbfba-1c4`'s lens set against that commit.
+>
 > ⚠ **ADR 0072 LANDED WITHOUT THE ADVERSARIAL REVIEW.** The five-lens review
 > (`wf_dc254647-26a`: over-refusal, boundary-holes, parity, correctness, prose) was launched
 > and then STOPPED before any lens returned, at the maintainer's call, and the slice was
@@ -94,7 +101,7 @@ reference as you work through the milestones.
 >      now has. Also worth doing with it: `examples/math/quadratic.sentinel` and
 >      `sentinel_library/std/math/float.sentinel` currently reach only lex/ast, because
 >      `snc merge`'s Bar-A printer rejects both a float literal and `sqrt` (menu item 5).
->   4. **THE FILED-DEFECT REGISTER — EIGHT items (D1-D8); **D1 is DONE**, the rest verified against a pre-slice binary,
+>   4. **THE FILED-DEFECT REGISTER — NINE items (D1-D9); **D1 and D8 are DONE**, the rest verified against a pre-slice binary,
 >      NONE registered in any `DEFERRED_PROGRAMS` / `KNOWN_SCG_BUGS` list because no corpus
 >      program reaches them.** They were also filed as task chips, but chips are ephemeral UI;
 >      THIS list is the record. Ordered by what they cost if left.
@@ -148,8 +155,27 @@ reference as you work through the milestones.
 >      `selfhost/types/borrow_arms.sentinel` ~997-1002. No effects fixture has a
 >      `secret`-returning effecting fn, which is why nothing saw it.
 >
->      **D8 — scg's types stage aborts on `impl as Trait for <struct>`.** (Filed earlier in the
->      session, same status as the rest.)
+>      **D9 — `snc build` and `snc llvm` DISAGREE about struct-target impls.** inkwell
+>      compiles and runs `impl as Trait for <struct>` (tests/pass/c42_impl_for_struct
+>      exits 42); the TEXT oracle refuses it outright — `impl on a non-class target` at
+>      crates/sentinel-driver/src/llvm_dump.rs — so the codegen differential SKIPS every
+>      such program and scg's codegen for the shape is compared against nothing. ⚠ That
+>      matters more than a tidiness nit: scg's `cg_emit_impl_mcall` / `cg_emit_qcall`
+>      read `imcid[iid]`, which is -1 for a struct target, and `cg_emit_snb_clsname`
+>      would index `clns[-1]` and ABORT. Teaching the oracle therefore un-hides an abort;
+>      do both together. `mangle_impl_method` already builds from `imp.type_name`, so the
+>      mangling rule is defined — a struct target simply uses the struct's name — and the
+>      two scg sites carry a ⚠ saying exactly this. Unlike D2-D7, this one IS reachable
+>      from the corpus (that fixture), which is why the "nothing in the corpus reaches
+>      them" line above no longer covers the whole register.
+>
+>      **D8 — DONE (`0fef8a4`, ADR 0023 A4).** scg mishandled a trait impl whose target is a
+>      STRUCT. Three symptoms, not the two reported: the dump printed `class#` with no id, a
+>      `self.<field>` read ABORTED the stage, and — found by probing — receiver-typed
+>      dispatch keyed on the class id alone made the FIRST struct impl match EVERY struct
+>      receiver, which is correct by accident with one struct in the program and wrong with
+>      two. Front end only: `snc build` compiles these but `snc llvm` refuses them, so the
+>      codegen differential cannot see the shape (filed separately).
 >   5. **Widen `snc merge`'s Bar-A source printer** — the highest-leverage COVERAGE item.
 >      `crates/sentinel-driver/src/source_dump.rs` rejects **98 of the 119** real programs
 >      (re-measured after `demos/` joined the corpus), dominated by `cast` (37) and `declassify`
@@ -451,10 +477,10 @@ reference as you work through the milestones.
 > not on the overstated one. **Verify the consequence, not just the discrepancy.**
 >
 > HANDOFF STATE (verified against the repo 2026-08-30): four-check green — `cargo test
-> --workspace --no-fail-fast` = **1811 passed / the 18 known Windows failures**, zero new;
-> `pass` **162**, `ui` **54** (this session added `c59_export_call`, `c58_float_math`,
-> `c57_ptr_of`, `c19_widen_call_unary`, `c35_effecting_let_secret` + the four
-> `ui/c35_effecting_*` boundary fixtures); all 9 differential stages byte-identical, both bootstrap fixed points hold;
+> --workspace --no-fail-fast` = **1812 passed / the 18 known Windows failures**, zero new;
+> `pass` **163**, `ui` **54** (this session added `c59_export_call`, `c58_float_math`,
+> `c57_ptr_of`, `c19_widen_call_unary`, `c35_effecting_let_secret`, `c42_impl_for_struct`
+> + the four `ui/c35_effecting_*` boundary fixtures); all 9 differential stages byte-identical, both bootstrap fixed points hold;
 > working tree clean. abi count **51**. **scg scalar codes: i64=0, i32=1, bool=2, u8=3,
 > f64=4 (ADR 0058), ptr=5 (ADR 0057); unary op-codes 1..=5 are the PREFIX operators and
 > 6..=9 the CALL-shaped RESERVED-NAME family (6 sqrt, 7 ptr_of, 8 ptr_of_mut, 9 is_null) —
