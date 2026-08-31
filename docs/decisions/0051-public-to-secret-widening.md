@@ -204,9 +204,20 @@ are unaffected. A new fixture exercises the widen (Phase 2) and `scg` mirrors it
   Both are unchanged by A5 — verified by building a pre-change stage and diffing, not
   inferred.
 
-  **"Call argument" here means a plain `f(x)` call.** A METHOD argument (`o.m(x)`), an
-  impl-method argument and a qualified call go through their own arg paths, which still pass
-  no expectation; they are not covered and are not claimed to be.
+  **"Call argument" here means a plain `f(x)` call ONLY.** Every other argument path still
+  passes no expectation and still diverges: a METHOD or impl-method argument, a QUALIFIED
+  trait call, a CLASS `init`, an enum construct, a `spawn` target, and a GENERIC user fn
+  (which routes through `dump_generic_call`). The oracle widens at those too, for a plain
+  literal — `C::init(2)` against `init(v: ?i64)` emits a `widen-null` that scg omits. None is
+  covered and none is claimed to be.
+
+  **And the residual ARM family is not cosmetic at these positions.** Those arms discard the
+  expectation they now receive; at a `let` that costs only the wrapper, but at the ASSIGN and
+  RETURN positions the store and the `ret` are rendered from the TARGET type while the operand
+  comes back un-widened, so scg emits `store { i1, i64 } %v4` with `%v4 : i64` — invalid IR,
+  where the oracle's is clean. Verified PRE-EXISTING against a pre-change stage, so A5 did not
+  cause it; but the same invalid-IR severity that justified A5 applies to the residue, and the
+  register entry has been corrected to say so rather than calling it a text divergence.
 
   Pinned by `tests/pass/c19_widen_arg_return_assign`, covering all three positions in both
   flavours. Neither bootstrap fixed point moves: no `selfhost/*.sentinel` source has any of

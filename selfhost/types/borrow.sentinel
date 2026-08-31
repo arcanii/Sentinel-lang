@@ -334,8 +334,12 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
         //     verifier failure. Read stderr anyway — the harness does — but the exit
         //     code is usable here.)
         //
-        // "Call argument" means a plain `f(x)`: a METHOD / impl-method / qualified-call
-        // argument goes through its own path and still passes no expectation.
+        // "Call argument" means a plain `f(x)` ONLY. Every other argument path still
+        // passes no expectation and still diverges — a METHOD or impl-method argument,
+        // a QUALIFIED trait call, a CLASS `init`, an enum construct, a `spawn` target,
+        // and a GENERIC user fn (which routes through `dump_generic_call`). The oracle
+        // widens at those too, for a plain literal — `C::init(2)` against
+        // `init(v: ?i64)` emits `widen-null` and scg does not.
         //
         // ADR 0051 A1 had deferred the `secret` call-arg and return widens BY DESIGN;
         // A5 amends that rather than contradicting it silently, because the same
@@ -347,12 +351,19 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
         // ELEMENT — so `widen_kind` handles that one and only the element expectation
         // is unthreaded, putting it in the arm family below.
         //
-        // What remains open here is the FAMILY above, not these positions. Note the
-        // two interact: an argument or assignment whose VALUE is a `StructLit`, a
-        // `Field`, an `Index` and so on now RECEIVES the expectation and still
-        // discards it — so `takes(P { x: 1 })` against `takes(p: ?P)` diverges. That
-        // is the arm family, not the threading, and it reproduces through a plain
-        // `let` with no call or assignment involved.
+        // What remains open here is the FAMILY above, not these positions — but do
+        // NOT read that family as cosmetic, which an earlier version of this comment
+        // implied. It reproduces through a plain `let`, where it costs only the
+        // wrapper (valid IR, wrong text). At the ASSIGN and RETURN positions the same
+        // arms cost INVALID IR, because the store and the `ret` are rendered from the
+        // TARGET type while the operand comes back un-widened:
+        //   let mut o: ?i64 = null; o = pv.f;
+        //     -> scg `store { i1, i64 } %v4` with `%v4 : i64`; llvm-as rejects it,
+        //        and the oracle's IR for the same program is clean.
+        // Verified PRE-EXISTING — a stage built from the pre-D3 sources emits the
+        // identical bytes — so threading did not cause it; but the invalid-IR severity
+        // that justified closing these three positions applies to the residue too, and
+        // the register entry says so now.
         Expr::Unary(uop, inner) => {
             let mut utmp: Vec<u8> = vec_new();
             let urt: i64 = dump_te_unary(&mut utmp, uop, inner, exp, src, c, gb);

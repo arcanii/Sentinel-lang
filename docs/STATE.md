@@ -54,9 +54,17 @@ one REGISTERED ADR 0070 entry still diverging. Neither fixed point moves — no
 `selfhost/*.sentinel` source has any of these shapes.
 **EVERY divergence found while probing was classified by BUILDING A PRE-CHANGE STAGE AND
 DIFFING**, not by argument. Unchanged by this slice, all filed: the builtin argument above; a
-`?Struct` argument (the StructLit ARM discards the expectation it now receives — the sibling
-arm family, reproducible through a plain `let`); an array LITERAL under `[secret u8]`; and an
-effecting fn's `return` at CODEGEN. Only the assignment RHS changed, which is the fix.
+`?Struct` argument; an array LITERAL under `[secret u8]`; and an effecting fn's `return` at
+CODEGEN. Only the assignment RHS changed, which is the fix.
+⚠ **And a correction to how this session described that residue.** The sibling arm family is
+NOT a text divergence at these positions. At a `let` it costs only the wrapper; at the ASSIGN
+and RETURN positions the store and the `ret` are rendered from the TARGET type while the
+operand comes back un-widened, so `o = pv.f` with `o: ?i64` gives `store { i1, i64 } %v4` with
+`%v4 : i64` — INVALID IR where the oracle's is clean. Pre-existing, but it carries exactly the
+severity that justified closing D3, so D2's register entry no longer calls it cosmetic. The
+same review also showed that only a plain `f(x)` argument is threaded — method, impl-method,
+qualified, class `init`, enum-construct, `spawn` and generic paths all still diverge on a plain
+literal, and are now listed rather than partially named.
 ⚠ **The new fixture's ORACLE IR does not assemble, and its header says so.** ANY `return` in
 a NULLABLE-returning fn makes `snc llvm` emit `ret { i1, i64 } 0` — measured: a bare `return`
 reproduces it, the same fn WITHOUT a `return` is clean, and the `secret` twin is clean. A

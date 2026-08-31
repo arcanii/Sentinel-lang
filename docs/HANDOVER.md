@@ -123,7 +123,14 @@ reference as you work through the milestones.
 >      narrow captured param, an inkwell panic, a verifier abort, invalid IR at exit 0 — all
 >      closed by the same gate. Four scg gaps it exposed are filed separately (see the chips).
 >
->      **D2 — the widen FAMILY.** `Field`, `Index`, `Method`, `Array`, `StructLit`, `Declassify`,
+>      **D2 — the widen FAMILY. ⚠ WORSE THAN ITS ORIGINAL FILING: not a text divergence.**
+>      At a `let` these arms cost only the wrapper, but at the ASSIGN and RETURN positions
+>      D3 threaded, they cost INVALID IR — the store/`ret` is rendered from the target type
+>      while the operand comes back un-widened. Measured: `o = pv.f` with `o: ?i64` gives
+>      `store { i1, i64 } %v4` with `%v4 : i64`; llvm-as rejects it and the oracle's IR for
+>      the same program is clean. Pre-existing (a pre-D3 stage emits identical bytes), but
+>      it carries the same severity that justified closing D3, so it is no longer a
+>      cosmetic follow-up. `Field`, `Index`, `Method`, `Array`, `StructLit`, `Declassify`,
 >      `Perform`, `Await`, `Qcall`, `ClassInit`, `Spawn` all take a real `exp` and discard it,
 >      exactly as `Call`/`Unary` did before `34e1a8f`. `let v: secret i64 = p.x;`, `= a[0];` and
 >      `= declassify(s);` diverge in one six-line program; at MIR the dropped `opaque` shifts
@@ -136,14 +143,19 @@ reference as you work through the milestones.
 >      assignment one emitted INVALID IR (`store { i1, i64 } 42`). A1 had deferred the
 >      `secret` call-arg/return widens by design — A5 amends that, because the same missing
 >      machinery also dropped ADR 0014 D3's `?T` pushdown, which nothing ever deferred.
->      A1's ARRAY deferral stands. ⚠ TWO THINGS THIS MAKES VISIBLE WITHOUT FIXING, both
->      filed and both proved unchanged by building a pre-change stage and diffing: the
->      sibling ARM family (D2) now reached through arguments and assignments
->      (`takes(P { x: 1 })` against `?P` diverges because `StructLit` discards the
->      expectation it now receives — reproducible via a plain `let`, so it is D2); and a
->      BUILTIN's argument, which the oracle DOES widen and scg does not, emitting
->      `extractvalue i64 5, 0` — invalid IR. That second one retracts a claim this session
->      wrote into an ADR and three comments; see STATE.
+>      A1's ARRAY deferral stands. ⚠ THREE THINGS THIS MAKES VISIBLE WITHOUT FIXING, all
+>      filed and all proved unchanged by building a pre-change stage and diffing:
+>      (i) the sibling ARM family (D2), now reached through arguments and assignments —
+>      and NOT cosmetic there: at a `let` it costs only the wrapper, but at the ASSIGN and
+>      RETURN positions it costs INVALID IR (`o = pv.f` with `o: ?i64` gives
+>      `store { i1, i64 } %v4` where `%v4 : i64`), because the store is rendered from the
+>      target type while the operand comes back un-widened;
+>      (ii) a BUILTIN's argument, which the oracle DOES widen and scg does not, emitting
+>      `extractvalue i64 5, 0` — invalid IR, and a retraction of a claim this session wrote
+>      into an ADR and three comments (see STATE);
+>      (iii) every argument path except a plain `f(x)` — method, impl-method, qualified,
+>      class `init`, enum construct, `spawn`, and generic — where the oracle widens a plain
+>      literal and scg does not.
 >
 >      **D4 — a generic USER fn inverts the widen.** The oracle seeds `T` from the EXPECTED type
 >      (`unify_one(signature.return_type, exp, …)` in `check_call`) and widens the ARGUMENT, so
