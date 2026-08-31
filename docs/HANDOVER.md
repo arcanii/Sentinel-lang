@@ -111,7 +111,7 @@ reference as you work through the milestones.
 >      now has. Also worth doing with it: `examples/math/quadratic.sentinel` and
 >      `sentinel_library/std/math/float.sentinel` currently reach only lex/ast, because
 >      `snc merge`'s Bar-A printer rejects both a float literal and `sqrt` (menu item 5).
->   4. **THE FILED-DEFECT REGISTER — NINE items (D1-D9); **D1, D8 and D9 are DONE**, the rest verified against a pre-slice binary,
+>   4. **THE FILED-DEFECT REGISTER — NINE items (D1-D9); **D1, D3, D8 and D9 are DONE**, the rest verified against a pre-slice binary,
 >      NONE registered in any `DEFERRED_PROGRAMS` / `KNOWN_SCG_BUGS` list because no corpus
 >      program reaches them.** They were also filed as task chips, but chips are ephemeral UI;
 >      THIS list is the record. Ordered by what they cost if left.
@@ -130,14 +130,20 @@ reference as you work through the milestones.
 >      every later value number. Same three-line fix shape as `34e1a8f`; probe each arm for
 >      OVER-widening rather than batching them blind.
 >
->      **D3 — the three expectation-LESS positions.** A call ARGUMENT, a `return` OPERAND and an
->      ASSIGNMENT right-hand side receive no expected type at all, so they fail for every shape
->      including a bare literal. Read the SCOPE comment on `dump_texpr`'s `Expr::Unary` arm in
->      `selfhost/types/borrow.sentinel` first — it carries the repros AND the status split: the
->      `secret` call-arg / return halves are **ADR 0051 A1 deferrals BY DESIGN**, not defects, so
->      doing them means amending that ADR. The ASSIGNMENT RHS is the one that matters —
->      `let mut o: ?i64 = null; o = 42;` emits `store { i1, i64 } 42, ptr %v0`, INVALID IR
->      (`llvm-as`: "integer constant must have integer type" — and it EXITS 0 while saying so).
+>      **D3 — DONE (`28dd77d`, ADR 0051 A5 + the ADR 0014 D3 mirror).** A call ARGUMENT, a
+>      `return` OPERAND and an ASSIGNMENT right-hand side supplied no expected type, so the
+>      widen wrapper was dropped in each; all three were shape-independent, and the
+>      assignment one emitted INVALID IR (`store { i1, i64 } 42`). A1 had deferred the
+>      `secret` call-arg/return widens by design — A5 amends that, because the same missing
+>      machinery also dropped ADR 0014 D3's `?T` pushdown, which nothing ever deferred.
+>      A1's ARRAY deferral stands. ⚠ TWO THINGS THIS MAKES VISIBLE WITHOUT FIXING, both
+>      filed and both proved unchanged by building a pre-change stage and diffing: the
+>      sibling ARM family (D2) now reached through arguments and assignments
+>      (`takes(P { x: 1 })` against `?P` diverges because `StructLit` discards the
+>      expectation it now receives — reproducible via a plain `let`, so it is D2); and a
+>      BUILTIN's argument, which the oracle DOES widen and scg does not, emitting
+>      `extractvalue i64 5, 0` — invalid IR. That second one retracts a claim this session
+>      wrote into an ADR and three comments; see STATE.
 >
 >      **D4 — a generic USER fn inverts the widen.** The oracle seeds `T` from the EXPECTED type
 >      (`unify_one(signature.return_type, exp, …)` in `check_call`) and widens the ARGUMENT, so
@@ -482,8 +488,8 @@ reference as you work through the milestones.
 > not on the overstated one. **Verify the consequence, not just the discrepancy.**
 >
 > HANDOFF STATE (verified against the repo 2026-08-30): four-check green — `cargo test
-> --workspace --no-fail-fast` = **1812 passed / the 18 known Windows failures**, zero new;
-> `pass` **163**, `ui` **54** (this session added `c59_export_call`, `c58_float_math`,
+> --workspace --no-fail-fast` = **1813 passed / the 18 known Windows failures**, zero new;
+> `pass` **164**, `ui` **54** (this session added `c59_export_call`, `c58_float_math`,
 > `c57_ptr_of`, `c19_widen_call_unary`, `c35_effecting_let_secret`, `c42_impl_for_struct`
 > + the four `ui/c35_effecting_*` boundary fixtures); all 9 differential stages byte-identical, both bootstrap fixed points hold;
 > working tree clean. abi count **51**. **scg scalar codes: i64=0, i32=1, bool=2, u8=3,

@@ -1,11 +1,12 @@
 # ADR 0051: Implicit public → secret widening
 
-Status: **ACCEPTED-WITH-AMENDMENTS** (A1–A4) — adds ergonomic, monotone public→secret widening.
+Status: **ACCEPTED-WITH-AMENDMENTS** (A1–A5) — adds ergonomic, monotone public→secret widening.
 The **operand widen** (binop + cmp) is in `snc` (Phase 1) AND mirrored into the self-hosted
 `scg` (Phase 2); `tests/pass/c56_operand_widen` validates `scg == snc` byte-for-byte across all
 8 selfhost stage differentials, both bootstrap fixed points hold, and the full nextest is green.
-The **call-arg / return / array** widens are snc-side ergonomics (A1). Amendments below record
-the deviations from the PROPOSED plan.
+The **call-arg / return** widens were snc-side ergonomics (A1) and are now self-hosted too
+(A5); the **array** widen remains snc-side. Amendments below record the deviations from the
+PROPOSED plan.
 
 Removes the pervasive friction the examples-as-tests track keeps hitting: mixing a `secret`
 value with a public value in operand position is rejected (`type mismatch: expected secret,
@@ -157,3 +158,56 @@ are unaffected. A new fixture exercises the widen (Phase 2) and `scg` mirrors it
   to secret would *trip the sink*. Rather than decouple Div's operand secrecy (like shifts), the
   ADR excludes Div from the widen entirely — `secret_x / 5` remains a `Mismatch` (it is not
   needed by the crypto code). The shift exclusion is the same: the amount is never widened.
+
+- **A5 — the CALL-ARG and RETURN widens are now self-hosted too; only the ARRAY widen stays
+  snc-side.** A1 left all three of the call-arg / return / array widens deliberately
+  unmirrored, on the grounds that "no `selfhost/*.sentinel` source and no corpus fixture uses
+  them" and that mirroring is "a low-value follow-up". Two of those three are now mirrored,
+  and A1's cost/benefit is amended accordingly — not contradicted silently.
+
+  **What changed the calculation is that the same missing machinery is NOT `secret`-specific.**
+  `scg` threaded no expected type into a call argument, a `return` operand, or an assignment
+  right-hand side AT ALL, so the identical gap also dropped ADR 0014 D3's `?T` pushdown, which
+  no ADR ever deferred. And the assignment position was not a text divergence: `o = 42` into a
+  `?i64` binding emitted `store { i1, i64 } 42, ptr %v0` — an aggregate store of a bare
+  integer that `llvm-as` rejects with "integer constant must have integer type". Threading the
+  expectation fixes all three positions and both flavours at once; suppressing the `secret`
+  half to honour A1 literally would have meant writing extra code to keep a known-wrong
+  answer.
+
+  The mechanism is the expectation, not a new widen: the callee's declared param type for an
+  argument (`fn_param_ty`), the enclosing fn's return type for a `return`, and the assigned
+  place's type for an assignment. `widen_kind` then decides as it always has, so an argument
+  whose type already IS the parameter's is not double-wrapped.
+
+  **A5 covers USER-FN arguments only, and the builtin gap it leaves is a live invalid-IR
+  divergence, not a design choice.** `fn_param_ty` answers -1 for a builtin, which preserves
+  today's behaviour exactly — but today's behaviour is wrong: the oracle DOES widen a
+  builtin's argument (`let y: i64 = unwrap_or(5, 0);` emits
+  `(widen-null (int 5 :i64) :?i64)`), and scg drops it and emits `extractvalue i64 5, 0`,
+  which `llvm-as` rejects. ADR 0052's own text already relied on that widen, describing
+  `push(&mut v, i64_to_u8(base + j))` as widening "the public byte at the push argument via
+  the ADR 0051 call-arg widen". The builtin arms infer their type argument from the ARGUMENTS
+  rather than from an expectation, which is the same shape as the generic user-fn gap, so it
+  is filed as its own slice rather than folded in here.
+
+  **The ARRAY widen (`[u8]` → `[secret u8]`) is NOT mirrored and stays A1-deferred**, and it
+  is really two different gaps that a single test does not separate:
+
+  - a whole ARRAY VALUE (`let s: [secret u8] = b;` where `b: [u8]`) — `widen_kind` does not
+    implement this at all, so it is not a threading question;
+  - an array LITERAL (`let s: [secret u8] = [i64_to_u8(1)];`) — here the oracle widens each
+    ELEMENT (`(array (widen-secret …) …)`), so `widen_kind` DOES handle `u8` → `secret u8`;
+    what is missing is threading the element expectation into the `ArrayLit` arm, which
+    makes it a member of the sibling arm family rather than an A1 item.
+
+  Both are unchanged by A5 — verified by building a pre-change stage and diffing, not
+  inferred.
+
+  **"Call argument" here means a plain `f(x)` call.** A METHOD argument (`o.m(x)`), an
+  impl-method argument and a qualified call go through their own arg paths, which still pass
+  no expectation; they are not covered and are not claimed to be.
+
+  Pinned by `tests/pass/c19_widen_arg_return_assign`, covering all three positions in both
+  flavours. Neither bootstrap fixed point moves: no `selfhost/*.sentinel` source has any of
+  these shapes.

@@ -14,6 +14,58 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
+**Latest (2026-08-31) — the register's D3 is closed: `scg` now threads the expected type
+into the three positions that supplied none** (`28dd77d`, **ADR 0051 A5** + the ADR 0014 D3
+mirror, pinned by `tests/pass/c19_widen_arg_return_assign`). A call ARGUMENT gets the
+callee's declared param type, a `return` OPERAND the enclosing fn's return type, and an
+ASSIGNMENT right-hand side the assigned place's type. All three were SHAPE-INDEPENDENT — a
+plain literal reproduced each — which is what separated them from the earlier call/unary gap,
+where the expectation WAS supplied and only certain shapes ignored it.
+**The assignment position was the only one that was not a text divergence:** `o = 42` into a
+`?i64` binding emitted `store { i1, i64 } 42, ptr %v0`, an aggregate store of a bare integer
+that `llvm-as` rejects. The `return` position did double damage — a block is typed by its
+tail, so the dropped wrapper also retyped the enclosing block `:i64` where the oracle says
+`:?i64`.
+**ADR 0051 A1 had DEFERRED the `secret` call-arg and return widens by design**, calling the
+mirror "a low-value follow-up". A5 amends that rather than contradicting it silently, and the
+reason it is worth amending is that the missing machinery was never `secret`-specific: the
+same absent expectation also dropped **ADR 0014 D3's `?T` pushdown**, which no ADR ever
+deferred, and produced the invalid IR above. Suppressing the `secret` half to honour A1
+literally would have meant writing extra code to keep a known-wrong answer. **A1's THIRD
+deferral — the ARRAY widen — stands**, and is really two gaps: a whole array VALUE that
+`widen_kind` does not implement at all, and an array LITERAL where the oracle widens each
+ELEMENT (so `widen_kind` handles that one and only the element expectation is unthreaded —
+the arm family).
+The mechanism is the expectation, not a new widen, so `widen_kind` still decides: an argument
+whose type already IS the parameter's is not double-wrapped, verified alongside a generic user
+fn, a zero-param fn beside a secret-param one, the `ufps`/`ufpe` slice arithmetic, and the
+`fnret` save/restore across fns and methods.
+⚠ **A CLAIM THIS SESSION MADE AND THE REVIEW KILLED**, recorded because the retraction is the
+useful part: that "the oracle does not widen a BUILTIN's argument" — written into the ADR and
+three code comments on the strength of ONE test (`unwrap_or(5, 0)` in tail position, which
+the oracle rejects for an unrelated reason: generic inference with no context). Give it a
+context and the oracle widens — `let y: i64 = unwrap_or(5, 0);` — scg drops it, and scg's IR
+is `extractvalue i64 5, 0`, INVALID. ADR 0052's own text already relied on that widen. All
+three copies are corrected; `fn_param_ty` answering -1 for a builtin is now documented as a
+LIMITATION that preserves today's behaviour, not as intended semantics, and the builtin gap is
+filed.
+Corpus byte-identical at types (175/0) and codegen (168/0); real programs 10 match with the
+one REGISTERED ADR 0070 entry still diverging. Neither fixed point moves — no
+`selfhost/*.sentinel` source has any of these shapes.
+**EVERY divergence found while probing was classified by BUILDING A PRE-CHANGE STAGE AND
+DIFFING**, not by argument. Unchanged by this slice, all filed: the builtin argument above; a
+`?Struct` argument (the StructLit ARM discards the expectation it now receives — the sibling
+arm family, reproducible through a plain `let`); an array LITERAL under `[secret u8]`; and an
+effecting fn's `return` at CODEGEN. Only the assignment RHS changed, which is the fix.
+⚠ **The new fixture's ORACLE IR does not assemble, and its header says so.** ANY `return` in
+a NULLABLE-returning fn makes `snc llvm` emit `ret { i1, i64 } 0` — measured: a bare `return`
+reproduces it, the same fn WITHOUT a `return` is clean, and the `secret` twin is clean. A
+pre-existing `snc` bug, filed; nothing fails, because the differential only flags scg when the
+ORACLE's IR is valid and inkwell compiles and runs the fixture. Corrected while there: this
+repo's lore (including its own harness comment) says `llvm-as` exits 0 on a bad module — on
+this LLVM 18 build it exits **1** for BOTH a parse error and a verifier failure.
+`pass` 163 → 164.
+
 **Latest (2026-08-31) — the two Rust back ends now AGREE about struct-target impls, and the
 register's D9 is closed** (`4ac7bdc`, **ADR 0023 A5**). `snc build` (inkwell) had always
 compiled and run `impl as Trait for <struct>`; the TEXT oracle `snc llvm` REFUSED it outright
