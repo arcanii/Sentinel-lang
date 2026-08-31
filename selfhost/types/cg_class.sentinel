@@ -293,6 +293,17 @@ fn cg_emit_class_mcall(c: &mut TyCtx, rty: i64, selfk: i64, selfv: i64, snap: i6
 
 // (Bar B / classes) a receiver-typed impl-method dispatch → `call @default__Type__Trait__
 // method(ptr self, args)` (Path 1 always routes through the DEFAULT impl, prefix `default`).
+//
+// ⚠ CLASS TARGETS ONLY (ADR 0023 A4). `imcid[iid]` is -1 for a STRUCT-target impl, and
+// `cg_emit_snb_clsname` would index `clns[-1]` and ABORT. A4 fixed the front end for
+// struct targets but deliberately stopped here, because the correct output is not
+// verifiable today: the TEXT oracle `snc llvm` REFUSES a struct-target impl outright
+// ("impl on a non-class target"), so no differential can compare whatever scg emits.
+// The rule itself is known — `mangle_impl_method` builds `{prefix}__{type_name}__…`
+// from the impl's TYPE NAME, so a struct target simply mangles with the struct's name —
+// and wiring it needs a `cg_emit_snb_structname` twin plus a target-kind dispatch here
+// and in `cg_emit_qcall`. Do it together with teaching the oracle, not before; landing
+// it blind would ship untested codegen for a shape nothing can check.
 fn cg_emit_impl_mcall(c: &mut TyCtx, rty: i64, selfk: i64, selfv: i64, snap: i64, iid: i64, mtid: i64, midx: i64) -> i64 {
     let d: i64 = cg_call_head(c, rty);
     cgo_str(c, "default__");

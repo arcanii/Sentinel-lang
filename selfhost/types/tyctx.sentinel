@@ -54,6 +54,7 @@ fn new_tyctx(mode: i64) -> TyCtx {
         imne: vec_new(),
         imtid: vec_new(),
         imcid: vec_new(),
+        imsid: vec_new(),
         trpos: vec_new(),
         dgcid: vec_new(),
         dgfs: vec_new(),

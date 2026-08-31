@@ -153,7 +153,17 @@ struct TyCtx {
     imns: Vec<i64>,   // impl name start (0,0 slot for a default/unnamed impl)
     imne: Vec<i64>,   // impl name end
     imtid: Vec<i64>,  // the impl's TraitId
-    imcid: Vec<i64>,  // the impl's target ClassId
+    imcid: Vec<i64>,  // the impl's target ClassId, or -1 when the target is not a class
+    // (ADR 0023 D7 / A4) the impl's target StructId, or -1 when the target is not a
+    // struct. AT MOST ONE of `imcid[i]` / `imsid[i]` is >= 0 — NOT exactly one: a target
+    // name that resolves to NEITHER (a typo, an enum, a builtin) leaves BOTH at -1. The
+    // oracle rejects such a program outright ("undefined type `X` in impl block"), so no
+    // differential ever compares one, and per the ADR 0044 D7 error-parity convention scg
+    // does not reproduce that rejection — but code reading these vectors must not assume
+    // a hit. Both are pushed at every impl-recording site so they stay ImplId-aligned
+    // with `imtid`/`imns`; a site that pushes one and not the other silently shifts every
+    // later impl's target.
+    imsid: Vec<i64>,
     trpos: Vec<i64>,  // trait token position (TraitId → token index; for delegate re-walk)
     // --- (4f-delegate) delegate records → synthesised forwarding impls ---
     dgcid: Vec<i64>,  // owning ClassId
@@ -936,6 +946,9 @@ pub fn run(src: [u8], mode: i64, result: &mut Vec<u8>) -> i64 {
         push(&mut ctx.imne, 0);
         push(&mut ctx.imtid, dtid);
         push(&mut ctx.imcid, dcid);
+        // (ADR 0023 A4) a delegate forwarder always targets the owning CLASS, so its
+        // struct slot is -1 — pushed unconditionally to keep `imsid` ImplId-aligned.
+        push(&mut ctx.imsid, 0 - 1);
         dr = dr + 1;
     }
 

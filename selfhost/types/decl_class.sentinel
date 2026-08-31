@@ -295,9 +295,12 @@ fn tclass_init(buf: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src:
 }
 
 // (4f) emit + type a class/impl method: ` (method #selfvid name <kind> (params) ret
-// <typed-body>)`. `self` is the receiver token, typed as the owning class. Cursor at
-// `fn`. The body's expectation is the return type (so a `?T`/secret method widens).
-fn tmethod(buf: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64, c: &mut TyCtx, gb: &mut Vec<u8>, cid: i64) -> i64 {
+// <typed-body>)`. `self` is the receiver token, typed as the owning CLASS (`cid`) or —
+// for an impl whose target is a struct (ADR 0023 D7 / A4) — as that STRUCT (`sid`).
+// Exactly one of the pair is passed >= 0 by the caller; a class body always passes
+// `sid = -1`. Cursor at `fn`. The body's expectation is the return type (so a
+// `?T`/secret method widens).
+fn tmethod(buf: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64, c: &mut TyCtx, gb: &mut Vec<u8>, cid: i64, sid: i64) -> i64 {
     (*c).base = len((*c).scs);
     *cur = *cur + 1;             // skip `fn`
     let mn_s: i64 = (*s)[*cur];
@@ -309,7 +312,18 @@ fn tmethod(buf: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u
     let excl: bool = tparse_self_kind(k, cur);
     let selfvid: i64 = (*c).nextvid;
     (*c).nextvid = (*c).nextvid + 1;
-    let clty: i64 = mk_class(c, cid);
+    // (ADR 0023 D7 / A4) `Self` inside the body is `Type::Class(cid)` for a class
+    // target and `Type::Struct(sid)` for a struct one. Binding a struct target as a
+    // class was the second symptom of the impl-for-struct gap: `mk_class(c, -1)` gave
+    // `self` a type that is neither, so `self.<field>` fell to
+    // `class_field_index(c, -1, …)` and the stage ABORTED on an out-of-bounds index.
+    // Getting the binding right is the whole fix — `dump_te_field` already dispatches
+    // on `struct_of_handle(..) >= 0`, so it needs no change at all.
+    let clty: i64 = if sid >= 0 {
+        mk_struct(c, sid)
+    } else {
+        mk_class(c, cid)
+    };
     bind_src(c, src, self_s, self_e, selfvid, clty);
     // (Bar B / classes) cg: a fresh per-method cg state with `self` = `%arg0` (cg_arg_base
     // =1). The caller (type_class / type_impl) set cgm_pfx_kind + the symbol components.
@@ -404,7 +418,7 @@ fn tclass_items(fbuf: &mut Vec<u8>, dfbuf: &mut Vec<u8>, ibuf: &mut Vec<u8>, mbu
         tclass_field(fbuf, k, s, e, src, cur, c, gb);
         tclass_items(fbuf, dfbuf, ibuf, mbuf, k, s, e, src, cur, c, gb, cid)
     } else if t == 3 {
-        tmethod(mbuf, k, s, e, src, cur, c, gb, cid);
+        tmethod(mbuf, k, s, e, src, cur, c, gb, cid, 0 - 1);
         tclass_items(fbuf, dfbuf, ibuf, mbuf, k, s, e, src, cur, c, gb, cid)
     } else if is_init_slice(src, (*s)[*cur], (*e)[*cur]) {
         tclass_init(ibuf, k, s, e, src, cur, c, gb, cid);
@@ -468,6 +482,31 @@ fn src_eq_snb(c: &mut TyCtx, bs: i64, be: i64, src: &[u8], ss: i64, se: i64) -> 
         }
         ok
     }
+}
+
+// (ADR 0023 A4) Resolve a `src` slice to a StructId, or -1 — the struct twin of
+// `class_lookup_slice`, for an `impl … for Type` whose target is a struct. `sts`/`ste`
+// index the same `snb` name blob as `clns`/`trns`, so the comparison is identical.
+// Mirrors resolve's `struct_lookup_slice`, which has had this since the resolve port.
+fn struct_lookup_slice(c: &mut TyCtx, src: &[u8], ss: i64, se: i64) -> i64 {
+    let n: i64 = len((*c).sts);
+    let mut i: i64 = 0;
+    let mut found: i64 = 0 - 1;
+    while i < n {
+        if found == 0 - 1 {
+            if src_eq_snb(c, (*c).sts[i], (*c).ste[i], src, ss, se) {
+                found = i;
+                0
+            } else {
+                0
+            };
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    found
 }
 
 // Resolve a `src` slice to a TraitId / ClassId, or -1.
@@ -575,9 +614,21 @@ fn scan_impl_header(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], p1: i6
     let ty_s: i64 = (*s)[cur];
     let ty_e: i64 = (*e)[cur];
     let tid: i64 = trait_lookup_slice(c, src, tr_s, tr_e);
+    // (ADR 0023 D7 / A4) the target is a CLASS or a STRUCT. Class is checked FIRST, the
+    // order the oracle's resolver uses, so a name that is somehow both resolves the same
+    // way on both sides. The loser is -1 — and so are BOTH when the name resolves to
+    // neither (a typo, an enum, a builtin). The oracle rejects that outright ("undefined
+    // type `X` in impl block") so no differential compares one, and per ADR 0044 D7 scg
+    // does not mirror the rejection; the invariant is AT MOST one >= 0, never exactly one.
     let cid: i64 = class_lookup_slice(c, src, ty_s, ty_e);
+    let sid: i64 = if cid >= 0 {
+        0 - 1
+    } else {
+        struct_lookup_slice(c, src, ty_s, ty_e)
+    };
     push(&mut (*c).imtid, tid);
     push(&mut (*c).imcid, cid);
+    push(&mut (*c).imsid, sid);
     0
 }
 
@@ -685,25 +736,26 @@ fn type_trait(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: 
     0
 }
 
-// (4f) impl methods: each reuses `tmethod` (self typed as the impl's class). The
-// per-method `pub` is skipped.
-fn timpl_methods(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64, c: &mut TyCtx, gb: &mut Vec<u8>, cid: i64) -> i64 {
+// (4f) impl methods: each reuses `tmethod` (self typed as the impl's target — its class
+// `cid`, or its struct `sid` per ADR 0023 D7 / A4). The per-method `pub` is skipped.
+fn timpl_methods(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64, c: &mut TyCtx, gb: &mut Vec<u8>, cid: i64, sid: i64) -> i64 {
     let t: i64 = (*k)[*cur];
     if t == 7 {
         *cur = *cur + 1;
         0
     } else if t == 59 {
         *cur = *cur + 1;         // skip a per-method `pub`
-        timpl_methods(out, k, s, e, src, cur, c, gb, cid)
+        timpl_methods(out, k, s, e, src, cur, c, gb, cid, sid)
     } else {
-        tmethod(out, k, s, e, src, cur, c, gb, cid);
-        timpl_methods(out, k, s, e, src, cur, c, gb, cid)
+        tmethod(out, k, s, e, src, cur, c, gb, cid, sid);
+        timpl_methods(out, k, s, e, src, cur, c, gb, cid, sid)
     }
 }
 
-// (4f) emit an impl decl head `(impl #iid name #tid Trait class#cid Type (method …)…)`
-// with TYPED method bodies. The trait + class were resolved in pass-1.5 (`imtid`/
-// `imcid`). The header is `impl [Name as]? Trait for Type {`.
+// (4f) emit an impl decl head `(impl #iid name #tid Trait <class#cid|struct#sid> Type
+// (method …)…)` with TYPED method bodies. The trait + target were resolved in pass-1.5
+// (`imtid` / `imcid` / `imsid`; ADR 0023 D7 allows a class OR a struct target, and
+// exactly one of the id pair is >= 0). The header is `impl [Name as]? Trait for Type {`.
 fn type_impl(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64, c: &mut TyCtx, gb: &mut Vec<u8>, iid: i64) -> i64 {
     *cur = *cur + 1;             // skip `impl`
     let has_name: bool = (*k)[*cur] != 60;
@@ -726,6 +778,7 @@ fn type_impl(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &
     *cur = *cur + 1;             // skip `{`
     let tid: i64 = (*c).imtid[iid];
     let cid: i64 = (*c).imcid[iid];
+    let sid: i64 = (*c).imsid[iid];
     append_str(out, "(impl #");
     append_int(out, iid);
     push(out, ' ');
@@ -741,8 +794,25 @@ fn type_impl(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &
     append_int(out, tid);
     push(out, ' ');
     append_slice(out, src, tr_s, tr_e);
-    append_str(out, " class#");
-    append_int(out, cid);
+    // (ADR 0023 D7 / A4) `class#<cid>` for a class target, `struct#<sid>` for a struct
+    // one, mirroring the oracle's `ImplTarget::{Class,Struct}` arms. This printed a bare
+    // `class#` before: the id was -1, and `append_int`'s `while v > 0` loop emits NOTHING
+    // for a negative value, so the tag lost its id rather than showing a wrong one — a
+    // silent-looking dump where the oracle says `struct#0`. Resolved into two locals
+    // first: a two-arm `if` that both borrow `out` trips the A2 borrow quirk, the same
+    // reason resolve's twin is written this way.
+    let tgtkw: [u8] = if sid >= 0 {
+        " struct#"
+    } else {
+        " class#"
+    };
+    let tgtid: i64 = if sid >= 0 {
+        sid
+    } else {
+        cid
+    };
+    append_str(out, tgtkw);
+    append_int(out, tgtid);
     push(out, ' ');
     append_slice(out, src, ty_s, ty_e);
     // (Bar B / classes) cg: this impl's methods mangle as `<name|default>__Type__Trait__<m>`.
@@ -757,7 +827,7 @@ fn type_impl(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &
     } else {
         0
     };
-    timpl_methods(out, k, s, e, src, cur, c, gb, cid);
+    timpl_methods(out, k, s, e, src, cur, c, gb, cid, sid);
     push(out, ')');
     0
 }

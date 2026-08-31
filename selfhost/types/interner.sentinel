@@ -1030,16 +1030,41 @@ fn impl_trait_of(c: &mut TyCtx, iid: i64) -> i64 {
     }
 }
 
-// Find the (default) impl whose target class is `cid` AND whose trait declares the
-// method `q` — the receiver-typed impl-method dispatch (a class with no OWN `q`), or
-// -1.
-fn impl_for_class(c: &mut TyCtx, cid: i64, q: &[u8]) -> i64 {
+// Find the (default) impl whose TARGET is this receiver — a class `cid` or a struct
+// `sid` (ADR 0023 D7 allows either) — AND whose trait declares the method `q`. The
+// receiver-typed impl-method dispatch, for a receiver with no OWN `q`. -1 if none.
+//
+// ⚠ THE CLASS ID ALONE IS NOT A KEY, and treating it as one was a silent wrong-dispatch.
+// A struct receiver has `cid == -1`, and every struct-target impl ALSO records
+// `imcid == -1`, so `imcid[i] == cid` made the FIRST struct-target impl match EVERY
+// struct receiver. With one struct in the program that is accidentally correct; with two
+// it picks the wrong impl — the oracle says `(impl-method #1 …)` for the second struct
+// and scg said `#0`. Match on whichever id the receiver actually has, and when it has
+// NEITHER (both -1) match nothing rather than the first class-less impl.
+fn impl_for_target(c: &mut TyCtx, cid: i64, sid: i64, q: &[u8]) -> i64 {
     let n: i64 = len((*c).imcid);
     let mut i: i64 = 0;
     let mut found: i64 = 0 - 1;
     while i < n {
         if found == 0 - 1 {
-            if (*c).imcid[i] == cid {
+            // The target must match AND the impl must be the DEFAULT (unnamed) one.
+            // ADR 0023 D6 Path 1 routes receiver-typed dispatch through the default impl
+            // only — verified: with a named impl as the type's ONLY impl, the oracle
+            // rejects `x.go(..)` with "has no method `go`". Testing the target alone
+            // returned the first MATCH, so a named impl declared before the default one
+            // was dispatched to instead: oracle `(impl-method #1 …)`, scg `#0`. That was
+            // pre-existing and reproduced on CLASS receivers too, so fixing it here fixes
+            // both. An unnamed impl is the `0,0` name slot, i.e. `imne <= imns`.
+            let named: bool = (*c).imne[i] > (*c).imns[i];
+            let tgt: bool = if cid >= 0 {
+                (*c).imcid[i] == cid
+            } else if sid >= 0 {
+                (*c).imsid[i] == sid
+            } else {
+                false
+            };
+            let hit: bool = tgt && !named;
+            if hit {
                 let tid: i64 = (*c).imtid[i];
                 if trait_method_index(c, tid, q) >= 0 {
                     found = i;

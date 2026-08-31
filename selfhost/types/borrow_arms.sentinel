@@ -1429,7 +1429,11 @@ fn dump_te_method(out: &mut Vec<u8>, mt: Expr, mn: [u8], ma: Args, exp: i64, src
                 0 - 1
             };
             (*c).consuming = svc;
-            let rcid: i64 = class_of_handle(c, strip_ref(c, tty));
+            let rbare: i64 = strip_ref(c, tty);
+            let rcid: i64 = class_of_handle(c, rbare);
+            // (ADR 0023 A4) the receiver's STRUCT id too — an impl target may be either,
+            // and dispatch keyed on the class id alone matched the wrong struct impl.
+            let rsid: i64 = struct_of_handle(c, rbare);
             // (7c) MIR: a method call -> Opaque([receiver, ...args]).
             let m_col: bool = (*c).mir_collecting;
             let m_snap: i64 = if mir_on(c) {
@@ -1466,7 +1470,7 @@ fn dump_te_method(out: &mut Vec<u8>, mt: Expr, mn: [u8], ma: Args, exp: i64, src
                 };
                 mret
             } else {
-                let idef: i64 = impl_for_class(c, rcid, &mn);
+                let idef: i64 = impl_for_target(c, rcid, rsid, &mn);
                 let mtid: i64 = impl_trait_of(c, idef);
                 let midx2: i64 = trait_method_index(c, mtid, &mn);
                 let mret2: i64 = trait_method_ret(c, mtid, &mn);

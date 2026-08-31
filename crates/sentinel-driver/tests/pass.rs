@@ -1606,6 +1606,40 @@ fn pass_c65_return_match() {
 }
 
 #[test]
+fn pass_c42_impl_for_struct() {
+    // ADR 0023 D7 / A4 c42_impl_for_struct: a trait impl whose target is a STRUCT.
+    //
+    // D7 always said `Self` in an `impl as Trait for Type` body is `Type::Class` OR
+    // `Type::Struct`; `scg` only mirrored the class half, recording a ClassId and
+    // nothing else. A struct target then left -1 wherever the target was read, which
+    // showed up THREE ways: the types dump printed `class#` with NO id (`append_int`'s
+    // `while v > 0` emits nothing for -1) where the oracle prints `struct#0`, and
+    // `self` bound as `mk_class(c, -1)` sent `self.<field>` into
+    // `class_field_index(c, -1, …)`, aborting the stage on an out-of-bounds index.
+    // The bodies below both read and write `self.<field>` so they catch the second, not
+    // just the first.
+    //
+    // A THIRD symptom, not in the report and found by probing, is the only one that
+    // picks a WRONG answer rather than an absent or crashing one: receiver-typed
+    // dispatch keyed on the class id alone, so the FIRST struct-target impl matched
+    // EVERY struct receiver — correct by accident with one struct, wrong with two. The
+    // same lookup also returned the first matching TARGET rather than the DEFAULT impl
+    // (ADR 0023 D6 Path 1), so a named impl declared before the default one won; that
+    // half was pre-existing and reproduced on CLASS receivers too.
+    //
+    // FIVE impls interleave struct and class targets, default and named, over TWO
+    // DISTINCT structs, with `Sink`'s named impl deliberately ahead of its default one.
+    // Each of those is load-bearing: `imcid`/`imsid` are ImplId-parallel so a one-sided
+    // push shifts every later impl; one struct makes the wrong-dispatch invisible; and
+    // default-first would let the Path 1 rule pass untested.
+    //
+    // NOT reached by the codegen differential: `snc build` compiles and runs this fine,
+    // but the TEXT oracle `snc llvm` refuses it ("impl on a non-class target"), so that
+    // sweep skips it while every front-end stage compares it. 40 + 2 = 42.
+    assert_eq!(run_exit("c42_impl_for_struct.sentinel"), 42);
+}
+
+#[test]
 fn pass_c35_effecting_let_secret() {
     // ADR 0072 c35_effecting_let_secret: an effecting fn whose single `let` carries a
     // `secret i64` annotation — the shape that made `snc build` return a RAW POINTER.

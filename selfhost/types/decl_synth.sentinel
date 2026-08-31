@@ -47,7 +47,10 @@ fn synth_forward(buf: &mut Vec<u8>, c: &mut TyCtx, gb: &mut Vec<u8>, cid: i64, s
         mi = mi + 1;
     }
     let mn_arr: [u8] = vec_to_array(mnbuf);
-    let rcid: i64 = class_of_handle(c, strip_ref(c, fty));
+    let rfbare: i64 = strip_ref(c, fty);
+    let rcid: i64 = class_of_handle(c, rfbare);
+    // (ADR 0023 A4) a delegated field may itself be a struct, so carry its struct id.
+    let rfsid: i64 = struct_of_handle(c, rfbare);
     let own: bool = class_has_method(c, rcid, &mn_arr);
     let oidx: i64 = if own {
         class_method_index(c, rcid, &mn_arr)
@@ -57,7 +60,7 @@ fn synth_forward(buf: &mut Vec<u8>, c: &mut TyCtx, gb: &mut Vec<u8>, cid: i64, s
     let iid: i64 = if own {
         0 - 1
     } else {
-        impl_for_class(c, rcid, &mn_arr)
+        impl_for_target(c, rcid, rfsid, &mn_arr)
     };
     let itid: i64 = impl_trait_of(c, iid);
     let iidx: i64 = if own {

@@ -1,0 +1,141 @@
+// c42_impl_for_struct: a trait impl whose target is a STRUCT rather than a class.
+//
+// WHAT IT PINS (ADR 0023 D7, A4). D7 has always said `Self` inside an
+// `impl as Trait for Type` body is `Type::Class(class_id)` OR `Type::Struct(struct_id)`.
+// The self-hosted `scg` only ever mirrored the class half: its impl table recorded a
+// ClassId and nothing else, so a struct target left -1 wherever the target was consulted.
+// Two symptoms followed, and this fixture is shaped to catch BOTH:
+//
+//   1. THE DUMP. `type_impl` printed the literal " class#" and then the id — with -1 the
+//      id printed as NOTHING at all, because `append_int`'s `while v > 0` loop emits no
+//      digits for a negative value. So `scg types` said `class#` where the oracle says
+//      `struct#0` — a tag that lost its id rather than showing a wrong one, which is
+//      easy to skim past in a diff.
+//   2. THE ABORT. `self` was bound with `mk_class(c, -1)`, giving it a type that is
+//      neither a struct nor a class, so a `self.<field>` read fell through to
+//      `class_field_index(c, -1, …)` and the stage DIED with
+//      `index out of bounds: idx=-1, len=0`. That is why `write` below both reads and
+//      writes `self.count` — a body that never touches `self` reproduces (1) alone and
+//      would have let (2) through.
+//
+//   3. THE DISPATCH — found by probing rather than reported, and the only one of the
+//      three that picks a WRONG answer rather than an absent or crashing one. Receiver-
+//      typed impl-method lookup keyed on the class id ALONE. A struct receiver has
+//      `cid == -1`, and every struct-target impl ALSO records `imcid == -1`, so the
+//      FIRST struct-target impl matched EVERY struct receiver. With one struct in the
+//      program that is accidentally correct — which is why the obvious repro misses it —
+//      and with two it silently dispatches to the wrong impl. A SECOND, independent way
+//      the same lookup was wrong, found the same way and fixed with it: it returned the
+//      first matching TARGET, but ADR 0023 D6 Path 1 routes receiver-typed dispatch
+//      through the DEFAULT impl only (with a named impl as the type's sole impl, the
+//      oracle rejects `x.go(..)` outright). So a named impl declared BEFORE the default
+//      one was dispatched to instead. That half was pre-existing and reproduced on CLASS
+//      receivers too, untouched by this change — fixing the lookup fixes both.
+//
+// Recording the StructId alongside the ClassId fixes all three at the root: the printer
+// picks its tag from whichever id is >= 0, dispatch matches on whichever the RECEIVER
+// has, and `dump_te_field` already tested `struct_of_handle(..) >= 0`, so it needed no
+// change whatsoever.
+//
+// WHAT THE SHAPE OF THIS PROGRAM IS FOR — every part of it is load-bearing:
+//   * INTERLEAVED struct and class targets, because `imcid` and `imsid` are parallel
+//     vectors indexed by ImplId: a site that pushes one and not the other silently shifts
+//     every LATER impl's target. The tags must read `class#0 struct#1 struct#0 struct#0
+//     class#0` in source order.
+//   * TWO DISTINCT structs (`Sink`, `Tally`), because with only one, matching the first
+//     struct-target impl is right by accident and symptom (3) stays invisible.
+//   * `Sink`'s NAMED impl declared BEFORE its default one, so receiver-typed dispatch has
+//     to skip it — the Path 1 half of (3). `s.write(30)` must resolve to `impl-method #3`
+//     (the default, fourth in source order), not `#2` (the named one it precedes).
+//   * method bodies that WRITE as well as read `self.<field>`, because a body that never
+//     touches `self` reproduces (1) alone and lets (2) through.
+//
+// ⚠ THIS FIXTURE DOES NOT REACH THE CODEGEN DIFFERENTIAL, and the reason is a separate
+// pre-existing gap worth knowing about: `snc build` (inkwell) compiles and runs this
+// program fine — it exits 42 — but `snc llvm`, the TEXT oracle the self-host differential
+// compares against, refuses it with `impl on a non-class target: Struct(StructId(0))`.
+// So the two Rust back ends disagree about whether this program is compilable, and the
+// codegen sweep skips the fixture because the oracle errored. Every FRONT-END stage
+// (lex, ast, resolve, types, effects, borrow, mir, ctverify) does compare it, which is
+// exactly the surface this fix moves.
+//
+// 40 + 2 + 0 = 42.
+
+trait Writer {
+    fn write(self: &mut Self, data: i64) -> i64;
+}
+
+struct Sink { count: i64 }
+
+// A SECOND struct implementing the same trait — the cell that catches symptom (3). With
+// only `Sink`, dispatch keyed on the class id alone matches the right impl by accident.
+struct Tally { total: i64 }
+
+class Box {
+    let n: i64;
+    pub init(n: i64) {
+        self.n = n;
+        0
+    }
+}
+
+// CLASS target, interleaved so the ImplId-aligned id pair has to stay in step.
+impl as Writer for Box {
+    fn write(self: &mut Self, data: i64) -> i64 {
+        self.n = self.n + data;
+        self.n
+    }
+}
+
+// The SECOND struct's impl, declared BEFORE `Sink`'s named one so the ImplId order and
+// the declaration order differ — dispatch has to key on the target, not on position.
+impl as Writer for Tally {
+    fn write(self: &mut Self, data: i64) -> i64 {
+        self.total = self.total + data;
+        self.total
+    }
+}
+
+// STRUCT target, NAMED — deliberately BEFORE the default impl below. Receiver-typed
+// dispatch (`s.write(30)`) must skip this one: ADR 0023 D6 Path 1 routes through the
+// DEFAULT impl, and a lookup that merely took the first matching target picked this one
+// instead. That was pre-existing and reproduced on CLASS receivers too.
+impl Doubling as Writer for Sink {
+    fn write(self: &mut Self, data: i64) -> i64 {
+        self.count = self.count + data * 2;
+        self.count
+    }
+}
+
+// STRUCT target, default impl — the shape that used to abort on `self.count`, and the
+// one receiver-typed dispatch has to find past the named impl above.
+impl as Writer for Sink {
+    fn write(self: &mut Self, data: i64) -> i64 {
+        self.count = self.count + data;
+        self.count
+    }
+}
+
+// CLASS target, named.
+impl Tripling as Writer for Box {
+    fn write(self: &mut Self, data: i64) -> i64 {
+        self.n = self.n + data * 3;
+        self.n
+    }
+}
+
+fn main() -> i64 {
+    let mut s: Sink = Sink { count: 0 };
+    let mut b: Box = Box::init(0);
+    // Receiver-typed dispatch onto the struct's default impl.
+    let a: i64 = s.write(30);
+    // Qualified dispatch onto the struct's named impl: 30 + 5*2 = 40.
+    let c: i64 = Doubling::write(&mut s, 5);
+    // The class side, so both target kinds are exercised in one program.
+    let d: i64 = b.write(a - 28);
+    // The second struct: if dispatch keyed on the class id alone, this would route into
+    // `Sink`'s impl and read the wrong field.
+    let mut t: Tally = Tally { total: 0 };
+    let e: i64 = t.write(0);
+    c + d + e
+}

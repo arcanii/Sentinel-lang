@@ -741,7 +741,15 @@ pub fn dump(program: &TypedProgram, drop_plan: &DropPlan) -> Result<String, Stri
         for m in &imp.methods {
             let sym = mangle_impl_method(imp, &m.name);
             // The impl method's `self` is a `ptr` to the implementing type's storage; we
-            // bind it as `Type::Class(self_class)` — every corpus impl targets a class.
+            // bind it as `Type::Class(self_class)`.
+            //
+            // ⚠ This used to say "every corpus impl targets a class". That is no longer
+            // true — `tests/pass/c42_impl_for_struct` targets a struct, and this arm is
+            // exactly why the TEXT oracle refuses it while inkwell compiles and runs it.
+            // The two Rust back ends therefore disagree about whether such a program is
+            // compilable, and the codegen differential skips it. Filed separately;
+            // `mangle_impl_method` already builds from `imp.type_name`, so the struct
+            // case needs a `Self` binding here rather than a new mangling.
             let self_class = match imp.target {
                 sentinel_resolve::ImplTarget::Class(cid) => cid,
                 ref other => return Err(format!("impl on a non-class target: {other:?}")),
