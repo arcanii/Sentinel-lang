@@ -374,6 +374,13 @@ struct TyCtx {
     cgm_nm_s: i64,       // (impl method) impl-name `src` slice start (when cgm_named)
     cgm_nm_e: i64,       // impl-name `src` slice end
     cgm_type_cid: i64,   // the owning/target class (→ `%Class`/className via `snb`)
+    // (ADR 0023 A5) the current impl's target StructId, or -1 when the target is a class.
+    // Set beside `cgm_type_cid` at every site that sets it, for the same reason the
+    // `imcid`/`imsid` pair is pushed together — except sharper, because this one is SET
+    // rather than pushed: a site that sets the class id and forgets this leaves a STALE
+    // StructId from the PREVIOUS item, which mangles a symbol under the wrong type name
+    // rather than failing.
+    cgm_type_sid: i64,   // the target struct (→ `%Struct`/structName via `snb`), or -1
     cgm_trait_tid: i64,  // (impl method) the trait (→ traitName via `snb`)
     // (Bar B / effects, ADR 0020) the kont runtime symbols used (→ declares) + the
     // enclosing `handle`'s dispatch state (the if-else-chain mirror of the oracle).

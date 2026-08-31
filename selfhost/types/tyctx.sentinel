@@ -188,6 +188,7 @@ fn new_tyctx(mode: i64) -> TyCtx {
         cgm_nm_s: 0,
         cgm_nm_e: 0,
         cgm_type_cid: 0,
+        cgm_type_sid: 0 - 1,
         cgm_trait_tid: 0,
         cg_used_perform: false,
         cg_used_resume: false,

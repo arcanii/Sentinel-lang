@@ -1633,9 +1633,10 @@ fn pass_c42_impl_for_struct() {
     // push shifts every later impl; one struct makes the wrong-dispatch invisible; and
     // default-first would let the Path 1 rule pass untested.
     //
-    // NOT reached by the codegen differential: `snc build` compiles and runs this fine,
-    // but the TEXT oracle `snc llvm` refuses it ("impl on a non-class target"), so that
-    // sweep skips it while every front-end stage compares it. 40 + 2 = 42.
+    // Reaches EVERY stage including codegen (ADR 0023 A5). It briefly did not: the text
+    // oracle refused struct-target impls while inkwell compiled them, so the codegen
+    // sweep skipped the shape — and the comment defending that refusal said "every corpus
+    // impl targets a class", which the refusal itself made true. 40 + 2 + 0 = 42.
     assert_eq!(run_exit("c42_impl_for_struct.sentinel"), 42);
 }
 

@@ -50,14 +50,15 @@
 //   * method bodies that WRITE as well as read `self.<field>`, because a body that never
 //     touches `self` reproduces (1) alone and lets (2) through.
 //
-// ⚠ THIS FIXTURE DOES NOT REACH THE CODEGEN DIFFERENTIAL, and the reason is a separate
-// pre-existing gap worth knowing about: `snc build` (inkwell) compiles and runs this
-// program fine — it exits 42 — but `snc llvm`, the TEXT oracle the self-host differential
-// compares against, refuses it with `impl on a non-class target: Struct(StructId(0))`.
-// So the two Rust back ends disagree about whether this program is compilable, and the
-// codegen sweep skips the fixture because the oracle errored. Every FRONT-END stage
-// (lex, ast, resolve, types, effects, borrow, mir, ctverify) does compare it, which is
-// exactly the surface this fix moves.
+// THIS FIXTURE REACHES EVERY STAGE, INCLUDING CODEGEN — and briefly it did not, which is
+// worth recording because the reason was circular. The TEXT oracle used to refuse a
+// struct-target impl outright (`impl on a non-class target`) while inkwell compiled and
+// ran the same program, so the codegen sweep skipped any such fixture; the comment
+// justifying the refusal said "every corpus impl targets a class", which was true ONLY
+// BECAUSE of the refusal. ADR 0023 A5 removed it, and doing so un-hid an abort in scg
+// (three sites read an `imcid` that is -1 for a struct target and indexed `clns[-1]`),
+// which is why the oracle and scg halves had to land in one commit. Both are fixed; this
+// fixture is byte-identical oracle-vs-scg at every stage.
 //
 // 40 + 2 + 0 = 42.
 
@@ -107,6 +108,14 @@ impl Doubling as Writer for Sink {
     }
 }
 
+// CLASS target, named.
+impl Tripling as Writer for Box {
+    fn write(self: &mut Self, data: i64) -> i64 {
+        self.n = self.n + data * 3;
+        self.n
+    }
+}
+
 // STRUCT target, default impl — the shape that used to abort on `self.count`, and the
 // one receiver-typed dispatch has to find past the named impl above.
 impl as Writer for Sink {
@@ -116,11 +125,17 @@ impl as Writer for Sink {
     }
 }
 
-// CLASS target, named.
-impl Tripling as Writer for Box {
-    fn write(self: &mut Self, data: i64) -> i64 {
-        self.n = self.n + data * 3;
-        self.n
+// A DELEGATING class, and it has to come after a STRUCT-target impl to be worth having.
+// Delegate forwarders are synthesised in a LATER group than user impls, so on entry the
+// codegen state still holds the LAST user impl's target — which is `Sink`, a struct,
+// because the default `Sink` impl above was moved to the end for exactly this reason.
+// If the forwarder failed to reset that state it would mangle itself under the STRUCT's
+// name; mutation-tested by deleting the reset, which makes this fixture diverge.
+class Relay {
+    delegate inner: Box to Writer;
+    pub init(b: Box) {
+        self.inner = b;
+        0
     }
 }
 
@@ -137,5 +152,8 @@ fn main() -> i64 {
     // `Sink`'s impl and read the wrong field.
     let mut t: Tally = Tally { total: 0 };
     let e: i64 = t.write(0);
-    c + d + e
+    // The delegating class, whose forwarder is synthesised after every user impl.
+    let mut r: Relay = Relay::init(Box::init(0));
+    let g: i64 = r.write(0);
+    c + d + e + g
 }

@@ -251,6 +251,8 @@ fn synth_delegate_impl(buf: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i6
         (*c).cgm_pfx_kind = 1;
         (*c).cgm_named = false;
         (*c).cgm_type_cid = cid;
+        // (ADR 0023 A5) a delegate forwarder is synthesised for the owning CLASS.
+        (*c).cgm_type_sid = 0 - 1;
         (*c).cgm_trait_tid = tid;
         0
     } else {

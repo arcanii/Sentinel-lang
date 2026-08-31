@@ -15,6 +15,43 @@ fn cg_emit_snb_clsname(c: &mut TyCtx, cid: i64) -> i64 {
     0
 }
 
+// (ADR 0023 A5) Emit a STRUCT's name (`snb[sts[sid]..ste[sid]]`) into the current cg
+// buffer — the struct twin of `cg_emit_snb_clsname`, for an impl whose target is a
+// struct. The name blob is shared, so this differs only in which span table it reads.
+fn cg_emit_snb_structname(c: &mut TyCtx, sid: i64) -> i64 {
+    let ns: i64 = (*c).sts[sid];
+    let ne: i64 = (*c).ste[sid];
+    let mut i: i64 = ns;
+    while i < ne {
+        let b: u8 = (*c).snb[i];
+        cg_putc(c, b);
+        i = i + 1;
+    }
+    0
+}
+
+// (ADR 0023 A5) Emit an impl TARGET's name — a class (`cid`) or a struct (`sid`), the
+// two ADR 0023 D7 allows. The mangling itself needs no other change: the oracle's
+// `mangle_impl_method` builds `{prefix}__{type_name}__{trait}__{method}` from the
+// target's NAME, so a struct target simply contributes its own name. Reading `imcid`
+// alone here made every struct target index `clns[-1]` and ABORT the stage.
+//
+// ⚠ The `else` arm ASSUMES `cid >= 0`, which the `imcid`/`imsid` doc says a reader must
+// not assume in general: a target resolving to NEITHER leaves both at -1 and this would
+// index `clns[-1]`. That is deliberate and unchanged from before A5 — the oracle rejects
+// such a program outright ("undefined type `X` in impl block") so codegen never runs on
+// one, and per ADR 0044 D7 scg does not mirror front-end rejections. Guarding it here
+// would trade an abort for a silently malformed symbol, which is worse; if scg ever
+// needs to survive such input, the guard belongs at the point the target is RESOLVED,
+// not at the point its name is printed.
+fn cg_emit_target_name(c: &mut TyCtx, cid: i64, sid: i64) -> i64 {
+    if sid >= 0 {
+        cg_emit_snb_structname(c, sid)
+    } else {
+        cg_emit_snb_clsname(c, cid)
+    }
+}
+
 // Emit a trait name (`snb[trns[tid]..trne[tid]]`) into the current cg buffer.
 fn cg_emit_snb_trname(c: &mut TyCtx, tid: i64) -> i64 {
     let ns: i64 = (*c).trns[tid];
@@ -78,6 +115,9 @@ fn cg_emit_class_init(c: &mut TyCtx, cid: i64, cty: i64, slot: i64, snap: i64) -
 // caller set per-class/impl. `mn_s`/`mn_e` = the method-name `src` slice (unused for init).
 fn cg_emit_method_sym(c: &mut TyCtx, src: &[u8], is_init: bool, mn_s: i64, mn_e: i64) -> i64 {
     let tcid: i64 = (*c).cgm_type_cid;
+    // (ADR 0023 A5) -1 for a struct-target impl; an `init` and a class method always
+    // have a class, so only the impl arm below needs the target dispatch.
+    let tsid: i64 = (*c).cgm_type_sid;
     if is_init {
         cg_emit_snb_clsname(c, tcid);
         cgo_str(c, "__init");
@@ -98,7 +138,7 @@ fn cg_emit_method_sym(c: &mut TyCtx, src: &[u8], is_init: bool, mn_s: i64, mn_e:
             0
         };
         cgo_str(c, "__");
-        cg_emit_snb_clsname(c, tcid);
+        cg_emit_target_name(c, tcid, tsid);
         cgo_str(c, "__");
         let ttid: i64 = (*c).cgm_trait_tid;
         cg_emit_snb_trname(c, ttid);
@@ -294,21 +334,18 @@ fn cg_emit_class_mcall(c: &mut TyCtx, rty: i64, selfk: i64, selfv: i64, snap: i6
 // (Bar B / classes) a receiver-typed impl-method dispatch → `call @default__Type__Trait__
 // method(ptr self, args)` (Path 1 always routes through the DEFAULT impl, prefix `default`).
 //
-// ⚠ CLASS TARGETS ONLY (ADR 0023 A4). `imcid[iid]` is -1 for a STRUCT-target impl, and
-// `cg_emit_snb_clsname` would index `clns[-1]` and ABORT. A4 fixed the front end for
-// struct targets but deliberately stopped here, because the correct output is not
-// verifiable today: the TEXT oracle `snc llvm` REFUSES a struct-target impl outright
-// ("impl on a non-class target"), so no differential can compare whatever scg emits.
-// The rule itself is known — `mangle_impl_method` builds `{prefix}__{type_name}__…`
-// from the impl's TYPE NAME, so a struct target simply mangles with the struct's name —
-// and wiring it needs a `cg_emit_snb_structname` twin plus a target-kind dispatch here
-// and in `cg_emit_qcall`. Do it together with teaching the oracle, not before; landing
-// it blind would ship untested codegen for a shape nothing can check.
+// (ADR 0023 A5) The target may be a CLASS or a STRUCT, so the name comes from
+// `cg_emit_target_name`, not `cg_emit_snb_clsname` — `imcid[iid]` is -1 for a struct
+// target and indexing `clns[-1]` ABORTED the stage (exit 127). A4 deliberately left this
+// alone because the oracle refused struct-target impls, so nothing could check what scg
+// emitted; A5 removed that refusal, which is exactly what made this fixable and made it
+// necessary in the same commit.
 fn cg_emit_impl_mcall(c: &mut TyCtx, rty: i64, selfk: i64, selfv: i64, snap: i64, iid: i64, mtid: i64, midx: i64) -> i64 {
     let d: i64 = cg_call_head(c, rty);
     cgo_str(c, "default__");
     let tcid: i64 = (*c).imcid[iid];
-    cg_emit_snb_clsname(c, tcid);
+    let tsid: i64 = (*c).imsid[iid];
+    cg_emit_target_name(c, tcid, tsid);
     cgo_str(c, "__");
     cg_emit_snb_trname(c, mtid);
     cgo_str(c, "__");
@@ -329,7 +366,8 @@ fn cg_emit_qcall(c: &mut TyCtx, rty: i64, snap: i64, iid: i64, qtid: i64, midx: 
     cgo_str(c, qia);
     cgo_str(c, "__");
     let tcid: i64 = (*c).imcid[iid];
-    cg_emit_snb_clsname(c, tcid);
+    let tsid: i64 = (*c).imsid[iid];
+    cg_emit_target_name(c, tcid, tsid);
     cgo_str(c, "__");
     cg_emit_snb_trname(c, qtid);
     cgo_str(c, "__");

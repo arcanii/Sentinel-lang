@@ -42,7 +42,7 @@ use sentinel_borrow_check::DropPlan;
 // oracle monomorphizes the same set, in the same order, as the production codegen.
 use sentinel_codegen::collect_mono_instantiations;
 use sentinel_resolve::{
-    ClassId, EffectId, EnumId, FnId, StructId, VarId, APPLY_FN_ID, ARG_COUNT_FN_ID, ARG_FN_ID,
+    EffectId, EnumId, FnId, StructId, VarId, APPLY_FN_ID, ARG_COUNT_FN_ID, ARG_FN_ID,
     I64_TO_U8_FN_ID,
     IS_SOME_FN_ID, LEN_FN_ID,
     CHANNEL_CLOSE_FN_ID, CHANNEL_NEW_FN_ID, POP_FN_ID, PRINT_BYTES_FN_ID, PRINT_FN_ID,
@@ -723,16 +723,16 @@ pub fn dump(program: &TypedProgram, drop_plan: &DropPlan) -> Result<String, Stri
         if let Some(init) = &cd.init {
             let sym = format!("{}__init", cd.name);
             dump_method(
-                program, drop_plan, &mut fns_buf, &mut used, &sym, init.self_var_id, cd.id,
-                &init.params, None, &init.body,
+                program, drop_plan, &mut fns_buf, &mut used, &sym, init.self_var_id,
+                Type::Class(cd.id), &init.params, None, &init.body,
             )?;
             fns_buf.push('\n');
         }
         for m in &cd.methods {
             let sym = format!("{}__{}", cd.name, m.name);
             dump_method(
-                program, drop_plan, &mut fns_buf, &mut used, &sym, m.self_var_id, cd.id,
-                &m.params, Some(m.return_type), &m.body,
+                program, drop_plan, &mut fns_buf, &mut used, &sym, m.self_var_id,
+                Type::Class(cd.id), &m.params, Some(m.return_type), &m.body,
             )?;
             fns_buf.push('\n');
         }
@@ -740,22 +740,25 @@ pub fn dump(program: &TypedProgram, drop_plan: &DropPlan) -> Result<String, Stri
     for imp in &program.impl_decls {
         for m in &imp.methods {
             let sym = mangle_impl_method(imp, &m.name);
-            // The impl method's `self` is a `ptr` to the implementing type's storage; we
-            // bind it as `Type::Class(self_class)`.
+            // ADR 0023 D7 / A5: the impl method's `self` is a `ptr` to the implementing
+            // type's storage, and that type is the impl's TARGET — a class or a struct.
             //
-            // ⚠ This used to say "every corpus impl targets a class". That is no longer
-            // true — `tests/pass/c42_impl_for_struct` targets a struct, and this arm is
-            // exactly why the TEXT oracle refuses it while inkwell compiles and runs it.
-            // The two Rust back ends therefore disagree about whether such a program is
-            // compilable, and the codegen differential skips it. Filed separately;
-            // `mangle_impl_method` already builds from `imp.type_name`, so the struct
-            // case needs a `Self` binding here rather than a new mangling.
-            let self_class = match imp.target {
-                sentinel_resolve::ImplTarget::Class(cid) => cid,
-                ref other => return Err(format!("impl on a non-class target: {other:?}")),
+            // This used to accept only `Class` and Err on anything else ("impl on a
+            // non-class target"), on the stated grounds that every corpus impl targeted a
+            // class. That was a SELF-FULFILLING claim: `selfhost_codegen` skips any
+            // fixture the oracle errors on, so the refusal is what kept the corpus free
+            // of struct-target impls — the evidence for the restriction was manufactured
+            // by the restriction. Meanwhile inkwell compiled and ran them, so the two
+            // Rust back ends disagreed about whether such a program was even compilable.
+            // Mirrors inkwell's `compile_impl` (sentinel-codegen/src/lib.rs:3422-3423);
+            // `mangle_impl_method` already builds the symbol from `imp.type_name`, so the
+            // struct case needed no new mangling, only the binding.
+            let self_ty = match imp.target {
+                sentinel_resolve::ImplTarget::Class(cid) => Type::Class(cid),
+                sentinel_resolve::ImplTarget::Struct(sid) => Type::Struct(sid),
             };
             dump_method(
-                program, drop_plan, &mut fns_buf, &mut used, &sym, m.self_var_id, self_class,
+                program, drop_plan, &mut fns_buf, &mut used, &sym, m.self_var_id, self_ty,
                 &m.params, Some(m.return_type), &m.body,
             )?;
             fns_buf.push('\n');
@@ -1485,7 +1488,7 @@ fn dump_method(
     used: &mut RuntimeSyms,
     sym: &str,
     self_var_id: VarId,
-    self_class: ClassId,
+    self_ty: Type,
     params: &[TypedParam],
     ret_ty: Option<Type>,
     body: &TypedBlock,
@@ -1519,7 +1522,10 @@ fn dump_method(
     // `self` is `%arg0` — bound by `self_var`, with its body type recorded as the class
     // (so `Var(self)` loads `%Class.N` and `self.f` GEPs the class). It is BORROWED, not
     // owned, so it is NOT pushed onto a scope frame (never dropped here).
-    e.var_ty.insert(self_var_id, Type::Class(self_class));
+    // ADR 0023 D7 / A5: `Self` is the impl's target — a class OR a struct. Taking a
+    // `ClassId` here was what made the text oracle refuse a struct-target impl that
+    // inkwell compiles and runs; it is the self TYPE, and the caller decides which.
+    e.var_ty.insert(self_var_id, self_ty);
     // Param frame (frame 0): declared params are `%arg1..` (self shifts them by one).
     e.scopes.push(Vec::new());
     for (i, p) in params.iter().enumerate() {

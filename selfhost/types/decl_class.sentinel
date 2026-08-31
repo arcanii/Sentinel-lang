@@ -444,6 +444,7 @@ fn type_class(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: 
     if cg_on(c) {
         (*c).cgm_pfx_kind = 0;
         (*c).cgm_type_cid = cid;
+        (*c).cgm_type_sid = 0 - 1;   // (ADR 0023 A5) a class body always has a class
         0
     } else {
         0
@@ -822,6 +823,7 @@ fn type_impl(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &
         (*c).cgm_nm_s = nm_s;
         (*c).cgm_nm_e = nm_e;
         (*c).cgm_type_cid = cid;
+        (*c).cgm_type_sid = sid;     // (ADR 0023 A5) -1 unless the target is a struct
         (*c).cgm_trait_tid = tid;
         0
     } else {
