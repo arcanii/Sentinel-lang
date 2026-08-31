@@ -51,6 +51,16 @@ reference as you work through the milestones.
 
 ---
 
+> ⚠ **A PRE-EXISTING FRONT-END HOLE IN THE SECURITY CLASS was found while reviewing
+> `4ac7bdc` and reported through the private channel per CONTRIBUTING.md — not described
+> here, and NOT introduced by any commit in this session (it reproduces with no trait,
+> impl or class anywhere). If you are picking this work up and have not been briefed on
+> it, ask before touching the struct drop path.
+>
+> ⚠ **ADR 0023 A5 (`4ac7bdc`) had all four review lenses report**, and every substantive
+> finding was verified by construction and acted on — including a mutation test proving the
+> fixture pins the one load-bearing state reset. Its VERIFICATION phase was stopped.
+>
 > ⚠ **ADR 0023 A4 (`0fef8a4`) LANDED ON A PARTIAL REVIEW.** Its four-lens review ran and
 > THREE lenses reported; every finding was verified by hand and acted on, and it earned its
 > keep — the Path 1 default-impl dispatch bug came from it, as did four prose corrections
@@ -101,7 +111,7 @@ reference as you work through the milestones.
 >      now has. Also worth doing with it: `examples/math/quadratic.sentinel` and
 >      `sentinel_library/std/math/float.sentinel` currently reach only lex/ast, because
 >      `snc merge`'s Bar-A printer rejects both a float literal and `sqrt` (menu item 5).
->   4. **THE FILED-DEFECT REGISTER — NINE items (D1-D9); **D1 and D8 are DONE**, the rest verified against a pre-slice binary,
+>   4. **THE FILED-DEFECT REGISTER — NINE items (D1-D9); **D1, D8 and D9 are DONE**, the rest verified against a pre-slice binary,
 >      NONE registered in any `DEFERRED_PROGRAMS` / `KNOWN_SCG_BUGS` list because no corpus
 >      program reaches them.** They were also filed as task chips, but chips are ephemeral UI;
 >      THIS list is the record. Ordered by what they cost if left.
@@ -155,19 +165,14 @@ reference as you work through the milestones.
 >      `selfhost/types/borrow_arms.sentinel` ~997-1002. No effects fixture has a
 >      `secret`-returning effecting fn, which is why nothing saw it.
 >
->      **D9 — `snc build` and `snc llvm` DISAGREE about struct-target impls.** inkwell
->      compiles and runs `impl as Trait for <struct>` (tests/pass/c42_impl_for_struct
->      exits 42); the TEXT oracle refuses it outright — `impl on a non-class target` at
->      crates/sentinel-driver/src/llvm_dump.rs — so the codegen differential SKIPS every
->      such program and scg's codegen for the shape is compared against nothing. ⚠ That
->      matters more than a tidiness nit: scg's `cg_emit_impl_mcall` / `cg_emit_qcall`
->      read `imcid[iid]`, which is -1 for a struct target, and `cg_emit_snb_clsname`
->      would index `clns[-1]` and ABORT. Teaching the oracle therefore un-hides an abort;
->      do both together. `mangle_impl_method` already builds from `imp.type_name`, so the
->      mangling rule is defined — a struct target simply uses the struct's name — and the
->      two scg sites carry a ⚠ saying exactly this. Unlike D2-D7, this one IS reachable
->      from the corpus (that fixture), which is why the "nothing in the corpus reaches
->      them" line above no longer covers the whole register.
+>      **D9 — DONE (`4ac7bdc`, ADR 0023 A5).** The two Rust back ends disagreed about
+>      whether `impl as Trait for <struct>` was compilable: inkwell compiled and ran it,
+>      the TEXT oracle refused it, and `selfhost_codegen` skips whatever the oracle
+>      errors on — so the codegen differential could never see the shape. The refusal was
+>      SELF-FULFILLING (its "every corpus impl targets a class" justification was true
+>      only because the refusal kept such fixtures out). Removing it un-hid an abort in
+>      scg's codegen, so both halves landed in one commit; oracle and scg are now
+>      byte-identical on the shape and the corpus is 168 emitted / 0 diverged.
 >
 >      **D8 — DONE (`0fef8a4`, ADR 0023 A4).** scg mishandled a trait impl whose target is a
 >      STRUCT. Three symptoms, not the two reported: the dump printed `class#` with no id, a

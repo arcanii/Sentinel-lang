@@ -697,6 +697,93 @@ disagree about whether it is compilable, and the codegen
 differential skips it. That asymmetry is pre-existing and filed
 separately; it is why A4 is a FRONT-END mirror only.
 
+**A5 — the TEXT oracle refused struct-target impls that
+inkwell compiled, and the refusal was self-fulfilling.**
+`snc llvm` matched only `ImplTarget::Class` when binding an
+impl method's `self`, erroring `impl on a non-class target` on
+anything else. Inkwell had the correct two-arm form all along
+(`Class(cid) => Type::Class(cid)`,
+`Struct(sid) => Type::Struct(sid)`), compiled such programs and
+ran them — so the two Rust back ends disagreed about whether a
+struct-target impl was even compilable.
+
+The comment justifying the refusal said "every corpus impl
+targets a class", and that was TRUE only because of the refusal
+itself: `selfhost_codegen` skips any fixture the oracle errors
+on, so no struct-target impl could ever be compared, so none was
+ever added. A4 broke the loop by adding
+`tests/pass/c42_impl_for_struct` (which the front-end sweeps do
+compare); A5 removes the refusal so codegen compares it too.
+
+`self_class: ClassId` was used in exactly one place in
+`dump_method`, so it generalised to the self TYPE with no other
+churn, and `mangle_impl_method` already built the symbol from
+`imp.type_name` — a struct target simply contributes its own
+name, needing no new mangling. The emitted body is structurally
+identical to the class twin, differing only in `%Struct.0` for
+`%Class.0`.
+
+**The two halves had to land together.** Teaching the oracle
+un-hid an abort in `scg`: `cg_emit_method_sym`,
+`cg_emit_impl_mcall` and `cg_emit_qcall` all read `imcid` /
+`cgm_type_cid`, which is -1 for a struct target, and
+`cg_emit_snb_clsname` then indexed `clns[-1]`. Confirmed by
+building the stage and running it — exit 127,
+`index out of bounds: idx=-1, len=1`. So A5 also adds
+`cg_emit_snb_structname`, a `cg_emit_target_name` dispatch, and
+a `cgm_type_sid` set beside every `cgm_type_cid`.
+
+That last point is sharper than it sounds, because this field is
+SET rather than pushed: a site that sets the class id and forgets
+it leaves a STALE StructId from the PREVIOUS item, mangling a
+symbol under the wrong type name rather than failing. Exactly one
+of the three reset sites can actually change output — the
+delegate forwarder's, because forwarders are synthesised in a
+LATER group than user impls, so on entry the state still holds
+the last user impl's target. The review pointed out that no
+corpus program had both a delegate and a struct-target impl, so
+that one line was unpinned. `c42_impl_for_struct` now ends with
+its struct impl (making the stale id a struct's) and adds a
+delegating class, and the pinning was MUTATION-TESTED: deleting
+the reset makes the forwarder emit
+`define i64 @default__Sink__Writer__write` — the struct's name,
+colliding with the real impl — instead of
+`@default__Relay__Writer__write`.
+
+Oracle and scg are byte-identical on the fixture, and the whole
+corpus stays byte-identical at codegen.
+
+**What A5 WIDENS rather than fixes, stated so the scope is not
+over-read.** Removing the refusal makes struct-target impls a
+second spelling for two PRE-EXISTING holes, neither introduced
+here and both reproducible without any impl at all:
+
+- an effecting METHOD still has no `Kont*` ABI, so a
+  struct-target impl method with an effect row emits
+  `ret i64 %v0` on a `ptr`. The CLASS twin emits the identical
+  invalid IR today, which is how we know A5 did not cause it;
+  it is the hole already filed from the ADR 0072 work.
+- the borrow checker accepts a value-typed copy of a borrowed
+  Move-field struct, so the copy becomes a second owner. A
+  struct-target impl gives that a shorter spelling because D7
+  types `self` as the bare struct — but a plain free function
+  with no trait, impl or class reproduces it, and it breaks both
+  back ends, so it is a front-end hole. Reported through the
+  private channel per CONTRIBUTING.md rather than described
+  further here.
+
+A5 does not widen either hazard's underlying reach: both were
+already reachable through classes or free functions.
+
+⚠ Note what is NOT claimed: the oracle's emitted text hardcodes
+an `arm64-apple-darwin` triple for a reproducible byte-target,
+so on a Windows host its IR cannot be assembled and RUN. A5
+rests on the IR assembling cleanly (`llvm-as`, reading stderr),
+on being structurally identical to the class lowering, on
+inkwell's build of the same program exiting 42, and on scg
+matching byte-for-byte — not on executing the oracle's own
+output.
+
 These amendments don't block subsequent sub-phases. C4.3
 (delegation) and C4.4 (structured concurrency) compose with the
 shipped Path 1 + Path 2 dispatch without depending on Path 3.

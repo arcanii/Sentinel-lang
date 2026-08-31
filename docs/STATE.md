@@ -14,6 +14,41 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
+**Latest (2026-08-31) — the two Rust back ends now AGREE about struct-target impls, and the
+register's D9 is closed** (`4ac7bdc`, **ADR 0023 A5**). `snc build` (inkwell) had always
+compiled and run `impl as Trait for <struct>`; the TEXT oracle `snc llvm` REFUSED it outright
+(`impl on a non-class target`). So the two halves of the same compiler disagreed about whether
+such a program was even compilable — and because `selfhost_codegen` skips any fixture the
+oracle errors on, the codegen differential could never see the shape at all.
+**THE REFUSAL WAS SELF-FULFILLING, which is the part worth remembering.** The comment
+defending it said "every corpus impl targets a class" — true ONLY BECAUSE of the refusal: a
+struct-target impl could never be compared, so none was ever added, so the restriction looked
+justified. The evidence for the guard was manufactured by the guard. A4 broke the loop by
+adding a fixture the front-end sweeps compare; A5 removes the refusal so codegen compares it
+too. Inkwell had the correct two-arm form all along, so the fix was to MIRROR it:
+`dump_method`'s `self_class: ClassId` becomes the self TYPE (it was used in exactly one
+place), and `mangle_impl_method` already built the symbol from `imp.type_name`, so a struct
+target needed no new mangling.
+**THE TWO HALVES HAD TO LAND TOGETHER.** Teaching the oracle immediately UN-HID an abort in
+`scg` — `cg_emit_method_sym`, `cg_emit_impl_mcall` and `cg_emit_qcall` all read `imcid` /
+`cgm_type_cid`, which is -1 for a struct target, and `cg_emit_snb_clsname` then indexed
+`clns[-1]`. Verified by building the stage and running it: exit 127,
+`index out of bounds: idx=-1, len=1`. A5 adds `cg_emit_snb_structname`, a
+`cg_emit_target_name` dispatch, and a `cgm_type_sid` set beside every `cgm_type_cid` — a
+field that is SET rather than pushed carries a stale value if a path forgets it, mangling a
+symbol under the wrong type name rather than failing.
+Oracle and scg are byte-identical on the fixture, and the whole corpus stays byte-identical at
+codegen (168 emitted / 0 diverged, up from 167 emitted). `snc merge` accepts the shape and
+`snc build --separate` runs it. A three-field probe pins the semantics end-to-end — mutation
+through `&mut Self` persisting across calls, a shared `&Self` read seeing it, and the GEP
+landing on the SECOND field with the first and third untouched — exit 42.
+⚠ **What is NOT claimed:** the text oracle hardcodes an `arm64-apple-darwin` triple for a
+reproducible byte-target, so on this Windows host its IR cannot be assembled AND RUN. A5 rests
+on `llvm-as` validity, on the emitted struct body being structurally identical to the class
+twin (only `%Struct.0` for `%Class.0`), on inkwell's build of the same program exiting 42, and
+on scg matching byte-for-byte — not on executing the oracle's own output.
+Tests 1812, `pass` 163 (no new fixture — `c42_impl_for_struct` simply reaches one more stage).
+
 **Latest (2026-08-31) — `scg` handles a trait impl whose target is a STRUCT; the register's
 D8 is closed** (`0fef8a4`, **ADR 0023 A4**, pinned by `tests/pass/c42_impl_for_struct`).
 ADR 0023 D7 has always said `Self` inside an `impl as Trait for Type` body is
