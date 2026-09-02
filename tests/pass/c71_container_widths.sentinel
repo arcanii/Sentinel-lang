@@ -1,0 +1,77 @@
+// ADR 0071 M1.4c / filed-defect register D17: CONTAINER ELEMENT WIDTHS through the
+// self-hosted `scg`. Every `sentinel_shared_*` / `sentinel_mutex_*` C-ABI entry carries
+// the element as an i64, so a narrower element must be `zext`ed on the way in and
+// `trunc`ed on the way out. M1.4c-1b made scg's containers ELEMENT-GENERIC in the TYPE
+// system but left both conversions unmirrored, so every non-i64 element emitted IR that
+// `llvm-as` rejects while the oracle assembled clean. Measured on THIS file against a
+// pre-change stage binary, the first rejection is "'%v2' defined with type 'i64' but
+// expected 'i32'" (at `ret i32 %v2` in `take`); the register entry's minimal repro
+// `fn take(s: Shared<u8>) -> u8 { shared_get(s) }` gives the `'i8'` form of the same
+// error. This is the fixture for the mirror.
+//
+// It is built to discriminate, because a single-element fixture catches only "nothing
+// was done". Each binding below kills a DIFFERENT wrong implementation:
+//   - `Shared<u8>` construct+read      — fix the encode but not the decode (or Shared
+//                                        but not Mutex), and the widths disagree.
+//   - `Shared<i32>` read in ANOTHER fn — a "convert only when narrower than 32" rule
+//                                        passes u8 and fails here; and the read is in a
+//                                        function with no construct, so the decode is
+//                                        exercised on its own.
+//   - `Shared<bool>` from the LITERAL `true` — the encode fires on a literal operand
+//                                        too (`zext i1 1 to i64`), not just on a
+//                                        register.
+//   - `Mutex<u8>` + `lock` + `*g`      — the guard-deref decode is a FOURTH site, in a
+//                                        different file from the other three, and the
+//                                        `?Guard` payload stays `{ i1, ptr }` (the cell
+//                                        handle) for every element — it is NOT `recv`'s
+//                                        `{ i1, <elem> }`.
+//   - `Mutex<bool>` + `lock` + `*g`    — the guard's own `zext i1 %valid to i64` sits
+//                                        directly beside the element decode, so a fix
+//                                        that converts the valid BIT instead of the
+//                                        value is caught here. (Mutation testing found
+//                                        that swap also moves `c71_mutex_deref` and
+//                                        `c71_secret_shared`, so this is the clearest
+//                                        signal, not the only one.)
+//
+// ⚠ There is deliberately NO `*g = v` on a non-i64 element: the ORACLE refuses it
+// ("guard assign element not ported (i64 only)"), so such a fixture cannot exist until
+// that gate is ported. See the register.
+//
+// The `secret` half of the same defect is the sibling `c71_secret_container_widths`;
+// it is separate because `secret i64` strips to width 64 and so cannot catch a mirror
+// that forgets to strip the qualifier before choosing the width.
+//
+// Trace: 7 (u8) + 22 (i32, via `take`) + 1 (bool true) + 11 (mutex u8) + 1 (mutex bool
+// false) = 42. Exit 42, no stdout.
+
+fn take(s: Shared<i32>) -> i32 {
+    shared_get(s)
+}
+
+fn main() -> i64 {
+    let u: u8 = 7 as u8;
+    let su: Shared<u8> = shared_new(u);
+    let ru: u8 = shared_get(su);
+
+    let i: i32 = 22 as i32;
+    let si: Shared<i32> = shared_new(i);
+    let ri: i32 = take(si);
+
+    let sb: Shared<bool> = shared_new(true);
+    let rb: bool = shared_get(sb);
+
+    let mu: u8 = 11 as u8;
+    let mmu: Mutex<u8> = mutex_new(mu);
+    let gu = lock(mmu);
+    let gv: u8 = *gu;
+
+    let mmb: Mutex<bool> = mutex_new(false);
+    let gb = lock(mmb);
+    let bv: bool = *gb;
+
+    (ru as i64)
+        + (ri as i64)
+        + (if rb { 1 } else { 0 })
+        + (gv as i64)
+        + (if bv { 0 } else { 1 })
+}

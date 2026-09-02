@@ -666,7 +666,29 @@ fn dump_te_unary(out: &mut Vec<u8>, uop: i64, inner: Expr, exp: i64, src: &[u8],
                         // in the runtime on a timed-out guard). As a READ, load the
                         // i64 slot; as an assign-target PLACE (`*g = v`), leave the
                         // data ptr as the operand for the store (cg_lastvid = -1).
-                        // i64-only elements (the scg corpus), like shared_get.
+                        //
+                        // (register D17) The READ path DECODES the i64 slot into the
+                        // element, exactly as `shared_get` does — `Mutex<u8>` used to
+                        // emit `zext i8 %vN to i64` over a register the load had just
+                        // defined as `i64`.
+                        //
+                        // ⚠ THE PLACE PATH (`*g = v`) DELIBERATELY DOES NOT ENCODE, and
+                        // the honest statement of what that costs is: a non-i64 `*g = v`
+                        // emits a NARROW STORE (`store i8 …`) into the 8-byte protected
+                        // slot, which is wrong and which `llvm-as` ACCEPTS. That store
+                        // is PRE-EXISTING — measured against a pre-change binary, which
+                        // emitted the same `store i8` — but D17 did remove an unrelated
+                        // `mutex_new` invalidity in the same module that had been
+                        // masking it, so the shape is now silently wrong where it used
+                        // to be loudly wrong. It stays unreachable: the ORACLE `Err`s on
+                        // every non-i64 guard-assign element ("guard assign element not
+                        // ported (i64 only)", measured after its own `unsecret`), so no
+                        // such program enters the differential, and inkwell — the back
+                        // end that actually emits objects — encodes it correctly. It is
+                        // on the register, oracle-first: port that gate in
+                        // `llvm_dump.rs`, then this branch needs `cg_container_encode`
+                        // on the stored value and the store widened to `i64`, matching
+                        // inkwell's `build_int_z_extend` + `store i64`.
                         let gda: i64 = cg_dst(c);
                         cgo_str(c, "extractvalue { i1, ptr } ");
                         cgo_operand(c, cguk, cguv);
@@ -695,7 +717,8 @@ fn dump_te_unary(out: &mut Vec<u8>, uop: i64, inner: Expr, exp: i64, src: &[u8],
                             cgo_str(c, "load i64, ptr %v");
                             cgo_int(c, gdd);
                             cg_putc(c, '\n');
-                            cg_reg(c, gde);
+                            let gdf: i64 = cg_container_decode(c, rt, gde);
+                            cg_reg(c, gdf);
                             0
                         };
                         0

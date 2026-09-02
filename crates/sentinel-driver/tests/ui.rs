@@ -169,6 +169,16 @@ ui_snapshot!(c71_guard_deref_computed, "c71_guard_deref_computed.sentinel");
 // branch is. This is the fixture that proves the secret container did not become a
 // laundering hole: if it ever compiles, constant-time is broken.
 ui_snapshot!(c71_secret_mutex_branch, "c71_secret_mutex_branch.sentinel");
+// ADR 0071 M1.4c / register D17: the `Shared<T>` element-domain fence — the twin of
+// `c66_channel_element_unsupported`. The element rides the C-ABI as one i64 slot, so
+// the domain is the word scalars and their `secret` forms; a nested container has no
+// i64 encoding. This is what makes the width mirror's fall-through arm unreachable
+// rather than merely unexercised, so the boundary is pinned by a rejection instead of
+// asserted in a comment.
+ui_snapshot!(
+    c71_shared_element_unsupported,
+    "c71_shared_element_unsupported.sentinel"
+);
 
 // ---- ADR 0070: non-capturing function values (types) ----
 // D4: a wrong-arity fn is not eligible as a Fn<T,R> value (any word-scalar shape).

@@ -1893,3 +1893,40 @@ fn pass_c19_widen_arm_family() {
     // dispatcher-level widen splice would surface. 10+6+3+10+8+5 = 42.
     assert_eq!(run_exit("c19_widen_arm_family.sentinel"), 42);
 }
+
+#[test]
+fn pass_c71_container_widths() {
+    // ADR 0071 M1.4c / register D17: container element WIDTHS through `scg`. Every
+    // `sentinel_shared_*` / `sentinel_mutex_*` C-ABI entry carries the element as an
+    // i64, so a narrower element needs a `zext` in and a `trunc` out. M1.4c-1b made
+    // scg's containers element-generic in the TYPE system but left both conversions
+    // unmirrored, so every non-i64 element emitted IR `llvm-as` rejects while the
+    // oracle assembled clean — on this file, "'%v2' defined with type 'i64' but
+    // expected 'i32'" against a pre-change stage binary.
+    //
+    // The fixture is built to discriminate: Shared<u8> (encode+decode), Shared<i32>
+    // read in another fn (an i32 element, and the decode on its own), Shared<bool>
+    // from a LITERAL operand, Mutex<u8> through `*g` (a fourth site, in a different
+    // file), and Mutex<bool> through `*g` (whose element decode sits beside the
+    // guard's own `zext i1 %valid`). 7+22+1+11+1 = 42.
+    //
+    // As with c19, the exit code is the weakest assertion — the real one is the
+    // codegen differential, which sweeps `tests/pass`.
+    assert_eq!(run_exit("c71_container_widths.sentinel"), 42);
+}
+
+#[test]
+fn pass_c71_secret_container_widths() {
+    // ADR 0071 M1.4c / register D17: the SECRET half. `Shared<secret u8>` is
+    // constructible, and a `secret u8` element is an interned HANDLE rather than a
+    // scalar code — so a mirror that copies the channel arms verbatim matches no width
+    // arm and falls through to the wrong encoding. The fix strips the qualifier first
+    // and takes the width from the inner type, as the oracle's `unsecret()` does.
+    //
+    // `c71_secret_shared` cannot catch that: its element is `secret i64`, which strips
+    // to width 64, so the conversion is a no-op either way. It takes a NARROW secret.
+    // The conversion is `zext`, never `sext`, so a secret cell's unused high bits are
+    // deterministically zero; every read below still types as `secret`, which is D6's
+    // named invariant. 7 + 5 + 30 = 42.
+    assert_eq!(run_exit("c71_secret_container_widths.sentinel"), 42);
+}

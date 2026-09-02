@@ -1,0 +1,14 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c71_shared_element_unsupported.sentinel\")"
+---
+sentinel::types::shared_element_not_supported
+
+  × `Shared<T>` element type is not supported yet
+    ╭─[tests/ui/c71_shared_element_unsupported.sentinel:21:14]
+ 20 │ // widened from another file.
+ 21 │ fn worker(s: Shared<Shared<i64>>) -> i64 {
+    ·              ─────────┬─────────
+    ·                       ╰── 
+ 22 │     0
+    ╰────

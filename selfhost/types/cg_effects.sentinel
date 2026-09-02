@@ -541,16 +541,30 @@ fn cg_emit_call(c: &mut TyCtx, src: &[u8], fid: i64, snap: i64, rty: i64) -> i64
         // `ptrtoint`. The encode is emitted HERE, before the send's own dst, so
         // register numbering matches the oracle. The `else` is the ptr/channel case.
         //
-        // (ADR 0058 UPDATE — this comment used to say `f64` "has no scg handle so
-        // it cannot occur"; the first half is now false, since `f64` is scalar
-        // code 4. The CONCLUSION still holds, on a different and verified guard:
-        // an f64 element needs an f64 VALUE, and every way to make one — a
-        // literal, an `as f64` cast — is Err'd by the oracle before lowering, so
-        // no such program is ever compared. A `Channel<f64>` that is only created
-        // and closed DOES lower, and matches byte-for-byte; verified. If f64
-        // values ever reach here, both this arm and the `recv` twin below need a
-        // `bitcast`, NOT the pointer `ptrtoint`/`inttoptr` fallback — that pair
-        // on a `double` is invalid IR, not merely different bytes.)
+        // (ADR 0058 UPDATE, CORRECTED by the register-D17 review — this comment has
+        // now named the wrong guard TWICE, so read the measurement, not the story.
+        // It first said `f64` "has no scg handle so it cannot occur" (false: f64 is
+        // scalar code 4). It then said every way to make an f64 value — a literal,
+        // an `as f64` cast — is Err'd by the oracle before lowering. THAT IS ALSO
+        // FALSE. The oracle Errs wherever an f64 TYPE must be RENDERED (`lty`), and
+        // an element riding the i64 slot is never rendered: `shared_new(x as f64)`
+        // lowers, the oracle emitting `bitcast double %v1 to i64`. The container
+        // twin of this arm was measured diverging on exactly that shape. Assume the
+        // same is reachable here until someone constructs the channel version and
+        // shows otherwise. What IS verified: no corpus program has an f64 element,
+        // the divergence is pre-existing, and the oracle's own f64 output is invalid
+        // IR ("integer constant must have integer type"), which is why `llvm_rejects`
+        // stays silent. If f64 values are ever ported, this arm and the `recv` twin
+        // need a `bitcast` — NOT the pointer `ptrtoint`/`inttoptr` fallback, which on
+        // a `double` is invalid IR rather than merely different bytes — AND `cgo_ty`
+        // needs a real code-4 arm first, or the `bitcast` renders `i64` on both sides
+        // and converts nothing.)
+        //
+        // ⚠ SECOND GAP IN THIS ARM, register-filed: it never calls `strip_secret`, so
+        // a `secret` element (an interned HANDLE, not a scalar code) matches no arm
+        // and falls to `ptrtoint`. `Channel<secret i64>` — which the ORACLE rejects
+        // and scg accepts — emits `ptrtoint i64 -> i64`, which `llvm-as` rejects.
+        // The container helpers strip first; this arm does not. Do not copy it.
         let cs_chk: i64 = (*c).cgak[snap];
         let cs_chv: i64 = (*c).cgav[snap];
         let cs_vk: i64 = (*c).cgak[snap + 1];
@@ -870,11 +884,15 @@ fn cg_emit_call(c: &mut TyCtx, src: &[u8], fid: i64, snap: i64, rty: i64) -> i64
         cg_reg(c, arg_a1);
         0
     } else if fid == 38 {
-        // (ADR 0071 M1.4a) shared_new(v: i64) -> Shared<i64> (ptr): allocate the
-        // refcounted cell (rc=1). The i64 element rides directly (no encode — the
-        // i64 differential case, byte-identical; scg is i64-only, like Channel).
+        // (ADR 0071 M1.4a / M1.4c, register D17) shared_new(v) -> Shared<T> (ptr):
+        // allocate the refcounted cell (rc=1), ENCODING the value into the runtime's
+        // i64 slot by its element type. The encode is emitted BEFORE the call's own
+        // dst so register numbering matches the oracle, exactly as the `send` arm
+        // does. An `i64` element encodes to -1 (no instruction), which is what keeps
+        // every pre-existing program byte-identical.
         let sn_vk: i64 = (*c).cgak[snap];
         let sn_vv: i64 = (*c).cgav[snap];
+        let sn_enc: i64 = cg_container_encode(c, (*c).cgat[snap], sn_vk, sn_vv);
         let sn_d: i64 = cg_dst(c);
         // (ADR 0071 M1.4c D6.2) a `secret T` payload goes to the mlocked,
         // zeroed-at-last-drop cell. `rt` is `Shared<elem>`; the element rides in
@@ -890,30 +908,42 @@ fn cg_emit_call(c: &mut TyCtx, src: &[u8], fid: i64, snap: i64, rty: i64) -> i64
             (*c).cg_used_sharednew = true;
             0
         };
-        cgo_operand(c, sn_vk, sn_vv);
+        if sn_enc == 0 - 1 {
+            cgo_operand(c, sn_vk, sn_vv)
+        } else {
+            cgo_str(c, "%v");
+            cgo_int(c, sn_enc)
+        };
         cgo_str(c, ")\n");
         cg_reg(c, sn_d);
         0
     } else if fid == 39 {
-        // (ADR 0071 M1.4a) shared_get(s: Shared<i64>) -> i64: read a copy of the
-        // cell's value directly (no decode — the i64 case; a Shared is always
-        // valid, so no `?T` wrapper, unlike recv).
+        // (ADR 0071 M1.4a / M1.4c, register D17) shared_get(s: Shared<T>) -> T: read
+        // the cell's i64 slot, then DECODE it into the element. Returned DIRECTLY —
+        // a `Shared` is always valid, so there is no `?T` wrapper to compose with,
+        // unlike `recv`. The element is this call's RESULT type `rty` (the oracle
+        // reads it from `type_args[0]`, which is the same thing); an `i64` element
+        // decodes to the raw register itself, emitting nothing.
         let sg_sk: i64 = (*c).cgak[snap];
         let sg_sv: i64 = (*c).cgav[snap];
-        let sg_d: i64 = cg_dst(c);
+        let sg_raw: i64 = cg_dst(c);
         cgo_str(c, "call i64 @sentinel_shared_get(ptr ");
         cgo_operand(c, sg_sk, sg_sv);
         cgo_str(c, ")\n");
         (*c).cg_used_sharedget = true;
+        let sg_d: i64 = cg_container_decode(c, rty, sg_raw);
         cg_reg(c, sg_d);
         0
     } else if fid == 40 {
-        // (ADR 0071 M1.4b) mutex_new(v: i64) -> Mutex<i64> (ptr): allocate the
-        // refcounted, lock-protected cell (rc=1, unlocked). The i64 element rides
-        // directly (no encode — the i64 differential case, byte-identical; scg is
-        // i64-only, like Shared). `lock` (41) lands in slice 2b-ii.
+        // (ADR 0071 M1.4b / M1.4c, register D17) mutex_new(v) -> Mutex<T> (ptr):
+        // allocate the refcounted, lock-protected cell (rc=1, unlocked), ENCODING the
+        // value into the runtime's i64 slot exactly as `shared_new` does. `lock` (41)
+        // needs no decode at all — its `?Guard` payload is the cell HANDLE (a ptr) for
+        // every element, not the protected value.
         let mn_vk: i64 = (*c).cgak[snap];
         let mn_vv: i64 = (*c).cgav[snap];
+        // (register D17) same element ENCODE as `shared_new` above.
+        let mn_enc: i64 = cg_container_encode(c, (*c).cgat[snap], mn_vk, mn_vv);
         let mn_d: i64 = cg_dst(c);
         // (ADR 0071 M1.4c D6.2) mirrors shared_new: a `secret T` protected value
         // goes to the mlocked, zeroed-at-last-drop cell.
@@ -927,7 +957,12 @@ fn cg_emit_call(c: &mut TyCtx, src: &[u8], fid: i64, snap: i64, rty: i64) -> i64
             (*c).cg_used_mutexnew = true;
             0
         };
-        cgo_operand(c, mn_vk, mn_vv);
+        if mn_enc == 0 - 1 {
+            cgo_operand(c, mn_vk, mn_vv)
+        } else {
+            cgo_str(c, "%v");
+            cgo_int(c, mn_enc)
+        };
         cgo_str(c, ")\n");
         cg_reg(c, mn_d);
         0

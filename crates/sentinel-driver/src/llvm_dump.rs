@@ -2056,7 +2056,8 @@ impl Emit<'_> {
             // valid bit + cell handle from the `{ i1, ptr }`, zext the bit, call
             // `sentinel_mutex_data(m, valid)` (aborts in the runtime on a timed-out
             // guard), load the i64 slot, and DECODE into `T` (the `shared_get`
-            // decode; `i64` = no decode, byte-identical with scg's i64-only mirror).
+            // decode; `i64` = no decode). Register D17 mirrored this into `scg`, so the
+            // narrow elements are byte-identical there too, not just the `i64` case.
             TypedExprKind::Unary(UnaryOp::Deref, inner) => {
                 if let Type::Nullable(NullableInner::Guard(gid)) = inner.ty {
                     let g = self.lower_expr(inner)?;

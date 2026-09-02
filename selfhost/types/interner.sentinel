@@ -339,10 +339,16 @@ fn scalar_bits(h: i64) -> i64 {
     // ⚠ f64 (code 4) and ptr (code 5) both fall into the `else` and answer 64.
     // The WIDTH is right for each, but the caller is the Cast arm's codegen,
     // which reads equal widths as "no conversion needed" — whereas an int<->f64
-    // cast needs `sitofp`/`fptosi`. Unreachable today, and here is the actual
-    // guard (the first attempt at this comment named the wrong one): the ORACLE
-    // Errs on every `x as f64` / `f64 as x` it tries to lower, so the codegen
-    // differential skips before scg runs. It is NOT true that these types cannot
+    // cast needs `sitofp`/`fptosi`. ⚠ THIS COMMENT HAS NOW NAMED THE WRONG GUARD
+    // TWICE. Attempt one named a different wrong one; attempt two said "the ORACLE
+    // Errs on every `x as f64` / `f64 as x` it tries to lower", and the register-D17
+    // review refuted that by construction: the oracle Errs wherever an f64 TYPE must
+    // be RENDERED (`lty`), which a `let d: f64 = x as f64` triggers but a container
+    // element does not — so `shared_new(x as f64)` LOWERS in the oracle (emitting
+    // `bitcast double %v1 to i64`) and diverges from scg. The cast is folded here, by
+    // this very function's equal-width answer, and never reaches `lty`. So the honest
+    // statement is: the fold is REACHABLE, it is pre-existing, no corpus program hits
+    // it, and it is on the register. It is NOT true that these types cannot
     // reach scg's codegen at all — a PHANTOM generic argument does, which is why
     // `cg_mangle_to` needs a real arm for BOTH (spelled `f64` / `ptr` since ADR
     // 0016 A1, `ty_F64` / `ty_Ptr` before it). Anyone porting f64 or ptr codegen

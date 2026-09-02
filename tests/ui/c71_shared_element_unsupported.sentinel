@@ -1,0 +1,27 @@
+// ADR 0071 M1.4c / filed-defect register D17: the `Shared<T>` ELEMENT-DOMAIN FENCE.
+// A container element rides the runtime's C-ABI as a single i64 slot, so the accepted
+// domain is the WORD SCALARS {i64,i32,u8,bool,f64,ptr}, plus the four `secret` forms
+// that exist — `secret ptr` hits this same fence and `secret f64` is refused outright
+// (floats are a public-only domain), so the secret domain is {i64,i32,u8,bool} and no
+// wider. A nested container is in neither list — a `Shared<Shared<i64>>` has no i64
+// encoding — and it surfaces SharedElementNotSupported. The twin of
+// `c66_channel_element_unsupported`.
+//
+// ⚠ THIS FENCE PINS ONLY THE NON-WORD-SCALAR HALF OF THE BOUNDARY, and saying otherwise
+// is how this repo got bitten before. An earlier draft of this comment claimed the fence
+// made `cg_container_encode`'s fall-through arm UNREACHABLE. It does not: `shared_id_for`
+// ADMITS f64 (4) and ptr (5), so `fn worker(s: Shared<f64>)` and `Shared<ptr>` build
+// happily and DO reach that arm — measured, both exit 0. What holds f64/ptr out of the
+// differential is a second and leakier gate in a different file (`llvm_ty` has no F64 or
+// Ptr arm), and it leaks: `shared_new(x as f64)` never renders the f64 type, so it
+// lowers and diverges. That gap is pre-existing and on the register; see the comment on
+// `cg_container_encode`. What this fixture pins is the half that genuinely is a fence —
+// a boundary that lives only in a comment is exactly the shape that gets silently
+// widened from another file.
+fn worker(s: Shared<Shared<i64>>) -> i64 {
+    0
+}
+
+fn main() -> i64 {
+    0
+}

@@ -1073,6 +1073,91 @@ fn cg_conv(c: &mut TyCtx, op: [u8], fromty: i64, k: i64, v: i64, toty: i64) -> i
     d
 }
 
+// (ADR 0071 M1.4c / register D17) ENCODE a container element into the runtime's i64
+// slot. Every `sentinel_shared_*` / `sentinel_mutex_*` C-ABI entry carries the element
+// as an i64, so a narrower or differently-shaped element has to be converted on the way
+// in — and the twin `cg_container_decode` converts it back on the way out.
+//
+// Returns the register holding the encoded value, or -1 when the element already IS an
+// i64 and no instruction is needed. The -1 is what keeps the `i64` case byte-identical:
+// the caller emits the original operand rather than a fresh register, so no numbering
+// moves for any program that existed before this.
+//
+// ⚠ STRIP THE SECRET FIRST, and this is the detail a naive mirror of the CHANNEL arms
+// gets wrong. `cgat` holds a TYPE HANDLE, not a scalar code, so a `secret u8` element is
+// a handle `>= tbase()` — it matches none of the scalar arms and would fall to whatever
+// the final `else` does. The channel arms can afford that (their element map rejects
+// secrets outright) but the containers cannot: `Shared<secret u8>` is constructible, and
+// the oracle encodes it as its STRIPPED inner (`zext i8 … to i64`), because a secret
+// lowers identically to its inner — the taint lives in the type system, not the IR.
+// Getting this wrong on a `secret` element is a constant-time-relevant miscompile, not
+// a byte difference.
+//
+// ⚠ THE `f64` (scalar code 4) AND `ptr` (code 5) ELEMENTS DELIBERATELY GET NO ARM, and
+// this is the opposite of what a faithful mirror of the oracle looks like — the oracle
+// spells them out as `bitcast` and `ptrtoint`/`inttoptr`. Two measured reasons:
+//
+//   1. `cgo_ty` HAS NO ARM FOR CODE 4 OR CODE 5. Both fall through its trailing `i64`
+//      fallback, so `cg_conv(c, "ptrtoint", 5, …)` renders `ptrtoint i64 %v to i64` —
+//      which `llvm-as` REJECTS ("invalid cast opcode for cast from 'i64' to 'i64'"),
+//      and `bitcast i64 %v to i64`, which it accepts as an inert no-op that only shifts
+//      register numbers. A first cut of this helper DID spell them out; a probe on
+//      `fn take(s: Shared<ptr>) -> ptr { shared_get(s) }` showed scg emitting clean
+//      `ret i64 %v2` BEFORE and non-assembling IR AFTER. Writing the arms made scg
+//      strictly worse.
+//   2. `ptr` is not differentially reachable: every route Errs before lowering
+//      ("llvm: type not yet ported (8a scalars only): Ptr", and a construct needs
+//      `ptr_of`, which Errs too). ⚠ `f64` IS REACHABLE AND DOES DIVERGE — the review
+//      refuted the first version of this comment, which claimed both were Err'd.
+//      The guard is not "the oracle Errs on every `as f64`"; it is that the oracle
+//      Errs wherever an f64 TYPE must be RENDERED (`lty`). A container element is
+//      never rendered — it rides an i64 slot — so `shared_new(x as f64)` slips past
+//      and LOWERS: the oracle emits `bitcast double %v1 to i64` and scg emits
+//      nothing. Measured, and PRE-EXISTING (byte-identical old vs new). Writing the
+//      arm would not fix it either: the oracle's own f64 output is INVALID IR
+//      (`bitcast double 3 to i64` — llvm-as: "integer constant must have integer
+//      type"), which is also why the `llvm_rejects` gate stays silent here. It is on
+//      the register, and it needs f64 lowering in both back ends, not an arm here.
+//
+// So they join the final `else`: emit nothing, pass the raw i64 through. Reason 1 is
+// the load-bearing half — spelling the arms out makes scg strictly worse without
+// buying parity. Do NOT read this as "f64/ptr containers assemble": they do not in
+// general (`shared_new(ptr_of(&buf))` emits `call ptr @sentinel_shared_new(i64 %v10)`
+// with `%v10 : ptr`, rejected, before and after). When `cgo_ty` (and its `ll_type_to`
+// twin) grow real `double`/`ptr` arms, these two elements come back here, and not
+// before.
+fn cg_container_encode(c: &mut TyCtx, ety: i64, k: i64, v: i64) -> i64 {
+    let e: i64 = strip_secret(c, ety);
+    if e == 0 {
+        0 - 1
+    } else if e == 1 || e == 2 || e == 3 {
+        cg_conv(c, "zext", e, k, v, 0)
+    } else {
+        // f64, ptr, and every non-word-scalar. The oracle Errs on all of them
+        // ("element not ported (word-scalar)" / "type not yet ported"), so the
+        // differential never compares such a program; emitting the operand unconverted
+        // keeps this arm from inventing an encoding for a shape nothing has defined.
+        0 - 1
+    }
+}
+
+// (ADR 0071 M1.4c / register D17) The twin of `cg_container_encode`: DECODE the i64 the
+// runtime handed back into the element type. `raw` is the register holding the i64.
+// Returns the register holding the decoded value — `raw` itself for an i64 element, so
+// the i64 case emits nothing and stays byte-identical. Same `strip_secret`-first rule
+// and same deliberate absence of an `f64`/`ptr` arm as the encode above; read its
+// comment before adding one here.
+fn cg_container_decode(c: &mut TyCtx, ety: i64, raw: i64) -> i64 {
+    let e: i64 = strip_secret(c, ety);
+    if e == 0 {
+        raw
+    } else if e == 1 || e == 2 || e == 3 {
+        cg_conv(c, "trunc", 0, 0, raw, e)
+    } else {
+        raw
+    }
+}
+
 // `  %vD = load <ty>, ptr %v<slot>`.
 fn cg_load(c: &mut TyCtx, ty: i64, slot: i64) -> i64 {
     let d: i64 = cg_dst(c);
