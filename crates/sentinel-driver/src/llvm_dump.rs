@@ -54,7 +54,8 @@ use sentinel_resolve::{
     VEC_NEW_FN_ID, VEC_TO_ARRAY_FN_ID, WRITE_FILE_FN_ID,
 };
 use sentinel_types::{
-    channel_elem_for, fn_value_sig_param_ret, guard_elem_for, mutex_elem_for, shared_elem_for,
+    array_elem_type_in, channel_elem_for, fn_value_sig_param_ret, guard_elem_for, mutex_elem_for,
+    shared_elem_for,
     type_display, NullableInner, Type, TypedBlock, TypedExpr, TypedExprKind, TypedFnDef, TypedFnSignature,
     TypedHandlerArm, TypedMatchArm, TypedParam, TypedPattern, TypedPatternBinding, TypedProgram,
     TypedReturnArm, TypedStmt, TypedStmtKind,
@@ -605,6 +606,128 @@ fn dump_spawn_wrapper(program: &TypedProgram, fn_id: FnId, out: &mut String) -> 
 /// construct not yet ported (the caller exits nonzero so the differential
 /// skips the fixture).
 pub fn dump(program: &TypedProgram, drop_plan: &DropPlan) -> Result<String, String> {
+    // Bar B / generics, and register item D15: discover the monomorphic fn instances
+    // FIRST, because that walk can CREATE generic instances that did not exist at
+    // type-check time — monomorphising `outer<T>` at `T = Box<i64>` makes its body's
+    // `inner(x)` return `Box<Box<i64>>`, which nothing ever interned. Substitution
+    // pushes those onto the `instances` vec it is handed.
+    //
+    // That vec used to be a LOCAL clone taken here, while every consumer
+    // (`llvm_ty`, `mangle_type`, `needs_drop`, `TypedProgram::generic_instance`)
+    // indexes `program.generic_instances`, which never grew — so a substitution-born
+    // id was out of bounds and `snc llvm` PANICKED on a six-line program. inkwell had
+    // the identical bug on its own copy. The fix is to fold the extended interners
+    // back into a program the rest of the dump uses, before Pass 0 runs: the instance
+    // DECLARATIONS have to see them too, or the new `%Box_Box_i64` would be
+    // referenced and never declared.
+    //
+    // Byte-neutrality is by construction, which is what makes this safe in a
+    // byte-differential project: substitution APPENDS, so when it surfaces nothing the
+    // extended tables equal the originals and every existing program's output is
+    // unchanged (verified by sweeping all 340 corpus programs against a pre-change
+    // binary — only the new fixture moved).
+    let mut instances = program.generic_instances.clone();
+    let mut refs = program.refs.clone();
+    let mono_insts = collect_mono_instantiations(program, &mut instances, &mut refs)?;
+    // Substituting each monomorphic BODY is itself an interning step, and it surfaces
+    // instances discovery does not: discovery records `(FnId, type_args)` pairs, while
+    // `Box<Box<i64>>` only comes into existence when `outer`'s body is rewritten at
+    // `T = Box<i64>`. So substitute every body HERE, before the tables are frozen, and
+    // emit from the results further down.
+    let mono_defs: Vec<TypedFnDef> = mono_insts
+        .iter()
+        .map(|(fn_id, args)| {
+            let gdef = program
+                .fns
+                .iter()
+                .find(|f| f.id == *fn_id)
+                .ok_or_else(|| "mono instance references an unknown fn".to_string())?;
+            Ok(gdef.substitute(args, &mut instances, &mut refs))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    // And a THIRD interning step, which is the one with no generic fn in sight:
+    // declaring a concrete instance substitutes its FIELD types, and that can create
+    // further instances — `Wrap<i64>`'s `b: Box<T>` becomes `Box<i64>`. Reaching it
+    // needs nothing but two generic structs and a phantom argument
+    // (`struct Holder<X> { n: i64 }` + `Holder<Wrap<i64>>`), or a `?Wrap<i64>`.
+    //
+    // Run it to a FIXPOINT rather than one pass: an instance created in round N may
+    // have its own fields to substitute in round N+1.
+    //
+    // ⚠ WHICH instances get WALKED is the whole correctness question, and the first
+    // version of this loop got it wrong in a way that regressed working programs. It
+    // walked everything the vec grew by, on the stated ground that "a struct field
+    // cannot reintroduce its own instance — the layout would be infinite and the type
+    // checker rejects it". Both halves of that are false, and an adversarial review
+    // falsified them with four-line programs: `struct A<T> { x: ?A<A<T>>, n: i64 }`
+    // type-checks and has a perfectly FINITE layout, because the recursion goes
+    // through a pointer. Each round then interns a STRICTLY LARGER argument
+    // (`A<i64>`, `A<A<i64>>`, `A<A<A<i64>>>`, …), structural dedup never fires, and
+    // the walk never terminates — the compiler died with a stack overflow on source
+    // the previous release compiled cleanly.
+    //
+    // The fix is to walk only what Pass 0 will actually NAME. `llvm_ty` renders a
+    // generic instance behind ANY pointer indirection as a bare `ptr` — see its
+    // Nullable arm, whose own comment notes that a `?Node` cycle is broken by the
+    // pointer — so `?X` / `[X]` / `Vec<X>` / `&X` fields never need `X`'s layout, and
+    // following them is pure over-approximation. Only a DIRECT by-value generic-instance
+    // field does. Those cannot nest for ever without an infinite layout, so restricting
+    // the walk to them is what makes the original termination argument true.
+    //
+    // A HARD CAP backs it up rather than replacing it, because by-value polymorphic
+    // recursion is still *declarable*: `struct S<T> { c: S<S<T>> }` is accepted (only
+    // the non-generic `struct N { n: N }` trips "recursive struct has no representable
+    // size"), and a phantom argument reaches Pass 0 with it. Such a program has no
+    // finite layout and no correct output, so the cap turns a crash into a DIAGNOSTIC —
+    // better than both the old panic and the stack overflow.
+    const MAX_INSTANCE_CLOSURE: usize = 4096;
+    let mut queue: Vec<usize> = (0..instances.len()).rev().collect();
+    let mut walked: std::collections::HashSet<usize> = (0..instances.len()).collect();
+    while let Some(idx) = queue.pop() {
+        let inst = instances[idx].clone();
+        if inst.args.iter().any(|a| type_has_typeparam_in(*a, &instances, &refs, &program.arrays)) {
+            continue; // abstract: no runtime layout, so no field substitution
+        }
+        for f in program.struct_decl(inst.struct_id).fields.clone() {
+            // Filter on the DECLARED field type before substituting, not after.
+            // Substitution has a side effect — it interns — and an instance interned
+            // here is one Pass 0 will then DECLARE. Filtering afterwards therefore
+            // emitted a spurious extra `%A_A_A_i64` type decl for
+            // `struct A<T> { x: ?A<A<T>>, n: i64 }`, changing the output of a program
+            // that previously compiled. Substitution is shape-preserving, so a field
+            // declared `?X` / `[X]` / `Vec<X>` / `&X` / a scalar / a plain struct can
+            // never substitute INTO a bare `GenericInstance`; only these two can.
+            if !matches!(f.ty, Type::GenericInstance(_) | Type::TypeParam(_)) {
+                continue;
+            }
+            let concrete = f.ty.substitute(&inst.args, &mut instances, &mut refs);
+            // Only a BY-VALUE generic-instance field needs its own layout named.
+            if let Type::GenericInstance(gid) = concrete {
+                let g = gid.0 as usize;
+                if walked.insert(g) {
+                    if walked.len() > MAX_INSTANCE_CLOSURE {
+                        return Err(format!(
+                            "generic instantiation does not converge: laying out \
+                             `{}` requires more than {MAX_INSTANCE_CLOSURE} distinct \
+                             generic-struct instances, which means a by-value field \
+                             mentions its own struct at a strictly larger type \
+                             argument and the layout is infinite",
+                            mangle_struct_name(program, inst.struct_id),
+                        ));
+                    }
+                    queue.push(g);
+                }
+            }
+        }
+    }
+    let extended = {
+        let mut p = program.clone();
+        p.generic_instances = instances;
+        p.refs = refs;
+        p
+    };
+    let program = &extended;
+
     let mut out = String::new();
     writeln!(out, "target triple = \"{TARGET_TRIPLE}\"").unwrap();
     out.push('\n');
@@ -679,13 +802,8 @@ pub fn dump(program: &TypedProgram, drop_plan: &DropPlan) -> Result<String, Stri
     if emitted_struct {
         out.push('\n');
     }
-    // Bar B / generics: discover every monomorphic fn instance `(FnId, type_args)`
-    // reachable from non-generic bodies (reusing the inkwell backend's worklist, so
-    // the set + order match). May extend `instances`/`refs` with nested generic
-    // instances surfaced during substitution.
-    let mut instances = program.generic_instances.clone();
-    let mut refs = program.refs.clone();
-    let mono_insts = collect_mono_instantiations(program, &mut instances, &mut refs);
+    // (`mono_insts` was computed at the top of this function, before Pass 0, so the
+    // generic instances substitution surfaces are declared above — see the note there.)
 
     // FnId order = source order; deterministic + matches the Sentinel side. Build
     // the fns into a buffer so the runtime-symbol `declare`s — emitted only for the
@@ -704,15 +822,14 @@ pub fn dump(program: &TypedProgram, drop_plan: &DropPlan) -> Result<String, Stri
     // concrete `TypedFnDef`, emit under its mangled symbol (`id__i64`). Insertion
     // order from the worklist (mirrors inkwell; the Sentinel records the same order
     // during its walk).
-    for (fn_id, args) in &mono_insts {
+    for (mono_def, (fn_id, args)) in mono_defs.iter().zip(mono_insts.iter()) {
         let gdef = program
             .fns
             .iter()
             .find(|f| f.id == *fn_id)
             .ok_or("mono instance references an unknown fn")?;
-        let mono_def = gdef.substitute(args, &mut instances, &mut refs);
         let sym = mangle_mono_name(&gdef.name, args, program);
-        dump_fn_named(&mono_def, program, drop_plan, &mut fns_buf, &mut used, &sym)?;
+        dump_fn_named(mono_def, program, drop_plan, &mut fns_buf, &mut used, &sym)?;
         fns_buf.push('\n');
     }
     // Class init + method bodies, then impl method bodies (Bar B / classes). Each is a
@@ -4271,17 +4388,59 @@ fn instance_is_concrete(args: &[Type], program: &TypedProgram) -> bool {
     args.iter().all(|a| !type_has_typeparam(*a, program))
 }
 
+/// The slice-taking form of [`type_has_typeparam`], for `dump`'s D15 fixpoint — which
+/// has to ask the question about interner tables that are still GROWING and so cannot
+/// hand over a finished `TypedProgram`. Mirrors inkwell's `arg_contains_typeparam`,
+/// which takes slices for the same reason.
+fn type_has_typeparam_in(
+    ty: Type,
+    instances: &[sentinel_types::GenericInstanceData],
+    refs: &[sentinel_types::RefData],
+    arrays: &[sentinel_types::ArrayElem],
+) -> bool {
+    match ty {
+        Type::TypeParam(_) => true,
+        Type::Nullable(ni) => type_has_typeparam_in(ni.to_type(), instances, refs, arrays),
+        Type::Array(ae) => {
+            type_has_typeparam_in(array_elem_type_in(ae, arrays), instances, refs, arrays)
+        }
+        Type::Vec(ve) => type_has_typeparam_in(ve.to_type(), instances, refs, arrays),
+        Type::Ref(id) => match refs.get(id.0 as usize) {
+            Some(d) => type_has_typeparam_in(d.inner, instances, refs, arrays),
+            None => false,
+        },
+        Type::GenericInstance(id) => match instances.get(id.0 as usize) {
+            Some(inst) => inst
+                .args
+                .iter()
+                .any(|a| type_has_typeparam_in(*a, instances, refs, arrays)),
+            None => false,
+        },
+        _ => false,
+    }
+}
+
+/// ⚠ The Array arm must go through `program.array_elem_type`, NOT the bare
+/// `ArrayElem::to_type()`: a NESTED array's element lives in the `arrays` interner and
+/// the bare promotion hits an `unreachable!` on `ArrayElem::Array`. That is reachable
+/// from ordinary source — `Box<[[u8]]>`, `Pair<i64, [[u8]]>` and `Pair<i64, &[[u8]]>`
+/// all panicked `snc llvm` AND `snc build` before this was fixed (register D16).
+/// Mirrors inkwell `arg_contains_typeparam`, which carries the longer note on why
+/// answering a flat `false` here would be convenient and wrong.
 fn type_has_typeparam(ty: Type, program: &TypedProgram) -> bool {
     match ty {
         Type::TypeParam(_) => true,
         Type::Nullable(ni) => type_has_typeparam(ni.to_type(), program),
-        Type::Array(ae) => type_has_typeparam(ae.to_type(), program),
+        Type::Array(ae) => type_has_typeparam(program.array_elem_type(ae), program),
         Type::Vec(ve) => type_has_typeparam(ve.to_type(), program),
-        Type::Ref(id) => type_has_typeparam(program.refs[id.0 as usize].inner, program),
-        Type::GenericInstance(id) => program.generic_instances[id.0 as usize]
-            .args
-            .iter()
-            .any(|a| type_has_typeparam(*a, program)),
+        Type::Ref(id) => match program.refs.get(id.0 as usize) {
+            Some(d) => type_has_typeparam(d.inner, program),
+            None => false,
+        },
+        Type::GenericInstance(id) => match program.generic_instances.get(id.0 as usize) {
+            Some(inst) => inst.args.iter().any(|a| type_has_typeparam(*a, program)),
+            None => false,
+        },
         _ => false,
     }
 }

@@ -1838,3 +1838,40 @@ fn pass_c16_mono_key_handle_tags() {
     // on.) Exit 42.
     assert_eq!(run_exit("c16_mono_key_handle_tags.sentinel"), 42);
 }
+
+#[test]
+fn pass_c68_nested_array_generic_arg() {
+    // ADR 0068 / register D16: a nested array `[[T]]` as a generic TYPE ARGUMENT
+    // used to PANIC both Rust back ends — `ArrayElem::to_type()`'s `unreachable!`,
+    // reached from codegen Pass 0's abstract-instance filter in each
+    // (`type_has_typeparam` in the oracle, `arg_contains_typeparam` in inkwell).
+    // Not a diagnostic: an `unreachable!` on ordinary user source.
+    //
+    // The exit code is the cheap half. The load-bearing half is that this file is in
+    // the codegen differential's fixture corpus, so `snc llvm` and `scg` are compared
+    // byte-for-byte on it — and they agree, because `scg` already emitted the correct
+    // `arr_arr_u8` tag and the fix brought the two Rust back ends TO it rather than
+    // needing a mirror. 1 + 2 + 2 + 37 = 42.
+    assert_eq!(run_exit("c68_nested_array_generic_arg.sentinel"), 42);
+}
+
+#[test]
+fn pass_c16_mono_root_method_bodies() {
+    // ADR 0016 D7 / register D15 (defect δ): a class init, a class method and an impl
+    // method are monomorphisation ROOTS. `collect_mono_instantiations` seeded only
+    // from `program.fns`, so a generic fn reached ONLY from a method body was never
+    // monomorphised while its call site was still lowered and mangled — both Rust back
+    // ends emitted a call to a symbol they never defined.
+    //
+    // The quietest failure in the D15 family, and the reason it is pinned separately:
+    // its siblings PANIC, this one emits confident-looking text that `llvm-as` rejects
+    // ("use of undefined value '@mk__i64'"). Measured pre-fix on this exact program:
+    // 4 calls, 0 definitions.
+    //
+    // ⚠ Polarity reversed from the rest of the family — `scg` already got this right,
+    // so the fix moved the two Rust back ends TO it. That is what makes this a
+    // `tests/pass` fixture: the two are byte-identical, so it earns real differential
+    // coverage, unlike its deferred `examples/lang/generic_calls_generic.sentinel`
+    // sibling. 4 + 16 + 22 = 42.
+    assert_eq!(run_exit("c16_mono_root_method_bodies.sentinel"), 42);
+}

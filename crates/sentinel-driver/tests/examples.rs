@@ -552,6 +552,13 @@ const EXAMPLES: &[(&str, i32)] = &[
     // instead by `tests/pass/c16_mono_key_handle_tags.sentinel`, through the mono-key
     // route.
     ("examples/lang/phantom_type_param.sentinel", 42),
+    // ADR 0016 D7 / register D15: a generic fn calling a generic fn, plus a generic
+    // struct whose field is another generic instance reached only as a phantom type
+    // argument. Both create instances the TYPE CHECKER never interned, which both Rust
+    // back ends then indexed out of bounds and CRASHED on. Registered in
+    // `DEFERRED_PROGRAMS` for `scg`'s own two gaps (no transitive mono worklist, no
+    // struct-field closure), not for D15. 20 + 18 + 3 + 1 = 42.
+    ("examples/lang/generic_calls_generic.sentinel", 42),
 ];
 
 #[test]
@@ -940,6 +947,17 @@ fn lang_phantom_type_param() {
     // they been wrong identically, nothing in CI would have noticed. (The gate is
     // also skipped entirely when `LLVM_SYS_180_PREFIX` is unset.)
     check_example("examples/lang/phantom_type_param.sentinel", "phantom_type_param", 42);
+}
+
+#[test]
+fn lang_generic_calls_generic() {
+    // ADR 0016 D7 / register D15 (defect alpha). The exit code proves inkwell — which
+    // PANICKED on this shape in `TypedProgram::generic_instance` before the fix —
+    // compiles and runs it. The byte comparison against `scg` is deliberately NOT
+    // asserted here: the program is in `DEFERRED_PROGRAMS` because `scg` has no
+    // transitive monomorphisation worklist and takes no generic-struct field closure,
+    // both of which are its own defects rather than this one. 20 + 18 + 3 + 1 = 42.
+    check_example("examples/lang/generic_calls_generic.sentinel", "generic_calls_generic", 42);
 }
 
 /// Coverage guard: every `.sentinel` program under `examples/` must be

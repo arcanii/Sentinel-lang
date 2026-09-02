@@ -1,0 +1,72 @@
+// A generic function calling another generic function — the ordinary way to build a
+// small generic library, where one helper wraps a value and a second is written in
+// terms of the first without ever naming a concrete type.
+//
+// It is also filed-defect register D15 (defect α), and this program is here because
+// that defect was reachable from about as plain a piece of code as Sentinel has.
+// Monomorphising `outer` at `T = i64` rewrites its body's `wrap(x)` to return
+// `Box<i64>` — an instance the TYPE CHECKER never interned, because nothing in the
+// source ever spells it. Substitution creates it, on a table codegen had cloned and
+// then thrown away, so every consumer (`llvm_ty`, `mangle_type`, the drop walkers)
+// indexed an id past the end of the original and CRASHED the compiler.
+//
+// The boundary is exactly "an instance the type checker never interned", and it has
+// two independent producers, both exercised below:
+//   * `outer`/`wrap` — substituting a generic fn BODY at a concrete type argument;
+//   * `Shelf<Crate<i64>>` — substituting a generic struct's FIELD types when its
+//     declaration is laid out. That route needs NO generic function at all: `Shelf`'s
+//     type parameter is phantom, no value of `Crate<i64>` is ever created, and the
+//     instance comes into being solely because the layout of `Crate<i64>` has to be
+//     named to declare `Shelf<Crate<i64>>`.
+// Neither NESTING nor a generic function is required, contrary to the defect's first
+// filing — `wrap` returning a plain `Box<i64>` trips it just as well.
+//
+// ⚠ REGISTERED IN `DEFERRED_PROGRAMS`, and not because of the bug above — that is
+// fixed in both Rust back ends. The self-hosted `scg` diverges here for two of its
+// OWN reasons, filed separately and all three verified on THIS file:
+//   D24 — its monomorphisation worklist has no transitive closure at all, so `wrap`,
+//         reached only through `boxed_then`'s body, is called and never defined;
+//   D25 — it takes no generic-struct field closure, so it emits
+//         `%Wrap_bool = type { %Box_bool }` while never declaring `%Box_bool`
+//         (`llvm-as`: "use of undefined type named 'Box_bool'");
+//   D26 — it emits a spurious `%Struct.2 = type { i64 }`, a runtime layout for the
+//         generic DECL `Shelf<S>` itself, which has none.
+// All three are independent of D15: they fire with no substitution-born instance
+// anywhere, and pre-interning does not touch them. Delete the registry entry when
+// `scg` grows a real worklist — but check all three, not just the first.
+//
+// Trace: the α1 call returns its `k` of 20, the α2 shelf carries 22. 20 + 22 = 42.
+// Exit 42, no stdout.
+
+struct Box<T> { v: T }
+// `Wrap`'s field is a generic instance BY VALUE, so laying `Wrap<X>` out requires
+// naming `Box<X>` — that is the whole of the α2 route.
+struct Wrap<T> { b: Box<T> }
+// `S` is phantom: no value of it is ever built, and it is never read.
+struct Shelf<S> { label: i64 }
+
+fn wrap<T>(x: T) -> Box<T> {
+    Box { v: x }
+}
+
+// Generic, and calls a generic — the α1 route. `Box<i64>` exists ONLY because this
+// body is substituted at `T = i64`; nothing in the source spells it.
+fn boxed_then<T>(x: T, k: i64) -> i64 {
+    let b = wrap(x);
+    k
+}
+
+fn main() -> i64 {
+    // α1. Note the two routes are kept at DIFFERENT element types on purpose: if both
+    // produced `Box<i64>`, whichever ran first would intern it and the other would
+    // dedup against it, and the fixture would silently stop testing one of them. An
+    // earlier draft of this file did exactly that and pinned neither.
+    let from_alpha1: i64 = boxed_then(1, 20);
+
+    // α2. `Shelf<Wrap<bool>>` spells `Wrap<bool>`, so the type checker interns THAT —
+    // but not `Box<bool>`, which comes into being only when `Wrap<bool>`'s field is
+    // substituted to lay it out. No generic function is involved in this route at all.
+    let s: Shelf<Wrap<bool>> = Shelf { label: 22 };
+
+    from_alpha1 + s.label
+}

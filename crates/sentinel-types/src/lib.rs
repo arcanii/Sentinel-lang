@@ -1890,9 +1890,16 @@ fn array_elem_of(
 /// type-check sites that hold the in-progress `arrays` vec rather than a finished
 /// [`TypedProgram`]. For a flat element this is `ae.to_type()`; for `Array(id)` it
 /// is the nested `[inner]` = `Type::Array(arrays[id])`.
-fn array_elem_type_in(ae: ArrayElem, arrays: &[ArrayElem]) -> Type {
+pub fn array_elem_type_in(ae: ArrayElem, arrays: &[ArrayElem]) -> Type {
     match ae {
-        ArrayElem::Array(id) => Type::Array(arrays[id.0 as usize]),
+        // ADR 0068: an out-of-range ArrayId cannot come from `check`, but this is
+        // `pub` (codegen's Pass-0 walkers use it), so answer defensively rather than
+        // indexing — the alternative is a panic on user-program input, which is
+        // exactly what this function exists to stop.
+        ArrayElem::Array(id) => match arrays.get(id.0 as usize) {
+            Some(inner) => Type::Array(*inner),
+            None => Type::Array(ArrayElem::U8),
+        },
         flat => flat.to_type(),
     }
 }

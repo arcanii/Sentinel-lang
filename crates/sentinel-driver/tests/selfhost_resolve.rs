@@ -707,6 +707,6 @@ fn sentinel_resolver_matches_oracle_on_real_programs() {
     // each is `examples/lang/phantom_type_param.sentinel`, ADR 0016 A1 — it merges, so
     // the merged FLOOR moves with the direct count, per this helper's own
     // "the floor is set to today's actual count" rule).
-    real_program_differential("resolve", &resolver, &work, 12, 12);
+    real_program_differential("resolve", &resolver, &work, 13, 13);
     let _ = std::fs::remove_dir_all(&tmp);
 }

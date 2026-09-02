@@ -1,0 +1,44 @@
+// ADR 0068 / filed-defect register D16: a NESTED array `[[T]]` used as a generic
+// TYPE ARGUMENT. Before this fixture both Rust back ends PANICKED on it — not a
+// diagnostic, an `unreachable!` — so the shapes below could not be compiled at all.
+//
+// The cause was one line repeated in two walkers. `ArrayElem::to_type()` is the
+// TABLE-LESS promotion of an array element to a `Type`, and it cannot resolve
+// `ArrayElem::Array` (a nested array's inner element lives in the `arrays` interner),
+// so it ends in `unreachable!("use TypedProgram::array_elem_type (ADR 0068)")`.
+// Codegen's Pass-0 "is this generic instance abstract?" filter called the bare form in
+// both back ends — `type_has_typeparam` in the `snc llvm` oracle and
+// `arg_contains_typeparam` in inkwell — and Pass 0 walks every interned instance, so
+// ANY generic instantiated at a nested array reached it. Both now go through the
+// interner-aware promotion, and the resulting tag (`arr_arr_u8`) is what the
+// self-hosted `scg` already emitted, so the fix brought the three back ends into
+// agreement rather than needing a mirror.
+//
+// Three shapes, deliberately: they fail for the same reason but arrive by different
+// routes, and a fix validated on only the first would look complete.
+//   * a PHANTOM argument (`Pair<i64, [[u8]]>`) — the nested array is named but no
+//     value of it exists;
+//   * a REAL field (`Box<[[u8]]>`) — the argument is the field's type, so the
+//     instance also has to LOWER, not merely be named;
+//   * under a reference (`Pair<i64, &[[u8]]>`) — proves the walk recurses through
+//     `Ref` into the array rather than stopping at the first wrapper.
+//
+// ⚠ What this does NOT establish: that `[[T]]` is generic. `struct Box<T> { v: [[T]] }`
+// DECLARES fine and the dump shows `[[<T#0>]]`, but it cannot be INSTANTIATED —
+// unification refuses `[[T]]` against `[[u8]]` (ADR 0068 D6, still deferred). So the
+// sibling guards that answer a flat `false` for a nested array on the stated grounds
+// that "it carries no TypeParam" are resting on a false premise and merely have not
+// been caught by it yet. The two walkers fixed here recurse properly instead.
+//
+// Trace: the phantom and ref instances carry no data (1 + 2), the box holds two
+// strings of 1 and 2 bytes (len 2), and 37 + 1 + 2 + 2 = 42. Exit 42, no stdout.
+
+struct Pair<A, B> { a: A }
+struct Box<T> { v: T }
+
+fn main() -> i64 {
+    let p: Pair<i64, [[u8]]> = Pair { a: 1 };
+    let r: Pair<i64, &[[u8]]> = Pair { a: 2 };
+    let b: Box<[[u8]]> = Box { v: ["a", "bb"] };
+    p.a + r.a + len(b.v) + 37
+}

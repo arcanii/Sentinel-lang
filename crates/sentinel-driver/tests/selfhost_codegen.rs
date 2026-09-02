@@ -688,6 +688,26 @@ const DEFERRED_PROGRAMS: &[(&str, &str)] = &[
     // deferred: this is the PROCESS channel (process_send/process_recv, fids 29/30),
     // which the M1.2 in-process-channel mirror did not touch.
     ("examples/lang/process_channel_typed.sentinel", "ADR 0066 M2.3b: generic process-channel elements are snc-only — scg emits INVALID IR (missing the zext encode: i8 passed as i64)"),
+    // Register D24/D25/D26, NOT D15 (which is fixed in both Rust back ends). THREE
+    // independent scg gaps, each verified on this exact program:
+    //   D24 — scg's monomorphisation worklist has ZERO transitive closure. It seeds
+    //         only from NON-generic bodies, so a generic fn reached through another
+    //         generic fn's body is CALLED and never DEFINED: `@wrap__i64` here. It
+    //         needs no generic struct at all — `fn ident<T>(x: T) -> T` called from a
+    //         generic `outer` is enough.
+    //   D25 — scg takes no generic-struct FIELD closure, so it emits
+    //         `%Wrap_bool = type { %Box_bool }` while never declaring `%Box_bool` —
+    //         an undefined TYPE rather than an undefined function (`llvm-as`: "use of
+    //         undefined type named 'Box_bool'").
+    //   D26 — scg emits a spurious `%Struct.2 = type { i64 }`: a runtime layout for
+    //         the generic DECL `Shelf<S>`, which has none. The Rust back ends skip
+    //         generic decls in Pass 0.
+    // All three are unrelated to the interner-staleness D15 fixed: they fire with no
+    // substitution-born instance anywhere. ⚠ This entry also exempts the program from
+    // the `llvm_rejects` validity gate below (it is guarded by `deferred_reason`), and
+    // scg's IR for it IS invalid — that is disclosed here rather than discovered later.
+    // Delete this entry when scg grows a real worklist, and re-check all three gaps.
+    ("examples/lang/generic_calls_generic.sentinel", "register D24/D25/D26: scg has no transitive mono worklist, no generic-struct field closure, and emits a layout for a generic decl — undefined symbols AND an undefined type"),
 ];
 
 /// Programs whose divergence is a REAL BUG in `scg`, not a deferred feature —

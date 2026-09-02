@@ -783,8 +783,8 @@ fn sentinel_mir_matches_oracle_on_real_programs() {
         &work,
         MIR_DEFERRED_PROGRAMS,
         MIR_KNOWN_SCG_BUGS,
-        12,
-        12,
+        13,
+        13,
     );
     let _ = std::fs::remove_dir_all(&tmp);
 }
@@ -803,8 +803,8 @@ fn sentinel_ctverifier_matches_oracle_on_real_programs() {
         &work,
         CTVERIFY_DEFERRED_PROGRAMS,
         CTVERIFY_KNOWN_SCG_BUGS,
-        12,
-        12,
+        13,
+        13,
     );
     let _ = std::fs::remove_dir_all(&tmp);
 }

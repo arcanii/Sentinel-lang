@@ -59,8 +59,8 @@ use sentinel_resolve::{
 };
 use sentinel_ast::SelfKind;
 use sentinel_types::{
-    channel_elem_for, fn_value_sig_param_ret, guard_elem_for, mutex_elem_for, shared_elem_for,
-    type_display, ArrayElem, ClassData, GenericInstanceData,
+    array_elem_type_in, channel_elem_for, fn_value_sig_param_ret, guard_elem_for, mutex_elem_for,
+    shared_elem_for, type_display, ArrayElem, ClassData, GenericInstanceData,
     GenericInstanceId, ImplData,
     NullableInner, RefData, SecretData, Type, TypedBlock, TypedExpr, TypedExprKind, TypedFnDef,
     TypedFnSignature, TypedHandlerArm, TypedMatchArm, TypedPattern, TypedProgram, TypedReturnArm,
@@ -252,7 +252,8 @@ pub fn compile_to_object_for_module(
     // program too. The interner table flows into llvm_basic_type so
     // every Secret(SecretId) lookup can strip to the inner type.
     let secrets: Vec<SecretData> = program.secrets.clone();
-    let instantiations = collect_mono_instantiations(program, &mut instances, &mut refs);
+    let instantiations = collect_mono_instantiations(program, &mut instances, &mut refs)
+        .map_err(CodegenError::VerifyFailed)?;
     // Materialise each fn instance as a substituted TypedFnDef so
     // pass 2's body lowering can consume it without TypeParam-
     // awareness. May extend `instances` further as nested generic
@@ -271,6 +272,90 @@ pub fn compile_to_object_for_module(
             )
         })
         .collect();
+
+    // Register item D15. The two steps above already ran before Pass 0 — that part was
+    // right — but their extended `instances` / `refs` stayed LOCAL while every consumer
+    // (`program.generic_instance(..)`, `program.struct_decl(..)`, the drop walkers)
+    // reads `program`, whose tables never grew. A substitution-born id was therefore
+    // out of bounds, and `snc build` PANICKED in `TypedProgram::generic_instance` on a
+    // six-line program (`fn inner<T>(x: T) -> Box<T>` called from a generic `outer`).
+    //
+    // A THIRD interning step is needed as well, and it needs no generic fn at all:
+    // declaring a concrete instance substitutes its FIELD types, which can create
+    // further instances — `Wrap<i64>`'s `b: Box<T>` becomes `Box<i64>`. Two generic
+    // structs and a phantom argument reach it (`struct Holder<X> { n: i64 }` +
+    // `Holder<Wrap<i64>>`), as does `?Wrap<i64>`.
+    //
+    // Run that to a FIXPOINT — an instance created in round N may have its own fields
+    // to substitute in round N+1 — then fold everything back into the program the rest
+    // of this function sees.
+    //
+    // ⚠ WHICH instances are WALKED is the correctness question, and getting it wrong
+    // regressed working programs. The first version walked everything the vec grew by,
+    // claiming "no recursive-by-value generic struct exists — the type checker rejects
+    // it". A review falsified that with `struct A<T> { x: ?A<A<T>>, n: i64 }`: it
+    // type-checks and its layout is FINITE, because the recursion is behind a pointer.
+    // Each round then interns a strictly larger argument, dedup never fires, and the
+    // compiler stack-overflowed on source the previous release compiled.
+    //
+    // So walk only what Pass 0 will NAME. A generic instance behind any pointer
+    // indirection lowers to a bare `ptr`, so `?X` / `[X]` / `Vec<X>` / `&X` fields
+    // never need `X`'s layout; only a DIRECT by-value one does, and those cannot nest
+    // for ever without an infinite layout. The filter is on the DECLARED field type
+    // BEFORE substituting, because substitution interns as a side effect and anything
+    // interned here is something Pass 0 then declares — filtering afterwards emitted a
+    // spurious extra type declaration.
+    //
+    // The cap backs that up rather than replacing it: `struct S<T> { c: S<S<T>> }` IS
+    // declarable (only the non-generic `struct N { n: N }` trips the recursive-size
+    // check) and a phantom argument reaches Pass 0 with it. Such a program has no
+    // finite layout, so refusing it is the correct answer — and a diagnostic beats the
+    // panic it used to produce.
+    //
+    // Byte-neutral by construction otherwise: substitution APPENDS, so a program that
+    // surfaces nothing gets identical tables and identical output. Mirrors
+    // `llvm_dump::dump`, which must stay in step — the two are compared byte-for-byte.
+    const MAX_INSTANCE_CLOSURE: usize = 4096;
+    let mut queue: Vec<usize> = (0..instances.len()).rev().collect();
+    let mut walked: HashSet<usize> = (0..instances.len()).collect();
+    while let Some(idx) = queue.pop() {
+        let inst = instances[idx].clone();
+        if inst
+            .args
+            .iter()
+            .any(|a| arg_contains_typeparam(*a, &instances, &refs, &program.arrays))
+        {
+            continue; // abstract: no runtime layout, so no field substitution
+        }
+        for f in program.struct_decl(inst.struct_id).fields.clone() {
+            if !matches!(f.ty, Type::GenericInstance(_) | Type::TypeParam(_)) {
+                continue; // pointer-indirect or non-generic: never names an instance
+            }
+            let concrete = f.ty.substitute(&inst.args, &mut instances, &mut refs);
+            if let Type::GenericInstance(gid) = concrete {
+                let g = gid.0 as usize;
+                if walked.insert(g) {
+                    if walked.len() > MAX_INSTANCE_CLOSURE {
+                        return Err(CodegenError::VerifyFailed(format!(
+                            "generic instantiation does not converge: laying out this \
+                             program requires more than {MAX_INSTANCE_CLOSURE} distinct \
+                             generic-struct instances, which means a by-value field \
+                             mentions its own struct at a strictly larger type argument \
+                             and the layout is infinite"
+                        )));
+                    }
+                    queue.push(g);
+                }
+            }
+        }
+    }
+    let extended_program = {
+        let mut p = program.clone();
+        p.generic_instances = instances.clone();
+        p.refs = refs.clone();
+        p
+    };
+    let program = &extended_program;
 
     // Pass 0: declare every user struct (non-generic + generic
     // instance) as an LLVM struct type. The typed program's struct
@@ -308,7 +393,7 @@ pub fn compile_to_object_for_module(
     // materialize at runtime — the monomorphic clones use
     // concrete-arg instances built during substitution.
     let abstract_args = |args: &[Type]| -> bool {
-        args.iter().any(|a| arg_contains_typeparam(*a, &instances, &refs))
+        args.iter().any(|a| arg_contains_typeparam(*a, &instances, &refs, &program.arrays))
     };
     for (idx, inst) in instances.iter().enumerate() {
         if abstract_args(&inst.args) {
@@ -2425,11 +2510,20 @@ fn llvm_basic_type<'ctx>(
 // monomorphic-instance discovery is byte-faithful to the inkwell backend's — pure
 // logic over the TypedProgram (no inkwell types), so the textual oracle and the
 // production codegen monomorphize the same set in the same order.
+///
+/// ⚠ Returns `Err` when the closure does not converge. A generic fn that instantiates
+/// ITSELF at a strictly larger type — `fn grow<T>(x: T) -> i64 { let b = mk(x); grow(b) }`
+/// — type-checks, and its worklist never closes because the deepening type never
+/// repeats. Unbounded instantiation is a compiler denial-of-service reachable from four
+/// accepted lines, so the walk is CAPPED and refuses rather than hanging. The cap is far
+/// above any real program (a monomorphic instance per entry, and the largest corpus
+/// program has a handful).
 pub fn collect_mono_instantiations(
     program: &TypedProgram,
     instances: &mut Vec<GenericInstanceData>,
     refs: &mut Vec<RefData>,
-) -> Vec<(FnId, Vec<Type>)> {
+) -> Result<Vec<(FnId, Vec<Type>)>, String> {
+    const MAX_MONO_INSTANCES: usize = 4096;
     let mut visited: HashSet<(FnId, Vec<Type>)> = HashSet::new();
     let mut order: Vec<(FnId, Vec<Type>)> = Vec::new();
     let mut pending: Vec<(FnId, Vec<Type>)> = Vec::new();
@@ -2451,10 +2545,64 @@ pub fn collect_mono_instantiations(
             &mut pending,
         );
     }
+    // …and from CLASS init / method bodies and IMPL method bodies, which are lowered
+    // as ordinary functions but do not live in `program.fns`. Omitting them was the
+    // quietest member of the D15 family: a generic fn reached ONLY from a method body
+    // was never monomorphised, so both Rust back ends emitted a call to a symbol they
+    // never defined — no panic, no diagnostic, just text that `llvm-as` rejects with
+    // "use of undefined value '@mk__i64'". The self-hosted `scg` gets this right, so
+    // the polarity was reversed from the rest of the family and the fix moves the two
+    // Rust back ends TO scg. Corpus-neutral: no shipped program calls a generic fn
+    // from a method body (swept, 222 emitted programs, zero undefined symbols).
+    for class in &program.class_decls {
+        if let Some(init) = &class.init {
+            walk_block_for_mono(
+                &init.body,
+                &no_subst,
+                program,
+                instances,
+                refs,
+                &mut visited,
+                &mut order,
+                &mut pending,
+            );
+        }
+        for m in &class.methods {
+            walk_block_for_mono(
+                &m.body,
+                &no_subst,
+                program,
+                instances,
+                refs,
+                &mut visited,
+                &mut order,
+                &mut pending,
+            );
+        }
+    }
+    for imp in &program.impl_decls {
+        for m in &imp.methods {
+            walk_block_for_mono(
+                &m.body,
+                &no_subst,
+                program,
+                instances,
+                refs,
+                &mut visited,
+                &mut order,
+                &mut pending,
+            );
+        }
+    }
 
     // Worklist: each pending instance is itself a generic-fn body
     // we now walk under its concrete type-args.
     while let Some((fn_id, subst)) = pending.pop() {
+        if order.len() > MAX_MONO_INSTANCES {
+            return Err(format!(
+                "monomorphic instantiation does not converge: more than                  {MAX_MONO_INSTANCES} distinct instances, which means a generic fn                  instantiates itself at a strictly larger type argument"
+            ));
+        }
         let generic_def = program
             .fns
             .iter()
@@ -2472,7 +2620,7 @@ pub fn collect_mono_instantiations(
         );
     }
 
-    order
+    Ok(order)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2595,6 +2743,29 @@ fn walk_expr_for_mono(
             );
         }
         TypedExprKind::Call { id, args, type_args, .. } => {
+            // A type argument mentioning a TypeParam this walk has no binding for is
+            // not monomorphisable HERE, and substituting it would index `subst` out of
+            // range — `Type::substitute` does `subst[idx]` behind a `debug_assert!`,
+            // so it aborts in every profile.
+            //
+            // Reachable since the D15 δ fix added IMPL-METHOD bodies as seed roots:
+            // `impl as Get for Box` targets a GENERIC struct, so the method body sees
+            // `Box`'s `T` while the seed walk carries an empty substitution.
+            // `impl as Get for Box { fn get(...) { let y = mk(self.v); k } }` turned a
+            // clean "type not yet ported: TypeParam(0)" refusal into a panic. Skipping
+            // restores the refusal: the call is left un-monomorphised and the back end
+            // Errs on the TypeParam downstream, exactly as it did before δ.
+            if type_args
+                .iter()
+                .any(|t| type_arg_escapes_subst(*t, subst, instances, refs))
+            {
+                for a in args {
+                    walk_expr_for_mono(
+                        a, subst, program, instances, refs, visited, order, pending,
+                    );
+                }
+                return;
+            }
             // Substitute the call's type_args under the active
             // subst to get the concrete instantiation key.
             let concrete_args: Vec<Type> = type_args
@@ -2843,6 +3014,13 @@ fn mono_args_dedup_safe(args: &[Type], origins: &NamedTypeOrigins) -> bool {
             }
             Type::Struct(id) => origins.structs.contains_key(&id),
             Type::Enum(id) => origins.enums.contains_key(&id),
+            // ADR 0068 / register D16: a NESTED array (`[[T]]`) is never dedup-safe.
+            // This arm is CONSERVATISM, not a claim — resolving the inner element
+            // would need the `arrays` interner, and widening the dedup gate on a
+            // guess is precisely what D19 warns against. It must come before the
+            // flat-Array arm below, whose `e.to_type()` would otherwise hit
+            // `ArrayElem::to_type`'s `unreachable!` on user source.
+            Type::Array(ArrayElem::Array(_)) => false,
             Type::Array(e) => safe(e.to_type(), origins),
             Type::Vec(e) => safe(e.to_type(), origins),
             Type::Nullable(inner) => safe(inner.to_type(), origins),
@@ -3093,15 +3271,66 @@ fn mangle_type(ty: Type, program: &TypedProgram) -> String {
     }
 }
 
+/// `true` iff `ty` mentions a `Type::TypeParam` whose index has NO binding in
+/// `subst` — i.e. substituting it would index out of range and abort. The monomorphic
+/// walk uses this to SKIP a call it cannot instantiate in the current context rather
+/// than crash on it; see the call site for the impl-on-generic-struct shape that makes
+/// it reachable. A TypeParam that IS bound is fine and must not be skipped.
+fn type_arg_escapes_subst(
+    ty: Type,
+    subst: &[Type],
+    instances: &[GenericInstanceData],
+    refs: &[RefData],
+) -> bool {
+    match ty {
+        Type::TypeParam(id) => (id.0 as usize) >= subst.len(),
+        Type::Nullable(ni) => type_arg_escapes_subst(ni.to_type(), subst, instances, refs),
+        Type::Vec(ve) => type_arg_escapes_subst(ve.to_type(), subst, instances, refs),
+        // A nested array's element is interned and concrete, and the bare
+        // `ArrayElem::to_type()` would hit its `unreachable!` (register D16), so stop
+        // here: `[[T]]` cannot carry an unbound TypeParam through this path.
+        Type::Array(ArrayElem::Array(_)) => false,
+        Type::Array(ae) => type_arg_escapes_subst(ae.to_type(), subst, instances, refs),
+        Type::Ref(id) => match refs.get(id.0 as usize) {
+            Some(d) => type_arg_escapes_subst(d.inner, subst, instances, refs),
+            None => false,
+        },
+        Type::GenericInstance(id) => match instances.get(id.0 as usize) {
+            Some(inst) => inst
+                .args
+                .iter()
+                .any(|a| type_arg_escapes_subst(*a, subst, instances, refs)),
+            None => false,
+        },
+        _ => false,
+    }
+}
+
 /// `true` iff `ty` mentions any `Type::TypeParam`, transitively
 /// through `Nullable`, `Array`, `GenericInstance`, and `Ref`. Used
 /// by codegen pass 0 to filter the abstract (TypeParam-using)
 /// instances out of LLVM struct-type emission per ADR 0016 D6 +
 /// ADR 0017 D11.
+///
+/// Takes `arrays` because a NESTED array's element lives in that interner: the
+/// bare `ArrayElem::to_type()` hits an `unreachable!` on `ArrayElem::Array`, and
+/// this walker is reached from user source (`Box<[[u8]]>`, `Pair<i64, [[u8]]>`,
+/// `Pair<i64, &[[u8]]>` all panicked `snc build` before this was threaded —
+/// register item D16).
+///
+/// ⚠ The tempting shortcut is `Type::Array(ArrayElem::Array(_)) => false`, which is
+/// what the sibling `sentinel_types::contains_type_param` does, on the stated
+/// grounds that "a nested-array element is interned/concrete, so it carries no
+/// TypeParam". **That premise is false** — `struct Box<T> { v: [[T]] }` and
+/// `fn f<T>(x: [[T]])` both type-check and the dump shows `[[<T#0>]]`. What is true
+/// is narrower: such a declaration cannot be INSTANTIATED (unification rejects
+/// `[[T]]` against `[[u8]]`, ADR 0068 D6), so the wrong answer has not yet cost
+/// anything. Recursing through the interner is right whether or not D6 is lifted.
 fn arg_contains_typeparam(
     ty: Type,
     instances: &[GenericInstanceData],
     refs: &[RefData],
+    arrays: &[ArrayElem],
 ) -> bool {
     match ty {
         Type::TypeParam(_) => true,
@@ -3121,14 +3350,22 @@ fn arg_contains_typeparam(
         // Phase D.1 / ADR 0032: enums are non-generic at the MVP.
         | Type::Enum(_)
         | Type::TraitSelf(_) => false,
-        Type::Nullable(ni) => arg_contains_typeparam(ni.to_type(), instances, refs),
-        Type::Array(ae) => arg_contains_typeparam(ae.to_type(), instances, refs),
-        Type::Vec(ve) => arg_contains_typeparam(ve.to_type(), instances, refs),
-        Type::GenericInstance(id) => instances[id.0 as usize]
-            .args
-            .iter()
-            .any(|a| arg_contains_typeparam(*a, instances, refs)),
-        Type::Ref(id) => arg_contains_typeparam(refs[id.0 as usize].inner, instances, refs),
+        Type::Nullable(ni) => arg_contains_typeparam(ni.to_type(), instances, refs, arrays),
+        Type::Array(ae) => {
+            arg_contains_typeparam(array_elem_type_in(ae, arrays), instances, refs, arrays)
+        }
+        Type::Vec(ve) => arg_contains_typeparam(ve.to_type(), instances, refs, arrays),
+        Type::GenericInstance(id) => match instances.get(id.0 as usize) {
+            Some(inst) => inst
+                .args
+                .iter()
+                .any(|a| arg_contains_typeparam(*a, instances, refs, arrays)),
+            None => false,
+        },
+        Type::Ref(id) => match refs.get(id.0 as usize) {
+            Some(d) => arg_contains_typeparam(d.inner, instances, refs, arrays),
+            None => false,
+        },
         // C3 / ADR 0019 D5: `secret T` at C3.1 wraps a concrete
         // (non-TypeParam) inner — no recursion. Returns false.
         // Future ADRs may relax for `secret <generic-T>` and need

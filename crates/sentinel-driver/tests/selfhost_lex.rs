@@ -493,6 +493,6 @@ fn sentinel_lexer_matches_oracle_on_real_programs() {
     let lexer = build_sentinel_lexer(&tmp);
     let work = tmp.join("work");
     std::fs::create_dir_all(&work).expect("create work dir");
-    real_program_differential("lex", &lexer, &work, 120, 22);
+    real_program_differential("lex", &lexer, &work, 121, 23);
     let _ = std::fs::remove_dir_all(&tmp);
 }

@@ -1,0 +1,74 @@
+// ADR 0016 D7 / filed-defect register D15 (defect δ): a CLASS init, a CLASS method
+// and an IMPL method are monomorphisation ROOTS, exactly like a free fn.
+//
+// `collect_mono_instantiations` seeds its worklist from `program.fns`, and class
+// init/method bodies and impl-method bodies do not live there — they are lowered as
+// ordinary functions but hang off `class_decls` / `impl_decls`. So a generic fn
+// reached ONLY from a method body was never monomorphised, while its CALL SITE was
+// still lowered and mangled. Both Rust back ends therefore emitted a call to a symbol
+// they never defined: `llvm-as` says "use of undefined value '@mk__i64'".
+//
+// That is the quietest failure in the D15 family and the reason it is worth its own
+// fixture. Its siblings PANIC — loud, immediate, impossible to ship past. This one
+// emits confident-looking text that no backend will load, and nothing in the corpus
+// reached it (222 emitted programs, zero undefined symbols), so it sat green.
+//
+// ⚠ The polarity here is REVERSED from the rest of the family: the self-hosted `scg`
+// already got this right, so the fix moved the two Rust back ends TO scg. That is what
+// makes this a `tests/pass` fixture at all — oracle and `scg` are byte-identical on
+// it, so it earns real differential coverage. Its `examples/lang/generic_calls_generic.sentinel`
+// sibling covers the routes where `scg` is the one that is wrong, and is deferred.
+//
+// ⚠ EACH ROOT CALLS `mk` AT A DIFFERENT TYPE, and that is the entire point of the
+// design. Three separate seed lists are being tested, and an earlier draft had all
+// three call `mk` at `i64` — which collapses to ONE monomorphic instance, so a fix
+// that added only impl methods (or only class init, or only class methods) produced
+// byte-identical IR and still exited 42. The fixture passed while testing one third of
+// what it claimed. Distinct types force three distinct definitions — `@mk__u8`,
+// `@mk__i64` and `@mk__bool` — so a partially-seeded worklist leaves an undefined
+// symbol and `llvm-as` rejects it. Keep them distinct.
+//
+// Trace: init stores mk(true) as 4, the class method contributes mk(seed)*k, and the
+// impl method contributes mk(d) as a u8 widened back. 4 + 16 + 22 = 42.
+// Exit 42, no stdout.
+
+fn mk<T>(x: T) -> T {
+    x
+}
+
+trait Doubler {
+    fn twice(self: &Self, d: i64) -> i64;
+}
+
+struct Counter { n: i64 }
+
+impl as Doubler for Counter {
+    fn twice(self: &Self, d: i64) -> i64 {
+        // IMPL-METHOD root, instantiating `mk` at `u8`.
+        let b: u8 = i64_to_u8(d);
+        u8_to_i64(mk(b)) + u8_to_i64(mk(b))
+    }
+}
+
+class Holder {
+    let seed: i64;
+    pub init(seed: i64) {
+        // CLASS-INIT root, instantiating `mk` at `bool`.
+        let ok: bool = mk(true);
+        self.seed = if ok { seed } else { 0 };
+        0
+    }
+    pub fn scaled(self: &Self, k: i64) -> i64 {
+        // CLASS-METHOD root, instantiating `mk` at `i64`.
+        mk(self.seed) * k
+    }
+}
+
+fn main() -> i64 {
+    let h: Holder = Holder::init(4);
+    let from_init: i64 = h.scaled(1);
+    let from_method: i64 = h.scaled(4);
+    let c: Counter = Counter { n: 0 };
+    let from_impl: i64 = c.twice(11);
+    from_init + from_method + from_impl
+}
