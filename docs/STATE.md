@@ -14,7 +14,90 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
-**Latest (2026-08-31) — the register's D3 is closed: `scg` now threads the expected type
+**Latest (2026-09-02) — the register's D5 is closed: the type-mangling scheme D7 left "TBD in
+implementation" is now pinned, structural and exhaustive in all three back ends** (**ADR 0016
+A1**, the ADR's first amendment; table in [`abi-v1.md`](abi-v1.md) §4; pinned by
+`examples/lang/phantom_type_param.sentinel` + `tests/pass/c16_mono_key_handle_tags.sentinel`).
+A tag is now derived from the type's own SHAPE, never from an interner index — which is the
+only property that lets three independent implementations produce the same name, since `scg`
+interns in its own order and has no `SharedId`/`TaskId` concept at all.
+
+**Both printing back ends were emitting invalid IR, differently, on the same six-line
+program.** The oracle's `mangle_type` ended in `other => format!("ty_{other:?}")`, leaking
+Rust's `Debug` into an LLVM identifier: `%Pair_i64_ty_Shared(SharedId(0))`, which `llvm-as`
+rejects outright ("expected '=' after name"). `scg`'s `cg_mangle_to` ended in a bare `ty`, so
+TEN interner kinds collapsed onto one token and two distinct markers produced two identical
+declarations ("redefinition of type"). Only inkwell — the back end that emits objects — was
+right, and it still is: the repro compiles and runs correctly today. **That asymmetry is why
+the defect survived.** No exit-code test can see it, and the oracle-vs-`scg` byte comparison
+cannot see a name the two get wrong *identically* — which is exactly what `ty_F64` and
+`ty_Ptr` were, hand-written into `cg_mangle_to` to match the oracle's `Debug` output. Two
+implementations agreeing is not evidence when the third is the one that ships.
+
+**The scope was ELEVEN variants, not the two on file, by two independent routes.** The
+register entry described a PHANTOM generic type argument, which needs the type to be writable
+in type position. The **mono-key** route does not: `idg(v)` on a plain `fn idg<T>(x: T) -> T`
+puts the type straight into `mangle_mono_name`, reaching `Task`, `Process` and `Guard` — none
+of them writable in an annotation — and corrupting a **function symbol** rather than a type
+declaration. Verified reachable by construction: `Class`, `Enum`, `Channel`, `Shared`,
+`Mutex`, `Guard`, `Task`, `Fn`, `Process`, `SealedChannel`, `U128`. `Class` and `Enum` need no
+concurrency feature at all — a plain enum as a generic argument reproduces the whole defect,
+which falsified both back ends' comments claiming only a container kind could reach the
+fallback. `Kont`, `TraitSelf` and `TypeParam` were verified UNREACHABLE, by trying every path
+that exists rather than by assertion; they get real structural tags anyway, because the point
+of an exhaustive match is that "unreachable" is never carried by a wildcard.
+
+**`scg` needed a second, non-mangling change**, and its filed description understated it. The
+`Shared<T>` / `Mutex<T>` type-position arms resolved the type argument and then discarded it,
+which the register called a tolerated, snc-only, IR-invisible over-accept. It is structural:
+with the element gone, `Tagged<i64, Shared<u8>>` and `Tagged<i64, Shared<i64>>` intern to the
+SAME handle, so `scg` emitted one generic-instance declaration where the oracle emitted two —
+a collapse no naming scheme could have separated. Measured on the new example: pre-change
+`scg` emitted 17 declarations under 10 distinct names, post-change 20 under 20.
+
+**`scg`'s fallback is now loud rather than plausible** (`UNKNOWN_KIND_<n>`, which no oracle tag
+can equal, so a future interner kind that forgets its arm fails the differential on the first
+program that reaches it). The Rust side gets this free: both `mangle_type` matches are
+exhaustive, so a new `Type` variant is a compile error.
+
+**⚠ THREE THINGS THIS SLICE MAKES VISIBLE WITHOUT FIXING, plus one regression it knowingly
+accepts** — all registered, all measured rather than reasoned:
+(i) **the tag/user-name collision class.** `struct arr_i64 {}` tags `arr_i64`, the same tag as
+`[i64]`, so `Pair<arr_i64, i64>` and `Pair<[i64], i64>` mangle identically — the oracle emits
+one `%Pair_arr_i64_i64` for two DIFFERENT layouts. PRE-EXISTING, byte-identical in both
+printing back ends, not closable by enumeration (`_` and `$` are both legal Sentinel
+identifier characters), and `abi-v2` encoding work.
+(ii) **A1 WIDENS that class in the two printing back ends**, found by the adversarial review
+and larger than the first draft of this entry said. The oracle's old tags contained
+PARENTHESES (`ty_Shared(SharedId(0))`), illegal in a Sentinel identifier and so accidentally
+UNFORGEABLE; every tag A1 introduces or renames is a legal identifier and therefore forgeable.
+Constructed: `struct process {}` beside a `Process` value emits `@idg__process` twice, and
+`struct f64 {}` beside a real `f64` value makes scg emit `@idg__f64` twice (pre-A1
+`@idg__f64` + `@idg__ty_F64`). The review also killed the defence this entry first offered —
+primitive spellings DO shadow the struct table in TYPE position, but the MONO-KEY route needs
+no spelling at all, only a value, so `idg(f64 { z: 20 })` reaches the tag anyway and nothing
+is safe by shadowing. Accepted because inkwell already used every one of these spellings (no
+*shipped* behaviour moves; LLVM uniquifies a duplicate) and the alternative is the printing
+back ends disagreeing forever with the one that ships. Against it, A1 removes a TEN-way
+UNCONDITIONAL collision and every unparseable name.
+(iii) **the `$` origin-separator premise in the `linkonce_odr` dedup was FALSE.** Its comment
+said `$` "can't appear in a bare type name"; the lexer accepts it (`[A-Za-z_][A-Za-z0-9_$]*`),
+and `struct util$geo$Point` compiles and tags identically to module `util::geo`'s `Point`.
+What actually keeps distinct instantiations off one symbol is `mono_args_dedup_safe` requiring
+a KNOWN ORIGIN — so that gate is load-bearing and must not be widened on the old belief. Both
+comments corrected here; no code change.
+
+**Two crashes on this surface were found in passing and are NOT fixed** (register D15/D16),
+both reachable from ordinary source and both in the SHIPPED compiler: `Box<[[u8]]>` panics
+`ArrayElem::to_type()`'s `unreachable!`, and a generic fn returning a generic instance
+(`fn inner<T>(x: T) -> Box<T>` called from another generic fn) panics both Rust back ends on a
+six-line program while `scg` emits a call to an undefined symbol.
+
+Four-check green (1814 passed / exactly the 18 known Windows failures — 1812 before, +2 from
+the two new fixtures); both bootstrap fixed points byte-identical; all nine stage differentials
+green after bumping their direct-comparison counts by one for the new example.
+
+**Previous (2026-08-31) — the register's D3 is closed: `scg` now threads the expected type
 into the three positions that supplied none** (`28dd77d`, **ADR 0051 A5** + the ADR 0014 D3
 mirror, pinned by `tests/pass/c19_widen_arg_return_assign`). A call ARGUMENT gets the
 callee's declared param type, a `return` OPERAND the enclosing fn's return type, and an
@@ -272,9 +355,12 @@ test in the typer *means* "scalar", and the oracle's `is_copy_type` lists `Type:
 the integers). Two things `sqrt` had not needed: RESULT TYPES that differ from the operand's
 (`ptr_of` yields `ptr`, not the `&[u8]` it takes; `is_null` yields `bool`), and the `ptr`
 type itself. No codegen half — `snc llvm` Errs on all three and on a `ptr` type — but
-`cg_mangle_to` still gained a real `ty_Ptr` arm, because a PHANTOM generic argument reaches
+`cg_mangle_to` still gained a real scalar-5 arm, because a PHANTOM generic argument reaches
 codegen even when no `ptr` value exists; that was added pre-emptively, the identical trap one
-scalar code over having been found by review during the float mirror.
+scalar code over having been found by review during the float mirror. (The tag was `ty_Ptr`
+then; **ADR 0016 A1 renamed it to `ptr`** — the old spelling copied the oracle's
+`Debug`-leaking catch-all, so oracle and scg agreed with each other and both disagreed with
+inkwell.)
 **What the gap cost while open was worse than its registry entry said:** not just
 `(call ptr_of …)` at `ast`, but `(call # …)` with an EMPTY FnId at `resolve` and
 `call print_bytes` — an unrelated builtin — at `mir`.
@@ -284,13 +370,21 @@ programs nothing had ever compared, and the same species of blind spot the sweep
 close. It also falsified this slice's own "the only callers are five library modules" claim:
 `demos/win32/messagebox.sentinel` is a sixth caller AND a self-contained program, so unlike
 the five it runs the whole pipeline. All three demos match at every stage; all eight sweeps
-now take four roots (119 direct + 21 merged at lex/ast, 11 + 11 at the semantic stages).
+now take four roots (119 direct + 21 merged at lex/ast, 11 + 11 at the semantic stages; ADR
+0016 A1 later added one program to each direct count).
 **TWO PRE-EXISTING defects were filed rather than folded in**, each verified against a
 pre-slice binary: scg never widens when a `secret T` / `?T` binding's RHS is a CALL or a
 UNARY (at MIR the dropped `opaque` shifts every later value number), and `cg_mangle_to`'s
 bare-`ty` fallback makes two DIFFERENT phantom generic arguments collide on one LLVM type
-name — duplicate type definitions, i.e. invalid IR, and NOT fixable by enumeration the way
-`ty_F64`/`ty_Ptr` were, because the oracle's fallback embeds its own interner ids.
+name — duplicate type definitions, i.e. invalid IR.
+⚠ That second entry's diagnosis was half right and its prescription was wrong: it said the
+collision was "NOT fixable by enumeration the way `ty_F64`/`ty_Ptr` were, because the
+oracle's fallback embeds its own interner ids". The premise is correct — the oracle's
+fallback did embed ids, and worse, produced names `llvm-as` cannot parse — but the
+conclusion does not follow. **ADR 0016 A1 fixed it by enumeration after moving the ORACLE
+off the id-bearing text**, which is what made the mirror possible. Recorded as a retraction
+rather than edited away, because "unfixable" is the kind of claim that stops the next
+session looking.
 `pass` 159 → 160.
 
 **Latest (2026-08-30) — the ADR 0058 `f64` FRONT-END mirror lands, discharging A3's deferral:

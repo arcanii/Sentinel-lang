@@ -1,18 +1,23 @@
 # ADR 0016: Concrete C1.7 surface syntax — generic fns, generic structs, monomorphization
 
-Status: ACCEPTED — all twelve D-decisions exercised across the
-C1.7 scaffolding commit (c1e5083, AST + parser + resolve), the
+Status: ACCEPTED-WITH-AMENDMENTS (A1) — all twelve D-decisions exercised
+across the C1.7 scaffolding commit (c1e5083, AST + parser + resolve), the
 C1.7.4a commit (d32a9fe, types crate + builtin re-route), the
 C1.7.5 commit (ad7e10d, codegen monomorphization for generic
 fns), and the C1.7.4b commit (2c6c652, generic structs end-to-end
-+ the D12 phase-go). The ADR landed cleanly with no amendments —
-each D-decision survived implementation as written. C1.7
++ the D12 phase-go). C1.7
 estimated at "4-6 weeks" (ADR 0011 D6); actual elapsed was ~1
 session across five commits.
 
+**A1 (2026-09-02)** pins the mangling scheme D7 left "TBD in implementation" —
+structural, id-free, exhaustive, and identical across all three back ends. See
+[Amendments](#amendments) at the end of this file. (This ADR previously recorded
+"no amendments — each D-decision survived implementation as written"; that stayed
+true of the *syntax* decisions, but the deferred half of D7 did not.)
+
 Date: 2026-05-26
-Last touched: 2026-05-27 (status flipped to ACCEPTED after the
-C1.7 implementation closed; no D-decision amendments)
+Last touched: 2026-09-02 (A1 — D7's mangling scheme pinned; register item D5
+closed)
 Related: 0011 (Phase C1 kickoff; D3 names generics as a C1 type-
 system deliverable, D6 schedules C1.7 last, D12 perf discipline
 becomes measurable here), 0015 (concrete C1.6 surface — D6
@@ -365,6 +370,12 @@ separate LLVM functions with mangled names (e.g.,
 `_S_id_i64`, `_S_id_bool` — exact mangling scheme TBD in
 implementation). Similarly, `Box<i64>` and `Box<bool>` are two
 separate LLVM struct types.
+
+> **Amended by A1 (2026-09-02).** "TBD in implementation" is no longer open: the
+> scheme is pinned in [`docs/abi-v1.md`](../abi-v1.md) §4 and is **structural**
+> (a tag names the type's shape, never an interner index) and **exhaustive**.
+> Leaving it TBD let three back ends fill the gap three different ways, two of
+> them producing IR no backend could read — see [Amendments](#amendments).
 
 #### D7a. Why monomorphization and not witness tables.
 
@@ -835,3 +846,199 @@ After C1.7: **Phase C1 closes**. ADR 0011 flips from
 PROPOSED to ACCEPTED (or ACCEPTED-WITH-AMENDMENTS as actuals
 warrant). Phase C2 begins with whatever ADR opens it (regions
 + references per HANDOVER §6.3).
+
+---
+
+## Amendments
+
+### A1 — D7's mangling scheme is pinned, structural, and exhaustive (2026-09-02)
+
+**Status: ACCEPTED.** Closes filed-defect register item **D5**.
+
+D7 deferred the mangling: *"separate LLVM functions with mangled names (e.g.
+`_S_id_i64`, `_S_id_bool` — exact mangling scheme TBD in implementation)."* Three
+implementations then grew independently — inkwell (`sentinel-codegen`), the
+`snc llvm` text oracle (`sentinel-driver/src/llvm_dump.rs`), and the self-hosted
+`scg` (`selfhost/types/cg.sentinel`) — and each filled the gap differently. A1
+settles the scheme and makes the three agree. The table lives in
+[`docs/abi-v1.md`](../abi-v1.md) §4, which A1 completes over every `Type` variant.
+
+**The rule: a tag is derived from the type's own SHAPE, never from an interner
+index.** That is not a style preference — it is the only property that lets three
+independent implementations produce the same name. `scg` interns in its own order
+and has no `SharedId`/`TaskId` concept at all, so any tag quoting a Rust interner
+id is a name it cannot reproduce even in principle.
+
+**What was wrong.** The oracle ended its match with
+`other => format!("ty_{other:?}")`, leaking Rust's `Debug` formatting into an LLVM
+identifier. `scg` ended its dispatch with `append_str(out, "ty")`, one token for
+every kind it had not enumerated. Both fallbacks produced **invalid IR**, in
+different ways, on the same six-line program:
+
+```
+struct Pair<A, B> { a: A }
+fn main() -> i64 {
+    let p: Pair<i64, Shared<i64>> = Pair { a: 1 };
+    let q: Pair<i64, Mutex<i64>> = Pair { a: 2 };
+    p.a + q.a
+}
+```
+
+The oracle emitted `%Pair_i64_ty_Shared(SharedId(0)) = type { i64 }`, which
+`llvm-as` rejects with *"expected '=' after name"* — an unquoted `(` cannot appear
+in an LLVM identifier. `scg` emitted `%Pair_i64_ty = type { i64 }` **twice**:
+*"redefinition of type"*. Only inkwell, the shipping back end, was right; the
+program compiles and runs correctly today. That asymmetry is why the defect
+survived — no exit-code test can see it, and the oracle-vs-`scg` byte comparison
+cannot see a name the two get wrong *identically*.
+
+**The scope was eleven variants, not the two on file, by two independent routes.**
+The register entry described a PHANTOM generic type argument. That route needs the
+type to be writable in type position, which excludes `Task`, `Process` and
+`Guard` — but the **mono-key** route reaches them anyway: `idg(some_task)` on a
+plain `fn idg<T>(x: T) -> T` puts the type straight into `mangle_mono_name` with no
+phantom parameter anywhere, and corrupts a **function symbol** rather than a type
+declaration (`define ptr @idg__ty_Task(TaskId(0))(ptr %arg0)` — `llvm-as`:
+*"expected type"*). Verified reachable by construction: `Class`, `Enum`, `Channel`,
+`Shared`, `Mutex`, `Guard`, `Task`, `Fn`, `Process`, `SealedChannel`, `U128`.
+`Class` and `Enum` need no concurrency feature at all — a plain enum as a generic
+argument reproduces the whole defect — which falsified both back ends' comments
+claiming only a container kind could reach the fallback.
+
+Verified **unreachable**, by trying every path that exists: `Kont` (a continuation
+binding *"can only be called, not used as a value"*), `TraitSelf` (`Self` is not
+writable in type position, and an impl body always has it substituted), and
+`TypeParam` (Pass 0 filters TypeParam-bearing instances; mono args are concrete by
+construction). They get real structural tags regardless — the point of an
+exhaustive match is that "unreachable" is never carried by a wildcard.
+
+**Where the scheme moved, and why that is an amendment and not `abi-v2`.**
+Where inkwell was already structural (`u128`, `f64`, `ptr`, `process`,
+`sealedchannel`, class/enum names, `fn_<p>_<r>`) the two printing back ends adopt
+**inkwell's** spelling, because inkwell is the back end that emits objects. Where
+inkwell embedded an id (`shared0`, `mutex0`, `guard0`, `chan0`, `task0`, `kont0`,
+`Self_trait0`) all three move to an element-derived tag (`shared_i64`, `chan_u8`,
+…). No shipped artifact can contain an old tag: these variants are reachable only
+through a phantom type argument or a mono key, and nothing in `sentinel_library/`,
+`examples/`, `demos/` or the fixtures instantiated a generic at any of them until
+this amendment added one.
+
+⚠ Two of the old spellings were **already agreed between the oracle and `scg`** —
+`ty_F64` and `ty_Ptr`, hand-written into `cg_mangle_to` to match the oracle's
+`Debug` output. They agreed with each other and both disagreed with inkwell, so
+the codegen differential was green on precisely the arms that were wrong. That is
+the shape to watch for: *two* implementations agreeing is not evidence when the
+third is the one that ships.
+
+**`scg` needed a second, non-mangling change.** Its `Shared<T>` / `Mutex<T>`
+type-position arms resolved the type argument and then discarded it, interning
+every annotation as `Shared<i64>` / `Mutex<i64>`. With the element gone,
+`Tagged<i64, Shared<u8>>` and `Tagged<i64, Shared<i64>>` intern to the **same
+handle**, so `scg` emitted one generic-instance declaration where the oracle
+emitted two — a structural collapse no naming scheme could have separated. Making
+the two arms element-generic (a two-line mirror of the existing `Channel` arm)
+recovers the distinct instances. Measured on the new example: pre-change `scg`
+emitted 17 declarations under 10 distinct names, post-change 20 under 20.
+
+**`scg`'s fallback is now loud rather than plausible.** Every interner kind 1..19
+has an arm; the final `else` emits `UNKNOWN_KIND_<n>`, which no oracle tag can
+equal, so a future kind that forgets its arm fails the codegen differential on the
+first program that reaches it. `ty` had the opposite property — plausible enough to
+pass unnoticed while producing invalid IR. The Rust side gets this for free: both
+`mangle_type` matches are exhaustive, so a new `Type` variant is a compile error.
+
+**What A1 does NOT fix, stated so it is not later mistaken for closed.**
+
+- **Tags share one flat namespace with user type names.** `struct arr_i64 {}` tags
+  `arr_i64`, the same tag as `[i64]`, so `Pair<arr_i64, i64>` and `Pair<[i64], i64>`
+  mangle identically — the oracle emits one `%Pair_arr_i64_i64` name for two
+  **different layouts**. PRE-EXISTING, byte-identical in both printing back ends,
+  and not closable by enumeration: `_` and `$` are both legal Sentinel identifier
+  characters, so no separator built from them is unforgeable. A real encoding
+  (length-prefixing, or `.`, which LLVM accepts and Sentinel's lexer cannot
+  produce) changes every existing tag and is `abi-v2` work. The shipping back end
+  is unaffected — LLVM uniquifies a duplicate name and the program runs correctly
+  (verified end-to-end).
+
+  ⚠ **A1 makes that class MEASURABLY LARGER in the two printing back ends, and the
+  honest accounting is a net win rather than a clean one.** Two review lenses
+  attacked this and both were right; the first draft of this paragraph said "two
+  members larger" and rested on a false argument, so both are corrected here rather
+  than quietly amended.
+
+  The mechanism: before A1 the oracle's tag for every payload-bearing kind was a
+  Rust `Debug` rendering containing **parentheses** — `ty_Shared(SharedId(0))`,
+  `ty_Enum(EnumId(0))`. Parentheses are not legal in a Sentinel identifier, so those
+  tags were *accidentally unforgeable*: no user type could be named to collide with
+  one. A1 trades that accident for legality and three-way agreement, so every tag it
+  introduces or renames joins the forgeable set: `f64`, `ptr`, `u128`, `process`,
+  `sealedchannel`, the handle tags, `fn_…`, `kont_…`, `Self_…`, and the declared
+  names now used for `Class`/`Enum`. Constructed and verified, both halves:
+  `struct process { z: i64 }` beside a `Process` value makes both printing back ends
+  emit `@idg__process` twice (`invalid redefinition of function`) where pre-A1 the
+  oracle spelled one `idg__ty_Process`; and `struct f64 { z: i64 }` beside a genuine
+  `f64` value makes `scg` emit `@idg__f64` twice, where pre-A1 it emitted
+  `@idg__f64` and `@idg__ty_F64`.
+
+  **The tempting defence does not work, and it is worth recording why.** The type
+  resolver matches primitive spellings *before* the struct table, so `struct f64 {}`
+  can never be **named** in type position (`Pair<i64, f64>` resolves to the
+  primitive — verified). It does not follow that it cannot reach the mangler: the
+  MONO-KEY route needs no type-position spelling at all, only a *value*, and
+  `idg(f64 { z: 20 })` tags `f64` directly. Shadowing protects the phantom route and
+  nothing else. No tag in this scheme is safe by shadowing.
+
+  It is accepted for two reasons. inkwell — the back end that emits objects — already
+  used every one of these spellings, so its exposure is unchanged and no *shipped*
+  behaviour moves (LLVM uniquifies a duplicate name; the colliding program builds and
+  runs correctly). And the alternative is keeping the two printing back ends
+  permanently disagreeing with the one that ships. Against the cost, A1 removes a
+  **ten-way unconditional** collision and every unparseable name.
+- **`SealedChannel` in type position.** The tag is agreed, but `scg`'s
+  `type_of_typeexpr` has no `SealedChannel` arm, so the annotation resolves to the
+  `i64` handle and the tag never gets a chance. That is the pre-existing ADR 0069
+  deferral already carried by three `DEFERRED_PROGRAMS` entries; folding it in
+  would mean re-diagnosing those inside a mangling slice.
+- **`u128` in `scg`.** `scg` models no `u128` at all, so `Pair<i64, u128>` resolves
+  its argument to the `i64` handle and collapses with `Pair<i64, i64>`. Both sides
+  emit *valid* IR — they simply disagree — which makes it the quiet member of the
+  family.
+- **Non-`i64` container VALUES in `scg`.** Making the annotation element-generic
+  does **not** make `Shared<u8>` work: `scg`'s codegen still emits no width
+  conversion around a container's runtime call, so
+  `fn take(s: Shared<u8>) -> u8 { shared_get(s) }` still yields `ret i8 %v` for an
+  `i64` `%v`. Confirmed by diffing a pre-change against a post-change `scg` binary
+  on that program — byte-identical output, so this is untouched ADR 0071 M1.4c
+  work, not a consequence of A1.
+
+**Pinned by** `examples/lang/phantom_type_param.sentinel`: 20 phantom markers
+covering every tag form (bare scalar, nominal name, one-element wrapper,
+handle-over-element, two-element signature, nested composition), asserted
+byte-identical between the oracle and `scg`, `llvm-as`-clean, and running to 42
+through inkwell under both build paths. The `u8` markers are load-bearing — they
+fail the moment a back end tags a handle by its id or assumes `i64`. Its complement
+`tests/pass/c16_mono_key_handle_tags.sentinel` covers the mono-key route, which is
+the only one that reaches `task_` and `guard_`. `abi_v1_mangling_is_stable` pins the
+tag strings themselves.
+
+**Three tags have NO differential fixture**, stated rather than left to be
+discovered: `u128` (the oracle emits a phantom `u128` tag but `scg` models no `u128`
+at all and resolves the argument to `i64`, so a fixture would pin a divergence, not a
+tag — register item D20), and `kont_` / `Self_`, both verified unreachable.
+`abi_v1_mangling_is_stable` pins those three as unit tests, which anchors the STRING
+but not the three-way agreement.
+
+⚠ **This list said FIVE until a review lens refuted two of them.** The draft claimed
+`process` and `sealedchannel` were unfixturable because "the mono-key route needs a
+real subprocess, which the corpus only ever spawns behind a runtime-false guard".
+That is backwards — the guard is exactly what makes them fixturable, since a tag is a
+compile-time property and the IR emits whether or not the child ever runs. Both are
+now covered by `c16_mono_key_handle_tags` and agree byte-for-byte. The lesson is the
+one this ADR keeps running into: "no fixture exists" is a fact about the corpus, and
+turning it into "no fixture is possible" is a claim that has to be tested.
+
+Two tags are covered but **weakly**, which is worth knowing before trusting them:
+`task_<elem>` cannot be distinguished from a hardcoded `i64` by any test, because
+`Task<T>`'s result is always `i64` at the ADR 0024 minimum; and `guard_<elem>` is
+pinned only at `i64`, because the `Mutex<u8>` that would exercise a non-`i64` guard
+diverges for an unrelated reason (register D17).

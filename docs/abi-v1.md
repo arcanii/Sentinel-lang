@@ -193,21 +193,75 @@ External symbol names for emitted functions. Source of truth:
 - **Class method**: `<Class>__<method>`.
 - **Impl method**: `<Name>__<Type>__<Trait>__<method>`.
 
-**Type tags** (`mangle_type`):
+**Type tags** (`mangle_type`). The table is now **complete over every `Type`
+variant** (ADR 0016 A1); both Rust matches (inkwell's and the text oracle's) are
+exhaustive, so a new variant cannot land without a row here — and `scg`'s
+`cg_mangle_to`, which has no exhaustiveness check, answers `UNKNOWN_KIND_<n>`
+rather than guessing, so a missing mirror fails the codegen differential loudly. Every tag is **structural** — derived from the type's
+own shape, never from an interner index — which is what lets three independent
+back ends (inkwell, the `snc llvm` text oracle, the self-hosted `scg`) derive
+the same name. They agree on every row **except `u128` and `SealedChannel`**, and
+in neither case because the tag differs: `scg` models no `u128` at all and has no
+`SealedChannel` arm in `type_of_typeexpr`, so it resolves either annotation to its
+`i64` handle and never reaches the row (register item D20, both pre-existing — pre-A1
+the oracle said `ty_U128` / `ty_SealedChannel` against the same `i64`). `SealedChannel`
+does agree through a generic fn's mono key, which is how
+`tests/pass/c16_mono_key_handle_tags.sentinel` pins it; only the type-annotation route
+diverges. Read the table as the contract, and those two rows as aspirational on the
+annotation route until `scg` catches up:
 
 | `Type` | tag |
 |--------|-----|
-| `i64` / `i32` / `bool` | `i64` / `i32` / `bool` |
-| `Struct` / `Class` | the declared name |
+| `i64` / `i32` / `bool` / `u8` | `i64` / `i32` / `bool` / `u8` |
+| `u128` / `f64` / `ptr` | `u128` / `f64` / `ptr` |
+| `Struct` / `Class` / `Enum` | the declared name |
 | `?T` (`Nullable`) | `opt_<tag(T)>` |
 | `[T]` (`Array`) | `arr_<tag(T)>` |
 | `Vec<T>` (`Vec`) | `vec_<tag(T)>` |
 | `&T` / `&mut T` | `ref_<tag(T)>` / `refmut_<tag(T)>` |
 | `GenericInstance` | `<Base>_<tag(arg)>_<tag(arg)>…` |
 | `secret T` | `sec_<tag(T)>` |
+| `TypeParam` | `T<index>` |
+| `Shared<T>` / `Mutex<T>` / `Guard<T>` | `shared_<tag(T)>` / `mutex_<tag(T)>` / `guard_<tag(T)>` |
+| `Channel<T>` / `Task<T>` | `chan_<tag(T)>` / `task_<tag(T)>` |
+| `Process` / `SealedChannel` | `process` / `sealedchannel` |
+| `Fn<P,R>` | `fn_<tag(P)>_<tag(R)>` |
+| `Kont` / `TraitSelf` | `kont_<tag(arg)>_<tag(ret)>` / `Self_<Trait>` |
 
 `secret T` participates in the monomorphisation key, so `id<i64>` and
 `id<secret i64>` get **distinct** symbols (`id__i64` vs `id__sec_i64`).
+
+Rows **added or changed by the ADR 0016 A1 amendment**: `u128` / `f64` / `ptr`,
+`Enum` (`Struct` and `Class` were already specified and are unchanged), the five
+handle rows, `Process` / `SealedChannel`, `Fn`, and `Kont` / `TraitSelf`. All were
+previously either unspecified here or inconsistent across the three back ends:
+inkwell tagged the handle types by their *interner id* (`shared0`, `task0`, …) and
+the text oracle fell back to Rust's `Debug` rendering (`ty_Shared(SharedId(0))`),
+which is not a legal unquoted LLVM name at all. Neither form is derivable by an
+independent implementation, so neither could be an ABI. (`TypeParam` is documented
+here for the first time but was already consistent, so it is a doc addition, not a
+change.) The amendment is safe as an amendment rather than an `abi-v2` bump because
+**no shipped artifact can contain an old tag**: `mangle_type` reaches these variants
+only through a phantom generic type argument or a generic fn's mono key, and no
+first-party library, example or fixture instantiated a generic at any of them —
+verified by sweeping all 339 corpus programs and diffing the emitted names, not
+inferred. The `i64`/`i32`/`bool`/`u8`/named-type/wrapper rows are unchanged, so every
+existing symbol is byte-identical.
+
+⚠ **Tags share one flat namespace with user type names** — `struct arr_i64 {}`
+produces the tag `arr_i64`, the same tag as `[i64]`, so `Pair<arr_i64, i64>` and
+`Pair<[i64], i64>` mangle identically (verified: the text oracle emits the same
+`%Pair_arr_i64_i64` name twice, with different layouts). This is **pre-existing
+and not closed by A1** — it predates the handle tags and applies to `arr_`,
+`opt_`, `vec_`, `ref_`, `sec_` alike. It is the same soft spot as the `__`
+ambiguity below, and it has the same fix: both `_` and `$` are legal Sentinel
+identifier characters (`[A-Za-z_][A-Za-z0-9_$]*`), so no separator built from
+them can be unforgeable. Closing it needs a real encoding — length-prefixing, or
+`.`, which LLVM accepts in an unquoted name and Sentinel's lexer cannot
+produce — and that changes every existing tag, so it is `abi-v2` work
+(cf. ADR 0029 D8). The shipping inkwell back end is unaffected in practice: LLVM
+uniquifies a duplicate type or function name, so the emitted code is correct
+(verified end-to-end); it is the two *printing* back ends that emit invalid IR.
 
 **Module-qualified symbols (D.6 / ADR 0037 D7 — an `abi-v1` amendment).**
 Separate compilation makes every cross-unit symbol part of the ABI, so a
@@ -249,12 +303,25 @@ importer-qualified with default linkage). The dedup is gated to
 **collision-safe** type args, where the mono-key tag is globally unambiguous:
 - a **primitive** (`i64` / `i32` / `bool` / `u8`);
 - a **cross-module struct or enum** whose origin is known — its tag is then
-  **origin-qualified** as `<seg>$…$<Name>` (`$`-joined module path, a
-  valid-in-identifier separator that can't appear in a bare name or path
-  segment), so `id<util::geo::Point>` → `id__util$geo$Point` and a same-named
-  `Point` from another module gets a distinct tag (`mangle_type_dedup` /
+  **origin-qualified** as `<seg>$…$<Name>` (`$`-joined module path), so
+  `id<util::geo::Point>` → `id__util$geo$Point` and a same-named `Point` from
+  another module gets a distinct tag (`mangle_type_dedup` /
   `mangle_mono_name_dedup`, keyed by a driver-supplied `StructId`/`EnumId →
   origin` map);
+
+  ⚠ **This bullet used to justify `$` as "a valid-in-identifier separator that
+  can't appear in a bare name or path segment". That premise is FALSE** and the
+  correction matters, because it is the stated reason the dedup key is
+  unambiguous. The lexer accepts `$` inside an identifier
+  (`[A-Za-z_][A-Za-z0-9_$]*` — added deliberately so merged source round-trips),
+  so `struct geo$Point` in module `util` and `struct Point` in module
+  `util::geo` both tag `util$geo$Point`; a top-level `struct util$geo$Point`
+  produces it too (verified: the program compiles and mangles that name). What
+  actually keeps distinct instantiations off one `linkonce_odr` symbol is the
+  gate itself, not the separator — and the gate is doing real work here, so do
+  not widen it on the belief that `$` is unforgeable. Making the separator
+  genuinely unambiguous is `abi-v2` encoding work (see the type-tag warning in
+  §4);
 - an array / nullable / vec of a safe element (recursively).
 
 A **local** struct/enum (importer-specific, no shared origin) or any **other**

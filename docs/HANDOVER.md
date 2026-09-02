@@ -57,6 +57,29 @@ reference as you work through the milestones.
 > impl or class anywhere). If you are picking this work up and have not been briefed on
 > it, ask before touching the struct drop path.
 >
+> ⚠ **ADR 0016 A1 HAD A FULL FIVE-LENS REVIEW *AND* ITS VERIFY PHASE** — the first slice in
+> this sequence where both halves ran to completion. 18 findings were settled by
+> construction: 11 REFUTED, 3 CONFIRMED-PRE-EXISTING, 4 CONFIRMED-INTRODUCED. **All four
+> introduced ones were errors in my PROSE, not the code**, and all four are fixed. They are
+> worth knowing because three of them are the same mistake in different clothes — asserting a
+> consequence I had not constructed:
+>   * "A1 adds TWO members to the collision class" + "primitive spellings shadow the struct
+>     table, THEREFORE `struct f64 {}` can never reach the mangler". The shadowing is real in
+>     TYPE position and irrelevant: the MONO-KEY route needs no spelling, only a value, so
+>     `idg(f64 { z: 20 })` tags `f64` and collides. Six more members, constructed.
+>   * "the `llvm-as` gate WOULD have fired pre-A1". It would have been SILENT — the gate fires
+>     only when scg is rejected AND the oracle is clean, and pre-A1 BOTH were rejected. Only
+>     the byte comparison would have caught it, and only because the two were wrong
+>     DIFFERENTLY. **Read that as a standing property of the harness, not a one-off.**
+>   * "no fixture is possible for `process`/`sealedchannel` (the mono-key route needs a real
+>     subprocess)". Backwards: the runtime-false guard is what MAKES them fixturable, since a
+>     tag is a compile-time property. Both are now pinned; the fixture covers eight tags.
+> The review also found **D22** (a `?Guard` moved through a generic call leaks the lock on the
+> not-taken branch) by attacking the new fixture itself, and **D23** (a latent `chan_secret`
+> mangling collision A1 arms for M1.4c-2). Lens 2 independently swept all 339 corpus programs
+> old-binary-vs-new and found exactly the two new fixtures changed, which is the strongest
+> corroboration of the "no shipped symbol moves" claim.
+>
 > ⚠ **ADR 0023 A5 (`4ac7bdc`) had all four review lenses report**, and every substantive
 > finding was verified by construction and acted on — including a mutation test proving the
 > fixture pins the one load-bearing state reset. Its VERIFICATION phase was stopped.
@@ -80,7 +103,7 @@ reference as you work through the milestones.
 > confirming nothing pre-existing is newly refused; oracle-vs-scg byte-equality on the new
 > fixture at types, mir and llvm; and the secret-taint check in both directions.
 
-### ▶ RESUME HERE (2026-08-31 — everything is COMMITTED at `b04740c`, four-check GREEN (1813 passed / exactly the 18 known Windows failures), tree CLEAN, nothing mid-flight. This session closed FOUR of the filed-defect register: **D1** (`5609fb7`, ADR 0072 — a SILENT `snc build` miscompile, an effecting fn returning a raw pointer), **D8** (`0fef8a4`, ADR 0023 A4 — scg mishandling `impl as Trait for <struct>`), **D9** (`4ac7bdc`, ADR 0023 A5 — the two Rust back ends disagreeing about whether that shape is compilable), and **D3** (`28dd77d`, ADR 0051 A5 — the widen expectation reaching a call arg, a `return` operand and an assignment RHS). **D5 is INVESTIGATED but NOT implemented** — read its register entry first, the "which side moves?" question is settled and the answer is the oracle. ⚠ THE REVIEWS EARNED THEIR COST AND ALSO CAUGHT FOUR FALSE CLAIMS OF MINE — see the caveat block below and `[[claim-verification-discipline]]`; the recurring shape was testing ONE instance and generalising. NEXT: D5 (settled, needs an ADR), D2 (re-filed — it is INVALID IR at two positions, not the text divergence its first filing claimed), D4, D6, D7, or the non-register menu items — `select`, `Channel<secret T>`, f64/ptr CODEGEN, widening the Bar-A printer)
+### ▶ RESUME HERE (2026-09-02 — everything is COMMITTED, four-check GREEN (**1814 passed / exactly the 18 known Windows failures**; 1812 before, +2 from the two new fixtures), both bootstrap fixed points byte-identical, tree CLEAN, nothing mid-flight. This session closed the register's **D5** — **ADR 0016 A1**, the mangling scheme D7 left "TBD in implementation", now pinned STRUCTURAL (a tag names the type's shape, never an interner index), EXHAUSTIVE, and identical across all three back ends; table in `docs/abi-v1.md` §4. ⚠ **THE FILED ENTRY WAS RIGHT ABOUT THE MECHANISM AND WRONG ABOUT THE SCOPE, TWICE, BOTH TIMES BY GENERALISING FROM ONE INSTANCE** — it named two container kinds (eleven variants reach it, and `Class`/`Enum` do so with no concurrency feature at all) and one route (there are two; the MONO-KEY route `idg(v)` is the only way `Task`/`Process`/`Guard` reach a tag, and it corrupts a FUNCTION SYMBOL). ⚠ **THE ADVERSARIAL REVIEW FOUND A REGRESSION IN MY OWN FIX, AND THEN KILLED MY FIRST ACCOUNT OF IT** — A1 makes the pre-existing tag/user-name collision class (D18) wider in the two printing back ends, because the oracle's old paren-bearing tags were accidentally unforgeable; my first write-up said "two members" and defended the rest by primitive-shadowing, and both were refuted by construction (the mono-key route needs no type-position spelling, so `struct f64 {}` collides too). Accepted deliberately, and now recorded as the wider fact. **NINE new register items (D15-D23) were filed from this work, all verified by construction — two of them are CRASHES IN THE SHIPPED COMPILER on ordinary generic source (D15, D16) and are the strongest candidates for what to do next; D22 is a lock leak the review found by attacking my own new fixture.** After those: D2 (invalid IR at the assign and return positions), D4, D6, D7, or the non-register menu items — `select`, `Channel<secret T>`, f64/ptr CODEGEN, widening the Bar-A printer)
 
 > **▶ THE OPEN MENU (2026-08-30) — real remaining work, verified against the repo.**
 >   1. **`select` over channels** — the flagship concurrency gap. Its RUNTIME is already PINNED
@@ -107,11 +130,11 @@ reference as you work through the milestones.
 >      answers 64, so the Cast arm's width-equality test reads an int↔f64 cast as a no-op;
 >      the four word-scalar encode/decode chains in `cg_effects.sentinel` DEFAULT an unknown
 >      handle to "pointer", so an f64 element would get `ptrtoint`/`inttoptr` (invalid IR on a
->      `double`) instead of `bitcast`; and `cg_mangle_to` needed a real `ty_F64` arm, which it
+>      `double`) instead of `bitcast`; and `cg_mangle_to` needed a real scalar-4 arm, which it
 >      now has. Also worth doing with it: `examples/math/quadratic.sentinel` and
 >      `sentinel_library/std/math/float.sentinel` currently reach only lex/ast, because
 >      `snc merge`'s Bar-A printer rejects both a float literal and `sqrt` (menu item 5).
->   4. **THE FILED-DEFECT REGISTER — FOURTEEN items (D1-D14); **D1, D3, D8 and D9 are DONE**, the rest verified against a pre-slice binary,
+>   4. **THE FILED-DEFECT REGISTER — TWENTY-THREE items (D1-D23); **D1, D3, D5, D8 and D9 are DONE**, the rest verified against a pre-slice binary,
 >      NONE registered in any `DEFERRED_PROGRAMS` / `KNOWN_SCG_BUGS` list because no corpus
 >      program reaches them.** They were also filed as task chips, but chips are EPHEMERAL UI
 >      and this list is the record — if the two disagree, this one wins, and a chip that is
@@ -166,37 +189,40 @@ reference as you work through the milestones.
 >      `store { i1, i1 } %v0` with `%v0` an `i1`, which `llvm-as` rejects; post-fix IR assembles)
 >      but it still diverges. Fix = thread `exp` into `dump_generic_call`.
 >
->      **D5 — the phantom-generic mangling. INVESTIGATED 2026-08-31, NOT implemented; the
->      "which side moves?" question is now SETTLED and the answer is: the ORACLE.**
+>      **D5 — DONE (ADR 0016 A1, the ADR's first amendment).** The mangling scheme D7 left
+>      "TBD in implementation" is now pinned, structural (a tag names the type's SHAPE, never
+>      an interner index), exhaustive, and identical in all three back ends. Table in
+>      `docs/abi-v1.md` §4. Pinned by `examples/lang/phantom_type_param.sentinel` (the phantom
+>      route, 20 markers, byte-identical + `llvm-as`-clean + runs) and
+>      `tests/pass/c16_mono_key_handle_tags.sentinel` (the mono-key route).
 >
->      The reported half reproduces: `Pair<i64, Shared<i64>>` and `Pair<i64, Mutex<i64>>` both
->      give `%Pair_i64_ty` in scg, so `llvm-as` says `redefinition of type` — invalid IR, and
->      pre-existing (a pre-D3 stage emits the same two identical names).
->
->      ⚠ **BUT THE ORACLE'S OWN IR DOES NOT ASSEMBLE EITHER, which the entry did not know and
->      which changes the decision.** `snc llvm` emits
->      `%Pair_i64_ty_Shared(SharedId(0)) = type { i64 }`, and `llvm-as` rejects it with
->      `expected '=' after name` — an unquoted `(` is not legal in an LLVM identifier. So the
->      oracle's fallback is not merely UNSTABLE (embedding its own interner ids, which scg's
->      independent numbering cannot reproduce); it is UNPARSEABLE. Both sides are broken,
->      differently — the same shape as D1.
->
->      That rules out two of the three options the entry left open. Mirroring only the id-free
->      kinds, or registering the divergence, would each leave `snc` emitting IR no backend can
->      read. **Fix the ORACLE's `mangle_type` fallback** (crates/sentinel-driver/src/llvm_dump.rs
->      ~4153, `other => format!("ty_{other:?}")`) to give these kinds a stable, id-free,
->      LLVM-legal name in the style every other arm already uses — `opt_`, `arr_`, `vec_`,
->      `ref_`/`refmut_`, `sec_` are all structural and id-free, so `shared_<elem>` /
->      `mutex_<elem>` and friends follow the convention — and THEN mirror by enumeration into
->      `cg_mangle_to`, which becomes possible precisely because the name no longer embeds an id.
->      Enumerate the kinds explicitly rather than leaving a wildcard: a wildcard that is merely
->      LLVM-legal still collides silently, which is the bug.
->
->      ORACLE-MOVING, so the full rhythm applies: ADR first, re-bless, mirror, both fixed points
->      green. Check inkwell's `mangle_generic_struct_name` (sentinel-codegen/src/lib.rs ~2198)
->      at the same time — it is the third implementation and must agree. Nothing in the corpus
->      instantiates a generic at a container kind through a phantom parameter, so every
->      differential is green today and a fixture has to be written to pin it.
+>      **What the entry got right:** the oracle's fallback was UNPARSEABLE, not merely
+>      unstable, so the oracle had to move first; and mirroring by enumeration only became
+>      possible once it did.
+>      **What it got wrong, and both errors are the same shape — a claim generalised from one
+>      instance:** (i) it scoped the defect to two container kinds; ELEVEN variants reach the
+>      fallback from real source, and `Class`/`Enum` do it with no concurrency feature at all.
+>      (ii) it described one route; there are two, and the second — a generic fn's MONO KEY,
+>      `idg(v)` on `fn idg<T>(x: T) -> T` — is the only way `Task`, `Process` and `Guard`
+>      reach a tag, since none is writable in type position. It corrupts a FUNCTION SYMBOL,
+>      not a type declaration. A fix validated only against the `Pair<i64, X>` phantom shape
+>      would have missed four variants.
+>      Also closed here: `scg`'s `Shared`/`Mutex` type-position arms are element-generic
+>      (they discarded the element, so two distinct oracle instances interned to ONE scg
+>      handle — a structural collapse, not a naming one).
+>      **⚠ A1 knowingly WIDENS the tag/user-name collision class (D18) in the two PRINTING
+>      back ends.** The oracle's old tags contained PARENTHESES (`ty_Shared(SharedId(0))`),
+>      which are illegal in a Sentinel identifier, so they were accidentally UNFORGEABLE;
+>      every tag A1 introduces or renames is a legal identifier and therefore forgeable.
+>      Constructed: `struct process {}` beside a `Process` value now emits `@idg__process`
+>      twice, and `struct f64 {}` beside a real `f64` value makes scg emit `@idg__f64` twice
+>      (pre-A1: `@idg__f64` + `@idg__ty_F64`). The review also refuted the tempting defence —
+>      primitive spellings shadow the struct table in TYPE position, but the MONO-KEY route
+>      needs no spelling, only a value, so nothing is safe by shadowing. Accepted because
+>      inkwell already used every one of these spellings (no shipped behaviour moves; LLVM
+>      uniquifies) and the alternative is the printing back ends disagreeing forever with the
+>      one that ships — against which A1 removes a TEN-way UNCONDITIONAL collision and every
+>      unparseable name.
 >
 >      **D6 — scg OVER-ACCEPTS `{ …; return e; }`**, which `snc`'s parser rejects ("blocks must
 >      end with an expression"), and synthesizes a `0` tail out of nothing. Worth more than its
@@ -275,6 +301,150 @@ reference as you work through the milestones.
 >      `let e: E = E { };` and no impl anywhere: the oracle emits valid IR, scg exits 127 on an
 >      out-of-bounds index. Differential-reachable — any tests/pass fixture with an empty
 >      struct turns it red — and green only because no corpus program declares one.
+>
+>      **▸ D15-D21 were all found DURING the D5 work (2026-09-02) and are all verified by
+>      construction. Two of them are CRASHES IN THE SHIPPED COMPILER on ordinary source,
+>      which makes them worth more than their position in this list suggests.**
+>
+>      **D15 — a generic fn returning a GENERIC INSTANCE crashes `snc build`.** Six lines,
+>      no phantom, no containers, no concurrency:
+>      `struct Box<T> { v: T }` / `fn inner<T>(x: T) -> Box<T> { Box { v: x } }` /
+>      `fn outer<T>(x: T) -> i64 { let b = inner(x); 7 }` /
+>      `fn main() -> i64 { let b1: Box<i64> = Box { v: 1 }; outer(b1) }`.
+>      `snc build` panics at `crates/sentinel-types/src/lib.rs:2756` (index out of bounds,
+>      len 2 index 2); `snc llvm` panics at `crates/sentinel-driver/src/llvm_dump.rs`'s
+>      `llvm_ty` GenericInstance arm with the same shape; `scg` does not crash but emits
+>      `call %Box_Box_i64 @inner__Box_i64(...)` for a function it never defines — `llvm-as`:
+>      "use of undefined value '@inner__Box_i64'". Diagnosis (from the review, not yet
+>      confirmed by a fix): substitution EXTENDS a CLONED copy of `program.generic_instances`
+>      (llvm_dump.rs ~652/685 clone it) while `llvm_ty`/`mangle_type` keep indexing the
+>      ORIGINAL, so the instance created by substituting `Box<T>` at `T = Box<i64>` has no
+>      entry. **The highest-severity item on this list: a panic on ordinary generic code in
+>      the compiler that ships.** Loud rather than silent, which is the only mercy.
+>
+>      **D16 — a NESTED ARRAY as a generic type argument crashes both Rust back ends.**
+>      `struct Box<T> { v: T }` + `let b: Box<[[u8]]> = Box { v: ["a"] };` panics at
+>      `crates/sentinel-types/src/lib.rs:669`, `ArrayElem::Array` reaching `to_type()`'s
+>      `unreachable!("use TypedProgram::array_elem_type (ADR 0068)")`. The phantom form
+>      (`Pair<i64, [[u8]]>`) and `&[[u8]]` panic identically. Two call sites reach it:
+>      `llvm_dump.rs`'s `type_has_typeparam` and `sentinel-codegen`'s
+>      `arg_contains_typeparam`, both of which call the bare `ae.to_type()` instead of
+>      `program.array_elem_type(ae)`. `scg` handles it correctly today (`arr_arr_u8`), and
+>      the oracle's post-fix tag would be `arr_arr_u8` too — so the fix gains parity for
+>      free. ⚠ `to_type()` on an `ArrayElem` has SEVEN more callers
+>      (`mono_args_dedup_safe`, `contains_type_param`, `try_substitute`, `unify_one` x3,
+>      `impl Display for Type`) — grep the SET before declaring it closed; the `Display` one
+>      means a diagnostic that formats a `[[T]]` may panic too.
+>
+>      **D17 — `scg` emits no width conversion around a container's runtime call**, so a
+>      non-`i64` container ELEMENT produces invalid IR:
+>      `fn take(s: Shared<u8>) -> u8 { shared_get(s) }` gives `ret i8 %v2` for an `i64`
+>      `%v2` (`llvm-as` rejects it) where the oracle brackets the call with
+>      `zext i8 -> i64` / `trunc i64 -> i8` and assembles clean. ADR 0071 M1.4c scope.
+>      **Explicitly NOT fixed by A1's element-generic annotation arms** — proven by diffing a
+>      pre-change against a post-change `scg` binary on that program and getting
+>      byte-identical output. Do not read "element-generic annotation" as "non-i64 container
+>      elements work".
+>
+>      **D18 — the tag/user-identifier collision class (`abi-v2` encoding work).**
+>      A mangled tag shares one flat namespace with user type names: `struct arr_i64 {}` tags
+>      `arr_i64`, exactly like `[i64]`, so `Pair<arr_i64, i64>` and `Pair<[i64], i64>` mangle
+>      identically — the oracle emits one `%Pair_arr_i64_i64` for two DIFFERENT layouts
+>      (`{ %Struct.0 }` vs `{ { i64, ptr } }`), and `scg` does the same. PRE-EXISTING (it
+>      predates every handle tag; `opt_`, `sec_`, `vec_`, `ref_` all reproduce it) and made
+>      easier by the fact that `mangle_instance` joins type arguments with a SINGLE `_`, which
+>      a multi-token tag can already contain — so the boundary between "where one tag ends"
+>      and "where the next begins" is not recoverable from the name. That half is pre-existing
+>      too (`arr_`/`opt_`/`sec_` are multi-token), confirmed by a review lens against a
+>      pre-change binary. **Not closable by enumeration**: `_` and `$` are both legal Sentinel identifier
+>      characters (`[A-Za-z_][A-Za-z0-9_$]*`), so no separator built from them is
+>      unforgeable. `.` is the one character LLVM accepts in an unquoted name that the lexer
+>      cannot produce, so a `.`-separated or length-prefixed encoding is the fix — and it
+>      moves every existing tag, hence `abi-v2` (cf. ADR 0029 D8, and the `__` soft-spot
+>      already noted in `abi-v1.md` §4). ⚠ The SHIPPED back end is unaffected: LLVM
+>      uniquifies a duplicate type or function name, and the colliding program builds and
+>      runs correctly (verified end to end). It is the two PRINTING back ends that emit
+>      invalid IR. A1 added `process`/`sealedchannel` to this class deliberately — see D5.
+>
+>      **D19 — the `linkonce_odr` dedup's `$`-separator justification was FALSE** (comments
+>      corrected in the A1 commit; NO code change, and none is safe without thought).
+>      `mangle_type_dedup` `$`-joins a module path onto a type name and its comment claimed
+>      `$` "can't appear in a bare type name or path segment, so distinct origins never
+>      collide". The lexer accepts `$` inside an identifier — added deliberately so merged
+>      source round-trips — so `struct util$geo$Point` compiles and tags identically to
+>      module `util::geo`'s `Point` (verified by compiling it), and module `util`'s
+>      `struct geo$Point` would too. What actually keeps two distinct instantiations off one
+>      `linkonce_odr` symbol is `mono_args_dedup_safe` requiring a KNOWN ORIGIN, not the
+>      separator. **So that gate is load-bearing and must not be widened on the old belief** —
+>      and the ABI doc already contemplates widening it ("class / generic-instance args +
+>      trait/class-method dedup remain the deferred tail"). Same species as the
+>      `is_process_channel_elem` bug: a fence resting on a false premise about the grammar.
+>      NOT constructed end-to-end (a two-module `--separate` build; the four
+>      `separate_*_linkonce_*` tests fail on Windows at `link.exe` for unrelated reasons), so
+>      the aliasing is shown at the TAG level only — that much is certain from the code.
+>
+>      **D20 — `scg` has no unknown-type diagnostic: an unrecognised type name in type
+>      position silently resolves to handle 0 (`i64`).** Verified with `Bogus`, `Task<i64>`,
+>      `Process`, `Guard<i64>`, bare `Vec`. Normally masked because the oracle refuses first
+>      and the differential skips whatever the oracle rejects — the D6 blind spot, in a new
+>      place. It is LIVE for the two spellings the oracle ACCEPTS: `Pair<i64, u128>` and
+>      `Pair<i64, SealedChannel<secret i64>>` both collapse onto a genuine `Pair<i64, i64>`
+>      instance, so `scg` emits ONE declaration where the oracle emits two. Both sides emit
+>      VALID IR — they simply disagree — which makes this the quiet member of the D5 family
+>      and the one no `llvm-as` gate can catch. `u128` needs `scg` to model `u128` at all
+>      (`scalar_code` has no arm); `SealedChannel` needs a `type_of_typeexpr` arm and is the
+>      pre-existing ADR 0069 deferral behind three `DEFERRED_PROGRAMS` entries.
+>
+>      **D21 — `__spawn_wrapper_<FnId>` embeds a source-ORDER-dependent id in an
+>      unqualified symbol.** Verified: adding one unrelated `fn` before the spawn target
+>      moves the symbol from `@__spawn_wrapper_42` to `@__spawn_wrapper_43`. All three back
+>      ends agree (both compilers compute the same FnId), so no differential sees it; the
+>      hazard is cross-unit, where `mangle_qualified` is NOT applied
+>      (`crates/sentinel-codegen/src/lib.rs:1230` formats the name inline) and two units each
+>      holding a spawn target at FnId 42 would both define it. Under default linkage that is
+>      a duplicate-symbol LINK ERROR rather than silent wrong code — NOT verified end-to-end.
+>      It is a 22nd naming site that the mangling census missed because it is built by an
+>      inline `format!` containing no "mangle" token.
+>
+>      **▸ D22-D23 came from the ADR 0016 A1 ADVERSARIAL REVIEW rather than the
+>      implementation, and neither is a mangling defect — the review found them by
+>      attacking the new FIXTURES.**
+>
+>      **D22 — moving a `?Guard` into a call leaks the lock on the not-taken branch.**
+>      The scope-exit unlock is emitted only on the branch that performed the move:
+>      `let cond: bool = false; let m: Mutex<i64> = mutex_new(2); let g = lock(m);`
+>      `let r: i64 = if cond { let h = idg(g); 2 } else { 0 }; r + 42`
+>      borrow-checks CLEAN, and the `else` path holds an acquired lock with no
+>      `sentinel_mutex_unlock` anywhere on it. PRE-EXISTING — a pre-A1 `scg` emits the
+>      identical unlock structure (verified; the two binaries differ only in the
+>      mangled name) — and it sits inside ADR 0071's deliberately deferred no-escape
+>      tail, which pinned `lock()` to a direct `let` RHS (`GuardNotLetBound`) but never
+>      constrained what happens to the binding afterwards. A generic call is the
+>      easiest way out: `idg(g)` needs no `unwrap`, no borrow and no deref, so none of
+>      the three existing guard pins fires.
+>      ⚠ `tests/pass/c16_mono_key_handle_tags.sentinel` is the FIRST corpus program to
+>      move a guard through a generic call. Its shape is sound — the condition IS
+>      `is_some(g)`, so the `else` arm is by construction the null-guard arm where no
+>      lock was ever taken — and the fixture now says so at the site, precisely so it
+>      is read as a warning rather than as a licence to copy the shape with some other
+>      condition. Fixing D22 properly means either a conditional-move drop (the guard
+>      dropped on the paths that did NOT move it) or extending the pin to refuse the
+>      move; the second is cheaper and matches the existing conservative posture.
+>
+>      **D23 — `channel_elem_for`'s reserved secret slots answer the PUBLIC scalar, and
+>      A1 gave that map a second consumer.** Slots 6..=9 are the M1.4c-2
+>      `Channel<secret T>` reservation and map to `I64/I32/U8/Bool`, deliberately, so
+>      the map agrees with the placeholder rows in the `channels` table. Unreachable
+>      today. But `mangle_type` now reads the element from here to build `chan_<tag>`,
+>      so the moment M1.4c-2 makes those slots reachable, `Channel<secret i64>` tags
+>      `chan_i64` — the same name as `Channel<i64>`, a silent collision of exactly the
+>      class A1 exists to remove. The sibling maps are already correct:
+>      `shared_elem_for` / `mutex_elem_for` / `guard_elem_for` route the secret range
+>      through `secret_elem_for_slot` first and yield `shared_sec_i64` (verified by
+>      construction on all eight secret containers). NO code change here — the slots
+>      are unreachable, so changing them now would be untestable — but the site now
+>      carries the warning, and **M1.4c-2 must make `channel_elem_for` match its
+>      siblings, not merely "change it together with the table".**
 >   5. **Widen `snc merge`'s Bar-A source printer** — the highest-leverage COVERAGE item.
 >      `crates/sentinel-driver/src/source_dump.rs` rejects **98 of the 119** real programs
 >      (re-measured after `demos/` joined the corpus), dominated by `cast` (37) and `declassify`
@@ -322,13 +492,19 @@ reference as you work through the milestones.
 > (The `Channel<f64>`-renders-`Channel<i64>` entry that used to head this list is **CLOSED** —
 > the ADR 0058 mirror made `f64` scalar code 4, so it now renders correctly, verified at
 > `types` and `mir`. `?f64` and `Fn<f64,f64>` came with it.)
-> ⚠ **A DIFFERENT, still-open over-accept in the same function, and NOT an f64 matter:** the
-> `is_shared` / `is_mutex` arms are element-HARDCODED — they call `collect_tyargs` only to
-> discard it and intern `mk_shared(c, 0)` — so `Shared<T>` / `Mutex<T>` render `<i64>` for
-> EVERY non-i64 element (`Shared<u8>` diverges identically; verified). Pre-existing ADR 0071
-> scope, unregistered because no corpus program annotates one. Making the two arms
-> element-generic is a 2-line mirror of the `is_channel` arm, but it touches refcount/drop
-> typing, so it wants its own slice.
+> ⚠ **The `is_shared` / `is_mutex` element-hardcoding that used to sit here is CLOSED**
+> (ADR 0016 A1). The two arms are now element-generic, a 2-line mirror of the `is_channel`
+> arm. Two corrections to what this entry used to say, both measured:
+> **(i)** it was NOT "snc-only and IR-invisible" — with the element discarded,
+> `Tagged<i64, Shared<u8>>` and `Tagged<i64, Shared<i64>>` interned to the SAME handle, so
+> scg emitted one generic-instance declaration where the oracle emitted two; that structural
+> collapse is what forced the fix into the A1 mangling slice rather than a later one.
+> **(ii)** the entry implied that making the arms element-generic would make non-i64
+> container elements work. It does not. scg's CODEGEN still emits no width conversion around
+> a container's runtime call, so `fn take(s: Shared<u8>) -> u8 { shared_get(s) }` still gives
+> `ret i8 %v` for an `i64` `%v`, which `llvm-as` rejects — verified by diffing a pre-change
+> against a post-change scg binary on that exact program and getting BYTE-IDENTICAL output.
+> That half is untouched ADR 0071 M1.4c work and is registered as **D17** below.
 
 > **▶▶ THE BOUNDARY-PREDICATE AUDIT (`61bcac3`) — what it found, so it need not be re-run.**
 > Prompted by the M1.2c fence bug (a security boundary written as `is_spawn_word_scalar(ty) &&

@@ -354,9 +354,14 @@ both bootstrap fixed points byte-identical).
   ported: Ptr"), so the codegen differential skips every program that uses them. That is
   the same structure ADR 0058 A8 records for floats. It does NOT mean `ptr` cannot reach
   scg's codegen at all: a PHANTOM generic argument does (`struct Pair<A, B> { a: A }` used
-  as `Pair<i64, ptr>` compiles to `%Pair_i64_ty_Ptr`), so `cg_mangle_to` carries a real
-  `ty_Ptr` arm — added pre-emptively here after the identical trap one scalar code over
-  was found by review during the float mirror.
+  as `Pair<i64, ptr>`), so `cg_mangle_to` carries a real scalar-5 arm — added pre-emptively
+  here after the identical trap one scalar code over was found by review during the float
+  mirror.
+  ⚠ **The TAG changed at ADR 0016 A1**: it was `ty_Ptr` (copied from the oracle's
+  `Debug`-leaking catch-all) and is now `ptr`. The old spelling made the oracle and scg
+  agree with each OTHER while both disagreed with inkwell, which always said `ptr` — so the
+  codegen differential was green on precisely the arm that was wrong. A1 moved all three to
+  inkwell's spelling.
   **What the gap cost while it was open**, recorded because the registry understated it:
   scg did not merely emit `(call ptr_of …)`. The name resolved to nothing, so `resolve`
   printed `(call # …)` with an EMPTY FnId and `mir` printed `call print_bytes` — an

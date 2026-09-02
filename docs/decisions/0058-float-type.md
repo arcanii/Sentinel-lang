@@ -208,8 +208,12 @@ integer min/max/clamp.
   (`Channel<f64>` and a phantom `f64` generic argument both lower cleanly), and getting
   this wrong cost a real defect during implementation — `cg_mangle_to` had no scalar-4
   arm, so `struct Pair<A, B> { a: A }` used as `Pair<i64, f64>` made `scg` ABORT on a
-  program the oracle compiles to `%Pair_i64_ty_F64`. It now mirrors the oracle's own
-  defensive `ty_F64`.
+  program the oracle compiles happily. It now carries a real scalar-4 arm.
+  ⚠ **The TAG changed at ADR 0016 A1**: it was `ty_F64` — mirroring the oracle's own
+  `Debug`-leaking catch-all — and is now `f64`. Mirroring the oracle was faithful and did
+  match byte-for-byte, but it matched the WRONG side: inkwell, the back end that emits
+  objects, always spelled it `f64`. Two implementations agreeing is not evidence when the
+  third is the one that ships.
   **Two decisions worth carrying forward.** (i) `f64` is a scg SCALAR CODE (4), never a
   new interner KIND: every `h < tbase()` test in the self-hosted typer *means* "scalar"
   (Copy, drop-free, `Fn<T,R>`-eligible, substitution-inert), so a kind would have made
