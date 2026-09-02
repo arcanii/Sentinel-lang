@@ -1875,3 +1875,21 @@ fn pass_c16_mono_root_method_bodies() {
     // sibling. 4 + 16 + 22 = 42.
     assert_eq!(run_exit("c16_mono_root_method_bodies.sentinel"), 42);
 }
+
+#[test]
+fn pass_c19_widen_arm_family() {
+    // ADR 0051 / ADR 0014 D3, register D2: the sibling ARM family. Ten expression
+    // arms took a real expected type and dropped it, so a widened binding lost its
+    // `(widen-secret …)` / `(widen-null …)` wrapper in `scg`.
+    //
+    // At a `let` that costs only the wrapper; at an ASSIGNMENT it costs INVALID IR,
+    // because the store is rendered from the target type while the operand comes back
+    // un-widened. Measured on this exact fixture against a pre-change stage binary:
+    // "'%v27' defined with type 'i64' but expected '{ i1, i64 }'". Post-fix the two
+    // back ends are byte-identical and `llvm-as` is clean.
+    //
+    // The exit code is the weakest assertion here. The real one is the codegen
+    // differential, which sweeps `tests/pass` — this file is where a regression in the
+    // dispatcher-level widen splice would surface. 10+6+3+10+8+5 = 42.
+    assert_eq!(run_exit("c19_widen_arm_family.sentinel"), 42);
+}

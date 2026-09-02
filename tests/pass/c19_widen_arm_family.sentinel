@@ -1,0 +1,90 @@
+// ADR 0051 / ADR 0014 D3, filed-defect register D2: the SIBLING ARM FAMILY.
+//
+// A widened binding wraps its right-hand side — `let v: secret i64 = e;` makes the
+// oracle print `(widen-secret e :secret i64)`, and MIR emits a whole `(vN opaque vM)`
+// node for it. `scg` mirrored that only in the arms that happened to call `widen_pre`
+// themselves (`Int`, `Var`, `Unary`, `Call`, …). ELEVEN arms took a real expected type
+// and dropped it: `Field`, `Index`, `Method`, `Array`, `StructLit`, `Declassify`,
+// `Perform`, `Await`, `Qcall`, `ClassInit` and `Handle` — each confirmed diverging by
+// its own probe rather than assumed from the list. ⚠ The count was TEN until the
+// adversarial review found `Handle`, which appeared in NEITHER of the source comment's
+// two lists. The code always covered it — that is the point of splicing at the
+// dispatcher rather than per arm — and only the prose undercounted. Do not re-derive
+// this list by hand.
+//
+// ⚠ AT A `let` THE COST IS ONLY THE WRAPPER; AT AN ASSIGNMENT IT IS INVALID IR, which
+// is why this is a fixture and not a cosmetic follow-up. The store is rendered from the
+// TARGET type while the operand comes back un-widened, so `o = p.f` with `o: ?i64` made
+// `scg` emit a `{ i1, i64 }` store of a bare `i64`: measured pre-fix as
+// "'%v4' defined with type 'i64' but expected '{ i1, i64 }'". The oracle's IR for the
+// same program assembles clean. That case is the fifth binding below and it is the
+// load-bearing one.
+//
+// The fix is ONE splice at the expression dispatcher rather than eleven arm bodies, and
+// the property that makes that safe is worth keeping in mind if this file ever fails:
+// an arm that already widened RETURNS the expected type, and `widen_kind` compares the
+// expectation's INNER type against the node's, so it answers 0 and the splice
+// degenerates to a copy. Arms that were already correct are untouched, and an arm
+// added later is covered without anyone remembering to.
+//
+// ⚠ NOT covered here, and deliberately: the ARRAY-ELEMENT widen `[u8]` -> `[secret u8]`
+// stays ADR 0051 A1-deferred. `widen_kind` has no array arm, so the dispatcher gate
+// never fires on it — verified 0-widens-before and 0-widens-after against a pre-change
+// stage binary, so this slice did not quietly change it either way.
+//
+// ⚠ ALSO NOT widened, and this one is a GUARD the splice needs rather than a gap: a
+// DIVERGENT node. The oracle's `check_expr` skips `coerce_to_expected` entirely when
+// `expr_diverges`, so `let v: secret i64 = if c { 42 } else { return 1 };` leaves the
+// `return` bare. The first version of this fix wrapped it — an introduced parity break
+// the review caught — so `dump_texpr` now consults a divergence flag set by the
+// `Return` arm. Only `Return` needs it: the oracle REFUSES every program that would put
+// a fully-diverging block, `if` or `match` in a widened position, measured rather than
+// assumed.
+//
+// Trace: 10 through a FIELD, 6 through an INDEX, 3 through a DECLASSIFY, 10 through an
+// ASSIGNMENT, 8 through a METHOD, and 5 through an ARRAY value. 10+6+3+10+8+5 = 42.
+// Exit 42, no stdout.
+
+struct P { f: i64 }
+
+class Meter {
+    let n: i64;
+    pub init(n: i64) {
+        self.n = n;
+        0
+    }
+    pub fn read(self: &Self) -> i64 {
+        self.n
+    }
+}
+
+fn main() -> i64 {
+    let p: P = P { f: 10 };
+    let a: [i64] = [6];
+    let m: Meter = Meter::init(8);
+    let seed: secret i64 = 3;
+
+    // Field, Index and Method into a `secret` expectation.
+    let from_field: secret i64 = p.f;
+    let from_index: secret i64 = a[0];
+    let from_method: secret i64 = m.read();
+
+    // Declassify into a `?T` expectation.
+    let from_declassify: ?i64 = declassify(seed);
+
+    // The ASSIGNMENT position — the one that was invalid IR, not a text divergence.
+    let mut assigned: ?i64 = null;
+    assigned = p.f;
+
+    // A whole ARRAY VALUE into a `secret` expectation. Distinct from the deferred
+    // element-wise widen above: here the expectation is `secret [i64]`, which
+    // `widen_kind` handles as an ordinary secret widen of the array.
+    let from_array: secret [i64] = [5];
+
+    declassify(from_field)
+        + declassify(from_index)
+        + unwrap_or(from_declassify, 0)
+        + unwrap_or(assigned, 0)
+        + declassify(from_method)
+        + declassify(from_array)[0]
+}

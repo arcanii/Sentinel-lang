@@ -229,6 +229,22 @@ struct TyCtx {
     // FieldAccess arm reads it (right after the target dump) to detect a `base.field`
     // PARTIAL move on a directly-named base.
     mvbv: i64,
+    // (ADR 0065 / register D2) Did the expression just dumped by `dump_texpr_node`
+    // DIVERGE? Reset on every entry, set only by the `Return` arm. The widen splice in
+    // `dump_texpr` reads it: the oracle's `check_expr` skips `coerce_to_expected`
+    // entirely when `expr_diverges(&synth)`, so a `return` in a widened position must
+    // NOT get a `(widen-secret …)` wrapper — `let v: secret i64 = if c { 42 } else
+    // { return 1 };` is the shape, and the oracle leaves the `return` bare.
+    //
+    // Only `Return` sets it, and that is MEASURED rather than a narrowing of the
+    // oracle's predicate. `expr_diverges` also covers a fully-diverging Block / If /
+    // Match, but the oracle REFUSES every program that would put one of those in a
+    // widened position (`let v: secret i64 = { return 1 };`, `= if c { return 1 } else
+    // { return 2 };`, `= match e { A => return 1, B => return 2 };` — all rejected), and
+    // a block whose non-tail STATEMENT returns already agrees. So the reachable set is
+    // exactly `Return`. If the front end ever accepts those shapes, this flag needs the
+    // propagation the oracle has.
+    ediv: bool,
     // --- (7/N) MIR lowering (ADR 0044) — built ONLY under `mode == 2` as a guarded
     //     side-effect of the pass-2 walk; PER-FN (reset in `type_fn`). Everything is
     //     a flat append-only parallel-Vec pool tagged by block (so out-of-order block

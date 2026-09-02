@@ -90,6 +90,7 @@ fn new_tyctx(mode: i64) -> TyCtx {
         mfv: vec_new(),
         mfi: vec_new(),
         mvbv: 0 - 1,
+        ediv: false,
         mode: mode,
         lastval: 0 - 1,
         mir_cur: 0,

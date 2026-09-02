@@ -101,7 +101,82 @@ fn record_field_move(c: &mut TyCtx, base: i64, field: i64) -> i64 {
     }
 }
 
+// (ADR 0051 / ADR 0014 D3, register item D2) The WIDEN SPLICE, applied once for every
+// expression node rather than arm by arm.
+//
+// A `let v: secret i64 = <e>;` or `let n: ?i64 = <e>;` wraps its right-hand side —
+// the oracle prints `(widen-secret … :secret i64)` / `(widen-null … :?i64)` and MIR
+// emits a whole `(vN:?T opaque vM)` for it. `scg` did that only in the arms that
+// happened to call `widen_pre` themselves: `Int`, `Bool`, `Var`, `Unary`, `Call`,
+// `SynthZero`, `Cast`, `Char`, `Float`, `Str` (plus `Binary` internally, and
+// `If`/`Block`/`Match`/`Scope`, which thread `exp` down to a leaf that does). ELEVEN
+// arms took a real `exp` and dropped it — `Field`, `Index`, `Method`, `Array`,
+// `StructLit`, `Declassify`, `Perform`, `Await`, `Qcall`, `ClassInit` and `Handle` —
+// each verified diverging by construction, one probe per arm. ⚠ That count was TEN
+// until an adversarial review found `Handle`, which the older comment below listed in
+// NEITHER of its two arm lists. The code covered it regardless, which is the argument
+// for splicing here rather than per arm — but do not re-derive the list by hand.
+//
+// Doing it HERE rather than eleven times is not just less code: the property that
+// makes it safe is that an arm which already widened RETURNS `exp` (`widen_post`
+// says so), and `widen_kind(exp, exp)` is 0 because it compares `exp`'s INNER type
+// against the node's. So the arms that were already right are untouched — the
+// splice degenerates to a copy — and any arm added later is covered without anyone
+// remembering to. The alternative, editing ten arm bodies to write into a temp, is
+// a far larger diff that closes exactly today's list.
+//
+// The fast path matters: `dump_texpr` is the compiler's hottest recursion and runs
+// over the whole self-hosted source, so the temp buffer and the extra frame are
+// taken ONLY when `exp` is a `?T` or `secret T` that could actually widen. Every
+// other call goes straight through as before.
+fn widen_possible(c: &mut TyCtx, exp: i64) -> bool {
+    if exp < tbase() {
+        false
+    } else {
+        let k: i64 = (*c).tk[exp - tbase()];
+        k == 3 || k == 4
+    }
+}
+
 fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
+    if widen_possible(c, exp) {
+        // The wrapper must PRECEDE the node and the node's type is known only after
+        // it synthesizes, so build into a temp and splice — the same shape
+        // `dump_te_binary` uses internally.
+        let mut wtmp: Vec<u8> = vec_new();
+        let wrt: i64 = dump_texpr_node(&mut wtmp, ex, exp, src, c, gb);
+        // Two `_on` probes rather than `||`: each takes `&mut TyCtx` and the lexical
+        // borrow checker reads the pair in one expression as overlapping.
+        let ww: bool = if mir_on(c) {
+            widen_kind(c, exp, wrt) != 0
+        } else if cg_on(c) {
+            widen_kind(c, exp, wrt) != 0
+        } else {
+            false
+        };
+        // (ADR 0065) A DIVERGENT node is never coerced. The oracle's `check_expr`
+        // guards `coerce_to_expected` with `if expr_diverges(&synth) { return synth }`,
+        // so `let v: secret i64 = if c { 42 } else { return 1 };` leaves the `return`
+        // bare — and without this the splice wrapped it, an INTRODUCED parity break
+        // that the adversarial review caught. Splice only when the node did not
+        // diverge; otherwise the temp is appended verbatim.
+        if (*c).ediv {
+            append_str(out, vec_to_array(wtmp));
+            wrt
+        } else {
+            mir_widen(c, ww, exp);
+            cg_widen(c, ww, exp);
+            widen_splice(out, wtmp, exp, wrt, c)
+        }
+    } else {
+        dump_texpr_node(out, ex, exp, src, c, gb)
+    }
+}
+
+fn dump_texpr_node(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
+    // (ADR 0065) reset the divergence flag on entry; only the `Return` arm re-sets it,
+    // and `dump_texpr`'s widen splice reads it immediately after this returns.
+    (*c).ediv = false;
     // (ADR 0046) reset the direct-Var tracker on entry; only the `Var` arm re-sets it. So
     // right after dumping a sub-expression, `mvbv >= 0` iff that sub-expression was a
     // directly-named binding read — the signal the FieldAccess arm needs for a partial move.
@@ -295,19 +370,13 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
         // or a variable RHS.
         //
         // A WHOLE FAMILY OF SIBLING ARMS still takes a real `exp` and discards it.
-        // Grep `widen_pre|widen_post|widen_splice` against the arm list: only
-        // `Int`, `Bool`, `Var`, `Unary`, `Call`, `SynthZero`, `Cast`, `Char`,
-        // `Float` and `Str` widen (plus `Binary` internally, and `If` / `Block` /
-        // `Match` / `Scope`, which thread `exp` down to a leaf that does). NOT
-        // `Field`, `Index`, `Method`, `Array`, `StructLit`, `Declassify`,
-        // `Perform`, `Await`, `Qcall`, `ClassInit` or `Spawn` — and `dump_te_field`
-        // / `dump_te_method` do not widen internally either. Three of them in one
-        // program, all oracle-accepted, all diverging:
-        //   let v: secret i64 = p.x;        oracle (widen-secret (field …)), scg (field …)
-        //   let w: secret i64 = a[0];       oracle (widen-secret (index …)), scg (index …)
-        //   let n: ?i64 = declassify(s);    oracle (widen-null (declassify …)), scg bare
-        // Same three-line pattern would fix them; each needs its own probe battery,
-        // because the risk a widen fix carries is OVER-widening.
+        // ⚠ THAT FAMILY IS NOW CLOSED (register D2), and NOT by the per-arm pattern
+        // this comment used to prescribe. `dump_texpr` splices the widen ONCE for
+        // every node instead — see the block above `widen_possible`. The list this
+        // comment used to give was also an UNDERCOUNT: it named ten arms, and the
+        // adversarial review found an ELEVENTH, `Handle`, in neither of its two lists.
+        // That is the standing lesson here — a hand-written arm list is only as good
+        // as the grep behind it, which is why the fix stopped depending on one.
         //
         // THREE POSITIONS used to supply no expectation AT ALL — a different defect
         // from the family above, and shape-INDEPENDENT (even a literal failed, which
@@ -351,12 +420,11 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
         // ELEMENT — so `widen_kind` handles that one and only the element expectation
         // is unthreaded, putting it in the arm family below.
         //
-        // What remains open here is the FAMILY above, not these positions — but do
-        // NOT read that family as cosmetic, which an earlier version of this comment
-        // implied. It reproduces through a plain `let`, where it costs only the
-        // wrapper (valid IR, wrong text). At the ASSIGN and RETURN positions the same
-        // arms cost INVALID IR, because the store and the `ret` are rendered from the
-        // TARGET type while the operand comes back un-widened:
+        // The FAMILY above is closed too (D2). It was never cosmetic, which an even
+        // earlier version of this comment implied: through a plain `let` it costs only
+        // the wrapper (valid IR, wrong text), but at the ASSIGN and RETURN positions
+        // the same arms cost INVALID IR, because the store and the `ret` are rendered
+        // from the TARGET type while the operand comes back un-widened:
         //   let mut o: ?i64 = null; o = pv.f;
         //     -> scg `store { i1, i64 } %v4` with `%v4 : i64`; llvm-as rejects it,
         //        and the oracle's IR for the same program is clean.
@@ -1202,6 +1270,12 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             } else {
                 0
             };
+            // (ADR 0065) mark this node DIVERGENT so `dump_texpr`'s widen splice leaves
+            // it alone — the oracle's `check_expr` skips `coerce_to_expected` for a
+            // diverging expression, so `let v: secret i64 = if c { 42 } else
+            // { return 1 };` must emit a bare `(return …)`, not a wrapped one. Set
+            // LAST, after the sub-dumps, because `dump_texpr` on the inner resets it.
+            (*c).ediv = true;
             it
         },
         // ADR 0049: integer cast `expr as T`. Type the operand, then the result is
