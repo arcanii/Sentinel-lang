@@ -80,7 +80,7 @@ reference as you work through the milestones.
 > confirming nothing pre-existing is newly refused; oracle-vs-scg byte-equality on the new
 > fixture at types, mir and llvm; and the secret-taint check in both directions.
 
-### ▶ RESUME HERE (2026-08-30 — SIX slices are COMMITTED, four-check GREEN, tree CLEAN; nothing is mid-flight. Pick fresh from the open menu below. The arc: menu item (3) — **extending the seven fixture-only stage differentials to REAL programs** (`34ffea0`) — found three unmirrored front-end surfaces nothing in the fixture corpus could reach, and the session then CLOSED ALL THREE, each pinned by a new fixture: **ADR 0059 `export "C"`** (`e2e5ee5`, ADR 0059 **A10**), **ADR 0058 FLOATS** (`339f437` + `3eeb34a`, ADR 0058 **A8**) and **ADR 0057's `ptr_of` / `ptr_of_mut` / `is_null`** (`e565a34`, ADR 0057 **A10**) — which completes the RESERVED-NAME family (`sqrt` + the three, scg unary op-codes 6..=9) and leaves `selfhost_parse.rs`'s registry EMPTY. scg now has `f64` and `ptr` as scalar codes 4 and 5. The sixth slice then closed the first of the PRE-EXISTING defects that probing had surfaced: **a widened `secret T` / `?T` binding now gets its wrapper when the RHS is a CALL or a UNARY** (`34e1a8f`) — at MIR that wrapper is a whole extra value, so its absence had been shifting every later value number, and REAL programs write the shape 18 times without any differential being able to see them. ⚠ TWO REVIEWS FOUND HOLES IN THE HARNESS ITSELF — the sweeps had missed the `demos/` root entirely (it is in all eight now: 119 direct + 21 merged at lex/ast, 11 + 11 at the semantic stages), and every differential SKIPS a program the oracle rejects, so "scg accepts what snc rejects" is untested by construction (filed). Every slice was adversarially reviewed before commit, and the reviews earned it: a reachable `scg` abort, a fourth unary table where `sqrt` rendered as `&mut`, that missing root, an INVALID-IR assignment widen, and several false claims of mine. NEXT: `select` (design-first), `Channel<secret T>`, f64/ptr CODEGEN, widening the Bar-A source printer, or the EIGHT filed defects (menu item 4 is now a durable register — start at D1, the snc miscompile) — see "▶ THE OPEN MENU" below)
+### ▶ RESUME HERE (2026-08-31 — everything is COMMITTED at `b04740c`, four-check GREEN (1813 passed / exactly the 18 known Windows failures), tree CLEAN, nothing mid-flight. This session closed FOUR of the filed-defect register: **D1** (`5609fb7`, ADR 0072 — a SILENT `snc build` miscompile, an effecting fn returning a raw pointer), **D8** (`0fef8a4`, ADR 0023 A4 — scg mishandling `impl as Trait for <struct>`), **D9** (`4ac7bdc`, ADR 0023 A5 — the two Rust back ends disagreeing about whether that shape is compilable), and **D3** (`28dd77d`, ADR 0051 A5 — the widen expectation reaching a call arg, a `return` operand and an assignment RHS). **D5 is INVESTIGATED but NOT implemented** — read its register entry first, the "which side moves?" question is settled and the answer is the oracle. ⚠ THE REVIEWS EARNED THEIR COST AND ALSO CAUGHT FOUR FALSE CLAIMS OF MINE — see the caveat block below and `[[claim-verification-discipline]]`; the recurring shape was testing ONE instance and generalising. NEXT: D5 (settled, needs an ADR), D2 (re-filed — it is INVALID IR at two positions, not the text divergence its first filing claimed), D4, D6, D7, or the non-register menu items — `select`, `Channel<secret T>`, f64/ptr CODEGEN, widening the Bar-A printer)
 
 > **▶ THE OPEN MENU (2026-08-30) — real remaining work, verified against the repo.**
 >   1. **`select` over channels** — the flagship concurrency gap. Its RUNTIME is already PINNED
@@ -164,12 +164,37 @@ reference as you work through the milestones.
 >      `store { i1, i1 } %v0` with `%v0` an `i1`, which `llvm-as` rejects; post-fix IR assembles)
 >      but it still diverges. Fix = thread `exp` into `dump_generic_call`.
 >
->      **D5 — `cg_mangle_to`'s bare-`ty` fallback COLLIDES.** Two DIFFERENT phantom generic
->      arguments land on ONE LLVM type name (`Pair<i64, Shared<i64>>` and `Pair<i64, Mutex<i64>>`
->      both give `%Pair_i64_ty`) — duplicate type definitions, i.e. invalid IR. NOT fixable by
->      enumeration the way `ty_F64` / `ty_Ptr` were: the oracle's fallback embeds its OWN interner
->      ids (`ty_Shared(SharedId(0))`), which scg's independent numbering cannot reproduce. Needs a
->      decision about which side moves.
+>      **D5 — the phantom-generic mangling. INVESTIGATED 2026-08-31, NOT implemented; the
+>      "which side moves?" question is now SETTLED and the answer is: the ORACLE.**
+>
+>      The reported half reproduces: `Pair<i64, Shared<i64>>` and `Pair<i64, Mutex<i64>>` both
+>      give `%Pair_i64_ty` in scg, so `llvm-as` says `redefinition of type` — invalid IR, and
+>      pre-existing (a pre-D3 stage emits the same two identical names).
+>
+>      ⚠ **BUT THE ORACLE'S OWN IR DOES NOT ASSEMBLE EITHER, which the entry did not know and
+>      which changes the decision.** `snc llvm` emits
+>      `%Pair_i64_ty_Shared(SharedId(0)) = type { i64 }`, and `llvm-as` rejects it with
+>      `expected '=' after name` — an unquoted `(` is not legal in an LLVM identifier. So the
+>      oracle's fallback is not merely UNSTABLE (embedding its own interner ids, which scg's
+>      independent numbering cannot reproduce); it is UNPARSEABLE. Both sides are broken,
+>      differently — the same shape as D1.
+>
+>      That rules out two of the three options the entry left open. Mirroring only the id-free
+>      kinds, or registering the divergence, would each leave `snc` emitting IR no backend can
+>      read. **Fix the ORACLE's `mangle_type` fallback** (crates/sentinel-driver/src/llvm_dump.rs
+>      ~4153, `other => format!("ty_{other:?}")`) to give these kinds a stable, id-free,
+>      LLVM-legal name in the style every other arm already uses — `opt_`, `arr_`, `vec_`,
+>      `ref_`/`refmut_`, `sec_` are all structural and id-free, so `shared_<elem>` /
+>      `mutex_<elem>` and friends follow the convention — and THEN mirror by enumeration into
+>      `cg_mangle_to`, which becomes possible precisely because the name no longer embeds an id.
+>      Enumerate the kinds explicitly rather than leaving a wildcard: a wildcard that is merely
+>      LLVM-legal still collides silently, which is the bug.
+>
+>      ORACLE-MOVING, so the full rhythm applies: ADR first, re-bless, mirror, both fixed points
+>      green. Check inkwell's `mangle_generic_struct_name` (sentinel-codegen/src/lib.rs ~2198)
+>      at the same time — it is the third implementation and must agree. Nothing in the corpus
+>      instantiates a generic at a container kind through a phantom parameter, so every
+>      differential is green today and a fixture has to be written to pin it.
 >
 >      **D6 — scg OVER-ACCEPTS `{ …; return e; }`**, which `snc`'s parser rejects ("blocks must
 >      end with an expression"), and synthesizes a `0` tail out of nothing. Worth more than its
