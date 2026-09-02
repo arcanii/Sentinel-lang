@@ -57,6 +57,27 @@ reference as you work through the milestones.
 > impl or class anywhere). If you are picking this work up and have not been briefed on
 > it, ask before touching the struct drop path.
 >
+> ⚠ **A SECOND PRE-EXISTING HOLE IN THE SECURITY CLASS was found on 2026-09-02 while verifying
+> the D15 fix through inkwell, and is deliberately NOT described here** — same handling as the
+> one above, per CONTRIBUTING.md. It is NOT the struct drop path and NOT introduced by any commit
+> in this session (it reproduces with no generics, no traits, no impls and no classes; the
+> compiler accepts it and the built program corrupts the heap at run time). It was found by
+> running an investigator's probe, not by looking for it. If you are picking this up and have not
+> been briefed, ask before touching the ARRAY drop path or reference deref-copy.
+>
+> ⚠ **D15/D16 (`45f231b`) HAD A FOUR-LENS REVIEW *AND* ITS VERIFY PHASE, and the review paid for
+> itself twice over.** It found (i) a BLOCKER I introduced — the first field-substitution fixpoint
+> walked every instance the vec grew by, on a termination argument I never constructed, and
+> `struct A<T> { x: ?A<A<T>>, n: i64 }` stack-overflowed the compiler on source the previous
+> release compiled; (ii) that the delta fix had turned a clean diagnostic into a panic on
+> `impl as Get for Box`; (iii) that it made a known unbounded-instantiation hang newly reachable
+> from method bodies, trading wrong output for a denial-of-service; and (iv) that BOTH new
+> fixtures were VACUOUS. All are fixed and re-verified. **The two fixture failures are the ones
+> to learn from**: an alpha route was masked because one line of the fixture SPELLED the instance
+> the defect was supposed to create, and a three-root fixture collapsed to one monomorphic
+> instance because all three roots used the same type. A fixture that exercises a defect at ONE
+> type, or that names the thing it means to synthesise, tests nothing.
+>
 > ⚠ **ADR 0016 A1 HAD A FULL FIVE-LENS REVIEW *AND* ITS VERIFY PHASE** — the first slice in
 > this sequence where both halves ran to completion. 18 findings were settled by
 > construction: 11 REFUTED, 3 CONFIRMED-PRE-EXISTING, 4 CONFIRMED-INTRODUCED. **All four
@@ -103,7 +124,7 @@ reference as you work through the milestones.
 > confirming nothing pre-existing is newly refused; oracle-vs-scg byte-equality on the new
 > fixture at types, mir and llvm; and the secret-taint check in both directions.
 
-### ▶ RESUME HERE (2026-09-02 — everything is COMMITTED, four-check GREEN (**1814 passed / exactly the 18 known Windows failures**; 1812 before, +2 from the two new fixtures), both bootstrap fixed points byte-identical, tree CLEAN, nothing mid-flight. This session closed the register's **D5** — **ADR 0016 A1**, the mangling scheme D7 left "TBD in implementation", now pinned STRUCTURAL (a tag names the type's shape, never an interner index), EXHAUSTIVE, and identical across all three back ends; table in `docs/abi-v1.md` §4. ⚠ **THE FILED ENTRY WAS RIGHT ABOUT THE MECHANISM AND WRONG ABOUT THE SCOPE, TWICE, BOTH TIMES BY GENERALISING FROM ONE INSTANCE** — it named two container kinds (eleven variants reach it, and `Class`/`Enum` do so with no concurrency feature at all) and one route (there are two; the MONO-KEY route `idg(v)` is the only way `Task`/`Process`/`Guard` reach a tag, and it corrupts a FUNCTION SYMBOL). ⚠ **THE ADVERSARIAL REVIEW FOUND A REGRESSION IN MY OWN FIX, AND THEN KILLED MY FIRST ACCOUNT OF IT** — A1 makes the pre-existing tag/user-name collision class (D18) wider in the two printing back ends, because the oracle's old paren-bearing tags were accidentally unforgeable; my first write-up said "two members" and defended the rest by primitive-shadowing, and both were refuted by construction (the mono-key route needs no type-position spelling, so `struct f64 {}` collides too). Accepted deliberately, and now recorded as the wider fact. **NINE new register items (D15-D23) were filed from this work, all verified by construction — two of them are CRASHES IN THE SHIPPED COMPILER on ordinary generic source (D15, D16) and are the strongest candidates for what to do next; D22 is a lock leak the review found by attacking my own new fixture.** After those: D2 (invalid IR at the assign and return positions), D4, D6, D7, or the non-register menu items — `select`, `Channel<secret T>`, f64/ptr CODEGEN, widening the Bar-A printer)
+### ▶ RESUME HERE (2026-09-02 — everything is COMMITTED at `45f231b`, four-check GREEN (**1817 passed / exactly the 18 known Windows failures**), both bootstrap fixed points byte-identical, tree CLEAN. This session closed **D5** (`ee0fa68`/`f521421`, ADR 0016 A1 — the type mangle is structural, exhaustive and three-way identical) and **D15 + D16** (`45f231b` — codegen now sees the generic instances substitution creates, and neither of its closures can loop). ⚠ **BOTH SLICES HAD A FALSE CLAIM OF MINE KILLED BY THE ADVERSARIAL REVIEW, and the second one was a BLOCKER** — I asserted a fixpoint terminated "because no recursive-by-value generic struct exists", never constructed it, and `struct A<T> { x: ?A<A<T>>, n: i64 }` stack-overflowed the compiler on source the previous release compiled. The review also found BOTH of that slice's new fixtures VACUOUS (one line pre-interned the instance it meant to test; three roots at one type collapsed to one instance). **Run the review, and read its refutations as carefully as its findings.** ⚠ A SECURITY-CLASS heap corruption was found in passing and is deliberately NOT described here — see the caveat block. **NEXT: D2** (the widen ARM family — invalid IR at the assign and return positions, and the closest thing to a worked template is ADR 0051 A5), then **D17** (non-`i64` container VALUES in `scg`). Also newly filed and worth a look: **D24-D26** (three independent `scg` generic gaps, all on one deferred example) and **D27** (the spawn-wrapper worklist is a fourth mono root with defect δ's shape). Or the non-register menu items — `select`, `Channel<secret T>`, f64/ptr CODEGEN, widening the Bar-A printer)
 
 > **▶ THE OPEN MENU (2026-08-30) — real remaining work, verified against the repo.**
 >   1. **`select` over channels** — the flagship concurrency gap. Its RUNTIME is already PINNED
@@ -134,7 +155,7 @@ reference as you work through the milestones.
 >      now has. Also worth doing with it: `examples/math/quadratic.sentinel` and
 >      `sentinel_library/std/math/float.sentinel` currently reach only lex/ast, because
 >      `snc merge`'s Bar-A printer rejects both a float literal and `sqrt` (menu item 5).
->   4. **THE FILED-DEFECT REGISTER — TWENTY-THREE items (D1-D23); **D1, D3, D5, D8 and D9 are DONE**, the rest verified against a pre-slice binary,
+>   4. **THE FILED-DEFECT REGISTER — TWENTY-SEVEN items (D1-D27); **D1, D3, D5, D8, D9, D15 and D16 are DONE**, the rest verified against a pre-slice binary,
 >      NONE registered in any `DEFERRED_PROGRAMS` / `KNOWN_SCG_BUGS` list because no corpus
 >      program reaches them.** They were also filed as task chips, but chips are EPHEMERAL UI
 >      and this list is the record — if the two disagree, this one wins, and a chip that is
@@ -306,7 +327,21 @@ reference as you work through the milestones.
 >      construction. Two of them are CRASHES IN THE SHIPPED COMPILER on ordinary source,
 >      which makes them worth more than their position in this list suggests.**
 >
->      **D15 — a generic fn returning a GENERIC INSTANCE crashes `snc build`.** Six lines,
+>      **D15 — DONE (`45f231b`).** Four defects, not one, and both halves of the filed
+>      diagnosis were too narrow: the boundary is "an instance the TYPE CHECKER never
+>      interned", it has TWO producers (mono-fn BODY substitution AND Pass-0 generic-struct
+>      FIELD substitution, which needs no generic fn at all), and NESTING is not required —
+>      a plain `Box<i64>` trips it. A fourth, SILENT member (defect δ: class init / class
+>      method / impl method were not monomorphisation roots, so a generic fn reached only
+>      from a method body was called and never defined) came out of the same worklist.
+>      ⚠ The adversarial review found the FIRST version of the fix regressed working
+>      programs — its termination comment claimed a recursive-by-value generic struct
+>      "cannot exist", and `struct A<T> { x: ?A<A<T>>, n: i64 }` falsifies it in four lines
+>      (finite layout, recursion behind a pointer), stack-overflowing the compiler. The
+>      closure now walks only BY-VALUE fields and is capped; the mono worklist is capped
+>      too, which also closed the pre-existing unbounded-instantiation HANG. Original entry:
+>      
+>      **(historical) D15 — a generic fn returning a GENERIC INSTANCE crashes `snc build`.** Six lines,
 >      no phantom, no containers, no concurrency:
 >      `struct Box<T> { v: T }` / `fn inner<T>(x: T) -> Box<T> { Box { v: x } }` /
 >      `fn outer<T>(x: T) -> i64 { let b = inner(x); 7 }` /
@@ -322,7 +357,15 @@ reference as you work through the milestones.
 >      entry. **The highest-severity item on this list: a panic on ordinary generic code in
 >      the compiler that ships.** Loud rather than silent, which is the only mercy.
 >
->      **D16 — a NESTED ARRAY as a generic type argument crashes both Rust back ends.**
+>      **D16 — DONE (`45f231b`).** THREE unguarded callers of `ArrayElem::to_type()`, not
+>      two — `mono_args_dedup_safe` was the third, and it is the one that reaches cross-unit
+>      dedup. All now recurse through the `arrays` interner. `scg` already emitted the right
+>      tag, so the fix moved the two Rust back ends TO it. ⚠ The shortcut the sibling
+>      `contains_type_param` uses rests on a FALSE premise — `struct Box<T> { v: [[T]] }`
+>      type-checks and the dump prints `[[<T#0>]]`; what is true is only that it cannot be
+>      INSTANTIATED. Original entry:
+>      
+>      **(historical) D16 — a NESTED ARRAY as a generic type argument crashes both Rust back ends.**
 >      `struct Box<T> { v: T }` + `let b: Box<[[u8]]> = Box { v: ["a"] };` panics at
 >      `crates/sentinel-types/src/lib.rs:669`, `ArrayElem::Array` reaching `to_type()`'s
 >      `unreachable!("use TypedProgram::array_elem_type (ADR 0068)")`. The phantom form
@@ -445,6 +488,56 @@ reference as you work through the milestones.
 >      are unreachable, so changing them now would be untestable — but the site now
 >      carries the warning, and **M1.4c-2 must make `channel_elem_for` match its
 >      siblings, not merely "change it together with the table".**
+>
+>      **▸ D24-D27 came out of the D15/D16 work (2026-09-02). D24-D26 are all `scg`, all
+>      verified on `examples/lang/generic_calls_generic.sentinel`, which is registered in
+>      `DEFERRED_PROGRAMS` naming all three. D27 is the Rust back ends and is the fourth
+>      face of D15's defect δ.**
+>
+>      **D24 — `scg`'s monomorphisation worklist has ZERO transitive closure.** It seeds
+>      only from NON-generic bodies, so a generic fn reached through another generic fn's
+>      body is CALLED and never DEFINED — `llvm-as`: "use of undefined value
+>      '@wrap__i64'". It needs no generic struct at all: `fn ident<T>(x: T) -> T` called
+>      from a generic `outer` is a four-line repro. This is why D15 was never noticed on
+>      the `scg` side — D15 is merely the first shape where the ORACLE also failed.
+>      The fix is two changes: drop the `cg_mono_on` guard in `dump_generic_call`
+>      (`selfhost/types/infer.sentinel`) and turn the mode-4 loop
+>      (`selfhost/types.sentinel`) into a real worklist. ⚠ It must be **LIFO**, not a
+>      FIFO `while i < len(...)`: the oracle drains with `Vec::pop()`, and emitted order
+>      is part of the byte comparison.
+>
+>      **D25 — `scg` takes no generic-struct FIELD closure.** It emits
+>      `%Wrap_bool = type { %Box_bool }` while never declaring `%Box_bool` — an undefined
+>      TYPE rather than an undefined function (`llvm-as`: "use of undefined type named
+>      'Box_bool'"). The `scg` analogue of D15's α2, and it fires in programs whose only
+>      function is `main`.
+>
+>      **D26 — `scg` emits a spurious runtime layout for a generic DECL.** On the same
+>      program it emits `%Struct.2 = type { i64 }` for `struct Shelf<S>`, which has no
+>      runtime layout at all; both Rust back ends skip generic decls in Pass 0. Smallest
+>      of the three and the easiest to fix.
+>
+>      **D27 — `__spawn_wrapper_<FnId>` collection is a FOURTH mono root with exactly
+>      defect δ's shape.** D15's δ fix added class init, class methods and impl methods
+>      as monomorphisation roots because they are "lowered as ordinary functions but do
+>      not live in `program.fns`". The `spawn`-target scan ~30 lines below it in the same
+>      function still reads `for f in program.fns.iter()...` and was NOT extended, so a
+>      `spawn` inside a class method, an impl method or a generic fn body emits
+>      `call ... @__spawn_wrapper_42` with no definition — silent invalid IR, the same
+>      failure signature δ was filed for. PRE-EXISTING (both binaries), verified on three
+>      shapes, and `scg` gets it right, so the polarity matches δ exactly. Deliberately
+>      NOT folded into the D15 commit: δ's fix was about the mono worklist, this is the
+>      spawn-wrapper worklist, and conflating them would have made a clean byte-neutral
+>      change into one that moves `spawn` output.
+>
+>      **▸ ALSO CLOSED BY THE D15 COMMIT, though filed under the family rather than as
+>      its own item: the unbounded-instantiation HANG.** `fn f<T>(x: T) -> i64 { let b =
+>      mk(x); f(b) }` type-checks and used to consume memory for ever with no depth cap —
+>      a compiler denial-of-service from four accepted lines. The monomorphic worklist is
+>      now capped and refuses with a diagnostic. The same commit added a second cap on
+>      the generic-struct field closure, for `struct S<T> { c: S<S<T>> }`, which is
+>      DECLARABLE (only the non-generic `struct N { n: N }` trips "recursive struct has no
+>      representable size") and has no finite layout.
 >   5. **Widen `snc merge`'s Bar-A source printer** — the highest-leverage COVERAGE item.
 >      `crates/sentinel-driver/src/source_dump.rs` rejects **98 of the 119** real programs
 >      (re-measured after `demos/` joined the corpus), dominated by `cast` (37) and `declassify`

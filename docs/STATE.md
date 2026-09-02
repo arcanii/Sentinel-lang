@@ -14,7 +14,93 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
-**Latest (2026-09-02) — the register's D5 is closed: the type-mangling scheme D7 left "TBD in
+**Latest (2026-09-02b) — the register's D15 and D16 are closed: codegen now sees the generic
+instances substitution creates, and neither of its closures can loop** (`45f231b`). Four defects,
+all reachable from ordinary source, all in the generic machinery, and all invisible to the
+corpus — 222 emitted programs, zero undefined symbols, zero panics.
+
+**D16 — three unguarded callers of a table-less promotion.** `ArrayElem::to_type()` cannot
+resolve a NESTED array (its inner element lives in the `arrays` interner) and ends in an
+`unreachable!`. `type_has_typeparam`, `arg_contains_typeparam` and `mono_args_dedup_safe` all
+called it, so `Box<[[u8]]>` PANICKED both Rust back ends. They recurse through the interner now.
+`scg` already emitted the right tag (`arr_arr_u8`), so the fix moved the two Rust back ends TO
+it and needed no mirror. ⚠ The shortcut the sibling `contains_type_param` uses —
+`Type::Array(ArrayElem::Array(_)) => false`, justified as "a nested-array element carries no
+TypeParam" — rests on a FALSE premise: `struct Box<T> { v: [[T]] }` type-checks and the dump
+prints `[[<T#0>]]`. The true statement is narrower (it cannot be INSTANTIATED — unification
+refuses `[[T]]` against `[[u8]]`), so the wrong answer has not cost anything yet.
+
+**D15 — the filed entry described one cell of a four-defect family, and both halves of its
+diagnosis were too narrow.** The boundary is "an instance the TYPE CHECKER never interned", and
+it has TWO producers, not one: monomorphic-fn BODY substitution (the filed shape), and Pass-0
+generic-struct FIELD substitution — which needs **no generic function at all**
+(`struct Shelf<S> { label: i64 }` at `Shelf<Wrap<bool>>` must still lay out `Wrap<bool>`, whose
+by-value field mints `Box<bool>`). Nesting is not required either: a plain `Box<i64>` trips it
+exactly like `Box<Box<i64>>`; the nesting in the filed repro was only the mechanism by which the
+program avoided ever SPELLING the instance.
+
+**A fourth defect (δ) came out of the same worklist and is the worst of the four**, because it
+is the only silent one. `collect_mono_instantiations` seeded only from `program.fns`, so a
+generic fn called ONLY from a class init / class method / impl method was never monomorphised
+while its call site was still lowered and mangled — a call to a symbol that is never defined, no
+panic, no diagnostic, just text `llvm-as` rejects. Its polarity is REVERSED from the rest: `scg`
+already got it right, so the fix moves the two Rust back ends to `scg`. That is why its fixture
+sits in `tests/pass` (oracle and `scg` byte-identical, real differential coverage) while the α
+fixture is a deferred `examples/` program.
+
+**⚠ THE ADVERSARIAL REVIEW FOUND A BLOCKER IN THE FIRST VERSION OF THE FIX, and it was a false
+claim of exactly the shape [[claim-verification-discipline]] keeps recording.** The field
+closure walked everything the instance vec grew by, with a comment asserting it terminates
+"because no recursive-by-value generic struct exists — the layout would be infinite and the type
+checker rejects it". Both halves are false, and four-line programs falsify them:
+`struct A<T> { x: ?A<A<T>>, n: i64 }` has a perfectly FINITE layout because the recursion is
+behind a pointer, so it type-checks and interns a strictly larger argument every round —
+**the compiler stack-overflowed on source the previous release compiled cleanly.** The codebase
+had already told me: `llvm_ty`'s nullable arm carries a comment noting that a `?Node` cycle is
+broken by the pointer.
+
+The corrected closure walks only **by-value** fields, because a generic instance behind
+`?`/`[]`/`Vec`/`&` lowers to a bare `ptr` and its layout is never named — following it was pure
+over-approximation. The filter is on the DECLARED field type, not the substituted one:
+substitution interns as a side effect, so filtering afterwards emitted a spurious extra
+`%A_A_A_i64` declaration and changed the output of a working program.
+
+**Two hard caps back that up.** By-value polymorphic recursion IS declarable —
+`struct S<T> { c: S<S<T>> }` is accepted, and only the non-generic `struct N { n: N }` trips
+"recursive struct has no representable size" — so a phantom argument reaches Pass 0 with a type
+that has no finite layout. It now gets a DIAGNOSTIC instead of the old panic. The monomorphic
+worklist is capped too, because the δ fix had made a known unbounded-instantiation hang newly
+reachable from method bodies, trading a wrong-output defect for a denial-of-service: all three
+hanging programs, **including the pre-existing one that was already on the register**, now
+refuse cleanly rather than consuming memory for ever.
+
+**A silent mangling defect was repaired as a side effect**, and ADR 0016 A1 could not have
+caught it: pre-fix the oracle emitted `@idg__ref2` — an INTERNER INDEX inside an `abi-v1` symbol
+— where `scg` emitted `@idg__ref_i64`. A1 fixed the SCHEME; this was a stale-TABLE problem
+reaching `mangle_type`'s `.get()` fallback. The two now agree.
+
+**⚠ THE REVIEW ALSO FOUND BOTH NEW FIXTURES VACUOUS, and the failures are instructive.** The α
+example was byte-identical old-vs-new because one line (`Shelf<Box<i64>>`) SPELLED the very
+instance α1 was supposed to create, so the type checker interned it and the defect never fired —
+the fixture's own α2 case masked its α1 case. The two routes now run at different element types
+so neither can dedup against the other. The δ fixture had all three roots calling `mk` at `i64`,
+which collapses to ONE monomorphic instance, so a fix that added only impl methods (or only
+class init, or only class methods) produced byte-identical IR and still exited 42. Each root now
+instantiates at a distinct type, requiring `@mk__bool`, `@mk__i64` and `@mk__u8`.
+
+**What is NOT fixed, and is registered:** `scg` has no transitive monomorphisation worklist
+(D24), takes no generic-struct field closure (D25), and emits a spurious runtime layout for a
+generic DECL (D26) — all three verified on the deferred example, all independent of D15 (they
+fire with no substitution-born instance anywhere). And the `__spawn_wrapper_<FnId>` collection is
+a FOURTH mono root with exactly δ's shape, still seeded only from `program.fns` (D27) —
+pre-existing, and `scg` gets that one right too.
+
+Four-check green (1817 passed / exactly the 18 known Windows failures); both bootstrap fixed
+points byte-identical; 68 constructed family cases with zero panics, zero hangs and zero
+`llvm-as` rejections; byte-neutral across all 340 corpus programs bar the two new `tests/pass`
+fixtures.
+
+**Previous (2026-09-02a) — the register's D5 is closed: the type-mangling scheme D7 left "TBD in
 implementation" is now pinned, structural and exhaustive in all three back ends** (**ADR 0016
 A1**, the ADR's first amendment; table in [`abi-v1.md`](abi-v1.md) §4; pinned by
 `examples/lang/phantom_type_param.sentinel` + `tests/pass/c16_mono_key_handle_tags.sentinel`).
