@@ -3,7 +3,8 @@
 Status: **ACCEPTED for M1.4a (`Shared<T>`) — implemented 2026-07-02 — and for M1.4b
 (`Mutex<T>`) — implemented 2026-07-15/16/17, slices 1–4 incl. the D5a deadlock tiers
 (see the implementation log + the D5 amendment); and for M1.4c (secret
-`Shared`/`Mutex`) — implemented 2026-07-19, snc-side + the scg mirror, see the M1.4c
+`Shared`/`Mutex`) — implemented 2026-07-19, snc-side + the scg mirror, whose element WIDTHS
+were then completed 2026-09-02 (M1.4c-1c, `6337bea`, register D17); see the M1.4c
 implementation log + the D6/D4 amendment. `Channel<secret T>` (M1.4c-2) remains open.** Design
 PINNED with maintainer sign-off 2026-07-02. This is the M1.4 sub-phase of the ADR 0066 threading roadmap, broken out into
 its own ADR per **ADR 0066 D5** ("blocked on first designing a runtime-refcounted
@@ -606,8 +607,9 @@ stale staticlib.
 
 ## M1.4c implementation log (secret containers)
 
-Status: **M1.4c-1 (snc-side) + M1.4c-1b (the scg mirror) BOTH DONE 2026-07-19 — M1.4c is
-COMPLETE for `Shared`/`Mutex` and the ADR is ACCEPTED for M1.4c.** `Channel<secret T>`
+Status: **M1.4c-1 (snc-side) + M1.4c-1b (the scg mirror) BOTH DONE 2026-07-19, and
+M1.4c-1c (the element WIDTHS the mirror left behind) DONE 2026-09-02 — M1.4c is COMPLETE
+for `Shared`/`Mutex` and the ADR is ACCEPTED for M1.4c.** `Channel<secret T>`
 is **M1.4c-2** (see below), scoped separately for the reason given there.
 
 ### M1.4c-1 — `Shared<secret T>` / `Mutex<secret T>`, snc-side
@@ -663,7 +665,9 @@ interner being STRUCTURAL made this threading rather than new representation:
 `dump_container_call` dispatched for FnIds 38/39/40/41, the `_secret` constructor choice
 in cg + its two declare flags. **The `*g` deref needed no change at all** — its result
 type is already computed structurally (`ta[ta[guard]]`), so it yields the secret element
-by itself. One wrinkle the oracle forced: the READERS (`shared_get`/`lock`) must render a
+by itself. ⚠ True of M1.4c-1b's TYPE-level question only: M1.4c-1c (below) then gave that
+same arm a width DECODE, because yielding the right TYPE says nothing about converting the
+i64 the runtime actually hands back. One wrinkle the oracle forced: the READERS (`shared_get`/`lock`) must render a
 `(targs <elem>)` annotation for a non-i64 element (the Rust side records `type_args`
 there), which means buffering the args first — the `dump_gcall` shape — while the
 CONSTRUCTORS dump straight through like `dump_apply_call`. The i64 case emits no targs,
@@ -703,6 +707,39 @@ mirror is its own slice. Its four sites are already mapped:
 4. **Deref decode** — the `*g` arm must strip the secret before its i64-only gate.
 Once green, move the fixture back to `tests/pass/` (satisfying D6's "a `tests/pass` fixture"
 requirement literally) and flip the ADR to ACCEPTED for M1.4c.
+
+### M1.4c-1c (DONE 2026-09-02, `6337bea`) — the ELEMENT WIDTHS the mirror left behind
+
+M1.4c-1b made `scg`'s containers element-generic in the TYPE system and stopped there. The
+runtime boundary was still `i64`-only: every `sentinel_shared_*` / `sentinel_mutex_*` C-ABI
+entry carries the element as one i64, so a narrower element needs a `zext` in and a `trunc`
+out, and `scg` emitted neither. Any non-`i64` element therefore produced IR `llvm-as`
+rejects while the oracle assembled clean. Filed as register D17 and closed there; the ADR
+records it because M1.4c-1b's own plan (above) under-described the work.
+
+**Item 4 of that plan — "the `*g` arm must strip the secret before its i64-only gate" — was
+the smaller half of a bigger site.** The `*g` arm needed a full element DECODE, not just a
+secret strip, and the same was true of `shared_get`; `shared_new` and `mutex_new` needed the
+matching ENCODE. Four sites in total, one of them (`*g`) in `borrow_arms.sentinel` rather
+than the builtin dispatcher — which is why a reader auditing `cg_effects.sentinel` alone
+would conclude the mirror was complete. `lock` needs nothing: its `?Guard` payload is the
+cell HANDLE, a ptr, for every element.
+
+The two helpers (`cg_container_encode` / `cg_container_decode`) strip the secret first, so
+D6's "a container read does NOT strip the `secret` qualifier" invariant is untouched: the
+strip is a CODEGEN width decision taken long after `secret_leak` has run, and the value's
+`Type` stays `Secret(..)` on both sides. The conversion is `zext`, never `sext`, so a narrow
+secret's unused high bits are deterministically zero, and D6.2's per-cell mlock and
+zero-at-last-drop cover the whole 8-byte slot regardless of element width.
+
+**Two things this slice deliberately did NOT do**, both registered:
+- `f64` and `ptr` elements get no arm, even though the oracle spells them out. `cgo_ty` has
+  no arm for scalar code 4 or 5, so mirroring emits `ptrtoint i64 %v to i64`, which is
+  invalid IR — measured turning a clean `Shared<ptr>` lowering into a rejected one. D33
+  (`cgo_ty`) blocks D30 (the f64 element gap, which IS reachable via `shared_new(x as f64)`,
+  contrary to what two comments in this tree asserted before the review refuted them).
+- `*g = v` on a non-`i64` element still emits a narrow store. The oracle refuses that
+  program, inkwell encodes it correctly, and nothing links `scg`'s IR — D28, oracle-first.
 
 ### M1.4c-2 (deferred) — `Channel<secret T>`
 

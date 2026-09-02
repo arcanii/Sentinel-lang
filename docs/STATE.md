@@ -14,7 +14,84 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
-**Latest (2026-09-02c) — the register's D2 is closed: `scg` splices the widen ONCE PER NODE
+**Latest (2026-09-02d) — the register's D17 is closed: `scg` converts container element
+widths at the runtime boundary** (`6337bea`, pinned by `tests/pass/c71_container_widths`,
+`tests/pass/c71_secret_container_widths` and `tests/ui/c71_shared_element_unsupported`).
+Every `sentinel_shared_*` / `sentinel_mutex_*` C-ABI entry carries the element as one i64,
+so a narrower element needs a `zext` in and a `trunc` out. ADR 0071 M1.4c-1b had made the
+containers element-generic in the TYPE system and left both conversions unmirrored, so any
+non-`i64` element emitted IR `llvm-as` rejects while the oracle assembled clean.
+
+**The gap was FOUR sites — the register named no count at all, which is part of why the
+fourth was nearly missed — and the fourth is the one worth remembering: it lives in a
+different file.** Three are builtin-dispatcher arms
+(`shared_new`/`mutex_new` encode, `shared_get` decode, `cg_effects.sentinel`); the fourth is
+the decode after the `load` in the `*g` guard-deref read, in `borrow_arms.sentinel`. Without
+it no `Mutex<u8>` program that READS THROUGH ITS GUARD assembles — a `Mutex<u8>` that only
+`lock`s is byte-identical on the dispatcher arms alone, measured — and inspecting the
+dispatcher would never show the read path at all. `lock` needs nothing at all — its `?Guard` payload is the cell HANDLE, a ptr, for
+every element (verified over seven). The two new helpers strip the `secret` FIRST, which is
+what a verbatim copy of the channel arms gets wrong: `cgat` holds a type HANDLE, not a
+scalar code, so a `secret u8` element matches no width arm and falls through.
+
+**`f64` and `ptr` deliberately get no arm, and that is the review's doing.** Mirroring the
+oracle faithfully means writing `bitcast` and `ptrtoint`, and a first cut did. But `cgo_ty`
+has no arm for scalar code 4 or 5 — both render `i64` — so the mirror emits
+`ptrtoint i64 %v to i64`, which `llvm-as` rejects: `fn take(s: Shared<ptr>) -> ptr` went
+from clean `ret i64 %v2` to non-assembling IR. Caught by construction before the commit,
+and now registered as D33.
+
+**The review also killed a claim of mine that TWO pre-existing comments already made**, which
+is the second time this project has been bitten by prose asserting a boundary nobody
+constructed. Both said the oracle Errs on every `as f64`, so an f64 element could not be
+compared. It does not: it Errs wherever an f64 TYPE must be RENDERED (`lty`), and a container
+element is never rendered — it rides the i64 slot. `shared_new(x as f64)` therefore LOWERS,
+the oracle emitting `bitcast double %v1 to i64` and `scg` emitting nothing. The divergence is
+pre-existing, no corpus program reaches it, and the oracle's own f64 output is itself invalid
+IR. ⚠ That is NOT why `llvm_rejects` stayed silent, and the difference matters because the
+wrong version of it was about to enter the record: measured, `scg`'s f64 module assembles
+CLEAN, so the gate short-circuits on its FIRST test (`llvm_rejects(scg).is_some()`) and never
+looks at the oracle at all. The both-wrong blind spot is a real property of that gate, just
+not the operative one here — what keeps it quiet is that no corpus program has an f64
+element. Filed as D30. The three PRE-EXISTING copies are corrected — but grepping the SET afterwards
+turned up TWO NEW ones that the SAME COMMIT wrote: `cg_container_encode`'s own `else`-arm
+comment, and the new fixture's registration in `crates/sentinel-driver/tests/ui.rs`, which
+was refuted verbatim by the header of the very fixture it registers. Both are fixed in the
+follow-up. Filing "fix N members of a set, then grep for the set" as a lesson and then
+missing two members of that set in the same commit is the sharpest available argument for
+running the grep as a step rather than an intention.
+
+**Measured rather than reasoned, throughout.** A 347-program sweep (`tests/pass`, `tests/ui`,
+`examples`, `demos`, `tools`, `sentinel_library`, driver fixtures) against a pre-change `scg`
+binary moved EXACTLY the two new fixtures, both from diverging to byte-identical with the
+oracle. Fourteen mutations were built and run: 13 killed, 1 documented survivor, all four
+wired sites individually covered, and neither new fixture redundant. The one survivor is
+worth naming rather than counting: "give the f64/ptr fall-through an arm" is caught by
+NOTHING in the 170-fixture corpus — a third missing pin, alongside the two the review found.
+The constant-operand
+mutation is killed only by `c71_container_widths` (its `shared_new(true)` literal is the
+corpus's only CONSTANT operand through `cg_container_encode` — not the corpus's only
+`zext i1 1 to i64`, which a first draft claimed: `examples/lang/channel_generic.sentinel`
+emits one too, from `send(cb, true)` in the fid-22 channel arm, which this mutation does
+not touch) and the dropped-`strip_secret` mutation only by
+`c71_secret_container_widths` (the existing `c71_secret_shared` cannot catch it, because
+`secret i64` strips to width 64). Roughly forty further shapes came back byte-identical.
+
+**One cost is disclosed rather than buried:** `*g = v` on a non-`i64` element emits a narrow
+store into the 8-byte slot. That store is pre-existing — the pre-change binary emits the same
+line — but D17 removed an unrelated `mutex_new` invalidity that had been masking it, so the
+shape went from loudly wrong to silently wrong. It stays unreachable (the oracle refuses the
+program, inkwell encodes it correctly, nothing links `scg`'s IR) and is D28, oracle-first.
+
+**Seven items were filed from this work (D28-D34), all verified by construction.** The
+sharpest is **D31**: a by-value container argument to a GENERIC user fn drops its refcount
+clone, so `scg` emits 0 `sentinel_shared_clone` against 2 `sentinel_shared_release` where the
+oracle emits 1 — one release too many, and the following read is a use-after-free. It is the only
+one that is differentially live, it is `scg`-only (inkwell and the oracle are both correct,
+and the selfhost sources declare no container binding, so nothing built links it), and the
+one-line locus is identified.
+
+**Previous (2026-09-02c) — the register's D2 is closed: `scg` splices the widen ONCE PER NODE
 rather than once per arm** (`bd1e36c`, pinned by `tests/pass/c19_widen_arm_family.sentinel`).
 A widened binding wraps its right-hand side — the oracle prints `(widen-secret … :secret i64)`
 and MIR emits a whole `(vN opaque vM)` for it — and `scg` mirrored that only in the arms that

@@ -171,10 +171,13 @@ ui_snapshot!(c71_guard_deref_computed, "c71_guard_deref_computed.sentinel");
 ui_snapshot!(c71_secret_mutex_branch, "c71_secret_mutex_branch.sentinel");
 // ADR 0071 M1.4c / register D17: the `Shared<T>` element-domain fence — the twin of
 // `c66_channel_element_unsupported`. The element rides the C-ABI as one i64 slot, so
-// the domain is the word scalars and their `secret` forms; a nested container has no
-// i64 encoding. This is what makes the width mirror's fall-through arm unreachable
-// rather than merely unexercised, so the boundary is pinned by a rejection instead of
-// asserted in a comment.
+// the domain is the word scalars {i64,i32,u8,bool,f64,ptr} plus the four `secret` forms
+// that exist (`secret ptr` hits this same fence, `secret f64` is refused outright); a
+// nested container is in neither list. ⚠ This pins only the NON-WORD-SCALAR half of the
+// boundary — see the fixture's own header, which refutes at length the claim that used
+// to stand here, that the fence makes the width mirror's fall-through arm unreachable.
+// It does not: `shared_id_for` admits f64 and ptr, and `shared_new(x as f64)` reaches
+// that arm and diverges (register D30). Read the fixture before extending this.
 ui_snapshot!(
     c71_shared_element_unsupported,
     "c71_shared_element_unsupported.sentinel"

@@ -1041,4 +1041,7 @@ Two tags are covered but **weakly**, which is worth knowing before trusting them
 `task_<elem>` cannot be distinguished from a hardcoded `i64` by any test, because
 `Task<T>`'s result is always `i64` at the ADR 0024 minimum; and `guard_<elem>` is
 pinned only at `i64`, because the `Mutex<u8>` that would exercise a non-`i64` guard
-diverges for an unrelated reason (register D17).
+diverged for an unrelated reason (register D17) — now CLOSED (`6337bea`), and the pin
+is written: both back ends emit `@idg__opt_guard_u8` byte-identically, so
+`c16_mono_key_handle_tags` exercises the element-READING half of `guard_<elem>` and not
+just `guard_i64`.

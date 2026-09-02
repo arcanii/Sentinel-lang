@@ -11,11 +11,13 @@
 // is how this repo got bitten before. An earlier draft of this comment claimed the fence
 // made `cg_container_encode`'s fall-through arm UNREACHABLE. It does not: `shared_id_for`
 // ADMITS f64 (4) and ptr (5), so `fn worker(s: Shared<f64>)` and `Shared<ptr>` build
-// happily and DO reach that arm — measured, both exit 0. What holds f64/ptr out of the
-// differential is a second and leakier gate in a different file (`llvm_ty` has no F64 or
-// Ptr arm), and it leaks: `shared_new(x as f64)` never renders the f64 type, so it
-// lowers and diverges. That gap is pre-existing and on the register; see the comment on
-// `cg_container_encode`. What this fixture pins is the half that genuinely is a fence —
+// happily — measured, both exit 0. (A declaration alone calls no container builtin, so it
+// reaches no conversion arm; the shape that DOES reach it is `shared_new(x as f64)`.)
+// What holds f64/ptr out of the differential is a second and leakier gate in a different
+// file (`llvm_ty` has no F64 or Ptr arm), and it leaks exactly there: a container element
+// never renders its type, so `shared_new(x as f64)` lowers in the oracle — emitting
+// `bitcast double %v1 to i64` — and diverges from scg. That gap is pre-existing and
+// registered as D30; see the comment on `cg_container_encode`. What this fixture pins is the half that genuinely is a fence —
 // a boundary that lives only in a comment is exactly the shape that gets silently
 // widened from another file.
 fn worker(s: Shared<Shared<i64>>) -> i64 {

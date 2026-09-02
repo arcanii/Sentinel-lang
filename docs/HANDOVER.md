@@ -124,7 +124,7 @@ reference as you work through the milestones.
 > confirming nothing pre-existing is newly refused; oracle-vs-scg byte-equality on the new
 > fixture at types, mir and llvm; and the secret-taint check in both directions.
 
-### ▶ RESUME HERE (2026-09-02 — everything is COMMITTED at `45f231b`, four-check GREEN (**1817 passed / exactly the 18 known Windows failures**), both bootstrap fixed points byte-identical, tree CLEAN. This session closed **D5** (`ee0fa68`/`f521421`, ADR 0016 A1 — the type mangle is structural, exhaustive and three-way identical) and **D15 + D16** (`45f231b` — codegen now sees the generic instances substitution creates, and neither of its closures can loop). ⚠ **BOTH SLICES HAD A FALSE CLAIM OF MINE KILLED BY THE ADVERSARIAL REVIEW, and the second one was a BLOCKER** — I asserted a fixpoint terminated "because no recursive-by-value generic struct exists", never constructed it, and `struct A<T> { x: ?A<A<T>>, n: i64 }` stack-overflowed the compiler on source the previous release compiled. The review also found BOTH of that slice's new fixtures VACUOUS (one line pre-interned the instance it meant to test; three roots at one type collapsed to one instance). **Run the review, and read its refutations as carefully as its findings.** ⚠ A SECURITY-CLASS heap corruption was found in passing and is deliberately NOT described here — see the caveat block. **NEXT: D2** (the widen ARM family — invalid IR at the assign and return positions, and the closest thing to a worked template is ADR 0051 A5), then **D17** (non-`i64` container VALUES in `scg`). Also newly filed and worth a look: **D24-D26** (three independent `scg` generic gaps, all on one deferred example) and **D27** (the spawn-wrapper worklist is a fourth mono root with defect δ's shape). Or the non-register menu items — `select`, `Channel<secret T>`, f64/ptr CODEGEN, widening the Bar-A printer)
+### ▶ RESUME HERE (2026-09-02 — everything is COMMITTED at `6337bea`, four-check GREEN (**exactly the 18 known Windows failures, zero new**), both bootstrap fixed points byte-identical, tree CLEAN. This session closed **D5** (`ee0fa68`/`f521421`), **D15 + D16** (`45f231b`), **D2** (`bd1e36c`/`039337f`) and **D17** (`6337bea` — `scg` now converts container element widths at the runtime boundary). D17's shape is worth carrying forward: the gap was FOUR sites and the register named no count at all, so the fourth (`*g`'s decode) — in a DIFFERENT FILE — was nearly missed; a 347-program sweep against a pre-change binary moved exactly the two new fixtures. ⚠ **THE REVIEW KILLED A CLAIM OF MINE THAT TWO PRE-EXISTING COMMENTS ALREADY MADE** — 'the oracle Errs on every `as f64`'. It does not: it Errs where an f64 TYPE must be RENDERED, and a container element is never rendered, so `shared_new(x as f64)` lowers and diverges (now D30). It also caught, PRE-COMMIT, that spelling out the f64/ptr arms turned clean `scg` output into non-assembling IR, because `cgo_ty` renders both as `i64` (now D33). **Every session so far has had a claim die to the review; budget for the findings, not just the run.** ⚠ A SECURITY-CLASS heap corruption found earlier is deliberately NOT described here — see the caveat block. **NEXT: D31** — a by-value container argument to a GENERIC fn drops its refcount clone, so `scg` emits an over-release (a use-after-free); it is the only new item that is DIFFERENTIALLY LIVE, and the one-line locus is identified. Then **D34** (`process_send`/`process_recv`, the last unmirrored member of D17's set — closing it DELETES a deferred entry) or **D28** (the guard-assign narrow store, oracle-first). Also newly filed: **D29**, **D30**, **D32**, **D33**. Or the non-register menu items — `select`, `Channel<secret T>`, f64/ptr CODEGEN (which D30 and D33 now block on), widening the Bar-A printer)
 
 > **▶ THE OPEN MENU (2026-08-30) — real remaining work, verified against the repo.**
 >   1. **`select` over channels** — the flagship concurrency gap. Its RUNTIME is already PINNED
@@ -149,15 +149,26 @@ reference as you work through the milestones.
 >      `sitofp`/`fptosi`, `llvm.sqrt.f64` and a `double` constant — then mirroring all of it.
 >      THREE traps are already signposted in `selfhost/` for whoever takes it: `scalar_bits(4)`
 >      answers 64, so the Cast arm's width-equality test reads an int↔f64 cast as a no-op;
->      the four word-scalar encode/decode chains in `cg_effects.sentinel` DEFAULT an unknown
->      handle to "pointer", so an f64 element would get `ptrtoint`/`inttoptr` (invalid IR on a
->      `double`) instead of `bitcast`; and `cg_mangle_to` needed a real scalar-4 arm, which it
->      now has. Also worth doing with it: `examples/math/quadratic.sentinel` and
+>      the THREE handle-dispatch chains in `cg_effects.sentinel` DEFAULT an unknown handle to
+>      "pointer", so an f64 element would get `ptrtoint`/`inttoptr` (invalid IR on a `double`)
+>      instead of `bitcast` — the spawn-wrapper return encode (`reth`), fid 22 `send`, and
+>      fid 23 `recv`. ⚠ This used to say "the FOUR word-scalar chains" and the count was simply
+>      wrong; a first attempt to correct it blamed D17 and narrowed the set to "the CHANNEL
+>      chains", which was worse — it dropped the spawn-wrapper chain, the one whose own comment
+>      carries the trap being signposted. D17 changed NOTHING in that file's chain set; what it
+>      ADDED is a SEPARATE pair of CONTAINER helpers in `cg.sentinel` (`cg_container_encode` /
+>      `cg_container_decode`), which strip the secret first and emit NOTHING for f64/ptr rather
+>      than defaulting to pointer (see D30/D33 for why emitting nothing is the correct choice
+>      until `cgo_ty` grows real `double`/`ptr` arms); and `cg_mangle_to` needed a real
+>      scalar-4 arm, which it now has. Also worth doing with it: `examples/math/quadratic.sentinel` and
 >      `sentinel_library/std/math/float.sentinel` currently reach only lex/ast, because
 >      `snc merge`'s Bar-A printer rejects both a float literal and `sqrt` (menu item 5).
->   4. **THE FILED-DEFECT REGISTER — TWENTY-SEVEN items (D1-D27); **D1, D2, D3, D5, D8, D9, D15 and D16 are DONE**, the rest verified against a pre-slice binary,
->      NONE registered in any `DEFERRED_PROGRAMS` / `KNOWN_SCG_BUGS` list because no corpus
->      program reaches them.** They were also filed as task chips, but chips are EPHEMERAL UI
+>   4. **THE FILED-DEFECT REGISTER — THIRTY-FOUR items (D1-D34); **D1, D2, D3, D5, D8, D9, D15, D16 and D17 are DONE**, the rest verified against a pre-slice binary. MOST are
+>      unregistered in any `DEFERRED_PROGRAMS` / `KNOWN_SCG_BUGS` list because no corpus program
+>      reaches them — but FOUR are, and the blanket "NONE" that stood here was falsified by
+>      this register's own new entries: D24/D25/D26 share the
+>      `examples/lang/generic_calls_generic.sentinel` entry, and D34 is
+>      `examples/lang/process_channel_typed.sentinel`, so closing D34 DELETES a deferred entry.** They were also filed as task chips, but chips are EPHEMERAL UI
 >      and this list is the record — if the two disagree, this one wins, and a chip that is
 >      closed or superseded should be dismissed so the two do not drift. Ordered by what they
 >      cost if left.
@@ -398,15 +409,39 @@ reference as you work through the milestones.
 >      `impl Display for Type`) — grep the SET before declaring it closed; the `Display` one
 >      means a diagnostic that formats a `[[T]]` may panic too.
 >
->      **D17 — `scg` emits no width conversion around a container's runtime call**, so a
->      non-`i64` container ELEMENT produces invalid IR:
->      `fn take(s: Shared<u8>) -> u8 { shared_get(s) }` gives `ret i8 %v2` for an `i64`
->      `%v2` (`llvm-as` rejects it) where the oracle brackets the call with
->      `zext i8 -> i64` / `trunc i64 -> i8` and assembles clean. ADR 0071 M1.4c scope.
->      **Explicitly NOT fixed by A1's element-generic annotation arms** — proven by diffing a
->      pre-change against a post-change `scg` binary on that program and getting
->      byte-identical output. Do not read "element-generic annotation" as "non-i64 container
->      elements work".
+>      **D17 — DONE (`6337bea`).** `scg` emitted no width conversion around a container's
+>      runtime call, so a non-`i64` container ELEMENT produced invalid IR. FOUR sites (this
+>      entry previously named no count at all): the encode before `shared_new` (fid 38) and
+>      `mutex_new` (fid 40), the decode
+>      after `shared_get` (fid 39), and — in a DIFFERENT FILE, which is why it is easy to
+>      miss — the decode after the `load` in the `*g` guard-deref READ
+>      (`borrow_arms.sentinel`). `lock` (fid 41) needs nothing: its `?Guard` payload is the
+>      cell HANDLE (a ptr) for every element, verified over seven element types. Two new
+>      helpers, `cg_container_encode` / `cg_container_decode`, which **strip the secret
+>      FIRST** — the detail a verbatim copy of the channel arms gets wrong, since `cgat`
+>      holds a type HANDLE and a `secret u8` element matches no width arm.
+>
+>      **`f64` and `ptr` deliberately get NO arm**, which is the opposite of a faithful
+>      mirror and is the finding the review paid for. `cgo_ty` has no arm for scalar code
+>      4 or 5 — both render `i64` — so spelling them out emits `ptrtoint i64 %v to i64`,
+>      which `llvm-as` rejects. A first cut DID spell them out; `fn take(s: Shared<ptr>) ->
+>      ptr { shared_get(s) }` emitted clean `ret i64 %v2` BEFORE and non-assembling IR
+>      AFTER. Do not re-add the arms before `cgo_ty` grows real `double`/`ptr` arms.
+>
+>      Measured: a **347-program sweep** against a pre-change `scg` binary moved EXACTLY
+>      the two new fixtures, both DIFF → byte-identical-to-the-oracle; **14 mutations, 13
+>      killed**, all four wired sites individually covered, and neither new fixture
+>      redundant (the constant-operand mutation is killed only by `c71_container_widths`,
+>      the `strip_secret` one only by `c71_secret_container_widths`). The lone SURVIVOR is
+>      "give the f64/ptr fall-through an arm" — nothing in the corpus catches it, which is a
+>      third missing pin. Fixtures:
+>      `tests/pass/c71_container_widths`, `tests/pass/c71_secret_container_widths`,
+>      `tests/ui/c71_shared_element_unsupported`.
+>
+>      ⚠ **ONE COST, DISCLOSED:** `*g = v` on a non-`i64` element emits a NARROW STORE
+>      into the 8-byte slot. That store is PRE-EXISTING (the pre-change binary emits the
+>      same line) but D17 removed an unrelated `mutex_new` invalidity that had been masking
+>      it, so the shape is now SILENTLY wrong where it was LOUDLY wrong. See D28.
 >
 >      **D18 — the tag/user-identifier collision class (`abi-v2` encoding work).**
 >      A mangled tag shares one flat namespace with user type names: `struct arr_i64 {}` tags
@@ -549,6 +584,122 @@ reference as you work through the milestones.
 >      spawn-wrapper worklist, and conflating them would have made a clean byte-neutral
 >      change into one that moves `spawn` output.
 >
+>      **▸ D28-D34 came out of the D17 work (2026-09-02). Every one was verified BY
+>      CONSTRUCTION — the oracle and both `scg` binaries run on a written program — and
+>      every one is PRE-EXISTING (pre- and post-change `scg` byte-identical) unless it says
+>      otherwise. Ranked by what they cost. D31 is the one to read first.**
+>
+>      **D28 — `*g = v` on a non-`i64` element emits a NARROW STORE into the 8-byte
+>      protected slot.** `llvm-as` ACCEPTS it, so it is a cell where `scg`'s output is
+>      assemblable and semantically wrong — the class the `llvm_rejects` gate structurally
+>      cannot catch. It is NOT the only one, though a first draft of this entry said so: the
+>      f64 element (D30) is the same class by a different route, since `scg` folds `as f64` to
+>      a no-op, so its whole module assembles and passes the INTEGER where the oracle passes
+>      the double's bits. For a `secret` element
+>      it also leaves the upper bits of the PREVIOUS secret in the slot — residue, not
+>      merely stale bytes. D17 did not introduce it, but D17 removed an unrelated
+>      `mutex_new` invalidity in the same module that used to make `llvm-as` reject first,
+>      so it went from loud to silent. NOT reportable, and here are all three legs,
+>      measured: the ORACLE refuses the program outright ("guard assign element not ported
+>      (i64 only)", applied AFTER its own `unsecret`, so `i64` and `secret i64` are the
+>      only elements it admits); **inkwell — the back end that actually emits objects — encodes it
+>      correctly** (`build_int_z_extend` / `build_bit_cast` / `build_ptr_to_int`, then
+>      `store i64`); and nothing links `scg`'s IR for it. **Oracle-first**: port the
+>      `llvm_dump.rs` gate, THEN give `borrow_arms`'s `un_place` branch
+>      `cg_container_encode` and widen the store to `i64`.
+>
+>      **D29 — `scg`'s CHANNEL arms (fid 22/23) never call `strip_secret`.** A `secret`
+>      element is an interned HANDLE, not a scalar code, so it matches no width arm and
+>      falls to the pointer catch-all: `Channel<secret i64>` — which the ORACLE REJECTS
+>      ("`Channel<T>` element type is not supported yet") and `scg` ACCEPTS — emits
+>      `ptrtoint i64 -> i64`, and `llvm-as` says "invalid cast opcode for cast from 'i64'
+>      to 'i64'". The D17 container helpers strip first; these arms do not, and the arm now
+>      carries a ⚠ warning not to be copied. Closing it properly is M1.4c-2's job
+>      (`Channel<secret T>`), which also needs the reserved `channel_chanid_for` slots
+>      6..=9 — see D23.
+>
+>      **D30 — an `f64` container element IS differentially reachable and DOES diverge,
+>      and TWO existing comments said it could not.** This is the claim the D17 review
+>      killed. The guard is NOT "the oracle Errs on every `as f64`"; it is that the oracle
+>      Errs wherever an f64 TYPE must be RENDERED (`lty`). A container element is never
+>      rendered — it rides the i64 slot — so `shared_new(x as f64)` and `mutex_new(3 as
+>      f64)` LOWER: the oracle emits `bitcast double %v1 to i64` and `scg` emits nothing.
+>      (`let d: f64 = x as f64` DOES Err, which is the shape both comments generalised
+>      from.) Writing the arm would not fix it: `cgo_ty` renders code 4 as `i64`, and
+>      **the oracle's own f64 output is itself INVALID IR** (`bitcast double 3 to i64` —
+>      "integer constant must have integer type"), which is exactly why the `llvm_rejects`
+>      gate stays silent: it fires only when `scg` is rejected AND the oracle is clean.
+>      Needs real f64 lowering in both back ends. The three PRE-EXISTING copies are corrected
+>      in `6337bea`, but the same commit wrote TWO NEW ones — `cg_container_encode`'s
+>      `else`-arm comment and the new fixture's registration in
+>      `crates/sentinel-driver/tests/ui.rs` — both falsified by the same constructed
+>      `Shared<f64>`, and the second refuted verbatim by its own fixture's header. Fixed in
+>      the follow-up. **GREP THE SET before calling this closed.**
+>
+>      **D31 — a by-value container argument to a GENERIC user fn DROPS its refcount
+>      clone, so `scg` emits an OVER-RELEASE — a use-after-free.** The sharpest item on
+>      this list, and the only one that is DIFFERENTIALLY LIVE: the oracle compiles the
+>      program fine, so the corpus differential turns red the moment a fixture reaches it.
+>      Repro, four lines — `fn wrap<T>(x: T) -> i64 { 1 }` and
+>      `let s: Shared<i64> = shared_new(6); let n: i64 = wrap(s); shared_get(s) + n`.
+>      The oracle emits **1 `sentinel_shared_clone` against 2 `sentinel_shared_release`**,
+>      with 1 `sentinel_shared_new` — so `#new + #clone == #release` and the count balances;
+>      `scg` emits **0 clones against the same 2 releases**, one release too many, so the rc
+>      hits zero inside the callee and the following `shared_get(s)` reads freed memory.
+>      (⚠ Count CALL sites, not `grep -c` on the symbol — the `declare` line inflates every
+>      one of these by one, and it inflated this entry's first draft.) A NON-generic callee is byte-identical, so it is specifically
+>      the generic path; `Mutex<T>` behaves the same. Locus: `dump_args_capture_all`
+>      (`selfhost/types/infer.sentinel`) omits the `cg_clone_shared_arg(c, t0);` that
+>      `dump_targs` has, while its own comment claims it "mirrors dump_targs /
+>      dump_args_capture_first" — false in exactly that one line. **Scope check, before
+>      anyone treats it as a security matter:** `scg`-only (inkwell and the oracle are both
+>      correct), and `selfhost/*.sentinel` declares no container-typed binding at all, so
+>      nothing that is built and run links it. Same class as the `mvbv` over-count fixed in
+>      `c010c2b`, with the polarity — and so the severity — reversed: that one leaked,
+>      this one frees early. ⚠ **It was OBSERVED a slice earlier and not filed**: the ADR
+>      0016 A1 work hit it, excluded containers from `c16_mono_key_handle_tags` because of
+>      it, and described it in that fixture's header as "`scg` drops the refcount `clone` on
+>      a container passed as a GENERIC call argument" — accurate, and never given a number,
+>      so it did not reach this register until the D17 review reconstructed it. A defect
+>      recorded only in a fixture comment is a defect nobody is tracking.
+>
+>      **D32 — `scg` has no element-domain gate on `Shared`/`Mutex` at all, and takes the
+>      element from the wrong place.** Three faces, each constructed: it ACCEPTS
+>      `Shared<P>` for a struct `P` and emits clean IR where the oracle says "`Shared<T>`
+>      element type is not supported yet"; it ACCEPTS `let s: Shared<u8> = shared_new(3)`,
+>      taking the element from the ANNOTATION, where the oracle takes it from the ARGUMENT
+>      and rejects with "expected <shared#2>, found <shared#0>"; and it PANICS —
+>      `sentinel: index out of bounds: idx=-101, len=3`, exit 127 — on a CALLED generic
+>      container fn (`fn getit<T>(s: Shared<T>) -> T { shared_get(s) }` plus a call).
+>      ⚠ Merely DECLARING that generic does NOT panic; `scg` exits 0 with clean IR. The
+>      CALL is the trigger, and a probe that only declares it files a false report — mine
+>      did, before I constructed the calling version.
+>
+>      **D33 — `cgo_ty` has no arm for scalar code 4 (`f64`) or 5 (`ptr`).** Both fall to
+>      its trailing `i64`. Not cosmetic: it is what makes D17's omission of those two
+>      elements CORRECT rather than lazy, and it is the first thing that has to change
+>      before D30 can be closed. Its `ll_type_to` twin needs the same.
+>
+>      **D34 — `process_send` / `process_recv` (fids 29/30) are the one member of D17's
+>      set still unmirrored**, and unlike every container cell it is already
+>      differentially visible: `examples/lang/process_channel_typed.sentinel` sits in
+>      `DEFERRED_PROGRAMS` with the exact wording ("missing the zext encode: i8 passed as
+>      i64"), re-confirmed post-D17. Bigger than the containers, which is why it was
+>      deliberately left out: `scg`'s fid 30 hardcodes the `{ i1, i64 }` aggregate TWICE
+>      (plus an `i64` alloca and an `i64` load, neither of which is the aggregate) AND its
+>      result type (`interner.sentinel` fid 30 is a bare
+>      `mk_nullable(c, 0)` with no `check_call` special-case, unlike fids 38/40/41), so it
+>      needs the `recv` treatment before the D17 helpers can be reused. Closing it DELETES
+>      a deferred entry, which is the only proof this project accepts for that list.
+>      **NOT the `stdin_recv` / `stdout_send` twins (fids 33/34): the ORACLE hardcodes
+>      `{ i1, i64 }` there too, so both sides agree and there is no gap** — checked,
+>      because the set was the point.
+>
+>      **▸ Two small pins the D17 review found missing, one fixture each:**
+>      `MutexElementNotSupported` has NO ui fixture in either position, and
+>      `SharedElementNotSupported` is unpinned in VALUE position (the new
+>      `c71_shared_element_unsupported` pins the type position only).
+>
 >      **▸ ALSO CLOSED BY THE D15 COMMIT, though filed under the family rather than as
 >      its own item: the unbounded-instantiation HANG.** `fn f<T>(x: T) -> i64 { let b =
 >      mk(x); f(b) }` type-checks and used to consume memory for ever with no depth cap —
@@ -612,11 +763,12 @@ reference as you work through the milestones.
 > scg emitted one generic-instance declaration where the oracle emitted two; that structural
 > collapse is what forced the fix into the A1 mangling slice rather than a later one.
 > **(ii)** the entry implied that making the arms element-generic would make non-i64
-> container elements work. It does not. scg's CODEGEN still emits no width conversion around
-> a container's runtime call, so `fn take(s: Shared<u8>) -> u8 { shared_get(s) }` still gives
+> container elements work. It did not: at the time, scg's CODEGEN emitted no width conversion
+> around a container's runtime call, so `fn take(s: Shared<u8>) -> u8 { shared_get(s) }` gave
 > `ret i8 %v` for an `i64` `%v`, which `llvm-as` rejects — verified by diffing a pre-change
 > against a post-change scg binary on that exact program and getting BYTE-IDENTICAL output.
-> That half is untouched ADR 0071 M1.4c work and is registered as **D17** below.
+> That half was untouched ADR 0071 M1.4c work; it was registered as **D17** and is now
+> **CLOSED** (`6337bea`). That same program is byte-identical to the oracle today.
 
 > **▶▶ THE BOUNDARY-PREDICATE AUDIT (`61bcac3`) — what it found, so it need not be re-run.**
 > Prompted by the M1.2c fence bug (a security boundary written as `is_spawn_word_scalar(ty) &&

@@ -1432,17 +1432,20 @@ fn type_of_typeexpr(c: &mut TyCtx, t: TypeE, gb: &mut Vec<u8>) -> i64 {
                 // 20, and the three recovered instances are exactly `Shared<u8>`,
                 // `Mutex<u8>` and `Shared<secret i64>`.
                 //
-                // ⚠ WHAT THIS DOES NOT FIX, measured rather than assumed: scg's
-                // CODEGEN still emits no width conversion around a container's
+                // ⚠ WHAT THIS ARM DID NOT FIX, measured rather than assumed at the
+                // time: scg's CODEGEN emitted no width conversion around a container's
                 // runtime call, so `fn take(s: Shared<u8>) -> u8 { shared_get(s) }`
-                // still diverges — the oracle follows the `i64`-returning runtime call
-                // with `trunc i64 -> i8` (and, at a `shared_new(u8)`, precedes it with
-                // `zext i8 -> i64`) where scg emits neither, giving `ret i8 %v2` for
-                // an `i64` `%v2` that `llvm-as` rejects. A
-                // pre/post-change scg binary emits BYTE-IDENTICAL output on that
-                // program, so the missing conversions are a separate, still-open
-                // ADR 0071 M1.4c gap and nothing to do with this arm. Do not read
-                // "element-generic annotation" as "non-i64 container elements work".
+                // diverged — the oracle follows the `i64`-returning runtime call with
+                // `trunc i64 -> i8` (and, at a `shared_new(u8)`, precedes it with
+                // `zext i8 -> i64`) where scg emitted neither, giving `ret i8 %v2` for
+                // an `i64` `%v2` that `llvm-as` rejects. A pre/post-change scg binary
+                // emitted BYTE-IDENTICAL output on that program, so the missing
+                // conversions were a separate ADR 0071 M1.4c gap and nothing to do with
+                // this arm. That gap was register D17 and is now CLOSED (`6337bea`,
+                // M1.4c-1c) — the same program is byte-identical to the oracle today.
+                // The lesson outlives it: do not read "element-generic annotation" as
+                // "non-i64 container elements work"; the type and the width are
+                // separate questions and this arm only ever answered the first.
                 //
                 // The constructor path (`shared_new`) was already element-generic
                 // (M1.4c-1b); only the annotation path lagged.

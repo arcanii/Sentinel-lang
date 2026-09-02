@@ -24,14 +24,27 @@
 //     but `scg` drops the refcount `clone` on a container passed as a GENERIC call
 //     argument, so those programs diverge for an unrelated, pre-existing reason (the
 //     `dump_generic_call` gap). Pinning them here would pin that bug instead.
-//   * a non-`i64` `Guard`. `guard_<elem>`'s element-reading would need a `Mutex<u8>`,
-//     but a `u8` container VALUE diverges today (register D17 — `scg` emits no width
-//     conversion around the runtime call), so `guard_i64` is the most this route can
-//     pin. `task_<elem>` is weaker still: `Task<T>`'s result is always `i64` at the
-//     ADR 0024 minimum, so `task_i64` cannot be distinguished from a hardcoded `i64`
-//     in any back end. Both recorded rather than silently absent.
+//     ⚠ That bug is worse than "diverges": it is an OVER-RELEASE — the oracle emits
+//     1 `sentinel_shared_clone` against 2 `sentinel_shared_release`, `scg` emits 0
+//     against the same 2, so the rc hits zero inside the callee and the next read is a
+//     use-after-free. Observed here first and left as a parenthetical; now filed as
+//     **register D31**, with the locus (`dump_args_capture_all` omits the
+//     `cg_clone_shared_arg` that `dump_targs` has). Recording a defect in a fixture
+//     comment is not the same as filing it, and this one waited a slice too long.
+//   * `task_<elem>`. `Task<T>`'s result is always `i64` at the ADR 0024 minimum, so
+//     `task_i64` cannot be distinguished from a hardcoded `i64` in any back end.
+//     Recorded rather than silently absent.
 //
-// Trace: enum 6, class 7, Fn 8 (apply doubles 4), channel 9, task 10, guard 2, and
+// ⚠ A non-`i64` `Guard` USED to be on that list — `guard_<elem>`'s element-reading
+// needs a `Mutex<u8>`, and a `u8` container VALUE diverged (register D17: `scg` emitted
+// no width conversion around the runtime call), so `guard_i64` was the most this route
+// could pin. D17 is CLOSED (`6337bea`), so the pin is now written below: both back ends
+// emit `@idg__opt_guard_u8` byte-identically. It is the tag this file could not reach
+// before, and it is why `guard_<elem>` is now pinned on its ELEMENT and not just its
+// shape.
+//
+// Trace: enum 6, class 7, Fn 8 (apply doubles 4), channel 9, task 10, guard 2 (the
+// `u8` guard below contributes 0, so adding it left the arithmetic alone), and
 // the subprocess arm contributes 0 — its spawn sits behind a runtime-false probe (the
 // `c66_process` idiom), so the IR and the `process` / `sealedchannel` tags are emitted
 // while nothing is executed. 6 + 7 + 8 + 9 + 10 + 2 = 42. Exit 42, no stdout.
@@ -135,6 +148,21 @@ fn main() -> i64 ! { Subprocess } {
         0
     };
 
+    // (register D17, closed `6337bea`) The SAME route at a `u8` element, which reads
+    // `guard_<elem>`'s element rather than merely its shape: `@idg__opt_guard_u8`.
+    // Unreachable before D17 — a `u8` container value diverged for want of the width
+    // conversion, so this binding would have pinned that bug instead of the tag.
+    // Contributes 0 so the trace arithmetic above is untouched. The `is_some` condition
+    // is load-bearing here for exactly the reason spelled out above; do not vary it.
+    let mxu: Mutex<u8> = mutex_new(2 as u8);
+    let gu = lock(mxu);
+    let from_guard_u8: i64 = if is_some(gu) {
+        let hu = idg(gu);
+        0
+    } else {
+        0
+    };
+
     // The `Process` / `SealedChannel` arm: compiled (so its tags emit), never run.
     let probe: bool = false;
     let from_subprocess: i64 = if probe {
@@ -144,5 +172,7 @@ fn main() -> i64 ! { Subprocess } {
         0
     };
 
-    from_enum + from_class + from_fn + from_chan + from_task + from_guard + from_subprocess
+    from_enum + from_class + from_fn + from_chan + from_task + from_guard
+        + from_guard_u8
+        + from_subprocess
 }

@@ -1133,10 +1133,14 @@ fn cg_container_encode(c: &mut TyCtx, ety: i64, k: i64, v: i64) -> i64 {
     } else if e == 1 || e == 2 || e == 3 {
         cg_conv(c, "zext", e, k, v, 0)
     } else {
-        // f64, ptr, and every non-word-scalar. The oracle Errs on all of them
-        // ("element not ported (word-scalar)" / "type not yet ported"), so the
-        // differential never compares such a program; emitting the operand unconverted
-        // keeps this arm from inventing an encoding for a shape nothing has defined.
+        // f64, ptr, and every non-word-scalar. ⚠ DO NOT write "the oracle Errs on all
+        // of them, so the differential never compares such a program" here — that is the
+        // refuted claim the header block above spends a paragraph on, and it was in THIS
+        // comment until a review constructed `shared_new(x as f64)`, which the oracle
+        // lowers. It Errs on the NON-word-scalars ("element not ported (word-scalar)")
+        // and on `ptr` ("type not yet ported"), but NOT on every f64 route. Emitting the
+        // operand unconverted keeps this arm from inventing an encoding for a shape
+        // nothing has defined; for f64 it is also a live divergence, registered as D30.
         0 - 1
     }
 }
