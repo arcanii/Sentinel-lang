@@ -111,10 +111,12 @@ reference as you work through the milestones.
 >      now has. Also worth doing with it: `examples/math/quadratic.sentinel` and
 >      `sentinel_library/std/math/float.sentinel` currently reach only lex/ast, because
 >      `snc merge`'s Bar-A printer rejects both a float literal and `sqrt` (menu item 5).
->   4. **THE FILED-DEFECT REGISTER — NINE items (D1-D9); **D1, D3, D8 and D9 are DONE**, the rest verified against a pre-slice binary,
+>   4. **THE FILED-DEFECT REGISTER — FOURTEEN items (D1-D14); **D1, D3, D8 and D9 are DONE**, the rest verified against a pre-slice binary,
 >      NONE registered in any `DEFERRED_PROGRAMS` / `KNOWN_SCG_BUGS` list because no corpus
->      program reaches them.** They were also filed as task chips, but chips are ephemeral UI;
->      THIS list is the record. Ordered by what they cost if left.
+>      program reaches them.** They were also filed as task chips, but chips are EPHEMERAL UI
+>      and this list is the record — if the two disagree, this one wins, and a chip that is
+>      closed or superseded should be dismissed so the two do not drift. Ordered by what they
+>      cost if left.
 >
 >      **D1 — DONE (`5609fb7`, ADR 0072).** `snc build` used to miscompile a qualified `let`
 >      in an effecting fn, returning a raw pointer as the program's answer. Fixed, and the
@@ -224,6 +226,55 @@ reference as you work through the milestones.
 >      receiver, which is correct by accident with one struct in the program and wrong with
 >      two. Front end only: `snc build` compiles these but `snc llvm` refuses them, so the
 >      codegen differential cannot see the shape (filed separately).
+>
+>      **D10 — ⚠ `snc llvm` emits an invalid fall-through for a NULLABLE return.** ANY
+>      `return` in a fn whose return type is nullable makes the ORACLE emit a bare `0` into
+>      the `{ i1, i64 }` merge slot — `fn rn() -> ?i64 { return 5 }` alone reproduces it, the
+>      same fn without a `return` is clean, and the `secret i64` twin is clean (secret lowers
+>      to i64). `llvm-as` rejects it; `snc build` (inkwell) compiles the same program
+>      correctly, so this is text-oracle-only. NOTHING CATCHES IT: `selfhost_codegen`'s IR
+>      check flags scg only when the ORACLE's IR is valid (deliberately — so scg is not blamed
+>      for reproducing the oracle), and here both are invalid, so the differential stays green
+>      and silent. Consider adding an assertion that the ORACLE's own IR assembles over the
+>      fixtures it emits for; that whole class has no test today.
+>      `tests/pass/c19_widen_arg_return_assign` contains the shape and documents it.
+>
+>      **D11 — a BUILTIN's call argument is not widened.** The oracle widens it and scg does
+>      not, emitting `extractvalue i64 5, 0` — invalid IR. `let y: i64 = unwrap_or(5, 0);`
+>      reproduces it with a bare literal. ⚠ A bare `unwrap_or(5, 0)` in TAIL position is
+>      rejected by the oracle for an unrelated reason (generic inference with no context); an
+>      earlier session generalised from that and wrote "the oracle does not widen a builtin's
+>      argument" into an ADR and three code comments before having to retract it — do not
+>      repeat that. ADR 0051 A5 threaded USER-fn params only; the builtin arms infer their type
+>      argument from the ARGUMENTS rather than from an expectation, which is the same shape as
+>      D4, so this needs its own probe battery for over-widening. `secret` is affected too and
+>      SHIPPED code relies on it: ADR 0052 describes `push(&mut v, i64_to_u8(...))` as using
+>      "the ADR 0051 call-arg widen", which scg does not perform.
+>
+>      **D12 — four scg effecting-path gaps**, all invisible today because ADR 0072 made the
+>      oracle refuse the programs that would expose two of them. (a) the c35d embedded-perform
+>      shape is not mirrored for a `secret`-returning fn (oracle 2 resumers, scg 0) — this one
+>      IS differential-reachable and green only for want of a fixture; (b) scg captures ALL
+>      params in declaration order where the oracle captures the tail's free vars in
+>      first-reference order, so an unused param makes scg over-capture; (c) `cg_tailk` is a
+>      sticky flag that nothing clears when a tail is pure, so `do_work(); 5` emits
+>      `ret ptr 5`; (d) the `?i64` let-shape stores 8 bytes into a 16-byte slot, leaving the
+>      discriminant uninitialised — and `llvm-as` ACCEPTS that, so it is valid IR with garbage
+>      semantics, a worse failure mode than the oracle's. ⚠ Do NOT "fix" (d) by falling through
+>      to `cg_eff_normal`; that path reproduces the exact miscompile ADR 0072 removed.
+>
+>      **D13 — an effecting METHOD has no `Kont*` ABI at all.** `dump_method` never consults
+>      `uses_kont_abi`, so a class/impl method with an effect row is emitted with the ordinary
+>      value ABI while its body performs — `Box__fetch` is declared to return `i64` and then
+>      does `ret i64` on a `Kont*`. A separate path from the one ADR 0072 fixed, and the reason
+>      `expr_suspends` deliberately does NOT treat method calls as suspending: under today's
+>      ABI they really do return a value. Decide first whether to give methods the ABI or to
+>      refuse an effect row on a method until that exists. Zero corpus programs have one.
+>
+>      **D14 — scg's codegen aborts on a ZERO-FIELD struct.** `struct E { }` with
+>      `let e: E = E { };` and no impl anywhere: the oracle emits valid IR, scg exits 127 on an
+>      out-of-bounds index. Differential-reachable — any tests/pass fixture with an empty
+>      struct turns it red — and green only because no corpus program declares one.
 >   5. **Widen `snc merge`'s Bar-A source printer** — the highest-leverage COVERAGE item.
 >      `crates/sentinel-driver/src/source_dump.rs` rejects **98 of the 119** real programs
 >      (re-measured after `demos/` joined the corpus), dominated by `cast` (37) and `declassify`
