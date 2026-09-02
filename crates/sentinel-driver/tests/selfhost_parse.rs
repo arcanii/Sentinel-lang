@@ -835,6 +835,6 @@ fn sentinel_parser_matches_oracle_on_real_programs() {
     let parser = build_sentinel_parser(&tmp);
     let work = tmp.join("work");
     std::fs::create_dir_all(&work).expect("create work dir");
-    real_program_differential("ast", &parser, &work, 119, 21);
+    real_program_differential("ast", &parser, &work, 120, 22);
     let _ = std::fs::remove_dir_all(&tmp);
 }

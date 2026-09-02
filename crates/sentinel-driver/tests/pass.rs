@@ -1817,3 +1817,24 @@ fn pass_c60_vec_struct_move() {
     // is the sole owner. (1+10+20) + (2+30+40) - 61 = 42.
     assert_eq!(run_exit("c60_vec_struct_move.sentinel"), 42);
 }
+
+#[test]
+fn pass_c16_mono_key_handle_tags() {
+    // ADR 0016 A1 (register item D5): the MONO-KEY route into the type mangler —
+    // an ordinary `idg(v)` on `fn idg<T>(x: T) -> T`, which puts `T`'s type into a
+    // FUNCTION SYMBOL (`@idg__<tag>`) rather than a type declaration. It is the
+    // complement of `examples/lang/phantom_type_param.sentinel`, not a subset:
+    // `Task<T>`, `Process` and `Guard<T>` cannot be written in type position at
+    // all, so this is the only route that reaches their tags.
+    //
+    // The exit code is the weakest of the three assertions this fixture carries.
+    // It is in `tests/pass` so inkwell builds and runs it, and in the codegen
+    // differential's corpus so `snc llvm` and `scg` are compared byte-for-byte —
+    // and that second one is what would have caught the defect: on the eight
+    // instantiations here, pre-fix `scg` emitted eight definitions under TWO symbol
+    // names — `@idg__ty` seven times carrying three different signatures, plus one
+    // `@idg__opt_ty`. (Four distinct (name, signature) pairs; the count that matters
+    // is the two NAMES, since that is what "invalid redefinition of function" keys
+    // on.) Exit 42.
+    assert_eq!(run_exit("c16_mono_key_handle_tags.sentinel"), 42);
+}

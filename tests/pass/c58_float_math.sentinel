@@ -10,7 +10,8 @@
 // tries to lower — which is also why the mirror needs no codegen half. State it
 // that way and no other: `snc llvm` does NOT refuse `F64` as such, and a phantom
 // f64 generic argument reaches scg's codegen, which is why `cg_mangle_to` carries
-// a real `ty_F64` arm. `snc build` uses inkwell, so this fixture compiles and runs.)
+// a real scalar-4 arm — spelled `f64` since ADR 0016 A1, `ty_F64` before it.
+// `snc build` uses inkwell, so this fixture compiles and runs.)
 //
 // EVERY VALUE THAT PARTICIPATES IN THE ARITHMETIC is exactly representable in
 // binary64 — integers, halves and quarters only — so the result is exact, not

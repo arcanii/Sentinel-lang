@@ -59,7 +59,8 @@ use sentinel_resolve::{
 };
 use sentinel_ast::SelfKind;
 use sentinel_types::{
-    fn_value_sig_param_ret, guard_elem_for, type_display, ArrayElem, ClassData, GenericInstanceData,
+    channel_elem_for, fn_value_sig_param_ret, guard_elem_for, mutex_elem_for, shared_elem_for,
+    type_display, ArrayElem, ClassData, GenericInstanceData,
     GenericInstanceId, ImplData,
     NullableInner, RefData, SecretData, Type, TypedBlock, TypedExpr, TypedExprKind, TypedFnDef,
     TypedFnSignature, TypedHandlerArm, TypedMatchArm, TypedPattern, TypedProgram, TypedReturnArm,
@@ -2879,9 +2880,19 @@ fn mangle_mono_name_dedup(
 /// primitives / origin-known named types / arrays-nullables-vecs of those, so no
 /// ambiguous tag ever flows here.
 fn mangle_type_dedup(ty: Type, program: &TypedProgram, origins: &NamedTypeOrigins) -> String {
-    // `$`-join the origin path onto the bare name: a valid-in-identifier
-    // separator that can't appear in a bare type name or path segment, so
-    // distinct origins never collide. Empty origin → the bare name.
+    // `$`-join the origin path onto the bare name. Empty origin → the bare name.
+    //
+    // ⚠ This used to say `$` "can't appear in a bare type name or path segment, so
+    // distinct origins never collide". FALSE, and worth correcting because it was
+    // the stated safety argument: the lexer accepts `$` inside an identifier
+    // (`[A-Za-z_][A-Za-z0-9_$]*`, added so merged source round-trips), so
+    // `struct geo$Point` in module `util` tags identically to `Point` in module
+    // `util::geo`, and a top-level `struct util$geo$Point` does too — verified by
+    // compiling one. What keeps two distinct instantiations off one `linkonce_odr`
+    // symbol is `mono_args_dedup_safe` requiring a KNOWN ORIGIN, not the separator.
+    // Treat that gate as load-bearing; widening it on the belief that `$` is
+    // unforgeable would open exactly the aliasing this function exists to prevent.
+    // A genuinely unambiguous encoding is `abi-v2` work (docs/abi-v1.md §4).
     let qualify = |origin: &[String], name: String| -> String {
         if origin.is_empty() {
             name
@@ -3012,21 +3023,35 @@ fn mangle_type(ty: Type, program: &TypedProgram) -> String {
             .get(id.0 as usize)
             .map(|d| format!("sec_{}", mangle_type(d.inner, program)))
             .unwrap_or_else(|| format!("sec{}", id.0)),
-        // C3.4 / ADR 0020 D5: konts never participate in
-        // monomorphization keys at C3.4 — handlers don't reach
-        // codegen until C3.5/C3.6. Defensive label only.
-        Type::Kont(id) => format!("kont{}", id.0),
-        // C4.4 / ADR 0024: Task<i64> carries no TypeParam so it
-        // never appears in a mono key; defensive label only.
-        Type::Task(id) => format!("task{}", id.0),
-        // ADR 0066 M1.2: Channel<i64> carries no TypeParam; defensive label.
-        Type::Channel(id) => format!("chan{}", id.0),
-        // ADR 0071 M1.4a: Shared<T> carries no TypeParam; defensive mangle label.
-        Type::Shared(id) => format!("shared{}", id.0),
-        // ADR 0071 M1.4b: Mutex<T> carries no TypeParam; defensive mangle label.
-        Type::Mutex(id) => format!("mutex{}", id.0),
-        // ADR 0071 M1.4b: Guard<T> carries no TypeParam; defensive mangle label.
-        Type::Guard(id) => format!("guard{}", id.0),
+        // ADR 0016 A1 (register item D5): the six handle kinds below used to carry
+        // an INTERNER ID (`kont0`, `task0`, `chan0`, `shared0`, `mutex0`, `guard0`),
+        // labelled "defensive" on the belief that none reaches a mono key. That
+        // belief was falsified by construction: `idg(some_shared)` — an ordinary
+        // generic call, no phantom type parameter — puts `Shared<i64>` straight into
+        // `mangle_mono_name`, and the same holds for Channel, Mutex, Task and
+        // `?Guard`. An id-bearing tag is not a name the other two back ends can
+        // derive (the text oracle has different ids; `scg` has no such ids at all),
+        // so each now tags by its ELEMENT. The `*_elem_for` inverses are total.
+        Type::Kont(id) => program
+            .konts
+            .get(id.0 as usize)
+            .map(|k| {
+                format!(
+                    "kont_{}_{}",
+                    mangle_type(k.arg_ty, program),
+                    mangle_type(k.ret_ty, program)
+                )
+            })
+            .unwrap_or_else(|| format!("kont{}", id.0)),
+        Type::Task(id) => program
+            .tasks
+            .get(id.0 as usize)
+            .map(|t| format!("task_{}", mangle_type(t.result_ty, program)))
+            .unwrap_or_else(|| format!("task{}", id.0)),
+        Type::Channel(id) => format!("chan_{}", mangle_type(channel_elem_for(id), program)),
+        Type::Shared(id) => format!("shared_{}", mangle_type(shared_elem_for(id), program)),
+        Type::Mutex(id) => format!("mutex_{}", mangle_type(mutex_elem_for(id), program)),
+        Type::Guard(id) => format!("guard_{}", mangle_type(guard_elem_for(id), program)),
         // ADR 0066 M2.1: Process carries no TypeParam; defensive mangle label.
         Type::Process => "process".to_string(),
         // ADR 0066 M2.4a: SealedChannel carries no TypeParam; defensive mangle label.
@@ -3046,8 +3071,20 @@ fn mangle_type(ty: Type, program: &TypedProgram) -> String {
             .get(id.0 as usize)
             .map(|e| e.name.clone())
             .unwrap_or_else(|| format!("enum{}", id.0)),
-        // C4.2: TraitSelf doesn't reach mangling.
-        Type::TraitSelf(id) => format!("Self_trait{}", id.0),
+        // C4.2: TraitSelf doesn't reach mangling — verified by construction (`Self`
+        // is not writable in type position, and an impl body always has it
+        // substituted to a concrete Class/Struct). Tagged by the TRAIT NAME anyway,
+        // so no arm here reaches for an interner id on its NORMAL path. The
+        // `unwrap_or_else` misses still render one (`sec{id}`, `ref{id}`, `gi{id}`,
+        // `class{id}`, `enum{id}`, `task{id}`, `kont{id}`, `Self_trait{id}`,
+        // `struct{id}`): those fire only when a table lookup fails, which means the
+        // program is already malformed, and an id-bearing debug label is better there
+        // than a panic. Do not read them as part of the scheme.
+        Type::TraitSelf(id) => program
+            .trait_decls
+            .get(id.0 as usize)
+            .map(|t| format!("Self_{}", t.name))
+            .unwrap_or_else(|| format!("Self_trait{}", id.0)),
         // ADR 0070 (generalized): mangle the concrete word-scalar signature.
         Type::Fn(id) => {
             let (param_ty, ret_ty) = fn_value_sig_param_ret(id);
@@ -10922,7 +10959,10 @@ mod tests {
     use super::*;
     use sentinel_resolve::resolve;
     use sentinel_syntax::parse;
-    use sentinel_types::check;
+    use sentinel_types::{
+        channel_chanid_for, check, fn_value_sig_id_for, guard_id_for, mutex_id_for, shared_id_for,
+        ChanId, GuardId, MutexId, SecretId, SharedId,
+    };
 
     fn compile_src(src: &str) -> Result<(), CodegenError> {
         let prog = parse(src).expect("parse");
@@ -10996,6 +11036,60 @@ mod tests {
         );
         // Zero type-args → the bare base name (a non-generic fn).
         assert_eq!(mangle_mono_name("main", &[], &typed), "main");
+
+        // ADR 0016 A1 (register item D5): the tags that used to fall through to
+        // `mangle_type`'s catch-all. Every one is STRUCTURAL — it names the type's
+        // shape, never an interner index — which is the property that lets three
+        // independent back ends derive the same symbol. The old spellings embedded
+        // an id (`shared0`, `task0`, `chan0`, `mutex0`, `guard0`, `kont0`,
+        // `Self_trait0`) or, in the text oracle, a raw Rust `Debug` rendering
+        // (`ty_Shared(SharedId(0))`) that is not even a legal LLVM name. A drift
+        // back to either must turn this test red.
+        assert_eq!(mangle_type(Type::U128, &typed), "u128");
+        assert_eq!(mangle_type(Type::F64, &typed), "f64");
+        assert_eq!(mangle_type(Type::Ptr, &typed), "ptr");
+        assert_eq!(mangle_type(Type::Process, &typed), "process");
+        assert_eq!(mangle_type(Type::SealedChannel, &typed), "sealedchannel");
+        // The handle tags read their element back out of the id, so a non-`i64`
+        // element must show up in the tag — this pair is what fails if a back end
+        // reverts to assuming `i64`.
+        assert_eq!(
+            mangle_type(Type::Shared(SharedId(shared_id_for(Type::I64).unwrap())), &typed),
+            "shared_i64"
+        );
+        assert_eq!(
+            mangle_type(Type::Shared(SharedId(shared_id_for(Type::U8).unwrap())), &typed),
+            "shared_u8"
+        );
+        assert_eq!(
+            mangle_type(Type::Mutex(MutexId(mutex_id_for(Type::Bool).unwrap())), &typed),
+            "mutex_bool"
+        );
+        assert_eq!(
+            mangle_type(Type::Guard(GuardId(guard_id_for(Type::I32).unwrap())), &typed),
+            "guard_i32"
+        );
+        assert_eq!(
+            mangle_type(Type::Channel(ChanId(channel_chanid_for(Type::U8).unwrap())), &typed),
+            "chan_u8"
+        );
+        // A nested composition: the tag recurses, so a secret element is visible.
+        assert_eq!(
+            mangle_type(
+                Type::Shared(SharedId(shared_id_for(Type::Secret(SecretId(0))).unwrap())),
+                &typed
+            ),
+            "shared_sec_i64"
+        );
+        // `Fn<P,R>` was already structural (its id is arithmetic, not an interner
+        // index) — pinned so the two-element form stays in the same family.
+        assert_eq!(
+            mangle_type(
+                Type::Fn(fn_value_sig_id_for(Type::U8, Type::Bool).unwrap()),
+                &typed
+            ),
+            "fn_u8_bool"
+        );
     }
 
     // ===== D.6 / ADR 0037 D7: module-qualified mangling (abi-v1 amendment) =====

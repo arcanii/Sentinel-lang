@@ -538,6 +538,20 @@ const EXAMPLES: &[(&str, i32)] = &[
     // computed arithmetically (no interner threading). inc_u8(29)=30 +
     // double_f64(5.0) as i64=10 + flip(false)-contributes-2 = 42. snc-only.
     ("examples/lang/fn_value_generic.sentinel", 42),
+    // ADR 0016 A1 (register item D5): a PHANTOM type parameter — a generic struct
+    // parameter no field uses, so it tags a type without adding layout. It is the
+    // one position where a type reaches the name mangler with NO value of that type
+    // anywhere. 20 markers -> 20 distinct, LLVM-legal, byte-identical type
+    // declarations across all three back ends. 6+7+8+9+12 = 42.
+    //
+    // It sweeps the tag forms a phantom parameter can reach — bare scalar, nominal
+    // name, one-element wrapper, handle-over-element, two-element signature, nested
+    // composition — but NOT every form the scheme has: the index-bearing `T<n>` is
+    // filtered out of Pass 0 by construction, and the zero-element atoms `process` /
+    // `sealedchannel` are not writable in type position at all. Those two are covered
+    // instead by `tests/pass/c16_mono_key_handle_tags.sentinel`, through the mono-key
+    // route.
+    ("examples/lang/phantom_type_param.sentinel", 42),
 ];
 
 #[test]
@@ -903,6 +917,29 @@ fn lang_fn_value_generic() {
     // Fn<i64,i64> — Fn<u8,u8>/Fn<f64,f64>/Fn<bool,bool> via the same `apply`
     // builtin, context-typed from each Fn value's own signature.
     check_example("examples/lang/fn_value_generic.sentinel", "fn_value_generic", 42);
+}
+
+#[test]
+fn lang_phantom_type_param() {
+    // ADR 0016 A1: phantom type parameters over 20 distinct marker types. The
+    // interesting assertion is NOT the exit code — it is that the same program is
+    // byte-identical between `snc llvm` and `scg`, which `selfhost_codegen`'s
+    // real-program sweep checks (this file lives under `examples/`, so it is in that
+    // sweep's corpus). Before A1 the oracle emitted names `llvm-as` could not parse
+    // and `scg` collapsed eight markers onto one name; only inkwell — which this test
+    // exercises — was ever right, which is exactly why an exit-code test alone could
+    // not have caught it.
+    //
+    // ⚠ Be precise about the `llvm-as` half, because the natural reading is wrong.
+    // That sweep's `llvm_rejects` gate fires only when scg's IR is rejected AND the
+    // ORACLE's is clean — it exists to catch scg diverging into invalid IR, not to
+    // audit the oracle. In the exact pre-A1 state this fixture memorialises, BOTH
+    // sides were rejected (scg: "redefinition of type"; oracle: "expected '=' after
+    // name"), so the gate would have been SILENT. What would have caught it is the
+    // byte comparison, and only because the two were wrong in different ways — had
+    // they been wrong identically, nothing in CI would have noticed. (The gate is
+    // also skipped entirely when `LLVM_SYS_180_PREFIX` is unset.)
+    check_example("examples/lang/phantom_type_param.sentinel", "phantom_type_param", 42);
 }
 
 /// Coverage guard: every `.sentinel` program under `examples/` must be

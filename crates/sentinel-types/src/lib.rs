@@ -1606,6 +1606,18 @@ pub fn channel_elem_for(id: ChanId) -> Type {
         // pushed into the `channels` table — a silent disagreement between the
         // two is exactly the trap M1.4c-2 would inherit. Both must change
         // together when the real secret elements land.
+        //
+        // ⚠ ADR 0016 A1 gave this map a SECOND consumer with a different
+        // requirement: `mangle_type` now tags `Channel<T>` as `chan_<tag(T)>`,
+        // reading the element from here. These four slots answer the PUBLIC
+        // counterpart, so the moment M1.4c-2 makes them reachable,
+        // `Channel<secret i64>` would tag `chan_i64` — the SAME name as
+        // `Channel<i64>`, which is a silent mangling collision of exactly the
+        // kind A1 exists to remove. The sibling maps do not have this problem:
+        // `shared_elem_for` / `mutex_elem_for` / `guard_elem_for` all route the
+        // secret range through `secret_elem_for_slot` FIRST and correctly yield
+        // `shared_sec_i64` and friends (verified). So M1.4c-2 must make this map
+        // do the same, not merely "change it together with the table".
         6 => Type::I64,
         7 => Type::I32,
         8 => Type::U8,

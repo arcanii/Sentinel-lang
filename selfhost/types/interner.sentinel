@@ -344,8 +344,9 @@ fn scalar_bits(h: i64) -> i64 {
     // Errs on every `x as f64` / `f64 as x` it tries to lower, so the codegen
     // differential skips before scg runs. It is NOT true that these types cannot
     // reach scg's codegen at all — a PHANTOM generic argument does, which is why
-    // `cg_mangle_to` needs a real arm for BOTH. Anyone porting f64 or ptr
-    // codegen revisits this.
+    // `cg_mangle_to` needs a real arm for BOTH (spelled `f64` / `ptr` since ADR
+    // 0016 A1, `ty_F64` / `ty_Ptr` before it). Anyone porting f64 or ptr codegen
+    // revisits this.
     if h == 1 {
         32
     } else if h == 3 {
@@ -1338,10 +1339,10 @@ fn type_of_typeexpr(c: &mut TyCtx, t: TypeE, gb: &mut Vec<u8>) -> i64 {
             let is_fn: bool = name_eq_lit(&gn, "Fn");
             // (ADR 0071 M1.4a) `Shared<T>` in type position → the kind-17 Shared
             // type (mirrors the Channel arm), so a fn can take a shared handle as a
-            // parameter. Element `i64` (handle 0) at the M1.4a minimum.
+            // parameter. ELEMENT-GENERIC since ADR 0016 A1 — see the arms below.
             let is_shared: bool = name_eq_lit(&gn, "Shared");
             // (ADR 0071 M1.4b) `Mutex<T>` in type position → the kind-18 Mutex type
-            // (mirrors the Shared arm). Element `i64` (handle 0) at the M1.4b minimum.
+            // (mirrors the Shared arm). Element-generic since ADR 0016 A1.
             let is_mutex: bool = name_eq_lit(&gn, "Mutex");
             let gsid: i64 = if is_vec {
                 0 - 1
@@ -1409,17 +1410,54 @@ fn type_of_typeexpr(c: &mut TyCtx, t: TypeE, gb: &mut Vec<u8>) -> i64 {
                 };
                 mk_fn(c, fparam, fret)
             } else if is_shared {
-                // resolve (and free) the type args like `Channel`; the element
-                // type is `i64` (handle 0) at the M1.4a minimum.
+                // (ADR 0016 A1) ELEMENT-GENERIC, a 2-line mirror of the `is_channel`
+                // arm above. These two arms used to `collect_tyargs` only to DISCARD
+                // the result and intern `mk_shared(c, 0)`, so every `Shared<T>` /
+                // `Mutex<T>` ANNOTATION resolved to the `<i64>` handle.
+                //
+                // Why the A1 mangle slice had to fix it: with the element thrown
+                // away, `Tagged<i64, Shared<u8>>` and `Tagged<i64, Shared<i64>>`
+                // intern to the SAME handle, so scg emitted ONE generic-instance
+                // declaration where the oracle emitted two. That is a STRUCTURAL
+                // collapse, not a naming one — no mangling scheme could have
+                // separated two instances the interner had already merged.
+                // `examples/lang/phantom_type_param.sentinel` pins it: pre-change scg
+                // emitted 17 declarations with 10 distinct names, post-change 20 with
+                // 20, and the three recovered instances are exactly `Shared<u8>`,
+                // `Mutex<u8>` and `Shared<secret i64>`.
+                //
+                // ⚠ WHAT THIS DOES NOT FIX, measured rather than assumed: scg's
+                // CODEGEN still emits no width conversion around a container's
+                // runtime call, so `fn take(s: Shared<u8>) -> u8 { shared_get(s) }`
+                // still diverges — the oracle follows the `i64`-returning runtime call
+                // with `trunc i64 -> i8` (and, at a `shared_new(u8)`, precedes it with
+                // `zext i8 -> i64`) where scg emits neither, giving `ret i8 %v2` for
+                // an `i64` `%v2` that `llvm-as` rejects. A
+                // pre/post-change scg binary emits BYTE-IDENTICAL output on that
+                // program, so the missing conversions are a separate, still-open
+                // ADR 0071 M1.4c gap and nothing to do with this arm. Do not read
+                // "element-generic annotation" as "non-i64 container elements work".
+                //
+                // The constructor path (`shared_new`) was already element-generic
+                // (M1.4c-1b); only the annotation path lagged.
                 let mut sav: Vec<i64> = vec_new();
                 collect_tyargs(c, ga, gb, &mut sav);
-                mk_shared(c, 0)
+                let selem: i64 = if len(sav) > 0 {
+                    sav[0]
+                } else {
+                    0
+                };
+                mk_shared(c, selem)
             } else if is_mutex {
-                // resolve (and free) the type args like `Shared`; the element
-                // type is `i64` (handle 0) at the M1.4b minimum.
+                // (ADR 0016 A1) element-generic, exactly like `is_shared` above.
                 let mut mav: Vec<i64> = vec_new();
                 collect_tyargs(c, ga, gb, &mut mav);
-                mk_mutex(c, 0)
+                let melem: i64 = if len(mav) > 0 {
+                    mav[0]
+                } else {
+                    0
+                };
+                mk_mutex(c, melem)
             } else if gsid >= 0 {
                 let mut gav: Vec<i64> = vec_new();
                 collect_tyargs(c, ga, gb, &mut gav);

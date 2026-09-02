@@ -171,6 +171,32 @@ fn cg_struct_name_to(out: &mut Vec<u8>, c: &mut TyCtx, sid: i64) -> i64 {
     0
 }
 
+// (ADR 0016 A1) append an ENUM's name (`snb[ets[eid]..ete[eid]]`) to `out` — the enum
+// twin of `cg_struct_name_to`. The name blob is shared; only the span table differs.
+fn cg_enum_name_to(out: &mut Vec<u8>, c: &mut TyCtx, eid: i64) -> i64 {
+    let bs: i64 = (*c).ets[eid];
+    let be: i64 = (*c).ete[eid];
+    let mut bi: i64 = bs;
+    while bi < be {
+        push(out, (*c).snb[bi]);
+        bi = bi + 1;
+    }
+    0
+}
+
+// (ADR 0016 A1) append a CLASS's name (`snb[clns[cid]..clne[cid]]`) to `out` — the
+// out-buffer twin of `cg_emit_snb_clsname`, which writes to the cg buffer instead.
+fn cg_class_name_to(out: &mut Vec<u8>, c: &mut TyCtx, cid: i64) -> i64 {
+    let bs: i64 = (*c).clns[cid];
+    let be: i64 = (*c).clne[cid];
+    let mut bi: i64 = bs;
+    while bi < be {
+        push(out, (*c).snb[bi]);
+        bi = bi + 1;
+    }
+    0
+}
+
 // (ADR 0070) append a user fn's name (from the fn-name blob `ufnb`) to `out` —
 // the `Fn` value's `@<name>` operand text. `fid` is a user FnId (>= 42).
 fn cg_fn_name_to(out: &mut Vec<u8>, c: &mut TyCtx, fid: i64) -> i64 {
@@ -204,22 +230,21 @@ fn cg_mangle_to(out: &mut Vec<u8>, c: &mut TyCtx, h: i64) -> i64 {
         //     struct Pair<A, B> { a: A }
         //     fn main() -> i64 { let p: Pair<i64, f64> = Pair { a: 42 }; p.a }
         // `B` is phantom, so no f64 VALUE and no f64 field type ever exist, and
-        // the oracle compiles it happily to `%Pair_i64_ty_F64` — only the
-        // MANGLED NAME mentions f64. Without this arm the `else` below computes
-        // `idx = 4 - tbase() = -96` and scg ABORTS with an out-of-bounds index
-        // on a program the oracle accepts.
+        // the MANGLED NAME is the only place f64 is mentioned. Without this arm
+        // the `else` below computes `idx = 4 - tbase() = -96` and scg ABORTS with
+        // an out-of-bounds index on a program the oracle accepts.
         //
-        // `ty_F64` is not invented: the oracle's `mangle_type` has no F64 arm
-        // either and falls to its defensive `other => format!("ty_{other:?}")`,
-        // so this literal text is exactly what it emits. Verified byte-identical
-        // on the repro above.
-        append_str(out, "ty_F64")
+        // ⚠ The TEXT changed at ADR 0016 A1, from `ty_F64` to `f64`. The old text
+        // was copied from the oracle's defensive `other => format!("ty_{other:?}")`
+        // catch-all — faithfully, and it did match byte-for-byte — but it matched
+        // the WRONG side: inkwell, the shipping back end, always spelled it `f64`,
+        // so oracle and scg agreed with each other and both disagreed with the
+        // compiler that actually emits objects. A1 makes all three say `f64`.
+        append_str(out, "f64")
     } else if h == 5 {
-        // (ADR 0057) The same story one code over: `Pair<i64, ptr>` with a
-        // phantom `B` compiles in the oracle to `%Pair_i64_ty_Ptr`, and without
-        // this arm scg would abort on `idx = 5 - tbase()`. Verified against the
-        // oracle rather than assumed, exactly as `ty_F64` was.
-        append_str(out, "ty_Ptr")
+        // (ADR 0057) The same story one code over: `Pair<i64, ptr>` with a phantom
+        // `B`. Same A1 text change, for the same reason (`ty_Ptr` -> `ptr`).
+        append_str(out, "ptr")
     } else {
         let idx: i64 = h - tbase();
         let k: i64 = (*c).tk[idx];
@@ -262,25 +287,75 @@ fn cg_mangle_to(out: &mut Vec<u8>, c: &mut TyCtx, h: i64) -> i64 {
                 gj = gj + 1;
             }
             0
+        } else if k == 7 {
+            // (ADR 0016 A1) Enum and Class render by their declared NAME, matching
+            // the oracle and inkwell. Neither needs a concurrency feature to reach
+            // this function — `Pair<i64, SomeEnum>` is enough — which is why the
+            // old comment below was wrong about what was reachable.
+            cg_enum_name_to(out, c, ta_v)
+        } else if k == 8 {
+            cg_class_name_to(out, c, ta_v)
+        } else if k == 12 {
+            append_str(out, "task_");
+            cg_mangle_to(out, c, ta_v)
+        } else if k == 13 {
+            append_str(out, "chan_");
+            cg_mangle_to(out, c, ta_v)
+        } else if k == 14 {
+            append_str(out, "process")
+        } else if k == 15 {
+            append_str(out, "sealedchannel")
+        } else if k == 16 {
+            append_str(out, "fn_");
+            cg_mangle_to(out, c, ta_v);
+            push(out, '_');
+            cg_mangle_to(out, c, tb_v)
+        } else if k == 17 {
+            append_str(out, "shared_");
+            cg_mangle_to(out, c, ta_v)
+        } else if k == 18 {
+            append_str(out, "mutex_");
+            cg_mangle_to(out, c, ta_v)
+        } else if k == 19 {
+            append_str(out, "guard_");
+            cg_mangle_to(out, c, ta_v)
         } else {
-            // PRE-EXISTING, verified against a pre-slice scg binary, and worse
-            // than a byte diff — but NOT fixable by enumeration, which is why it
-            // is documented here rather than patched. The oracle's `mangle_type`
-            // falls to `other => format!("ty_{other:?}")`, and for a
-            // payload-bearing kind that Debug text EMBEDS THE ORACLE'S OWN
-            // INTERNER ID: `ty_Shared(SharedId(0))`, `ty_Mutex(MutexId(0))`. scg's
-            // interner ids are allocated in its own first-intern order and are
-            // deliberately independent, so it cannot reproduce that text at all.
-            // Emitting a bare `ty` means two DIFFERENT phantom kinds collide on
-            // one LLVM type name — verified: a program with both
-            // `Pair<i64, Shared<i64>>` and `Pair<i64, Mutex<i64>>` gives the
-            // oracle two distinct `%Pair_i64_ty_*` definitions and scg two
-            // IDENTICAL `%Pair_i64_ty` ones, which is invalid IR, not just
-            // different bytes. Unreachable in the corpus (nothing instantiates a
-            // generic at a container kind through a PHANTOM parameter, which is
-            // the only way a container handle reaches a mangling without a value
-            // of that type existing). Tracked as its own item.
-            append_str(out, "ty")
+            // (ADR 0016 A1) THE FALLBACK IS NOW LOUD, AND MUST STAY LOUD.
+            //
+            // What used to be here was `append_str(out, "ty")` — the single token
+            // every unenumerated kind collapsed onto. That is a TEN-WAY COLLISION
+            // (kinds 7, 8, 12..19), and it is not a byte diff: a program with both
+            // `Pair<i64, Shared<i64>>` and `Pair<i64, Mutex<i64>>` made scg emit
+            // `%Pair_i64_ty = type { i64 }` TWICE, which `llvm-as` rejects with
+            // "redefinition of type". Its own comment claimed the arm was
+            // unreachable "because nothing instantiates a generic at a container
+            // kind through a PHANTOM parameter" — false twice over: a plain
+            // `idg(ch)` on a Channel value reaches it through the MONO-KEY path with
+            // no phantom parameter anywhere, and Enum/Class reach it at kinds that
+            // are not containers at all.
+            //
+            // Every kind the interner can actually produce has an arm above — the
+            // producible set is {1,2,3,4,6..19}, since `tk` has exactly two writers
+            // (`intern_type` and `mk_generic`) and 5 is a SCALAR CODE (`ptr`, handled
+            // in the `h < tbase()` prefix), not an interner kind. So this is dead
+            // today. It stays as an ALARM rather than a silent guess:
+            // a new interner kind that forgets its arm gets a name no oracle tag can
+            // equal, so the codegen differential fails on the first program that
+            // reaches it. `ty` had the opposite property — it was plausible enough
+            // to pass unnoticed while producing invalid IR. Do NOT replace this with
+            // a "reasonable-looking" default. (The Rust side gets this for free: its
+            // `mangle_type` match is exhaustive, so a new variant is a compile
+            // error.)
+            //
+            // ⚠ The alarm covers an unknown KIND, not an unknown HANDLE, and the
+            // difference is worth knowing before relying on it: a handle that is
+            // neither a scalar code 0..5 nor `>= tbase()` — notably the -1 REJECT
+            // handle some type queries return — computes a negative `idx` in the
+            // prefix above and ABORTS the whole stage instead of reaching here.
+            // PRE-EXISTING (A1 changed the arms, not the dispatch shape), and an
+            // abort is at least loud, but it is a crash rather than a diagnostic.
+            append_str(out, "UNKNOWN_KIND_");
+            append_int(out, k)
         }
     }
 }

@@ -1,0 +1,104 @@
+// ADR 0016 A1 (filed-defect register D5): a PHANTOM type parameter — a generic
+// struct parameter that no field uses, so it tags the type without contributing a
+// byte of layout. `Tagged<T, Marker>` is the classic use: two values with the same
+// runtime representation that the type system refuses to mix up.
+//
+// It is also the sharpest test of the MANGLING scheme, which is why this program
+// sweeps so many marker types. A phantom parameter is the one position where a type
+// reaches the compiler's name mangler WITHOUT any value of that type existing
+// anywhere — no field, no local, no argument. So `Tagged<i64, Shared<i64>>` demands
+// a mangled tag for `Shared<i64>` while never allocating a cell. Every distinct
+// marker below must produce a DISTINCT, LLVM-LEGAL `%Tagged_i64_<tag>` type
+// declaration in all three back ends (inkwell, the `snc llvm` text oracle, and the
+// self-hosted `scg`), and the three must agree byte-for-byte.
+//
+// Before A1 they did not. The text oracle rendered a marker it had no arm for by
+// leaking Rust's `Debug` formatting into an LLVM identifier
+// (`%Tagged_i64_ty_Shared(SharedId(0))`), which `llvm-as` rejects outright —
+// "expected '=' after name", because an unquoted `(` cannot appear in an LLVM
+// name — and which embeds an interner id no other back end could reproduce. `scg`
+// collapsed ten different marker kinds onto the single token `ty`, so two distinct
+// markers produced two IDENTICAL declarations: "redefinition of type". Only inkwell,
+// the shipping back end, was right, which is why this program has always RUN
+// correctly while both printing back ends emitted IR no backend would read.
+//
+// The markers below cover every tag FORM a phantom parameter can reach: a bare scalar
+// (`f64`, `ptr`), a nominal name (a struct, an enum, a class), a one-element wrapper
+// (`arr_`, `opt_`, `vec_`, `refmut_`, `sec_`), a handle over an element
+// (`shared_`, `mutex_`, `chan_`), a two-element signature (`fn_`), and a NESTED
+// composition (`shared_sec_i64` — a handle over a secret over a scalar). The `u8`
+// variants matter on their own: they are what proves the tag reads the real element
+// type instead of assuming `i64`.
+//
+// Three tags are deliberately ABSENT, and one of the absences is load-bearing:
+// `process` / `sealedchannel` are not writable in a phantom slot at all (they are
+// covered by `tests/pass/c16_mono_key_handle_tags.sentinel` instead), and `u128` is
+// omitted because `scg` models no `u128` — it would resolve the marker to the `i64`
+// handle and this program would stop being byte-identical, pinning a known divergence
+// (register D20) instead of the tag. Adding a `u128` marker is the correct way to
+// close D20 once `scg` has one; until then its absence is a decision, not an
+// oversight.
+//
+// Trace: the phantoms carry no data, so the arithmetic is entirely in the `a` fields:
+// 6 + 7 + 8 + 9 + 12 = 42. Exit 42, no stdout.
+
+struct Marker { m: i64 }
+
+enum Flavour {
+    Plain,
+    Fancy,
+}
+
+class Meter {
+    let n: i64;
+    pub init(n: i64) {
+        self.n = n;
+        0
+    }
+}
+
+// `B` is never mentioned by a field — it exists only to distinguish instantiations.
+struct Tagged<A, B> { a: A }
+
+fn main() -> i64 {
+    // Bare scalars, and the two the oracle used to spell `ty_F64` / `ty_Ptr`.
+    let s1: Tagged<i64, f64> = Tagged { a: 1 };
+    let s2: Tagged<i64, ptr> = Tagged { a: 2 };
+    let s3: Tagged<i64, bool> = Tagged { a: 3 };
+
+    // Nominal names: struct, enum, class. None needs a concurrency feature — these
+    // three alone reproduced the whole defect, which is what falsified the old
+    // "only a container kind can reach this" comment in both back ends.
+    let n1: Tagged<i64, Marker> = Tagged { a: 1 };
+    let n2: Tagged<i64, Flavour> = Tagged { a: 2 };
+    let n3: Tagged<i64, Meter> = Tagged { a: 4 };
+
+    // One-element wrappers — the arms that were already structural, kept here so a
+    // future change to the scheme has to move them together with the new ones.
+    let w1: Tagged<i64, [i64]> = Tagged { a: 1 };
+    let w2: Tagged<i64, ?i64> = Tagged { a: 2 };
+    let w3: Tagged<i64, Vec<u8>> = Tagged { a: 2 };
+    let w4: Tagged<i64, &mut i64> = Tagged { a: 3 };
+
+    // Handles over an element. The `u8` pair is the load-bearing one: it fails the
+    // moment a back end tags the handle by its interner id, or assumes `i64`.
+    let h1: Tagged<i64, Shared<i64>> = Tagged { a: 1 };
+    let h2: Tagged<i64, Shared<u8>> = Tagged { a: 1 };
+    let h3: Tagged<i64, Mutex<i64>> = Tagged { a: 2 };
+    let h4: Tagged<i64, Mutex<u8>> = Tagged { a: 2 };
+    let h5: Tagged<i64, Channel<i64>> = Tagged { a: 1 };
+    let h6: Tagged<i64, Channel<u8>> = Tagged { a: 2 };
+
+    // A two-element signature, and a nested composition (`shared_sec_i64`).
+    let f1: Tagged<i64, Fn<i64, i64>> = Tagged { a: 3 };
+    let f2: Tagged<i64, Fn<u8, bool>> = Tagged { a: 4 };
+    let c1: Tagged<i64, secret i64> = Tagged { a: 2 };
+    let c2: Tagged<i64, Shared<secret i64>> = Tagged { a: 3 };
+
+    let scalars: i64 = s1.a + s2.a + s3.a;
+    let nominals: i64 = n1.a + n2.a + n3.a;
+    let wrappers: i64 = w1.a + w2.a + w3.a + w4.a;
+    let handles: i64 = h1.a + h2.a + h3.a + h4.a + h5.a + h6.a;
+    let composed: i64 = f1.a + f2.a + c1.a + c2.a;
+    scalars + nominals + wrappers + handles + composed
+}

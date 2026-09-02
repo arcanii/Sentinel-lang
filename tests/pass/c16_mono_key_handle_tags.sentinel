@@ -1,0 +1,148 @@
+// ADR 0016 A1 (filed-defect register D5), the SECOND route into the type mangler.
+//
+// `examples/lang/phantom_type_param.sentinel` covers the phantom-generic route: a
+// type argument no field uses, so the type is mangled without any value of it
+// existing. This fixture covers the other one, and the two are complementary rather
+// than nested. The phantom route needs the type to be WRITABLE in type position;
+// this one does not, so it is the only way `Task<T>`, `Process` and `Guard<T>` —
+// none of which can be spelled in an annotation — reach a mangled name at all. A fix
+// validated only against the phantom shape would have missed them.
+//
+// The route is just an ordinary generic call: `idg(v)` on `fn idg<T>(x: T) -> T`
+// puts `T`'s type into the MONO KEY, so the instantiation becomes a function symbol
+// `@idg__<tag>`. That makes the damage worse than the phantom route's, not milder:
+// a bad tag corrupts a `define` and every `call` to it rather than a type
+// declaration. Before A1 the oracle emitted `define ptr @idg__ty_Task(TaskId(0))`,
+// which `llvm-as` rejects ("expected type"), while `scg` emitted `@idg__ty` for every
+// kind it had no arm for. Measured on the eight generic instantiations below: EIGHT
+// definitions under TWO symbol names — `@idg__ty` seven times, carrying three
+// different signatures (`ptr` ×5, `%Class.0`, `{ i32, ptr }`), plus one
+// `@idg__opt_ty`. That is "invalid redefinition of function", not a byte difference.
+//
+// Deliberately NOT exercised here, each for its own specific reason:
+//   * `Shared<T>` / `Mutex<T>` through a generic argument. Their tags are correct,
+//     but `scg` drops the refcount `clone` on a container passed as a GENERIC call
+//     argument, so those programs diverge for an unrelated, pre-existing reason (the
+//     `dump_generic_call` gap). Pinning them here would pin that bug instead.
+//   * a non-`i64` `Guard`. `guard_<elem>`'s element-reading would need a `Mutex<u8>`,
+//     but a `u8` container VALUE diverges today (register D17 — `scg` emits no width
+//     conversion around the runtime call), so `guard_i64` is the most this route can
+//     pin. `task_<elem>` is weaker still: `Task<T>`'s result is always `i64` at the
+//     ADR 0024 minimum, so `task_i64` cannot be distinguished from a hardcoded `i64`
+//     in any back end. Both recorded rather than silently absent.
+//
+// Trace: enum 6, class 7, Fn 8 (apply doubles 4), channel 9, task 10, guard 2, and
+// the subprocess arm contributes 0 — its spawn sits behind a runtime-false probe (the
+// `c66_process` idiom), so the IR and the `process` / `sealedchannel` tags are emitted
+// while nothing is executed. 6 + 7 + 8 + 9 + 10 + 2 = 42. Exit 42, no stdout.
+
+enum Flavour {
+    Plain,
+    Fancy,
+}
+
+class Meter {
+    let n: i64;
+    pub init(n: i64) {
+        self.n = n;
+        0
+    }
+    pub fn read(self: &Self) -> i64 {
+        self.n
+    }
+}
+
+fn dbl(x: i64) -> i64 {
+    x * 2
+}
+
+fn idg<T>(x: T) -> T {
+    x
+}
+
+fn work() -> i64 ! { Async } {
+    10
+}
+
+// `Process` cannot be written in an annotation, so this is the only route to its tag.
+// `SealedChannel<secret i64>` CAN be (the ADR 0069 / M2.4a `resolve_type_expr` arm),
+// but only in the oracle — `scg`'s `type_of_typeexpr` has no arm for it and silently
+// resolves the annotation to `i64` (register D20), so the mono key is the only route
+// on which the two back ends can be compared. The spawn is guarded by a runtime-false
+// probe in `main` (the `c66_process` idiom): a tag is a compile-time property, so the
+// IR — and both tags — emit without any child process ever running.
+fn subprocess_tags(argv: [[u8]]) -> i64 ! { Subprocess } {
+    let p = process_spawn("cmd", argv);
+    let p2 = idg(p);
+    let sc = sealed_channel(p2);
+    let sc2 = idg(sc);
+    let back = sealed_process(sc2);
+    process_wait(back)
+}
+
+fn main() -> i64 ! { Subprocess } {
+    // A nominal enum and a nominal class: tags are the declared names, and neither
+    // needs a concurrency feature to reach the mangler.
+    let e: Flavour = Flavour::Fancy;
+    let e2: Flavour = idg(e);
+    let from_enum: i64 = match e2 {
+        Flavour::Plain => 0,
+        Flavour::Fancy => 6,
+    };
+
+    let m: Meter = Meter::init(7);
+    let m2: Meter = idg(m);
+    let from_class: i64 = m2.read();
+
+    // A two-element signature tag (`fn_i64_i64`).
+    let f: Fn<i64, i64> = dbl;
+    let f2: Fn<i64, i64> = idg(f);
+    let from_fn: i64 = apply(f2, 4);
+
+    // A handle over an element (`chan_i64`).
+    let ch: Channel<i64> = channel_new();
+    let ch2: Channel<i64> = idg(ch);
+    send(ch2, 9);
+    let got: ?i64 = recv(ch2);
+    let from_chan: i64 = unwrap_or(got, 0);
+
+    // `Task<T>` is NOT writable in type position — this route is the only one that
+    // reaches its tag.
+    let from_task: i64 = scope concurrent {
+        let t = spawn work();
+        let t2 = idg(t);
+        t2.await
+    };
+
+    // Neither is `Guard<T>`; it arrives wrapped, as `lock`'s `?Guard<i64>`, so the
+    // tag that gets exercised is the composed `opt_guard_i64`.
+    //
+    // ⚠ THE CONDITION HERE MUST STAY `is_some(g)` — do not copy this shape with any
+    // other condition. Moving a `?Guard` into a call is the one way it leaves its
+    // `let`, and the scope-exit unlock is then emitted ONLY on the branch that moved
+    // it. That is sound here and only here, because the `else` arm is by construction
+    // the null-guard arm, where no lock was ever acquired. Swap in an unrelated
+    // condition and the borrow checker still accepts the program while the `else`
+    // path holds a lock that is never released — a real leak from safe source,
+    // PRE-EXISTING (a pre-A1 `scg` emits the identical unlock structure) and part of
+    // ADR 0071's deferred no-escape tail. Registered as D22.
+    let mx: Mutex<i64> = mutex_new(2);
+    let g = lock(mx);
+    let from_guard: i64 = if is_some(g) {
+        let h = idg(g);
+        2
+    } else {
+        0
+    };
+
+    // The `Process` / `SealedChannel` arm: compiled (so its tags emit), never run.
+    let probe: bool = false;
+    let from_subprocess: i64 = if probe {
+        let argv: [[u8]] = ["x"];
+        subprocess_tags(argv)
+    } else {
+        0
+    };
+
+    from_enum + from_class + from_fn + from_chan + from_task + from_guard + from_subprocess
+}

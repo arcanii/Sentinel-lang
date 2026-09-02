@@ -54,6 +54,7 @@ use sentinel_resolve::{
     VEC_NEW_FN_ID, VEC_TO_ARRAY_FN_ID, WRITE_FILE_FN_ID,
 };
 use sentinel_types::{
+    channel_elem_for, fn_value_sig_param_ret, guard_elem_for, mutex_elem_for, shared_elem_for,
     type_display, NullableInner, Type, TypedBlock, TypedExpr, TypedExprKind, TypedFnDef, TypedFnSignature,
     TypedHandlerArm, TypedMatchArm, TypedParam, TypedPattern, TypedPatternBinding, TypedProgram,
     TypedReturnArm, TypedStmt, TypedStmtKind,
@@ -4126,31 +4127,109 @@ fn llvm_ty(ty: Type, program: &TypedProgram) -> Result<String, String> {
 /// A structural mangling tag for `ty` (`i64` → `"i64"`, `[i64]` → `"arr_i64"`,
 /// `Pair<i64, bool>` → `"Pair_i64_bool"`). Order-independent (no interner ids), so
 /// both the oracle and the Sentinel side derive the same generic-instance type names
-/// and monomorphic fn symbols. Mirrors inkwell `mangle_type` (lib.rs:2063).
+/// and monomorphic fn symbols. Mirrors inkwell `mangle_type` (lib.rs:2958) — the two
+/// must agree tag-for-tag; `abi-v1.md` §4 carries the table.
+///
+/// ADR 0016 A1 (register item D5): this match is **EXHAUSTIVE ON PURPOSE — never
+/// re-add a `_ =>` arm.** It used to end in `other => format!("ty_{other:?}")`, which
+/// leaked Rust's `Debug` rendering into an LLVM identifier and was wrong two ways at
+/// once: `ty_Shared(SharedId(0))` is not a legal unquoted LLVM name (`llvm-as`:
+/// "expected '=' after name"), and the id it embeds is an interner index the
+/// self-hosted `scg` — which interns in its own order and has no `SharedId` concept
+/// at all — could never reproduce. Eleven variants reached it from real source, by
+/// two independent routes: a PHANTOM generic type argument (`Pair<i64, Shared<i64>>`,
+/// where no value of the argument type need exist) and a generic fn's MONO KEY
+/// (`idg(some_shared)`, which corrupts a function symbol rather than a type decl).
+/// A new `Type` variant must therefore land a tag here, in inkwell, and in `scg`'s
+/// `cg_mangle_to` — the compile error this exhaustiveness produces is the reminder.
+///
+/// ⚠ What this does NOT fix: tags share one flat namespace with user type names, so
+/// `struct arr_i64 {}` still collides with `[i64]` — PRE-EXISTING, identical in both
+/// printing back ends, and not closable by enumeration (see the ADR; closing it needs
+/// an encoding change, since `_` and `$` are both legal Sentinel identifier
+/// characters). Do not describe this function as collision-free.
 fn mangle_type(ty: Type, program: &TypedProgram) -> String {
     match ty {
         Type::I64 => "i64".into(),
         Type::I32 => "i32".into(),
         Type::Bool => "bool".into(),
         Type::U8 => "u8".into(),
+        // ADR 0055 / 0058 / 0057: the three scalars the old catch-all rendered
+        // `ty_U128` / `ty_F64` / `ty_Ptr`. inkwell always spelled them plainly and
+        // is the shipping back end, so the printing back ends move to inkwell.
+        Type::U128 => "u128".into(),
+        Type::F64 => "f64".into(),
+        Type::Ptr => "ptr".into(),
         Type::Struct(id) => mangle_struct_name(program, id),
         Type::Nullable(inner) => format!("opt_{}", mangle_type(inner.to_type(), program)),
         Type::Array(elem) => format!("arr_{}", mangle_type(program.array_elem_type(elem), program)),
         Type::Vec(elem) => format!("vec_{}", mangle_type(elem.to_type(), program)),
-        Type::Ref(id) => {
-            let d = &program.refs[id.0 as usize];
-            let prefix = if d.mutable { "refmut" } else { "ref" };
-            format!("{prefix}_{}", mangle_type(d.inner, program))
-        }
-        Type::Secret(id) => format!("sec_{}", mangle_type(program.secrets[id.0 as usize].inner, program)),
-        Type::GenericInstance(id) => {
-            let inst = &program.generic_instances[id.0 as usize];
-            mangle_instance(program, inst.struct_id, &inst.args)
-        }
+        Type::Ref(id) => match program.refs.get(id.0 as usize) {
+            Some(d) => {
+                let prefix = if d.mutable { "refmut" } else { "ref" };
+                format!("{prefix}_{}", mangle_type(d.inner, program))
+            }
+            None => format!("ref{}", id.0),
+        },
+        Type::Secret(id) => match program.secrets.get(id.0 as usize) {
+            Some(d) => format!("sec_{}", mangle_type(d.inner, program)),
+            None => format!("sec{}", id.0),
+        },
+        Type::GenericInstance(id) => match program.generic_instances.get(id.0 as usize) {
+            Some(inst) => mangle_instance(program, inst.struct_id, &inst.args),
+            None => format!("gi{}", id.0),
+        },
         Type::TypeParam(id) => format!("T{}", id.0),
-        // Enum/Class/Kont/Task/TraitSelf never appear in a corpus mono key or instance
-        // arg — a defensive label only (keeps the oracle self-contained).
-        other => format!("ty_{other:?}"),
+        // Nominal types render by their declared name, matching inkwell and the
+        // `abi-v1.md` §4 row that already said so for `Class`. The three name spaces
+        // (struct / class / enum) are mutually exclusive — a duplicate is rejected
+        // ("`Foo` is already declared"), verified — so one flat space is sound here.
+        Type::Class(id) => match program.class_decls.get(id.0 as usize) {
+            Some(c) => c.name.clone(),
+            None => format!("class{}", id.0),
+        },
+        Type::Enum(id) => match program.enums.get(id.0 as usize) {
+            Some(e) => e.name.clone(),
+            None => format!("enum{}", id.0),
+        },
+        // The handle types: tag by the ELEMENT, never by the interner id. The
+        // `*_elem_for` inverses are total (they answer a defensive `i64` for an
+        // unknown id), so no table access and no panic.
+        Type::Task(id) => match program.tasks.get(id.0 as usize) {
+            Some(t) => format!("task_{}", mangle_type(t.result_ty, program)),
+            None => format!("task{}", id.0),
+        },
+        Type::Channel(id) => format!("chan_{}", mangle_type(channel_elem_for(id), program)),
+        Type::Shared(id) => format!("shared_{}", mangle_type(shared_elem_for(id), program)),
+        Type::Mutex(id) => format!("mutex_{}", mangle_type(mutex_elem_for(id), program)),
+        Type::Guard(id) => format!("guard_{}", mangle_type(guard_elem_for(id), program)),
+        Type::Process => "process".into(),
+        Type::SealedChannel => "sealedchannel".into(),
+        // ADR 0070: `FnValueSigId` is arithmetic (base-6 over the word scalars), not
+        // an interner index, so decoding it back to `(param, ret)` is exact.
+        Type::Fn(id) => {
+            let (param_ty, ret_ty) = fn_value_sig_param_ret(id);
+            format!("fn_{}_{}", mangle_type(param_ty, program), mangle_type(ret_ty, program))
+        }
+        // Kont and TraitSelf are DEFENSIVE — both were probed on every path that
+        // exists today and neither reaches a mono key or an instance arg: a `kont`
+        // binding "can only be called, not used as a value" (`KontUsedAsValue`), and
+        // `Self` is not writable in type position (the parser rejects it) while an
+        // impl body always has `Self` substituted to a concrete Class/Struct. They
+        // get real structural tags anyway, because the point of the exhaustive match
+        // is that "unreachable" is never carried by a wildcard.
+        Type::Kont(id) => match program.konts.get(id.0 as usize) {
+            Some(k) => format!(
+                "kont_{}_{}",
+                mangle_type(k.arg_ty, program),
+                mangle_type(k.ret_ty, program)
+            ),
+            None => format!("kont{}", id.0),
+        },
+        Type::TraitSelf(id) => match program.trait_decls.get(id.0 as usize) {
+            Some(t) => format!("Self_{}", t.name),
+            None => format!("Self_trait{}", id.0),
+        },
     }
 }
 

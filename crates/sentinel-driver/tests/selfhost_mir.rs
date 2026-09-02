@@ -773,15 +773,18 @@ fn sentinel_mir_matches_oracle_on_real_programs() {
     std::fs::create_dir_all(&work).expect("create work dir");
     // The semantic stages do no module discovery, so the MERGED form is what
     // supplies the multi-module programs (`delegation`, `rect_demo`,
-    // `process_ids`, `sort_search`, …) — 11 direct + 11 merged.
+    // `process_ids`, `sort_search`, …) — 12 direct + 12 merged (the 12th of
+    // each is `examples/lang/phantom_type_param.sentinel`, ADR 0016 A1 — it merges, so
+    // the merged FLOOR moves with the direct count, per this helper's own
+    // "the floor is set to today's actual count" rule).
     real_program_differential(
         "mir",
         &lowerer,
         &work,
         MIR_DEFERRED_PROGRAMS,
         MIR_KNOWN_SCG_BUGS,
-        11,
-        11,
+        12,
+        12,
     );
     let _ = std::fs::remove_dir_all(&tmp);
 }
@@ -800,8 +803,8 @@ fn sentinel_ctverifier_matches_oracle_on_real_programs() {
         &work,
         CTVERIFY_DEFERRED_PROGRAMS,
         CTVERIFY_KNOWN_SCG_BUGS,
-        11,
-        11,
+        12,
+        12,
     );
     let _ = std::fs::remove_dir_all(&tmp);
 }
