@@ -155,7 +155,7 @@ reference as you work through the milestones.
 >      now has. Also worth doing with it: `examples/math/quadratic.sentinel` and
 >      `sentinel_library/std/math/float.sentinel` currently reach only lex/ast, because
 >      `snc merge`'s Bar-A printer rejects both a float literal and `sqrt` (menu item 5).
->   4. **THE FILED-DEFECT REGISTER — TWENTY-SEVEN items (D1-D27); **D1, D3, D5, D8, D9, D15 and D16 are DONE**, the rest verified against a pre-slice binary,
+>   4. **THE FILED-DEFECT REGISTER — TWENTY-SEVEN items (D1-D27); **D1, D2, D3, D5, D8, D9, D15 and D16 are DONE**, the rest verified against a pre-slice binary,
 >      NONE registered in any `DEFERRED_PROGRAMS` / `KNOWN_SCG_BUGS` list because no corpus
 >      program reaches them.** They were also filed as task chips, but chips are EPHEMERAL UI
 >      and this list is the record — if the two disagree, this one wins, and a chip that is
@@ -169,7 +169,26 @@ reference as you work through the milestones.
 >      narrow captured param, an inkwell panic, a verifier abort, invalid IR at exit 0 — all
 >      closed by the same gate. Four scg gaps it exposed are filed separately (see the chips).
 >
->      **D2 — the widen FAMILY. ⚠ WORSE THAN ITS ORIGINAL FILING: not a text divergence.**
+>      **D2 — DONE (`bd1e36c`).** ELEVEN arms, not the eleven this entry listed and not the
+>      ten I first counted: the entry's list omitted `Handle`, which an adversarial review
+>      found, and included `Spawn`, which does not diverge. The fix is NOT the "same
+>      three-line fix shape" per arm this entry prescribed — probing each arm first turned
+>      up a better one. An arm that ALREADY widens returns the EXPECTED type, and
+>      `widen_kind` compares the expectation's INNER type against the node's, so it answers
+>      0 and the splice degenerates to a copy. ONE splice at the expression dispatcher
+>      therefore covers every arm, leaves the correct ones untouched, and covers any arm
+>      added later — gated on a cheap `widen_possible` so the hottest recursion only pays
+>      for a temp where the expectation is a `?T`/`secret T`.
+>      ⚠ The review caught the first version wrapping DIVERGENT nodes: the oracle skips
+>      `coerce_to_expected` when `expr_diverges`, so `let v: secret i64 = if c { 42 } else
+>      { return 1 };` must leave the `return` bare. `dump_texpr` now consults a divergence
+>      flag, set only by `Return` — measured, not narrowed: the oracle REFUSES every
+>      program that would put a fully-diverging block/`if`/`match` in a widened position.
+>      The ADR 0051 A1 ARRAY-ELEMENT widen stays deferred (`widen_kind` has no array arm;
+>      0 widens before and after). Pinned by `tests/pass/c19_widen_arm_family.sentinel`.
+>      Original entry:
+>      
+>      **(historical) D2 — the widen FAMILY. ⚠ WORSE THAN ITS ORIGINAL FILING: not a text divergence.**
 >      At a `let` these arms cost only the wrapper, but at the ASSIGN and RETURN positions
 >      D3 threaded, they cost INVALID IR — the store/`ret` is rendered from the target type
 >      while the operand comes back un-widened. Measured: `o = pv.f` with `o: ?i64` gives

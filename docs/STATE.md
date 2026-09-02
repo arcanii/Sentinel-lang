@@ -14,7 +14,47 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
-**Latest (2026-09-02b) — the register's D15 and D16 are closed: codegen now sees the generic
+**Latest (2026-09-02c) — the register's D2 is closed: `scg` splices the widen ONCE PER NODE
+rather than once per arm** (`bd1e36c`, pinned by `tests/pass/c19_widen_arm_family.sentinel`).
+A widened binding wraps its right-hand side — the oracle prints `(widen-secret … :secret i64)`
+and MIR emits a whole `(vN opaque vM)` for it — and `scg` mirrored that only in the arms that
+happened to call `widen_pre` themselves. At a `let` the gap costs only the wrapper; at an
+ASSIGNMENT it costs INVALID IR, measured pre-fix as "'%v4' defined with type 'i64' but expected
+'{ i1, i64 }'" against a stage binary built from HEAD.
+
+**The register prescribed the per-arm fix eleven times over; probing each arm first turned up a
+better one.** An arm that ALREADY widens returns the EXPECTED type, and `widen_kind` compares
+the expectation's INNER type against the node's — so it answers 0 and the splice degenerates to
+a copy. One splice at the expression dispatcher therefore fixes every arm, leaves the
+already-correct ones untouched, and covers any arm added later without anyone remembering to.
+It is gated on a cheap `widen_possible`, so the compiler's hottest recursion pays for a temp
+buffer only where the expectation is actually a `?T` or `secret T` — the bootstrap fixed point
+was reproduced end-to-end on the 452 KB merged compiler with timings within noise.
+
+**⚠ TWO CORRECTIONS THE ADVERSARIAL REVIEW FORCED, both of the shape this project keeps
+recording.** First, an INTRODUCED parity break: the oracle does NOT coerce at every node —
+`check_expr` skips `coerce_to_expected` when `expr_diverges` — so
+`let v: secret i64 = if c { 42 } else { return 1 };` must leave the `return` bare, and the first
+version wrapped it. `dump_texpr` now consults a divergence flag. Only `Return` sets it, and that
+is MEASURED rather than a narrowing of the oracle's predicate: `expr_diverges` also covers a
+fully-diverging block / `if` / `match`, but the oracle REFUSES every program that would put one
+in a widened position, and a block whose non-tail statement returns already agreed.
+
+Second, an UNDERCOUNT in my own claim: I said ten arms, having derived the list from a source
+comment that listed `Handle` in NEITHER of its two lists. It is eleven. The code covered
+`Handle` regardless — which is the argument for splicing at the dispatcher rather than editing
+arm bodies — but the prose was wrong in three places. The register entry was also wrong the
+other way: it listed `Spawn`, which does not diverge.
+
+**Untouched and checked rather than assumed:** the ADR 0051 A1 ARRAY-ELEMENT widen
+(`[u8]` → `[secret u8]`) stays deferred — `widen_kind` has no array arm, so the gate never
+fires, measured 0 widens before and 0 after against a pre-change stage binary.
+
+Four-check green (1818 passed / exactly the 18 known Windows failures); both bootstrap fixed
+points byte-identical; a 343-program corpus sweep through pre- and post-change stage binaries
+moves exactly one file — the new fixture — and moves it TOWARD the oracle.
+
+**Previous (2026-09-02b) — the register's D15 and D16 are closed: codegen now sees the generic
 instances substitution creates, and neither of its closures can loop** (`45f231b`). Four defects,
 all reachable from ordinary source, all in the generic machinery, and all invisible to the
 corpus — 222 emitted programs, zero undefined symbols, zero panics.
