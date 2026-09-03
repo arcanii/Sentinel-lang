@@ -1930,3 +1930,23 @@ fn pass_c71_secret_container_widths() {
     // named invariant. 7 + 5 + 30 = 42.
     assert_eq!(run_exit("c71_secret_container_widths.sentinel"), 42);
 }
+
+#[test]
+fn pass_c71_generic_container_arg_rc() {
+    // ADR 0071 M1.4a slice 3 / register D31: the refcount clone on a container argument
+    // to a GENERIC fn. `scg` emitted the `rc++` in `dump_targs` (ordinary calls) and not
+    // in `dump_args_capture_all` (generic calls), whose comment claimed it mirrored
+    // `dump_targs` — so a `Shared`/`Mutex` passed to a generic got no clone while the
+    // callee still released it. One release too many: the cell is freed while the caller
+    // still holds it, and the caller's next read is a use-after-free.
+    //
+    // Measured on this fixture against a pre-change stage binary: `#new + #clone -
+    // #release` was -4 for Shared and -1 for Mutex; post-fix both balance at 0 and the
+    // module is byte-identical to the oracle.
+    //
+    // The exit code CANNOT catch this defect: `run_exit` builds through inkwell, which
+    // emitted the clone correctly all along, and scg's IR is never linked into anything
+    // this harness runs. The codegen differential (which sweeps `tests/pass`) is the only
+    // assertion that pins it. 7 + 9 + 9 + 7 + 6 + 4 = 42.
+    assert_eq!(run_exit("c71_generic_container_arg_rc.sentinel"), 42);
+}

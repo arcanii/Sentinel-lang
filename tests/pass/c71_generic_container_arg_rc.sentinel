@@ -1,0 +1,109 @@
+// ADR 0071 M1.4a slice 3 / filed-defect register D31: the REFCOUNT CLONE on a container
+// argument to a GENERIC function.
+//
+// A `Shared<T>` / `Mutex<T>` handle passed BY VALUE to a user fn transfers a refcount
+// unit, so the caller must emit `rc++` (`sentinel_shared_clone`) to balance the `rc--`
+// the callee emits at scope exit. `scg` did that in `dump_targs` — the ordinary-call arg
+// walker — and NOT in `dump_args_capture_all`, the GENERIC-call walker, whose own comment
+// claimed it mirrored `dump_targs`. So a container passed to a generic fn got no clone
+// while the callee still released it: one release too many, the cell freed while the
+// caller still held it, and the caller's next read a use-after-free. The oracle always
+// emitted the clone, which is why a NON-generic callee was byte-identical and this hid.
+//
+// The load-bearing invariant is `#new + #clone == #release` — measured on the minimal
+// repro as oracle 1/1/2 (balanced) against `scg` 1/0/2 (one short). Each binding below
+// exercises a different corner of the one broken walker:
+//   - `takes_one(s)`         the base shape: a container as the only argument.
+//   - `takes_second(9, s)`   NOT in first position — the walker recurses, so a fix that
+//                            only handled the head argument would pass the base shape.
+//   - `takes_two(s, t)`      two containers in one call: two independent clones.
+//   - `takes_one(m)`         the `Mutex` branch of the helper, a separate arm from
+//                            `Shared` emitting `sentinel_mutex_clone`.
+//
+// THREE NEGATIVE cases matter more than any of those, because each pins one conjunct of
+// the gate, and a wrong implementation that drops that conjunct passes every positive
+// case above AND the entire rest of the corpus:
+//   - `takes_zero(shared_new(1))`  an RVALUE source. It TRANSFERS its unit, so the oracle
+//                                  emits NO clone. Drop the `mvbv >= 0` conjunct and this
+//                                  over-clones — a permanent leak, D31's mirror image.
+//   - `Holder::With(u)`            an ENUM-CONSTRUCT payload (below).
+//
+// ⚠ A THIRD NEGATIVE CASE BELONGS HERE AND CANNOT BE WRITTEN YET. The `ndump` leaf test
+// in `dump_args_capture_all` exists for a COMPOUND argument whose tail happens to be a
+// Var. The oracle tests the whole argument structurally and emits no clone; the helper's
+// bare `mvbv >= 0` gate does not, and the first version of this fix used it and turned
+// three byte-identical programs DIVERGENT — so that shape is exactly what the `ndump`
+// test pins, and NOTHING in `tests/pass` currently pins it. The reason it cannot be
+// written here is a separate defect OUTSIDE `scg` that is tracked privately with the
+// maintainer, not in the register; ask before adding the case. Until then the `ndump`
+// test is guarded by this paragraph and by nothing else — which is why the paragraph is
+// long.
+//
+// The enum payload: `Holder::With(u)` is an enum-CONSTRUCT argument, not a user-fn owning
+// param. Drop the `cg_ufarg` conjunct and it over-clones. `dump_cargs` exists solely to
+// suppress that, and nothing else pins it.
+//
+// ⚠ THE EXIT CODE CANNOT CATCH THIS DEFECT AT ALL, and saying "it is the weaker
+// assertion" would understate it. `run_exit` builds through inkwell, which emitted the
+// clone correctly the whole time; `scg`'s IR is never linked into anything this harness
+// runs. So the exit code exercises the back end that was always right. **The codegen
+// differential is the ONLY thing that pins this** — it sweeps `tests/pass` and compares
+// `scg` against the oracle byte-for-byte. If this file is ever "simplified" by trusting
+// the exit code, the fixture stops testing anything.
+//
+// For the record on severity, since the runtime makes it sharper than "a divergence":
+// `sentinel_shared_release` does `fetch_sub` then `debug_assert!(prev >= 1)`, and frees
+// at `prev == 1`. At the PREMATURE release `prev` IS 1 — so the assert passes, the cell
+// is freed while an owner is still live, and nothing reports it. The assert can only fire
+// on a LATER release, which is by then a write to freed memory with a garbage `prev`.
+//
+// ⚠ DELIBERATELY ABSENT, because they hit DIFFERENT defects and would pin those instead:
+// a generic that RETURNS its container param (`fn ident<T>(x: T) -> T`), and a generic
+// that passes its param to another generic. Both still diverge, for a callee-side
+// over-release that is a separate register item, and the second also needs D24's
+// transitive monomorphisation worklist. Do not "complete" this fixture with either.
+//
+// Trace: 7 + 9 + 9 + 7 + 0 (the rvalue negative case) + 6 (s) + 4 (t) = 42.
+// Exit 42, no stdout.
+
+fn takes_one<T>(x: T) -> i64 {
+    7
+}
+
+fn takes_second<T>(a: i64, x: T) -> i64 {
+    a
+}
+
+fn takes_two<T>(x: T, y: T) -> i64 {
+    9
+}
+
+// Contributes 0 so the negative cases below leave the trace arithmetic alone.
+fn takes_zero<T>(x: T) -> i64 {
+    0
+}
+
+enum Holder {
+    Empty,
+    With(Shared<i64>),
+}
+
+fn main() -> i64 {
+    let s: Shared<i64> = shared_new(6);
+    let t: Shared<i64> = shared_new(4);
+    let m: Mutex<i64> = mutex_new(3);
+
+    let a: i64 = takes_one(s);
+    let b: i64 = takes_second(9, s);
+    let c: i64 = takes_two(s, t);
+    let d: i64 = takes_one(m);
+
+    // The three NEGATIVE cases. Each must emit NO clone; see the header.
+    let e: i64 = takes_zero(shared_new(1));
+    let u: Shared<i64> = shared_new(0);
+    let h: Holder = Holder::With(u);
+
+    // Both handles are still live here — that is the whole point. Pre-fix the refcount
+    // had already reached zero and these two reads were reading freed memory.
+    a + b + c + d + e + shared_get(s) + shared_get(t)
+}

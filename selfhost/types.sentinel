@@ -245,6 +245,14 @@ struct TyCtx {
     // exactly `Return`. If the front end ever accepts those shapes, this flag needs the
     // propagation the oracle has.
     ediv: bool,
+    // (register D31) A monotonic count of `dump_texpr_node` ENTRIES. Snapshot it before
+    // dumping a sub-expression and the delta is that sub-expression's node count, so a
+    // delta of exactly 1 means the sub-expression was a LEAF. Paired with `mvbv >= 0`
+    // (whose leaf was a `Var`) that is the precise "this argument IS a bare `Var`" test
+    // the oracle's `clone_if_shared_var` makes structurally — and which `mvbv` alone
+    // CANNOT make, because `mvbv` is reset per node and set by the Var arm, so any
+    // compound expression whose tail happens to be a Var leaks it upward.
+    ndump: i64,
     // --- (7/N) MIR lowering (ADR 0044) — built ONLY under `mode == 2` as a guarded
     //     side-effect of the pass-2 walk; PER-FN (reset in `type_fn`). Everything is
     //     a flat append-only parallel-Vec pool tagged by block (so out-of-order block

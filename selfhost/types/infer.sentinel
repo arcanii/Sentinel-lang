@@ -249,8 +249,41 @@ fn dump_args_capture_all(out: &mut Vec<u8>, a: Args, src: &[u8], c: &mut TyCtx, 
             push(out, ' ');
             // (6/N) generic-call args inherit the caller's consuming context (set true
             // by the user-fn call arm).
+            // (register D31) snapshot the node counter so the clone gate below can tell
+            // a BARE `Var` argument from a compound one whose tail merely happens to be
+            // a Var. See the gate.
+            let n0: i64 = (*c).ndump;
             let t0: i64 = dump_texpr(out, x, 0 - 1, src, c, gb);
             mir_collect(c);
+            // (ADR 0071 M1.4a slice 3 / register D31) rc++ a named container arg into
+            // the callee's owning param, as `dump_targs` does. ⚠ THIS WAS MISSING and the
+            // comment below claimed it was here: a `Shared<T>` or `Mutex<T>` passed by
+            // value to a GENERIC fn got no clone while the callee still emitted its
+            // release, so the refcount went one release too far — the cell was freed
+            // while the caller still held it and the caller's next use read freed memory.
+            // The oracle always emitted the clone; only this path diverged, which is why
+            // a NON-generic callee was byte-identical.
+            //
+            // ⚠ THE `ndump` TEST IS LOAD-BEARING — DO NOT REDUCE THIS TO A BARE
+            // `cg_clone_shared_arg` CALL. That helper gates on `mvbv >= 0`, which is NOT
+            // "the argument is a named Var": `mvbv` is reset per node and set by the Var
+            // arm, so ANY compound argument whose tail is a Var (`{ s }`, `if c { s }
+            // else { t }`, `p.h`) leaks it upward and the helper fires. The oracle
+            // decides structurally (`clone_if_shared_var` returns early unless the whole
+            // argument is a `Var` node), so the leaky gate would emit a clone the oracle
+            // does not. A first cut of this fix did exactly that and the review caught it:
+            // three shapes that were byte-identical before became DIVERGENT. A delta of
+            // exactly 1 node means the argument was a LEAF, and `mvbv >= 0` means that
+            // leaf was a Var — together, the oracle's test.
+            //
+            // `dump_targs` still carries the leaky gate and still over-clones on those
+            // three shapes (pre-existing, registered). It is NOT fixed here because the
+            // ORACLE is the wrong side there and the fix is oracle-first.
+            if (*c).ndump == n0 + 1 {
+                cg_clone_shared_arg(c, t0)
+            } else {
+                0
+            };
             // (Bar B / generics-b) codegen: collect the arg operand so cg_emit_call can
             // pass it to the monomorphic callee (mirrors dump_targs / dump_args_capture_first).
             cg_collect(c, t0);

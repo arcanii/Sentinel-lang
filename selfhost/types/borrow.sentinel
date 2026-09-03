@@ -181,6 +181,9 @@ fn dump_texpr_node(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut Ty
     // right after dumping a sub-expression, `mvbv >= 0` iff that sub-expression was a
     // directly-named binding read — the signal the FieldAccess arm needs for a partial move.
     (*c).mvbv = 0 - 1;
+    // (register D31) count this node so a caller can tell a LEAF sub-expression from a
+    // compound one. See the field's comment in `types.sentinel`.
+    (*c).ndump = (*c).ndump + 1;
     match ex {
         Expr::Int(nv) => {
             let w: bool = widen_pre(out, exp, 0, c);
