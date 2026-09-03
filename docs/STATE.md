@@ -14,7 +14,55 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
-**Latest (2026-09-02d) — the register's D17 is closed: `scg` converts container element
+**Latest (2026-09-02e) — the register's D31 is closed: `scg` clones a container argument
+passed to a GENERIC function** (`7e5ca56`, pinned by
+`tests/pass/c71_generic_container_arg_rc.sentinel`). A `Shared<T>` / `Mutex<T>` handle
+passed by value to a user fn transfers a refcount unit, so the caller owes an `rc++` to
+balance the `rc--` the callee emits at scope exit. `scg` did that in `dump_targs`, the
+ordinary-call argument walker, and not in `dump_args_capture_all`, the generic-call
+walker — whose own comment claimed it mirrored `dump_targs`. A container passed to a
+generic fn therefore got no clone while the callee still released it: one release too
+many, the cell freed while the caller still held it, and the caller's next read a
+use-after-free. A non-generic callee was byte-identical, which is why it hid.
+
+**The one-line fix was wrong, and that is the durable lesson here.** Mirroring
+`dump_targs` exactly — a bare `cg_clone_shared_arg(c, t0);` — made THREE previously
+byte-identical shapes diverge: `takes({ s })`, `takes(if c { s } else { t })`,
+`takes(p.h)`. The helper gates on `mvbv >= 0`, which reads as "a named-Var source" and
+is not: `mvbv` is reset per node and set by the `Var` arm, so ANY compound argument whose
+tail happens to be a Var leaks it upward and the helper fires. The oracle decides
+structurally — `clone_if_shared_var` returns early unless the whole argument is a `Var`
+node. **A gate whose name describes a structural property but whose implementation is a
+per-node tracker will be wrong on exactly the compound cases, and the comment asserting
+otherwise was the thing that misled the fix.** The landed version adds `ndump`, a
+monotonic count of `dump_texpr_node` entries: a delta of exactly 1 across the argument
+means the argument was a LEAF, and `mvbv >= 0` means that leaf was a Var — together, the
+oracle's test.
+
+Verified: a 347-program sweep against the pre-change binary moved ZERO programs; the
+fixture is byte-identical to the oracle; four-check green with exactly the 18 known
+Windows failures and both bootstrap fixed points byte-identical. The fixture carries two
+NEGATIVE cases, because the mutation lens showed that dropping either of the gate's other
+conjuncts — `mvbv` or `cg_ufarg` — passes every positive case AND the entire corpus: an
+rvalue argument and an enum-construct payload each over-clone, which is D31's mirror image
+(a permanent leak).
+
+**⚠ The third negative case — the compound argument the `ndump` test exists for — CANNOT
+be written as a pass fixture, and finding out why was the most useful thing in this
+slice.** It was tried and the fixture would not pass, for a reason that lies OUTSIDE `scg`
+and is tracked privately with the maintainer rather than here. So the `ndump` test is
+guarded by the fixture's header paragraph and by nothing else — ask before adding the
+case. The `scg`-side half is registered as **D35**, which is oracle-first and cannot be
+done from `selfhost/`.
+
+Two more items were filed from this work, both pre-existing and both verified against a
+pre-change binary: **D36**, a generic fn that RETURNS its container param over-releases in
+`scg` — and, separately, shows that the `SharedReturnNotSupported` guard is bypassed by
+generics, because it matches `Type::Shared(_)` and a generic body's tail types as
+`TypeParam`, so the ui fixture pins a fence generics walk around; and **D37**, a generic
+`&T` parameter given a container panics `scg` with an out-of-bounds index.
+
+**Previous (2026-09-02d) — the register's D17 is closed: `scg` converts container element
 widths at the runtime boundary** (`6337bea`, pinned by `tests/pass/c71_container_widths`,
 `tests/pass/c71_secret_container_widths` and `tests/ui/c71_shared_element_unsupported`).
 Every `sentinel_shared_*` / `sentinel_mutex_*` C-ABI entry carries the element as one i64,

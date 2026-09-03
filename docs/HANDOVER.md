@@ -124,7 +124,7 @@ reference as you work through the milestones.
 > confirming nothing pre-existing is newly refused; oracle-vs-scg byte-equality on the new
 > fixture at types, mir and llvm; and the secret-taint check in both directions.
 
-### ▶ RESUME HERE (2026-09-02 — everything is COMMITTED at `6337bea`, four-check GREEN (**exactly the 18 known Windows failures, zero new**), both bootstrap fixed points byte-identical, tree CLEAN. This session closed **D5** (`ee0fa68`/`f521421`), **D15 + D16** (`45f231b`), **D2** (`bd1e36c`/`039337f`) and **D17** (`6337bea` — `scg` now converts container element widths at the runtime boundary). D17's shape is worth carrying forward: the gap was FOUR sites and the register named no count at all, so the fourth (`*g`'s decode) — in a DIFFERENT FILE — was nearly missed; a 347-program sweep against a pre-change binary moved exactly the two new fixtures. ⚠ **THE REVIEW KILLED A CLAIM OF MINE THAT TWO PRE-EXISTING COMMENTS ALREADY MADE** — 'the oracle Errs on every `as f64`'. It does not: it Errs where an f64 TYPE must be RENDERED, and a container element is never rendered, so `shared_new(x as f64)` lowers and diverges (now D30). It also caught, PRE-COMMIT, that spelling out the f64/ptr arms turned clean `scg` output into non-assembling IR, because `cgo_ty` renders both as `i64` (now D33). **Every session so far has had a claim die to the review; budget for the findings, not just the run.** ⚠ A SECURITY-CLASS heap corruption found earlier is deliberately NOT described here — see the caveat block. **NEXT: D31** — a by-value container argument to a GENERIC fn drops its refcount clone, so `scg` emits an over-release (a use-after-free); it is the only new item that is DIFFERENTIALLY LIVE, and the one-line locus is identified. Then **D34** (`process_send`/`process_recv`, the last unmirrored member of D17's set — closing it DELETES a deferred entry) or **D28** (the guard-assign narrow store, oracle-first). Also newly filed: **D29**, **D30**, **D32**, **D33**. Or the non-register menu items — `select`, `Channel<secret T>`, f64/ptr CODEGEN (which D30 and D33 now block on), widening the Bar-A printer)
+### ▶ RESUME HERE (2026-09-02 — everything is COMMITTED at `7e5ca56`, four-check GREEN (**exactly the 18 known Windows failures, zero new**), both bootstrap fixed points byte-identical, tree CLEAN. This session closed **D5**, **D15 + D16**, **D2**, **D17** (`6337bea` — container element widths) and **D31** (`7e5ca56` — the generic-call container argument's refcount clone; it was the only DIFFERENTIALLY LIVE item on the register). ⚠ **D31'S OBVIOUS ONE-LINE FIX WAS A REGRESSION AND THE REVIEW CAUGHT IT** — mirroring `dump_targs` exactly made three byte-identical shapes diverge, because the shared helper's gate reads as "a named-Var source" and is actually a per-node tracker that any compound argument with a Var tail leaks. The landed fix adds an `ndump` leaf test; **do not simplify it back**, and note that NOTHING in `tests/pass` can catch you if you do — see D35 for why. **Every slice this session had a claim or a fix die to the review; budget for the findings, not just the run.** ⚠ A SECURITY-CLASS finding is deliberately NOT described here — see the caveat block. **NEXT: D35** (oracle-first — the drop/clone accounting must key on the argument's STRUCTURE in all three back ends; it blocks the D31 fixture's own missing pin), or **D34** (`process_send`/`process_recv`, the last unmirrored member of D17's set — closing it DELETES a deferred entry), or **D36**/**D37** (both scg-only, both with a one-shape repro). Also open: **D28**, **D29**, **D30**, **D32**, **D33**. Or the non-register menu items — `select`, `Channel<secret T>`, f64/ptr CODEGEN (which D30 and D33 now block on), widening the Bar-A printer)
 
 > **▶ THE OPEN MENU (2026-08-30) — real remaining work, verified against the repo.**
 >   1. **`select` over channels** — the flagship concurrency gap. Its RUNTIME is already PINNED
@@ -163,7 +163,7 @@ reference as you work through the milestones.
 >      scalar-4 arm, which it now has. Also worth doing with it: `examples/math/quadratic.sentinel` and
 >      `sentinel_library/std/math/float.sentinel` currently reach only lex/ast, because
 >      `snc merge`'s Bar-A printer rejects both a float literal and `sqrt` (menu item 5).
->   4. **THE FILED-DEFECT REGISTER — THIRTY-FOUR items (D1-D34); **D1, D2, D3, D5, D8, D9, D15, D16 and D17 are DONE**, the rest verified against a pre-slice binary. MOST are
+>   4. **THE FILED-DEFECT REGISTER — THIRTY-SEVEN items (D1-D37); **D1, D2, D3, D5, D8, D9, D15, D16, D17 and D31 are DONE**, the rest verified against a pre-slice binary. MOST are
 >      unregistered in any `DEFERRED_PROGRAMS` / `KNOWN_SCG_BUGS` list because no corpus program
 >      reaches them — but FOUR are, and the blanket "NONE" that stood here was falsified by
 >      this register's own new entries: D24/D25/D26 share the
@@ -636,10 +636,11 @@ reference as you work through the milestones.
 >      `Shared<f64>`, and the second refuted verbatim by its own fixture's header. Fixed in
 >      the follow-up. **GREP THE SET before calling this closed.**
 >
->      **D31 — a by-value container argument to a GENERIC user fn DROPS its refcount
->      clone, so `scg` emits an OVER-RELEASE — a use-after-free.** The sharpest item on
->      this list, and the only one that is DIFFERENTIALLY LIVE: the oracle compiles the
->      program fine, so the corpus differential turns red the moment a fixture reaches it.
+>      **D31 — DONE (`7e5ca56`).** A by-value container argument to a GENERIC user fn
+>      dropped its refcount clone, so `scg` emitted an OVER-RELEASE — a use-after-free.
+>      It was the only item on this list that was DIFFERENTIALLY LIVE: the oracle compiles
+>      the program fine, so the corpus differential would have turned red the moment a
+>      fixture reached it.
 >      Repro, four lines — `fn wrap<T>(x: T) -> i64 { 1 }` and
 >      `let s: Shared<i64> = shared_new(6); let n: i64 = wrap(s); shared_get(s) + n`.
 >      The oracle emits **1 `sentinel_shared_clone` against 2 `sentinel_shared_release`**,
@@ -656,7 +657,27 @@ reference as you work through the milestones.
 >      correct), and `selfhost/*.sentinel` declares no container-typed binding at all, so
 >      nothing that is built and run links it. Same class as the `mvbv` over-count fixed in
 >      `c010c2b`, with the polarity — and so the severity — reversed: that one leaked,
->      this one frees early. ⚠ **It was OBSERVED a slice earlier and not filed**: the ADR
+>      this one frees early.
+>
+>      **⚠ THE FIX IS NOT THE OBVIOUS ONE, and the obvious one is a REGRESSION.** The
+>      first cut was a bare `cg_clone_shared_arg(c, t0);`, mirroring `dump_targs` exactly.
+>      The review caught that it made THREE previously byte-identical shapes DIVERGE —
+>      `takes({ s })`, `takes(if c { s } else { t })`, `takes(p.h)` — because the helper
+>      gates on `mvbv >= 0`, which is **not** "the argument is a named Var": `mvbv` is
+>      reset per node and set by the `Var` arm, so ANY compound argument whose tail happens
+>      to be a Var leaks it upward and the helper fires. The oracle decides STRUCTURALLY
+>      (`clone_if_shared_var` returns early unless the whole argument is a `Var` node). The
+>      landed fix therefore adds `ndump`, a monotonic count of `dump_texpr_node` entries: a
+>      delta of exactly 1 across the argument means it was a LEAF, and `mvbv >= 0` means
+>      that leaf was a Var — together, the oracle's test. **Do not "simplify" the gate back
+>      to a bare helper call**; nothing in `tests/pass` can catch it (see D35).
+>
+>      Verified: a 347-program sweep against the pre-change binary moved ZERO programs, and
+>      the fixture `tests/pass/c71_generic_container_arg_rc.sentinel` is byte-identical to
+>      the oracle. It carries two negative cases — an RVALUE argument and an
+>      ENUM-CONSTRUCT payload — because the mutation lens showed a wrong implementation
+>      dropping either of the gate's other two conjuncts (`mvbv`, `cg_ufarg`) passes every
+>      positive case and the whole corpus. ⚠ **It was OBSERVED a slice earlier and not filed**: the ADR
 >      0016 A1 work hit it, excluded containers from `c16_mono_key_handle_tags` because of
 >      it, and described it in that fixture's header as "`scg` drops the refcount `clone` on
 >      a container passed as a GENERIC call argument" — accurate, and never given a number,
@@ -694,6 +715,42 @@ reference as you work through the milestones.
 >      **NOT the `stdin_recv` / `stdout_send` twins (fids 33/34): the ORACLE hardcodes
 >      `{ i1, i64 }` there too, so both sides agree and there is no gap** — checked,
 >      because the set was the point.
+>
+>      **▸ D35-D37 came out of the D31 work (2026-09-02), all verified BY CONSTRUCTION
+>      and all PRE-EXISTING (pre- and post-change `scg` byte-identical).**
+>
+>      **D35 — `dump_targs` carries the same leaky `mvbv >= 0` gate D31 had to work
+>      around, and OVER-clones because of it.** On the ordinary (non-generic) call path,
+>      `takes({ s })` and `takes(p.h)` make `scg` emit one `sentinel_shared_clone` where
+>      the oracle emits none — measured, and diverging both before and after D31. D31 did
+>      NOT fix it, deliberately: on those shapes the ORACLE is the side that has to move
+>      first, so this is **oracle-first** and cannot be done from `selfhost/`. It is also
+>      why the D31 fixture cannot pin its own `ndump` test. ⚠ There is more to this item
+>      than the parity divergence described here, and that part is tracked PRIVATELY with
+>      the maintainer — ask before working it, and do not widen this entry from what the
+>      private thread says. Closing the `scg` half needs the drop/clone accounting to key
+>      on the argument's STRUCTURE in all three back ends, not on a per-node tracker.
+>
+>      **D36 — a generic fn that RETURNS its container param over-releases in `scg`.**
+>      `fn ident<T>(x: T) -> T { x }` at `Shared<i64>`: the oracle omits the scope-exit
+>      release in the mono body (correct — ownership moves out with the return value),
+>      `scg` emits it. Pre- and post-D31 `scg` emit the identical callee body, so D31
+>      neither caused nor fixed it; D31 improved the surrounding balance from −2 to −1.
+>      ⚠ It also showed that the `SharedReturnNotSupported` guard does not cover the
+>      generic form: the non-generic `fn ident(x: Shared<i64>) -> Shared<i64> { x }` is
+>      REJECTED ("returning a named `Shared<T>` binding is not yet supported") while the
+>      generic form compiles, because the guard matches on `Type::Shared(_)` and a generic
+>      body's tail types as `TypeParam` — it runs pre-monomorphisation and nothing
+>      re-checks the instance. That particular route is SOUND in `snc build` (inkwell
+>      implements the transfer exemption the guard was compensating for, verified by
+>      running it). The general question of what that guard does and does not cover is
+>      tracked PRIVATELY with the maintainer; ask before extending it.
+>
+>      **D37 — `scg` PANICS on a generic `&T` parameter given a container.**
+>      `fn takes<T>(x: &T)` called as `takes(&s)` with `s: Shared<i64>` aborts both `scg`
+>      binaries with `sentinel: index out of bounds: idx=-101, len=4` while the oracle
+>      emits cleanly. Same family as D32's panic (a CALLED generic container fn), different
+>      trigger.
 >
 >      **▸ Two small pins the D17 review found missing, one fixture each:**
 >      `MutexElementNotSupported` has NO ui fixture in either position, and
