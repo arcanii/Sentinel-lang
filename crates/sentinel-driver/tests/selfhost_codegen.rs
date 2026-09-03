@@ -684,10 +684,14 @@ const DEFERRED_PROGRAMS: &[(&str, &str)] = &[
     // byte-identical to the oracle. The oracle itself was extended in the same slice
     // — its text backend had never learned to send a channel HANDLE, so it errored
     // on channel-of-channels where inkwell succeeded.)
-    // ADR 0066 M2.3b: generic word-scalar elements for the process channel — STILL
-    // deferred: this is the PROCESS channel (process_send/process_recv, fids 29/30),
-    // which the M1.2 in-process-channel mirror did not touch.
-    ("examples/lang/process_channel_typed.sentinel", "ADR 0066 M2.3b: generic process-channel elements are snc-only — scg emits INVALID IR (missing the zext encode: i8 passed as i64)"),
+    // (ADR 0066 M2.3b / register D34 — the PROCESS-channel entry that used to sit here
+    // is GONE, deleted 2026-09-03 rather than re-labelled. `scg` now mirrors
+    // process_send/process_recv (fids 29/30): the element ENCODE reuses D17's
+    // `cg_container_encode`, the DECODE its twin, and `process_recv`'s result element
+    // is context-typed off the EXPECTED type the way `channel_new` is — a `Process`
+    // is anonymous and carries no element, so it cannot come from the argument.
+    // `examples/lang/process_channel_typed.sentinel` is byte-identical to the oracle
+    // and `llvm-as` clean. Deleting the entry is the proof; do not re-add it.)
     // Register D24/D25/D26, NOT D15 (which is fixed in both Rust back ends). THREE
     // independent scg gaps, each verified on this exact program:
     //   D24 — scg's monomorphisation worklist has ZERO transitive closure. It seeds

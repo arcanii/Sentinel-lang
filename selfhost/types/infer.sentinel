@@ -682,6 +682,83 @@ fn dump_container_call(out: &mut Vec<u8>, fid: i64, ca: Args, src: &[u8], c: &mu
 // targs, keeping every pre-M1.2b fixture byte-identical. An `<elem>` that is
 // itself a `Channel<…>` (channel-of-channels, M1.2c) rides through unchanged —
 // `render_type` recurses and the interner is structural.
+// (ADR 0066 M2.3b / register D34) The CROSS-PROCESS channel element fence.
+//
+// ⚠ THIS IS AN EXPLICIT LIST AND MUST STAY ONE. Two rules, both learned the hard way
+// in this repo:
+//
+//   1. DO NOT write it as an OPEN range. A closed `h >= 0 && h <= 5` happens to be
+//      safe today — `tbase()` is 100, so codes 6..99 are free and a later scalar could
+//      not slip in — but `h < tbase()` WOULD absorb every one of them silently. (An
+//      earlier draft of this comment named `h <= 5` as the hazard; that was the wrong
+//      counterexample. The rule stands, the reasoning is the open bound.) Keep the
+//      list explicit anyway: a security fence that widens when someone else edits a
+//      different file is exactly the bug the M1.2c post-mortem is about.
+//   2. DO NOT reuse the in-process CHANNEL element predicate. The two sets are
+//      DELIBERATELY different and the oracle carries a warning saying so: an
+//      in-process `Channel<T>` may carry another channel HANDLE (M1.2c's nested
+//      `Channel<Channel<E>>`), but a process PIPE may not — a handle is a
+//      process-local address and means nothing on the other side. They happened to
+//      coincide before M1.2c, and a comment claiming they "match" is what let the
+//      cross-process fence widen once already.
+//
+// Mirrors `is_process_channel_elem` (`crates/sentinel-types/src/lib.rs`) one code at a
+// time: i64(0), i32(1), bool(2), u8(3), f64(4), ptr(5). An interned handle (>= tbase())
+// is NOT in the list.
+//
+// ⚠ IN `scg` THIS IS A FALLBACK FILTER, NOT A REJECTION, and an earlier version of this
+// comment claimed the opposite in the exact place a reader checks the safety posture.
+// Being out of the list does not produce a diagnostic: the element silently becomes
+// `i64` and the ORACLE reports the resulting mismatch.
+// `tests/ui/c66_process_channel_handle_fence.sentinel` pins the ORACLE's fence, not this
+// function — a ui fixture the oracle rejects is skipped by every differential, so it
+// never reaches `scg` at all. This predicate is therefore UNPINNED in scg by
+// construction (snc-only, like `GuardNotLetBound`): keep it identical to the oracle by
+// inspection, because no test will tell you if it drifts.
+//
+// It has two call sites, and they are not symmetric: `dump_process_recv` uses it to pick
+// the element, and the `process_send` codegen arm uses it to GATE the encode — see the
+// note there for why stripping `secret` at that boundary was a fail-open regression.
+fn is_process_channel_elem_h(h: i64) -> bool {
+    h == 0 || h == 1 || h == 2 || h == 3 || h == 4 || h == 5
+}
+
+// (ADR 0066 M2.3b / register D34) `process_recv(p) -> ?T`.
+//
+// Unlike `recv`, the element canNOT come from the argument: a `Process` is anonymous
+// and carries no element at all. So T comes from the EXPECTED type, mirroring the
+// oracle's `expected_return` read — the same shape `channel_new` (fid 21) uses. A
+// non-nullable or out-of-fence expectation falls back to `i64`, and the outer context
+// then surfaces the mismatch, exactly as the oracle documents.
+//
+// `(targs T)` is emitted ONLY for a non-i64 element, which is what keeps every
+// pre-existing i64 program byte-identical (the oracle carries `type_args` on the same
+// condition).
+fn dump_process_recv(out: &mut Vec<u8>, ca: Args, exp: i64, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
+    let mut abuf: Vec<u8> = vec_new();
+    dump_targs(&mut abuf, ca, 0 - 1, 0, src, c, gb);
+    let inner: i64 = if cg_is_nullable(c, exp) {
+        nullable_inner_of(c, exp)
+    } else {
+        0
+    };
+    let elem: i64 = if is_process_channel_elem_h(inner) {
+        inner
+    } else {
+        0
+    };
+    if elem == 0 {
+        0
+    } else {
+        append_str(out, " (targs ");
+        render_type(out, elem, c);
+        push(out, ')');
+        0
+    };
+    append_str(out, vec_to_array(abuf));
+    mk_nullable(c, elem)
+}
+
 fn dump_channel_recv(out: &mut Vec<u8>, ca: Args, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
     let mut abuf: Vec<u8> = vec_new();
     let ht: i64 = dump_args_capture_first(&mut abuf, ca, false, src, c, gb);

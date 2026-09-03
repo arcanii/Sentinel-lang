@@ -9,10 +9,13 @@
 // annotations). A `secret` element is still rejected — the cross-process secret
 // fence (D8).
 //
-// snc-side (like `u128` / `f64` / `task_generic` — the scg mirror is deferred, so
-// the self-host differential corpus stays at the `i64` case, byte-identical). The
-// real spawn is GUARDED behind a runtime-false flag for cross-platform
-// determinism; the generic send/recv IR + typing still lower. Exit 42.
+// The scg mirror LANDED (register D34): this program is byte-identical between the
+// oracle and `scg` at both the types and codegen stages, and its `DEFERRED_PROGRAMS`
+// entry is deleted — which is the only proof this project accepts for that list. It
+// used to say "snc-side … the mirror is deferred, so the differential corpus stays at
+// the `i64` case"; that is no longer true and this file is now a live differential pin
+// for the non-i64 elements. The real spawn is GUARDED behind a runtime-false flag for
+// cross-platform determinism; the generic send/recv IR + typing still lower. Exit 42.
 
 fn echo_worker(argv: [[u8]]) -> i64 ! { Subprocess } {
     let p = process_spawn("cat", argv);

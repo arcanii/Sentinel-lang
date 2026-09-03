@@ -494,8 +494,12 @@ const EXAMPLES: &[(&str, i32)] = &[
     // `process_send`/`process_recv` over `u8` / `i32` / `bool` (not just `i64`),
     // encoded into / decoded from the 8-byte i64 frame (the M1.1 spawn encode). The
     // spawn is guarded for cross-platform determinism; the generic send/recv IR +
-    // typing still lower. snc-only (the scg mirror is deferred, like task_generic /
-    // f64 — the differential corpus stays at the i64 `c66_process_channel`). 42.
+    // typing still lower. ⚠ This row used to end "snc-only (the scg mirror is deferred
+    // … the differential corpus stays at the i64 `c66_process_channel`)". Both halves
+    // are false since register D34: `scg` mirrors fids 29/30, this program is
+    // byte-identical to the oracle at the types, MIR and codegen stages, and its
+    // deferred entry is deleted from all THREE lists — so it is now a live differential
+    // pin for the non-i64 elements, not a demonstrator. 42.
     ("examples/lang/process_channel_typed.sentinel", 42),
     // ADR 0066 M2.4a / ADR 0069: SealedChannel<secret i64> — the AEAD-encrypted
     // secret-cross-process path. An in-process `seal` -> `open` round-trip

@@ -1127,6 +1127,12 @@ fn dump_te_call(out: &mut Vec<u8>, cn: [u8], ca: Args, exp: i64, src: &[u8], c: 
                     // (ADR 0066 M1.2b-cont / M1.2c) recv(ch) -> ?<elem>: the element
                     // comes from the channel arg's handle (the reader shape).
                     dump_channel_recv(out, ca, src, c, gb)
+                } else if fid == 30 {
+                    // (ADR 0066 M2.3b / register D34) process_recv(p) -> ?<elem>: a
+                    // `Process` is anonymous and carries NO element, so unlike `recv`
+                    // the element comes from the EXPECTED type — the `channel_new`
+                    // (fid 21) shape, mirroring the oracle's `expected_return` read.
+                    dump_process_recv(out, ca, exp, src, c, gb)
                 } else {
                     // (ADR 0014 D3 / ADR 0051 A5) push the callee's declared param
                     // types down onto the args. `fn_param_ty` answers -1 for a builtin,

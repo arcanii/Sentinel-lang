@@ -456,9 +456,11 @@ const MIR_DEFERRED_PROGRAMS: &[(&str, &str)] = &[
     // `(vN:f64 opaque)`) and the ADR 0070 direct call, which is still live.
     // (`task_generic.sentinel` was float-only and IS deleted.)
     ("examples/lang/fn_value_generic.sentinel", "ADR 0070 D3-revisit: `apply_bool` uses direct-call sugar, which scg lowers as a kont resume"),
-    // ADR 0066 M2.3b: generic word-scalar elements for the PROCESS channel are
-    // snc-only — scg lowers `process_recv` to `?i64` where the oracle has `?u8`.
-    ("examples/lang/process_channel_typed.sentinel", "ADR 0066 M2.3b: generic process-channel elements are snc-only (scg lowers process_recv `?i64`)"),
+    // (ADR 0066 M2.3b / register D34) The process-channel entry that used to sit here
+    // is GONE, deleted 2026-09-03 rather than re-labelled. `scg` now types and lowers
+    // `process_recv` with a context-typed element, so this program is byte-identical to
+    // the oracle at THIS stage too. ⚠ The entry existed in THREE lists (types, mir,
+    // codegen); deleting one and running the suite is how the other two surfaced.
 ];
 
 /// `snc mir` — programs whose divergence is a REAL BUG in the self-hosted

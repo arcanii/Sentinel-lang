@@ -740,25 +740,63 @@ fn cg_emit_call(c: &mut TyCtx, src: &[u8], fid: i64, snap: i64, rty: i64) -> i64
         cg_reg(c, prda1);
         0
     } else if fid == 29 {
-        // (ADR 0066 M2.3) process_send(p, v: i64) -> i64. Frame an i64 to the
-        // child's stdin; the cross-process twin of channel_send.
+        // (ADR 0066 M2.3 / M2.3b, register D34) process_send(p, v: T) -> i64. Frame T
+        // to the child's stdin as one i64; the cross-process twin of channel_send.
+        // The element ENCODE is the same one the containers use — the frame is an i64
+        // slot, so a narrower element is `zext`ed on the way in. Emitted BEFORE the
+        // call's own dst so register numbering matches the oracle, exactly as fid 22
+        // and the container constructors do.
+        //
+        // The element is the VALUE ARG's own type (`cgat[snap + 1]`), which is what the
+        // oracle reads (`args[1].ty`) — NOT the Process, which carries no element.
         let pse_pk: i64 = (*c).cgak[snap];
         let pse_pv: i64 = (*c).cgav[snap];
         let pse_vk: i64 = (*c).cgak[snap + 1];
         let pse_vv: i64 = (*c).cgav[snap + 1];
+        // ⚠ GATE THE ENCODE ON THE FENCE. `cg_container_encode` strips the `secret`
+        // qualifier FIRST, which is right for a CONTAINER (a secret rides the i64 slot
+        // and the taint stays in the type system) and WRONG here, because a secret may
+        // not cross a process pipe at all — that is ADR 0066 D8, pinned by
+        // `tests/ui/c66_process_channel_secret_fence.sentinel`.
+        //
+        // Measured: without this gate, D34 widened the failure mode of that fence in
+        // `scg` from FAIL-CLOSED to FAIL-OPEN. Pre-D34 a `secret u8`/`i32`/`bool`
+        // element emitted IR `llvm-as` rejects; the strip made all four secret scalars
+        // emit clean, assembling IR instead. The oracle rejects every one of them, so
+        // no such program is user-reachable or differentially compared — but turning a
+        // security boundary from loud to silent is how this repo has been bitten twice,
+        // and the gate costs nothing: all 9 corpus `process_send` programs, the pin,
+        // the i64 control and the merged-compiler fixed point are byte-identical with
+        // it in place.
+        let pse_ety: i64 = (*c).cgat[snap + 1];
+        let pse_enc: i64 = if is_process_channel_elem_h(pse_ety) {
+            cg_container_encode(c, pse_ety, pse_vk, pse_vv)
+        } else {
+            0 - 1
+        };
         let pse_d: i64 = cg_dst(c);
         cgo_str(c, "call i64 @sentinel_process_send(ptr ");
         cgo_operand(c, pse_pk, pse_pv);
         cgo_str(c, ", i64 ");
-        cgo_operand(c, pse_vk, pse_vv);
+        if pse_enc == 0 - 1 {
+            cgo_operand(c, pse_vk, pse_vv)
+        } else {
+            cgo_str(c, "%v");
+            cgo_int(c, pse_enc)
+        };
         cgo_str(c, ")\n");
         (*c).cg_used_procsend = true;
         cg_reg(c, pse_d);
         0
     } else if fid == 30 {
-        // (ADR 0066 M2.3) process_recv(p) -> ?i64: read one i64 frame to a stack
-        // slot, build the { i1 valid, i64 value } from the status (valid = 0). The
-        // cross-process twin of recv.
+        // (ADR 0066 M2.3 / M2.3b, register D34) process_recv(p) -> ?T: read one i64
+        // frame to a stack slot, DECODE it into T, and build `{ i1 valid, T value }`
+        // from the status (valid = 0). The cross-process twin of recv, and it borrows
+        // that arm's shape exactly: the out-slot is `alloca i64` and the load is
+        // `load i64` for EVERY element — the runtime frame is always an i64 — and only
+        // the decoded value and the AGGREGATE are element-typed. The valid bit is
+        // never converted.
+        let prc_elem: i64 = nullable_inner_of(c, rty);
         let prc_pk: i64 = (*c).cgak[snap];
         let prc_pv: i64 = (*c).cgav[snap];
         let prc_slot: i64 = cg_alloca(c, 0);
@@ -773,18 +811,25 @@ fn cg_emit_call(c: &mut TyCtx, src: &[u8], fid: i64, snap: i64, rty: i64) -> i64
         cgo_str(c, "icmp eq i64 %v");
         cgo_int(c, prc_status);
         cgo_str(c, ", 0\n");
-        let prc_value: i64 = cg_dst(c);
+        let prc_raw: i64 = cg_dst(c);
         cgo_str(c, "load i64, ptr %v");
         cgo_int(c, prc_slot);
         cg_putc(c, '\n');
+        let prc_value: i64 = cg_container_decode(c, prc_elem, prc_raw);
         let prc_o0: i64 = cg_dst(c);
-        cgo_str(c, "insertvalue { i1, i64 } undef, i1 %v");
+        cgo_str(c, "insertvalue { i1, ");
+        cgo_ty(c, prc_elem);
+        cgo_str(c, " } undef, i1 %v");
         cgo_int(c, prc_valid);
         cgo_str(c, ", 0\n");
         let prc_o1: i64 = cg_dst(c);
-        cgo_str(c, "insertvalue { i1, i64 } %v");
+        cgo_str(c, "insertvalue { i1, ");
+        cgo_ty(c, prc_elem);
+        cgo_str(c, " } %v");
         cgo_int(c, prc_o0);
-        cgo_str(c, ", i64 %v");
+        cgo_str(c, ", ");
+        cgo_ty(c, prc_elem);
+        cgo_str(c, " %v");
         cgo_int(c, prc_value);
         cgo_str(c, ", 1\n");
         cg_reg(c, prc_o1);

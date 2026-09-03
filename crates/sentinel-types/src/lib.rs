@@ -8398,8 +8398,11 @@ fn check_call(
         );
         // Carry the element in `type_args` ONLY for a non-`i64` element (codegen's
         // decode reads it); the `i64` case emits no `type_args` so its dump stays
-        // byte-identical to M2.3 (the differential corpus is i64-only — the generic
-        // elements are snc-side demonstrators in `examples/`, scg mirror deferred).
+        // byte-identical to M2.3. (This used to add "the differential corpus is i64-only
+        // — the generic elements are snc-side demonstrators, scg mirror deferred".
+        // Register D34 mirrored it: `examples/lang/process_channel_typed.sentinel` is
+        // now compared byte-for-byte at every stage, so the non-i64 `type_args` path is
+        // differentially live and a change here moves `selfhost/` too.)
         let type_args = if elem == Type::I64 { vec![] } else { vec![elem] };
         return Ok((
             TypedExprKind::Call {
@@ -8472,8 +8475,10 @@ fn check_call(
     // (unlike `Process`), pre-interned at a fixed `ChanId` (`channel_chanid_for`); the
     // element is read back from the channel arg's `ChanId` (`channel_elem_for`) with no
     // `channels`-table threading. The `i64` case is byte-identical to M1.2 (no encode/
-    // decode, no `type_args`); generic elements are snc-side demonstrators in
-    // `examples/` (scg mirror deferred, like M2.3b).
+    // decode, no `type_args`). ⚠ The tail of this comment used to read "generic elements
+    // are snc-side demonstrators … scg mirror deferred, like M2.3b" — stale twice over:
+    // the in-process channel mirror landed earlier, and M2.3b's process-channel mirror
+    // landed as register D34. Both are differentially live.
     if id == CHANNEL_NEW_FN_ID {
         // `channel_new() -> Channel<T>`: T from the expected type (default `Channel<i64>`,
         // the M1.2 ChanId(0)). The element is element-agnostic in codegen (a runtime ptr).

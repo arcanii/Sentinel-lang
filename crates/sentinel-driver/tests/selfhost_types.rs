@@ -413,10 +413,11 @@ const DEFERRED_PROGRAMS: &[(&str, &str)] = &[
     // `(resume-kont …)` where the oracle has `(call #37 …)`. (Its sibling
     // `task_generic.sentinel` was float-only and IS deleted.)
     ("examples/lang/fn_value_generic.sentinel", "ADR 0070 D3-revisit: `apply_bool` uses direct-call sugar, which scg types as a kont resume"),
-    // ADR 0066 M2.3b: generic word-scalar elements for the PROCESS channel
-    // (process_send/process_recv) are snc-only — scg types `process_recv` as
-    // `?i64` where the oracle types `?u8` / `?i32`.
-    ("examples/lang/process_channel_typed.sentinel", "ADR 0066 M2.3b: generic process-channel elements are snc-only (scg types process_recv `?i64`)"),
+    // (ADR 0066 M2.3b / register D34) The process-channel entry that used to sit here
+    // is GONE, deleted 2026-09-03 rather than re-labelled. `scg` now types and lowers
+    // `process_recv` with a context-typed element, so this program is byte-identical to
+    // the oracle at THIS stage too. ⚠ The entry existed in THREE lists (types, mir,
+    // codegen); deleting one and running the suite is how the other two surfaced.
 ];
 
 /// Programs whose divergence is a REAL BUG in the self-hosted stage, not a
