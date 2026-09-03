@@ -163,7 +163,7 @@ reference as you work through the milestones.
 >      scalar-4 arm, which it now has. Also worth doing with it: `examples/math/quadratic.sentinel` and
 >      `sentinel_library/std/math/float.sentinel` currently reach only lex/ast, because
 >      `snc merge`'s Bar-A printer rejects both a float literal and `sqrt` (menu item 5).
->   4. **THE FILED-DEFECT REGISTER — THIRTY-SEVEN items (D1-D37); **D1, D2, D3, D5, D8, D9, D15, D16, D17 and D31 are DONE**, the rest verified against a pre-slice binary. MOST are
+>   4. **THE FILED-DEFECT REGISTER — THIRTY-SEVEN items (D1-D37); **D1, D2, D3, D5, D8, D9, D15, D16, D17, D31 and D34 are DONE**, the rest verified against a pre-slice binary. MOST are
 >      unregistered in any `DEFERRED_PROGRAMS` / `KNOWN_SCG_BUGS` list because no corpus program
 >      reaches them — but FOUR are, and the blanket "NONE" that stood here was falsified by
 >      this register's own new entries: D24/D25/D26 share the
@@ -701,35 +701,58 @@ reference as you work through the milestones.
 >      elements CORRECT rather than lazy, and it is the first thing that has to change
 >      before D30 can be closed. Its `ll_type_to` twin needs the same.
 >
->      **D34 — `process_send` / `process_recv` (fids 29/30) are the one member of D17's
->      set still unmirrored**, and unlike every container cell it is already
->      differentially visible: `examples/lang/process_channel_typed.sentinel` sits in
->      `DEFERRED_PROGRAMS` with the exact wording ("missing the zext encode: i8 passed as
->      i64"), re-confirmed post-D17. Bigger than the containers, which is why it was
->      deliberately left out: `scg`'s fid 30 hardcodes the `{ i1, i64 }` aggregate TWICE
->      (plus an `i64` alloca and an `i64` load, neither of which is the aggregate) AND its
->      result type (`interner.sentinel` fid 30 is a bare
->      `mk_nullable(c, 0)` with no `check_call` special-case, unlike fids 38/40/41), so it
->      needs the `recv` treatment before the D17 helpers can be reused. Closing it DELETES
->      a deferred entry, which is the only proof this project accepts for that list.
->      **NOT the `stdin_recv` / `stdout_send` twins (fids 33/34): the ORACLE hardcodes
->      `{ i1, i64 }` there too, so both sides agree and there is no gap** — checked,
->      because the set was the point.
+>      **D34 — DONE (`b9c0aa7`).** `process_send`/`process_recv` (fids 29/30) were the
+>      last unmirrored member of D17's set. Three parts: a new `dump_process_recv` whose
+>      element comes from the EXPECTED type — a `Process` is ANONYMOUS and carries none,
+>      so this is the `channel_new` (fid 21) shape, NOT the `recv` (fid 23) shape, and
+>      choosing between those two is the whole difficulty; the codegen reusing D17's
+>      `cg_container_encode`/`_decode` unchanged plus an element-typed `{ i1, T }`
+>      aggregate; and the DEFERRED_PROGRAMS entry deleted, which is the only proof this
+>      project accepts for that list. The pin is byte-identical at the TYPES, MIR and
+>      CODEGEN stages; the i64 control is unchanged at all three; a 347-program sweep
+>      moved exactly the pin; the merged-compiler fixed point was rebuilt and compared
+>      (4,941,871 bytes, identical).
+>
+>      **Two things from it that generalise, both learned the expensive way:**
+>
+>      ⚠ **THE DEFERRED ENTRY EXISTED IN THREE LISTS** — `selfhost_types.rs`,
+>      `selfhost_mir.rs`, `selfhost_codegen.rs`. Deleting one and running the suite is how
+>      the other two surfaced ("now MATCHES the oracle — delete it from
+>      DEFERRED_PROGRAMS"). The harness catches this, but only after a full run; grep the
+>      set first.
+>
+>      ⚠ **THE ENCODE HAD TO BE GATED ON THE FENCE, and the ungated version was a
+>      FAIL-OPEN REGRESSION on a security boundary.** `cg_container_encode` strips
+>      `secret` FIRST — correct for a container, where the taint lives in the type system
+>      and the value rides the i64 slot; WRONG at a process pipe, where a secret may not
+>      cross at all (ADR 0066 D8). Ungated, D34 turned that fence in `scg` from
+>      FAIL-CLOSED to FAIL-OPEN: `secret u8`/`i32`/`bool` went from emitting IR `llvm-as`
+>      rejects to emitting clean assembling IR. Measured, gated, re-measured; the gate
+>      costs nothing (zero corpus movement, pin and control still byte-identical).
+>      `secret i64` still assembles — a PRE-EXISTING hole, untouched, and worth its own
+>      look. **The lesson is reusable-helper-shaped: a helper that is correct for one
+>      boundary can be exactly wrong at another, and `strip_secret` is the tell.**
 >
 >      **▸ D35-D37 came out of the D31 work (2026-09-02), all verified BY CONSTRUCTION
 >      and all PRE-EXISTING (pre- and post-change `scg` byte-identical).**
 >
->      **D35 — `dump_targs` carries the same leaky `mvbv >= 0` gate D31 had to work
->      around, and OVER-clones because of it.** On the ordinary (non-generic) call path,
->      `takes({ s })` and `takes(p.h)` make `scg` emit one `sentinel_shared_clone` where
->      the oracle emits none — measured, and diverging both before and after D31. D31 did
->      NOT fix it, deliberately: on those shapes the ORACLE is the side that has to move
->      first, so this is **oracle-first** and cannot be done from `selfhost/`. It is also
->      why the D31 fixture cannot pin its own `ndump` test. ⚠ There is more to this item
->      than the parity divergence described here, and that part is tracked PRIVATELY with
->      the maintainer — ask before working it, and do not widen this entry from what the
->      private thread says. Closing the `scg` half needs the drop/clone accounting to key
->      on the argument's STRUCTURE in all three back ends, not on a per-node tracker.
+>      **D35 — THREE call paths still carry the leaky `mvbv` gate**, not the one this
+>      entry first named. Settled by construction (each shape run against both binaries):
+>      `let y = p.h;` (the let-init duplication), `takes(p.h)` through `dump_targs` (the
+>      ordinary-call arg walker), and `spawn work(p.h)` (the capture). All three
+>      over-clone — `scg` emits 1 where the oracle emits 0 — which is a LEAK and a
+>      divergence. D31's generic site is now correct, which is the independent
+>      confirmation that its `ndump` leaf test is scoped right.
+>
+>      **⚠ THREE EMITTERS, THREE DIFFERENT PREDICATES**, which is why this pair has
+>      drifted twice: `llvm_dump.rs` and the inkwell twin both test
+>      `matches!(expr.kind, Var(_))`, while `selfhost/types/cg.sentinel`'s
+>      `cg_clone_shared_arg` tests `mvbv >= 0`, a per-node most-recent-`Var` tracker.
+>      Any fix must move all three together, and any new fixture for these shapes will
+>      diverge until it does. NOT fixed here deliberately: the ORACLE is the wrong side
+>      on some of these, so it is oracle-first and cannot be done from `selfhost/`.
+>      There is more to this item than the parity divergence and that part is tracked
+>      privately with the maintainer — ask before working it, and do not widen it.
 >
 >      **D36 — a generic fn that RETURNS its container param over-releases in `scg`.**
 >      `fn ident<T>(x: T) -> T { x }` at `Shared<i64>`: the oracle omits the scope-exit

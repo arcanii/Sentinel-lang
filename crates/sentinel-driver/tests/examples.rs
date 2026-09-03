@@ -464,8 +464,10 @@ const EXAMPLES: &[(&str, i32)] = &[
     ("examples/lang/channel.sentinel", 42),
     // ADR 0066 M1.2b-cont: GENERIC word-scalar channels — Channel<u8> / Channel<bool>
     // (the element encoded/decoded through the i64 slot; the i64 case stays byte-
-    // identical to M1.2). snc-only (the scg mirror is deferred, like M2.3b). A
-    // Channel<u8> queue summing 30+12 + a Channel<bool> round-trip → 42.
+    // identical to M1.2). ⚠ This row used to say "snc-only (the scg mirror is deferred,
+    // like M2.3b)" and BOTH halves were false: this program is deferred in no list, and
+    // M2.3b's mirror landed as register D34. A Channel<u8> queue summing 30+12 + a
+    // Channel<bool> round-trip → 42.
     ("examples/lang/channel_generic.sentinel", 42),
     // ADR 0066 M1.3: the worker-pool pattern — two long-lived workers spawned
     // with their `Channel<i64>` endpoints (the M1.2b channel-typed param), a
@@ -487,8 +489,11 @@ const EXAMPLES: &[(&str, i32)] = &[
     // program the line above says cannot be written. Each claimer sends its OWN
     // reply-channel handle through a `Channel<Channel<i64>>`, so a reply reaches
     // exactly one claimer and correlation is structural. Needs no `select`: a
-    // worker waits on one channel, its own. snc-only (the scg mirror is deferred,
-    // like process_channel_typed / channel_generic). 6+12+18+6 = 42.
+    // worker waits on one channel, its own. ⚠ This row used to say "snc-only (the scg
+    // mirror is deferred, like process_channel_typed / channel_generic)" — stale three
+    // times over: this program is deferred in no list, and BOTH cited exemplars are
+    // mirrored (channel_generic already, process_channel_typed as register D34).
+    // 6+12+18+6 = 42.
     ("examples/lang/addressed_reply.sentinel", 42),
     // ADR 0066 M2.3b: GENERIC word-scalar elements for the typed process channel —
     // `process_send`/`process_recv` over `u8` / `i32` / `bool` (not just `i64`),
@@ -534,8 +539,11 @@ const EXAMPLES: &[(&str, i32)] = &[
     // indirectly via the `apply(f, x)` builtin. Unblocks parameterizing a
     // worker body by its operation instead of hardcoding it (the worker_pool
     // motivation). Two different fns through the same `apply_to`: square(6) +
-    // double(3) = 36 + 6 = 42. snc-only (the scg mirror is deferred, like
-    // task_generic / f64 / process_channel_typed — see ADR 0070 D7).
+    // double(3) = 36 + 6 = 42. snc-only — this one IS genuinely still deferred, in all
+    // three lists (see ADR 0070 D7). ⚠ Its old "like task_generic / f64 /
+    // process_channel_typed" citation is dead: `task_generic` was deleted and
+    // `process_channel_typed` was mirrored (register D34), so `f64` is the only live
+    // companion left.
     ("examples/lang/fn_value.sentinel", 42),
     // ADR 0070 (generalized, M-cont): GENERIC word-scalar Fn<T,R> — not just
     // Fn<i64,i64>. Fn<u8,u8>/Fn<f64,f64>/Fn<bool,bool>, the signature id

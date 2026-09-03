@@ -14,7 +14,45 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
-**Latest (2026-09-02e) — the register's D31 is closed: `scg` clones a container argument
+**Latest (2026-09-03) — the register's D34 is closed: `scg` mirrors the process-channel
+element widths** (`b9c0aa7`), and with it the last unmirrored member of D17's set.
+`process_send`/`process_recv` carry their element as one i64 frame, so a narrower element
+needs a `zext` in, a `trunc` out, and an element-typed `{ i1, T }` result. The oracle did
+all three; `scg` hardcoded i64, and `examples/lang/process_channel_typed.sentinel` sat in
+DEFERRED_PROGRAMS because of it. That entry is now DELETED — the only proof this project
+accepts for that list — and the program is byte-identical to the oracle at the TYPES, MIR
+and CODEGEN stages.
+
+**The one design decision worth carrying forward:** `process_recv`'s element cannot come
+from its argument, because a `Process` is ANONYMOUS and carries none. It comes from the
+EXPECTED type — the `channel_new` (fid 21) shape, not the `recv` (fid 23) shape. Those two
+builtins look interchangeable and are not, and picking the wrong one is the whole
+difficulty of this item. The codegen half then reused D17's `cg_container_encode` /
+`cg_container_decode` unchanged, which is what the D17 plan predicted it could.
+
+**⚠ TWO THINGS THE REVIEW CAUGHT THAT THE FOUR-CHECK DID NOT.** First, the deferred entry
+existed in THREE lists (types, mir, codegen); deleting one and running the suite is how
+the other two surfaced. Second, and more serious: the encode had to be GATED on the
+element fence. `cg_container_encode` strips `secret` FIRST — correct for a container,
+where the taint lives in the type system and the value rides an i64 slot, and WRONG at a
+process pipe, where a secret may not cross at all (ADR 0066 D8). Ungated, this change
+turned that fence in `scg` from FAIL-CLOSED to FAIL-OPEN: `secret u8`/`i32`/`bool` went
+from emitting IR `llvm-as` rejects to emitting clean assembling IR. Nothing was
+user-reachable (the oracle rejects all four secret scalars) and nothing was
+differentially compared, but turning a security boundary from loud to silent is the exact
+failure this repo has already paid for twice. Measured, gated, re-measured — the gate
+costs nothing. **A helper that is correct at one boundary can be exactly wrong at
+another, and `strip_secret` is the tell.**
+
+The fence comment was rewritten after the review refuted all three of its claims: in
+`scg` the predicate is a FALLBACK FILTER and not a rejection (an out-of-fence expectation
+silently becomes `?i64` and the ORACLE reports the mismatch); the ui fixture it cited pins
+the ORACLE and can never reach `scg`, since a rejected program is skipped by every
+differential; and the rule against writing it as a range had the wrong counterexample —
+`tbase()` is 100, so a closed `h <= 5` is safe and an OPEN `h < tbase()` is the hazard.
+Five further stale-prose sites were corrected, two in the oracle's own source.
+
+**Previous (2026-09-02e) — the register's D31 is closed: `scg` clones a container argument
 passed to a GENERIC function** (`7e5ca56`, pinned by
 `tests/pass/c71_generic_container_arg_rc.sentinel`). A `Shared<T>` / `Mutex<T>` handle
 passed by value to a user fn transfers a refcount unit, so the caller owes an `rc++` to
