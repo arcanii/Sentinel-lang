@@ -14,7 +14,44 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
-**Latest (2026-09-03) — the register's D34 is closed: `scg` mirrors the process-channel
+**Latest (2026-09-03b) — the register's D24, D25 and D26 are closed: `scg` now closes
+both of its generic walks** (`3b6bfa1`). All three were verified on
+`examples/lang/generic_calls_generic.sentinel`, whose `DEFERRED_PROGRAMS` entry naming
+all three is DELETED — the only proof this project accepts for that list.
+
+D26 was a wrong PREDICATE behind a guard that already existed: genericity was inferred
+from whether a field mentioned a type param, so a PHANTOM parameter read as non-generic
+and Pass 0 emitted a layout for a declaration that has none. D25 was a snapshotted bound
+over a table that GROWS during the loop — laying out `Wrap<bool>` creates `Box<bool>`.
+D24 was a monomorphisation worklist with no transitive closure at all.
+
+**The register's own prescription for D24 was wrong, and the deferred program could not
+have shown it.** It said to make the loop a LIFO worklist. The oracle keeps TWO
+structures: `order`, appended at first DISCOVERY and emitted from, and `pending`, a LIFO
+stack that only decides which body is re-walked next. On `main->g1,g2; g1->h1; g2->h2`
+the oracle emits `g1, g2, h2, h1` while the body-walk order is `g2, h2, g1, h1`; a
+single emitting pass cannot produce the former. Following the entry would have passed
+the deferred program — a single chain, where all three candidate orderings coincide —
+and silently reordered branching ones. A register entry that names a fix is a hypothesis.
+
+**The review caught two regressions in the first cut, and the more important one was
+found by the SETTLING lens after all four attack lenses missed the axis.** A program
+that was byte-identical to the oracle BEFORE the change gained a spurious type
+declaration after, with `llvm-as` silent on it — so the validity gate could not have
+caught it either. The cause was chasing a field type AFTER substitution rather than
+filtering on the DECLARED type: the identical mistake the ORACLE made when D15 first
+added its closure, fixed there the same way, with a comment recording why. It was then
+re-made in the mirror. The second was an unbounded discovery walk that took five
+accepted lines from 0.1s to a stack overflow — and capping alone converted that into a
+70 MB module, so `scg` now abandons mono emission on a non-convergent set.
+
+`tests/pass/c16_transitive_mono_order.sentinel` is new: nothing pinned the emission
+ORDER, because the deferred program's single chain cannot distinguish the candidates. It
+has two halves — a branching graph, and a body with TWO nested discoveries — and the
+second exists because the review found the first could not observe child-push order.
+Four items filed (D38-D41), all pre-existing.
+
+**Previous (2026-09-03) — the register's D34 is closed: `scg` mirrors the process-channel
 element widths** (`b9c0aa7`), and with it the last unmirrored member of D17's set.
 `process_send`/`process_recv` carry their element as one i64 frame, so a narrower element
 needs a `zext` in, a `trunc` out, and an element-typed `{ i1, T }` result. The oracle did

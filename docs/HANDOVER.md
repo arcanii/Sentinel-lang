@@ -124,7 +124,7 @@ reference as you work through the milestones.
 > confirming nothing pre-existing is newly refused; oracle-vs-scg byte-equality on the new
 > fixture at types, mir and llvm; and the secret-taint check in both directions.
 
-### ▶ RESUME HERE (2026-09-02 — everything is COMMITTED at `7e5ca56`, four-check GREEN (**exactly the 18 known Windows failures, zero new**), both bootstrap fixed points byte-identical, tree CLEAN. This session closed **D5**, **D15 + D16**, **D2**, **D17** (`6337bea` — container element widths) and **D31** (`7e5ca56` — the generic-call container argument's refcount clone; it was the only DIFFERENTIALLY LIVE item on the register). ⚠ **D31'S OBVIOUS ONE-LINE FIX WAS A REGRESSION AND THE REVIEW CAUGHT IT** — mirroring `dump_targs` exactly made three byte-identical shapes diverge, because the shared helper's gate reads as "a named-Var source" and is actually a per-node tracker that any compound argument with a Var tail leaks. The landed fix adds an `ndump` leaf test; **do not simplify it back**, and note that NOTHING in `tests/pass` can catch you if you do — see D35 for why. **Every slice this session had a claim or a fix die to the review; budget for the findings, not just the run.** ⚠ A SECURITY-CLASS finding is deliberately NOT described here — see the caveat block. **NEXT: D35** (oracle-first — the drop/clone accounting must key on the argument's STRUCTURE in all three back ends; it blocks the D31 fixture's own missing pin), or **D34** (`process_send`/`process_recv`, the last unmirrored member of D17's set — closing it DELETES a deferred entry), or **D36**/**D37** (both scg-only, both with a one-shape repro). Also open: **D28**, **D29**, **D30**, **D32**, **D33**. Or the non-register menu items — `select`, `Channel<secret T>`, f64/ptr CODEGEN (which D30 and D33 now block on), widening the Bar-A printer)
+### ▶ RESUME HERE (2026-09-03 — committed at `3b6bfa1`, four-check GREEN (**exactly the 18 known Windows failures**), both bootstrap fixed points byte-identical, tree CLEAN. This session closed **D17** (`6337bea`), **D31** (`6f57d6a`), **D34** (`b9c0aa7`) and **D24+D25+D26** (`3b6bfa1`), and DELETED two `DEFERRED_PROGRAMS` entries — the only proof this project accepts for that list. ⚠ **THE REGISTER'S OWN PRESCRIPTION FOR D24 WAS WRONG** and the deferred program could not have shown it: emission follows DISCOVERY order, not the LIFO drain, and a branching graph is what distinguishes them. Treat a register entry that names a fix as a hypothesis. ⚠ **THE REVIEWS KEEP FINDING REGRESSIONS THE FOUR-CHECK CANNOT** — D34 turned the ADR-0066-D8 secret fence FAIL-CLOSED→FAIL-OPEN, and D25's first cut added a spurious type decl to a program that had been byte-identical, with `llvm-as` silent on it. Both were found by a lens constructing an input, neither by any test. ⚠ A SECURITY-CLASS finding in the SHIPPING compiler is tracked privately with the maintainer and is deliberately not described here or in any commit — see the caveat block; **D35 is blocked behind it**. **NEXT:** D29 (the channel arms never `strip_secret` — small, and the direct sibling of D34's fence bug), or D36/D37/D39 (the container and generic `scg` gaps), or D33→D30 (f64/ptr, where D33 blocks D30). Newly filed: **D38-D41**.)
 
 > **▶ THE OPEN MENU (2026-08-30) — real remaining work, verified against the repo.**
 >   1. **`select` over channels** — the flagship concurrency gap. Its RUNTIME is already PINNED
@@ -163,7 +163,7 @@ reference as you work through the milestones.
 >      scalar-4 arm, which it now has. Also worth doing with it: `examples/math/quadratic.sentinel` and
 >      `sentinel_library/std/math/float.sentinel` currently reach only lex/ast, because
 >      `snc merge`'s Bar-A printer rejects both a float literal and `sqrt` (menu item 5).
->   4. **THE FILED-DEFECT REGISTER — THIRTY-SEVEN items (D1-D37); **D1, D2, D3, D5, D8, D9, D15, D16, D17, D31 and D34 are DONE**, the rest verified against a pre-slice binary. MOST are
+>   4. **THE FILED-DEFECT REGISTER — FORTY-ONE items (D1-D41); **D1, D2, D3, D5, D8, D9, D15, D16, D17, D24, D25, D26, D31 and D34 are DONE**, the rest verified against a pre-slice binary. MOST are
 >      unregistered in any `DEFERRED_PROGRAMS` / `KNOWN_SCG_BUGS` list because no corpus program
 >      reaches them — but FOUR are, and the blanket "NONE" that stood here was falsified by
 >      this register's own new entries: D24/D25/D26 share the
@@ -548,28 +548,74 @@ reference as you work through the milestones.
 >      `DEFERRED_PROGRAMS` naming all three. D27 is the Rust back ends and is the fourth
 >      face of D15's defect δ.**
 >
->      **D24 — `scg`'s monomorphisation worklist has ZERO transitive closure.** It seeds
->      only from NON-generic bodies, so a generic fn reached through another generic fn's
->      body is CALLED and never DEFINED — `llvm-as`: "use of undefined value
->      '@wrap__i64'". It needs no generic struct at all: `fn ident<T>(x: T) -> T` called
->      from a generic `outer` is a four-line repro. This is why D15 was never noticed on
->      the `scg` side — D15 is merely the first shape where the ORACLE also failed.
->      The fix is two changes: drop the `cg_mono_on` guard in `dump_generic_call`
->      (`selfhost/types/infer.sentinel`) and turn the mode-4 loop
->      (`selfhost/types.sentinel`) into a real worklist. ⚠ It must be **LIFO**, not a
->      FIFO `while i < len(...)`: the oracle drains with `Vec::pop()`, and emitted order
->      is part of the byte comparison.
+>      **D24 — DONE (`3b6bfa1`).** `scg`'s mono worklist had ZERO transitive closure: a
+>      generic reached only through another generic's body was called and never defined.
+>      Closed with TWO passes — discovery under a LIFO stack with output muted, then
+>      emission in DISCOVERY order.
 >
->      **D25 — `scg` takes no generic-struct FIELD closure.** It emits
->      `%Wrap_bool = type { %Box_bool }` while never declaring `%Box_bool` — an undefined
->      TYPE rather than an undefined function (`llvm-as`: "use of undefined type named
->      'Box_bool'"). The `scg` analogue of D15's α2, and it fires in programs whose only
->      function is `main`.
+>      ⚠ **THIS ENTRY'S OWN PRESCRIPTION WAS WRONG** and is worth reading as a lesson
+>      about the register rather than deleting. It said "turn the mode-4 loop into a real
+>      worklist — it must be LIFO". That is not sufficient and not quite right: the
+>      oracle keeps TWO structures. `order` is appended when an instance is first
+>      DISCOVERED and is what gets emitted; `pending` is a LIFO stack that only decides
+>      which body is re-walked next. Measured on `main->g1,g2; g1->h1; g2->h2`, the
+>      oracle emits `g1, g2, h2, h1` while the body-walk order is `g2, h2, g1, h1`. A
+>      single emitting pass CANNOT produce the former. Following the entry would have
+>      passed the deferred program — a single chain, where all three candidate orderings
+>      coincide — and silently reordered branching ones. **A register entry that names a
+>      fix is a hypothesis; construct the discriminating input before trusting it.**
 >
->      **D26 — `scg` emits a spurious runtime layout for a generic DECL.** On the same
->      program it emits `%Struct.2 = type { i64 }` for `struct Shelf<S>`, which has no
->      runtime layout at all; both Rust back ends skip generic decls in Pass 0. Smallest
->      of the three and the easiest to fix.
+>      **D25 — DONE (`3b6bfa1`).** `scg` took no generic-struct FIELD closure, emitting
+>      `%Wrap_bool = type { %Box_bool }` while never declaring `%Box_bool`. Laying out
+>      `Wrap<bool>` CREATES `Box<bool>` — `subst_type` interns — and the emission loop
+>      had snapshotted its bound. Closed with an explicit closure pass that chases only
+>      BY-VALUE fields, **filtered on the DECLARED type**. ⚠ Filtering AFTER substitution
+>      is the trap: it is what the ORACLE got wrong when D15 first added its closure, its
+>      comment says so, and the first cut of this fix re-made it in the mirror — adding a
+>      spurious `%Box_bool` to a program that had been byte-identical, with `llvm-as`
+>      silent so the validity gate could not catch it.
+>
+>      **D26 — DONE (`3b6bfa1`).** `scg` emitted `%Struct.N = type { i64 }` for a generic
+>      DECL, which has no runtime layout. The Pass-0 guard existed; the PREDICATE was
+>      wrong — it scanned the struct's FIELDS for a type param, so a PHANTOM parameter
+>      (`struct Shelf<S> { label: i64 }`) read as non-generic. Genericity now comes from
+>      the declaration's type-param count. The field scan was never wrong when it
+>      answered TRUE; it was incomplete, which is the harder kind of wrong to notice —
+>      and the comment above it had already observed that a phantom parameter "would need
+>      a real type-param count", then used that as a reason not to add one.
+>
+>      **▸ D38-D41 came out of the D24/D25/D26 work (2026-09-03), all pre-existing, none
+>      a regression of that change, each verified by construction.**
+>
+>      **D38 — `scg`'s mono discovery walk cannot REFUSE, so a non-convergent program
+>      gets a truncated module instead of a diagnostic.** `fn grow<T>(x: T, n: i64) ->
+>      i64 { let b = [x]; grow(b, n) }` instantiates itself at a strictly larger type
+>      argument for ever. The oracle caps at `MAX_MONO_INSTANCES` and returns `Err`; mode
+>      4 has no error path, so `scg` now caps the drain and abandons mono emission
+>      entirely (188 bytes). That is the best available answer and still not the oracle's.
+>      ⚠ Capping WITHOUT the bail is worse than useless — measured, it turns the stack
+>      overflow into a 70 MB module. Giving mode 4 a refusal channel is the real fix.
+>
+>      **D39 — `scg` renders a NULLABLE generic-instance field BY VALUE where the oracle
+>      renders `{ i1, ptr }`.** `struct Node<T> { next: ?Node<T>, v: T }` gives
+>      `%Node_i64 = type { { i1, %Node_i64 }, i64 }` against the oracle's `{ i1, ptr }` —
+>      a self-referential layout, and invalid IR. Pre-existing and independent of D25,
+>      but D25's declared-type filter is what keeps it LOUD: without the filter the
+>      closure chased those fields and buried the bug under 8.4 MB of declarations.
+>
+>      **D40 — emission order diverges when a generic call sits in another generic call's
+>      ARGUMENT subtree.** The oracle pushes the callee key BEFORE walking args; `scg`
+>      records during codegen, which lowers operands first. `outer(inner(true))` gives
+>      oracle `outer__i64, inner__bool` and `scg` the reverse. Pre-existing — the
+>      pre-change binary diverges identically on the non-transitive form — but D24's
+>      worklist now lets it CASCADE through several defines. No corpus program reaches it.
+>
+>      **D41 — type-decl order diverges for an instance born only inside a transitively
+>      discovered body.** The oracle interns while substituting mono bodies in DISCOVERY
+>      order; `scg`'s discovery pass interns in DRAIN order. It is the same
+>      two-structures distinction D24 applied to `define`s and did not apply to
+>      interning. Not a regression (these programs were invalid IR before, with
+>      coincidentally correct type order), and no corpus program reaches it.
 >
 >      **D27 — `__spawn_wrapper_<FnId>` collection is a FOURTH mono root with exactly
 >      defect δ's shape.** D15's δ fix added class init, class methods and impl methods
