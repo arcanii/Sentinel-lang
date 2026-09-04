@@ -179,9 +179,29 @@ fn mir_widen(c: &mut TyCtx, w: bool, exp: i64) -> i64 {
 // (Bar B) codegen counterpart to `mir_widen`: when a node widened to `exp` and `exp`
 // is a nullable `?T` (kind 4), wrap the threaded operand into `{ i1 1, <op> }` via an
 // `insertvalue` chain (mirrors the oracle's WidenToNullable). A `secret` widen (`w`
-// true, but `exp` is kind 3) is value-level identity → no-op. The `?Struct`/`?GI`
-// heap-box widen is unexercised (the corpus only widens primitives, and reaches
-// `?Struct` via `null`), so the inline-payload chain suffices.
+// true, but `exp` is kind 3) is value-level identity → no-op.
+//
+// ⚠ THE `?Struct`/`?GI` HEAP-BOX WIDEN IS NOT IMPLEMENTED HERE, and this comment used
+// to claim "the inline-payload chain suffices" for it. It does not, and did not: for
+// `?Struct` the chain already emitted `insertvalue { i1, ptr } %v3, %Struct.0 %v2, 1`,
+// which `llvm-as` rejects ("insertvalue operand and field disagree in type"). Register
+// D39 makes `?GI` take that same shape — before it, `cgo_ty` said `{ i1, %Bx_i64 }` and
+// the chain was accidentally self-consistent and `llvm-as`-clean. So D39 moves the `?GI`
+// widen from assemblable-but-disagreeing-with-both-Rust-back-ends to unassemblable,
+// which is louder and no less correct. Measured on all THREE widen positions — a `let`
+// initializer, a struct-literal field and a call argument — each clean before and
+// rejected after; nothing observes the change, because the ORACLE refuses every one of
+// them ("widen-to-nullable of a struct/generic payload (heap-box) deferred"), so the
+// differential skips them before scg runs, and scg has no refusal channel of its own
+// (register D38).
+//
+// ⚠ FIXING IT NEEDS THREE BACK ENDS, NOT TWO. Oracle-first: give `llvm_dump.rs` the
+// real heap box (alloc + store + pointer payload), then mirror it here. But the moment
+// `llvm_dump` stops refusing, the shape becomes corpus-legal and `snc build` starts
+// failing on it — inkwell's own `WidenToNullable`
+// (`crates/sentinel-codegen/src/lib.rs:8722`) matches `NullableInner::Struct(_)` alone
+// and passes a `%Bx_i64` VALUE into a `{ i1, ptr }` aggregate, which its `verify()`
+// rejects. inkwell has to be fixed in the same slice or ahead of it.
 fn cg_widen(c: &mut TyCtx, w: bool, exp: i64) -> i64 {
     if cg_on(c) {
         if w {

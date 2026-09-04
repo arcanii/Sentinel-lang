@@ -457,6 +457,21 @@ fn pass_c17_box() {
 }
 
 #[test]
+fn pass_c17_nullable_generic_instance() {
+    // ADR 0016 D6b over ADR 0015 D11 / ADR 0045 A22, register D39: `?Node<i64>`
+    // heap-indirects to `{ i1, ptr }`, the same as `?Struct`. `scg` had the struct half
+    // only, in all three of its places (`cgo_ty`, `ll_type_to`, the `null` operand), and
+    // for this fixture's field order emitted the self-referential
+    // `%Node_i64 = type { i64, { i1, %Node_i64 } }`.
+    //
+    // ⚠ The exit code is INSENSITIVE, not a pin: nothing reads the payload, so 42 does
+    // not depend on the lowering — and it is not "42 under the broken lowering" either,
+    // since this path builds through inkwell (never broken) and the pre-fix `scg` IR
+    // does not assemble. The real pin is the codegen differential. 40 + 2 = 42.
+    assert_eq!(run_exit("c17_nullable_generic_instance.sentinel"), 42);
+}
+
+#[test]
 fn pass_c17_go_no_go() {
     // ADR 0016 D12 phase-go: Pair<A, B> + make_pair / fst / snd +
     // pick_int composition. The full generic-struct + generic-fn

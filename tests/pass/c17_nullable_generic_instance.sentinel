@@ -1,0 +1,54 @@
+// C1.7 / ADR 0016 D6b over ADR 0015 D11, ADR 0045 A22, register D39: a NULLABLE whose
+// payload is a generic-struct INSTANCE. `?Struct` heap-indirects to `{ i1, ptr }` so a
+// recursive struct has a finite layout (ADR 0015 D11); ADR 0016 D6b added
+// `GenericInstance` to `NullableInner`, so `?Node<i64>` must indirect for the same
+// reason, and ADR 0045 A22 prescribes exactly that for `scg`'s `cgo_ty`/`ll_type_to`.
+// `scg` implemented the struct half only, in all three of its places at once, and with
+// THIS file's field order emitted `%Node_i64 = type { i64, { i1, %Node_i64 } }` —
+// self-referential, and `llvm-as`: "Cannot allocate unsized type".
+//
+// ⚠ THE REGISTER FILED THIS AS A FIELD DEFECT ("a nullable generic-instance FIELD").
+// It is every position where a `?GI` TYPE or `null` CONSTANT is rendered, which is why
+// this file pins three sites in one program:
+//   * `ll_type_to`   — the Pass-0 aggregate `%Node_i64 = type { i64, { i1, ptr } }`;
+//   * `cgo_ty`       — the `next` local's `alloca` / `load` / `extractvalue { i1, ptr }`;
+//   * `cgo_operand`  — the `null` constant `{ i1 0, ptr null }`.
+// The `next` local is what separates the first two from the third: a `null` renders its
+// type and its constant ADJACENTLY, so a struct-literal field alone cannot show that the
+// type renderer and the operand renderer are independent decisions. The local supplies
+// the constant-free `alloca`/`load`/`extractvalue` lines that only `cgo_ty` produces.
+//
+// ⚠ A FOURTH `?GI` RENDERER IS DELIBERATELY LEFT BROKEN: `cg_widen`
+// (`selfhost/types/mir_emit.sentinel`) still renders a widen payload by value, so
+// `let o: ?Bx<i64> = b;` emits `insertvalue { i1, ptr } …, %Bx_i64 %v2, 1`. The ORACLE
+// refuses every such program ("widen-to-nullable of a struct/generic payload (heap-box)
+// deferred"), so the differential skips it before `scg` runs and no fixture can reach
+// it. See that function's comment for the three-back-end fix.
+//
+// ⚠ ANTI-REGRESSION — AND THE TWO GUARDS PIN OPPOSITE BRANCHES, which is the point:
+//   * `tests/pass/c16_linked_list_node.sentinel` is the ONLY program in the whole
+//     oracle-emitting corpus that pins the `?Struct` (heap-indirect) branch — measured:
+//     it is the sole source of `{ i1 0, ptr null }` outside this file. A "fix" that
+//     REPLACED the struct test with the generic-instance one would leave this file green
+//     and turn c16 red.
+//   * `tests/pass/c15_nullable_struct_field.sentinel` pins the FALL-THROUGH branch. Its
+//     name means "a nullable field inside a struct", not "a nullable of a struct" — its
+//     payload is `?i64`, and it emits `{ i1, i64 }` six times and no pointer at all. It
+//     is the guard against the predicate being WIDENED, which is the failure the helper's
+//     own ⚠ paragraph calls load-bearing.
+// Both guards are needed and neither substitutes for the other.
+//
+// ⚠ The exit code is insensitive: nothing here reads the payload, so 42 does not depend
+// on the lowering. (It is not "42 under the broken lowering" either — `run_exit` builds
+// through inkwell, which was never on the broken path, and the pre-fix `scg` IR does not
+// assemble, so it has no exit code at all.) The real pin is the codegen differential,
+// which sweeps `tests/pass` and compares emitted IR byte-for-byte against `snc llvm`.
+//
+// 40 + 2 = 42.
+struct Node<T> { v: T, next: ?Node<T> }
+
+fn main() -> i64 {
+    let head: Node<i64> = Node { v: 40, next: null };
+    let next: ?Node<i64> = null;
+    if is_some(next) { 1 } else { head.v + 2 }
+}

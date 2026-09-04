@@ -159,6 +159,40 @@ fn cg_is_nullable(c: &mut TyCtx, h: i64) -> bool {
     }
 }
 
+// (register D39) Does a `?T` payload HEAP-INDIRECT — i.e. render as `ptr` and zero as
+// `ptr null`? Exactly when `T` is a user struct (interner kind 6) or a generic-struct
+// INSTANCE (kind 10). That is the Rust side's `NullableInner::Struct(_) |
+// NullableInner::GenericInstance(_)`. ADR 0015 D11 introduced the indirection to break
+// a recursive struct's layout cycle, ADR 0016 D6b extended `NullableInner` to
+// instances, and ADR 0045 A22 prescribes it for `cgo_ty`/`ll_type_to` here — scg
+// spelled only the struct half, in all three of ITS places at once, so `?Node<i64>`
+// rendered `{ i1, %Node_i64 }`: a self-referential aggregate, `llvm-as` "Cannot
+// allocate unsized type".
+//
+// ⚠ THE RUST SIDE ASKS THIS QUESTION IN EIGHT PLACES AND TWO OF THEM ANSWER IT WRONG —
+// so do NOT read this comment as "the Rust back ends are the reference, go copy them".
+// Measured (`grep -n 'NullableInner::Struct'`):
+//   SPELL THE PAIR (6) — `llvm_dump.rs` 2372 `NullLit`, 2388 the `WidenToNullable`
+//     REFUSAL, 4210 `llvm_ty`; `sentinel-codegen/src/lib.rs` 2205 `needs_drop`,
+//     2381 `llvm_basic_type`, 5159 the drop emitter.
+//   STRUCT-ONLY, i.e. still carrying the defect this helper fixes (2) —
+//     `sentinel-codegen/src/lib.rs` 8571 `NullLit` and 8722 `WidenToNullable`, both in
+//     inkwell's `lower_expr`. 8722 fails LLVM verification on a `?GI` widen; 8571 is
+//     harmless only because its payload is all-zero and LLVM folds a mistyped all-zero
+//     element list to a `zeroinitializer` of the target type. Both are filed.
+//
+// ⚠ THE NARROWNESS IS LOAD-BEARING, NOT CAUTION, and the site that proves it is
+// `cgo_operand`. `?&T` / `?Channel<T>` / `?Guard<T>` also lower to a pointer, and in
+// `cgo_ty`/`ll_type_to` they reach `ptr` through the `else` anyway — so widening the
+// predicate would move no byte THERE. It is the `null` CONSTANT that differs: the
+// oracle's `_` arm is `format!("{} 0", lty(inner))`, so those three spell `ptr 0`, not
+// `ptr null`. A predicate restated as "the payload lowers to a pointer" emits
+// `ptr null` for them and breaks a pair that is byte-identical today. (`ptr 0` is
+// invalid IR on BOTH sides — a separate joint defect, and the oracle's to fix first.)
+fn cg_nullable_payload_indirect(c: &mut TyCtx, nin: i64) -> bool {
+    struct_of_handle(c, nin) >= 0 || gi_decl_of(c, nin) >= 0
+}
+
 // (Bar B) append a struct's name (from the struct-name blob `snb`) to `out`.
 fn cg_struct_name_to(out: &mut Vec<u8>, c: &mut TyCtx, sid: i64) -> i64 {
     let bs: i64 = (*c).sts[sid];
@@ -441,11 +475,13 @@ fn cgo_ty(c: &mut TyCtx, h: i64) -> i64 {
         } else if enum_of_handle(c, hs) >= 0 {
             cgo_str(c, "{ i32, ptr }")
         } else if cg_is_nullable(c, hs) {
-            // (Bar B) `?T` = `{ i1 valid, <payload> }` — inner-dependent: `?Struct`
-            // heap-indirects (`{ i1, ptr }`), `?primitive` stays inline (`{ i1, T }`).
+            // (Bar B) `?T` = `{ i1 valid, <payload> }` — inner-dependent: `?Struct` and
+            // (register D39) `?GenericInstance` heap-indirect (`{ i1, ptr }`), while
+            // `?primitive` stays inline (`{ i1, T }`). See
+            // `cg_nullable_payload_indirect` for why that pair is the WHOLE set.
             cgo_str(c, "{ i1, ");
             let nin: i64 = nullable_inner_of(c, hs);
-            if struct_of_handle(c, nin) >= 0 {
+            if cg_nullable_payload_indirect(c, nin) {
                 cgo_str(c, "ptr")
             } else {
                 cgo_ty(c, nin)
@@ -525,10 +561,12 @@ fn ll_type_to(out: &mut Vec<u8>, c: &mut TyCtx, h: i64) -> i64 {
             append_str(out, "{ i32, ptr }")
         } else if cg_is_nullable(c, hs) {
             // (Bar B) `?T` = `{ i1, <payload> }` (mirrors `cgo_ty`); a Pass-0 struct
-            // field of nullable type lands here (`struct Node { next: ?Node }`).
+            // field of nullable type lands here (`struct Node { next: ?Node }`), and
+            // (register D39) so does a generic-instance one (`struct Node<T> { next:
+            // ?Node<T> }`) — the same `cg_nullable_payload_indirect` set.
             append_str(out, "{ i1, ");
             let nin: i64 = nullable_inner_of(c, hs);
-            if struct_of_handle(c, nin) >= 0 {
+            if cg_nullable_payload_indirect(c, nin) {
                 append_str(out, "ptr")
             } else {
                 ll_type_to(out, c, nin)
@@ -761,9 +799,22 @@ fn cg_pass0(out: &mut Vec<u8>, c: &mut TyCtx) -> i64 {
     // comment did, and it is measurably wrong: that declaration alone is never
     // instantiated, so the oracle and both scg builds emit an identical 111 bytes and
     // the bound never fires. The shape that actually needs it is the NULLABLE self-
-    // reference, `struct A<T> { x: ?A<A<T>>, n: i64 }`, and only because of the filter
-    // above — scg renders that field BY VALUE where the oracle renders `{ i1, ptr }`,
-    // so without the declared-type filter the closure follows it for ever.
+    // reference, `struct A<T> { x: ?A<A<T>>, n: i64 }`: without the declared-type filter
+    // below, the closure substitutes it into a STRICTLY LARGER argument every round
+    // (`A<i64>`, `A<A<i64>>`, `A<A<A<i64>>>`, …) and structural dedup never fires, so it
+    // runs to `gcap` and emits the 8.4 MB the next paragraph records. (It does not spin
+    // for ever — `gcap` in the `while` guard is what stops it — but the SET it is walking
+    // is unbounded, which is the property that matters.)
+    //
+    // ⚠ That is a property of the CLOSURE, not of the renderer, and an earlier version
+    // of this sentence got the causality backwards — it blamed scg "rendering that field
+    // BY VALUE where the oracle renders `{ i1, ptr }`". The closure body below calls no
+    // renderer at all (its only non-trivial calls are `cg_has_typeparam` / `gi_decl_of` /
+    // `gi_argstart` / `gi_argend` / `subst_type`), and the ORACLE needed the identical
+    // filter while already rendering `{ i1, ptr }`. The pointer rendering is what makes
+    // SKIPPING the field CORRECT — the layout behind an indirection is never needed —
+    // not what makes chasing it diverge. Register D39 has since given scg the same
+    // `{ i1, ptr }`, so the by-value premise is now false as well as beside the point.
     // (register D25) CLOSURE PHASE. Walk the concrete generic instances and intern the
     // ones their BY-VALUE fields require, to a fixpoint. `struct Wrap<T> { b: Box<T> }`
     // laid out at `bool` needs `Box<bool>` NAMED, and nothing in the source spells it —
@@ -1007,10 +1058,10 @@ fn cgo_operand(c: &mut TyCtx, kind: i64, val: i64) -> i64 {
         cg_fn_name_to(&mut fnb, c, val);
         cgo_str(c, vec_to_array(fnb))
     } else {
-        // kind 3: `null` = `{ i1 0, <zero payload> }`. `?Struct` zeroes a pointer;
-        // `?primitive` zeroes its inline scalar.
+        // kind 3: `null` = `{ i1 0, <zero payload> }`. `?Struct` and (register D39)
+        // `?GenericInstance` zero a pointer; `?primitive` zeroes its inline scalar.
         cgo_str(c, "{ i1 0, ");
-        if struct_of_handle(c, val) >= 0 {
+        if cg_nullable_payload_indirect(c, val) {
             cgo_str(c, "ptr null")
         } else {
             cgo_ty(c, val);
