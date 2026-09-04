@@ -124,7 +124,7 @@ reference as you work through the milestones.
 > confirming nothing pre-existing is newly refused; oracle-vs-scg byte-equality on the new
 > fixture at types, mir and llvm; and the secret-taint check in both directions.
 
-### ▶ RESUME HERE (2026-09-04 — committed at `8b0e64c`, four-check GREEN (**exactly the 18 known Windows failures**), both bootstrap fixed points byte-identical, tree CLEAN. `origin/main` is at `5325e6d`; the README + D19 redaction commits are **unpushed** — I push, you don't. This session closed **D17** (`6337bea`), **D31** (`6f57d6a`), **D34** (`b9c0aa7`), **D24+D25+D26** (`3b6bfa1`) and **D29** (`fbccc2b`), DELETED two `DEFERRED_PROGRAMS` entries (six remain), and moved **D19** to the private channel. Register: 41 items, 15 done, D19 redacted. ⚠ **TREAT A REGISTER ENTRY AS A HYPOTHESIS — ABOUT ITS FIX *AND* ABOUT ITS SEVERITY.** D24's prescribed fix was wrong, and the program it was pinned on was the degenerate case where every candidate looked right. D19's entry said its collision was "NOT constructed end-to-end — TAG level only"; constructing it took an hour and produced a **silently miscompiled running binary**, which is what set the item's priority wrong for months. ⚠ **THE REVIEWS KEEP FINDING WHAT THE FOUR-CHECK CANNOT** — this session: a fail-closed→fail-open regression on a security boundary (D34), a SILENT wrong-output regression with `llvm-as` clean on it that four attack lenses missed and only the settling lens found (D25), a fix already made in the oracle re-made as a bug in the mirror (D25), and a rule I wrote in a comment and did not apply one file over (D24). ⚠ TWO SECURITY-CLASS findings in the SHIPPING compiler are tracked privately with the maintainer and are deliberately not described here — see the caveat block. **D35 is blocked behind one of them; D19 IS the other.** If you find yourself in the container refcount/drop path, or in the cross-unit symbol mangling / `linkonce_odr` dedup, **ask first**. **NEXT:** D36/D37/D39 (the container and generic `scg` gaps), or D33→D30 together (f64/ptr — D33 blocks D30), or one of the six remaining deferred programs. Newly filed this session: **D35-D41**.)
+### ▶ RESUME HERE (2026-09-04b — committed at `0bf7abb`, four-check GREEN (1824 passed / **exactly the 18 known Windows failures**, zero new), all 9 differential stages and BOTH bootstrap fixed points byte-identical, tree CLEAN. `origin/main` is at `5325e6d`; everything after it is **unpushed** — I push, you don't. This session closed **D39** (`0bf7abb`) and filed **D42-D49**. Register: 49 items, 16 done, D19 redacted. ⚠ **A REGISTER ENTRY IS A HYPOTHESIS ABOUT ITS SCOPE, NOT ONLY ITS FIX AND SEVERITY.** D39 was filed as a nullable generic-instance *FIELD* defect; it is every position a `?GI` type or `null` constant is rendered, and the position the entry missed — a bare `let o: ?Bx<i64> = null;` — is the ORACLE-ACCEPTED one, i.e. the only reason the fix could be pinned at all. Read an entry's scope claim as something to falsify by construction before you plan around it. ⚠ **THE REVIEW FOUND NO CODE DEFECT AND FIVE FALSE CLAIMS IN MY OWN COMMIT'S PROSE**, which is the ratio to expect: an IR literal quoted with its fields in the wrong order (copied from the register entry, whose program declares them the other way), a site census short by five, "both Rust back ends do" (false for inkwell's VALUE constructions — that became D42), an anti-regression pair naming a fixture that pins the OPPOSITE branch, and an exit-code claim about a run that cannot happen. **Run the review on the prose, and re-measure every literal against the program printed beside it.** ⚠ TWO SECURITY-CLASS findings in the SHIPPING compiler are tracked privately with the maintainer and are deliberately not described here — see the caveat block. **D35 is blocked behind one of them; D19 IS the other.** If you find yourself in the container refcount/drop path, or in the cross-unit symbol mangling / `linkonce_odr` dedup, **ask first**. **NEXT:** **D42** (inkwell refuses a legal `?GI` widen — the only new item in the shipping back end), **D44** + **D45** (two differentially-LIVE `scg` gaps, both pinnable today), **D37+D43** together (same `-101` unbound-type-argument family), or D33→D30 (f64/ptr — D33 blocks D30). **D36 needs a maintainer decision first** (it is the container drop path, and its question splits in two — see its entry). Six deferred programs remain.)
 
 > **▶ THE OPEN MENU (2026-08-30) — real remaining work, verified against the repo.**
 >   1. **`select` over channels** — the flagship concurrency gap. Its RUNTIME is already PINNED
@@ -163,7 +163,7 @@ reference as you work through the milestones.
 >      scalar-4 arm, which it now has. Also worth doing with it: `examples/math/quadratic.sentinel` and
 >      `sentinel_library/std/math/float.sentinel` currently reach only lex/ast, because
 >      `snc merge`'s Bar-A printer rejects both a float literal and `sqrt` (menu item 5).
->   4. **THE FILED-DEFECT REGISTER — FORTY-ONE items (D1-D41); **D1, D2, D3, D5, D8, D9, D15, D16, D17, D24, D25, D26, D29, D31 and D34 are DONE**, the rest verified against a pre-slice binary. MOST are
+>   4. **THE FILED-DEFECT REGISTER — FORTY-NINE items (D1-D49); **D1, D2, D3, D5, D8, D9, D15, D16, D17, D24, D25, D26, D29, D31, D34 and D39 are DONE**, the rest verified against a pre-slice binary. MOST are
 >      unregistered in any `DEFERRED_PROGRAMS` / `KNOWN_SCG_BUGS` list because no corpus program
 >      reaches them — but FOUR are, and the blanket "NONE" that stood here was falsified by
 >      this register's own new entries: D24/D25/D26 share the
@@ -587,12 +587,54 @@ reference as you work through the milestones.
 >      ⚠ Capping WITHOUT the bail is worse than useless — measured, it turns the stack
 >      overflow into a 70 MB module. Giving mode 4 a refusal channel is the real fix.
 >
->      **D39 — `scg` renders a NULLABLE generic-instance field BY VALUE where the oracle
->      renders `{ i1, ptr }`.** `struct Node<T> { next: ?Node<T>, v: T }` gives
->      `%Node_i64 = type { { i1, %Node_i64 }, i64 }` against the oracle's `{ i1, ptr }` —
->      a self-referential layout, and invalid IR. Pre-existing and independent of D25,
->      but D25's declared-type filter is what keeps it LOUD: without the filter the
->      closure chased those fields and buried the bug under 8.4 MB of declarations.
+>      **D39 — DONE (`0bf7abb`).** `scg` rendered a `?GenericInstance` payload BY VALUE
+>      where the Rust side heap-indirects it (ADR 0015 D11 + ADR 0016 D6b, and ADR 0045
+>      A22 prescribes it for `scg` by name). Three sites — `cgo_ty`, `ll_type_to` and
+>      `cgo_operand` kind 3 — now share one named predicate,
+>      `cg_nullable_payload_indirect` = interner kind 6 or kind 10.
+>
+>      **THE ENTRY CALLED IT A *FIELD* DEFECT AND THAT WAS WRONG, in the direction that
+>      mattered most.** It is every position where a `?GI` TYPE or `null` CONSTANT is
+>      rendered. A bare `let o: ?Bx<i64> = null;` diverges with no struct anywhere, and a
+>      monomorphised generic's `?T` parameter diverges in its own signature
+>      (`define i64 @ident__Bx_i64({ i1, ptr })` vs `({ i1, %Bx_i64 })`). That is the
+>      difference between unpinnable and pinnable: the local shape is oracle-ACCEPTED, so
+>      unlike most of this register it reaches the differential.
+>      `tests/pass/c17_nullable_generic_instance.sentinel` pins all three sites in one
+>      program. **The entry's own root-cause sentence was also inverted** — it said D25's
+>      declared-type filter "is what keeps it LOUD", implying the by-value rendering drove
+>      the runaway closure. The closure body calls no renderer at all, and the ORACLE
+>      needed the identical filter while already emitting `{ i1, ptr }`; the pointer
+>      rendering is what makes SKIPPING such a field correct, not what makes chasing it
+>      diverge. Corrected in place at `cg_pass0`.
+>
+>      ⚠ **THE PREDICATE'S NARROWNESS IS LOAD-BEARING and the site that proves it is
+>      `cgo_operand`.** `?&T` / `?Channel<T>` / `?Guard<T>` also lower to a pointer, and
+>      in the two TYPE renderers they reach `ptr` through the `else` anyway — widening the
+>      predicate to "the payload lowers to a pointer" would move no byte there. It is the
+>      null CONSTANT that differs: the oracle's `_` arm is `format!("{} 0", lty(inner))`,
+>      so those three spell `ptr 0` and NOT `ptr null`. Widening would break a pair that
+>      is byte-identical today (`?&i64` and `?Channel<i64>`: 432 bytes on both sides,
+>      before and after). That `ptr 0` is itself invalid on both sides — filed as D46.
+>
+>      ⚠ **ONE DELIBERATE REGRESSION, measured on all THREE of its positions** (a `let`
+>      initializer, a struct-literal field, a call argument): `cg_widen` still renders a
+>      widen payload by value, so the `?GI` widen goes from `llvm-as`-CLEAN to
+>      `llvm-as`-REJECTED. Before the fix `cgo_ty` said `{ i1, %Bx_i64 }` and the chain was
+>      accidentally self-consistent. Nothing observes it — the oracle refuses every such
+>      program, so the differential skips it before `scg` runs — and louder beats
+>      accidentally-consistent. Un-deferring it needs THREE back ends, not two (see D42).
+>
+>      Verified: fixture byte-identical at 745 bytes and `llvm-as` clean;
+>      `struct A<T> { x: ?A<A<T>>, n: i64 }` 427 → 408 with the never-declared
+>      `%A_A_A_i64` gone; a 349-program sweep moved EXACTLY the new fixture, and the
+>      review reproduced that on a 380-file superset. **The review found no code defect
+>      and five false claims in the commit's own prose** — including an IR literal quoted
+>      with its fields in the wrong order (copied from THIS entry, whose program declares
+>      them the other way round), and an anti-regression pair naming
+>      `c15_nullable_struct_field` as a `?Struct` pin when its payload is `?i64` and it
+>      pins the opposite branch. `c16_linked_list_node` is the ONLY `?Struct` heap-indirect
+>      pin in the whole corpus; keep it.
 >
 >      **D40 — emission order diverges when a generic call sits in another generic call's
 >      ARGUMENT subtree.** The oracle pushes the callee key BEFORE walking args; `scg`
@@ -607,6 +649,118 @@ reference as you work through the milestones.
 >      two-structures distinction D24 applied to `define`s and did not apply to
 >      interning. Not a regression (these programs were invalid IR before, with
 >      coincidentally correct type order), and no corpus program reaches it.
+>
+>      **▸ D42-D49 came out of the D39 work (2026-09-04), every one verified BY
+>      CONSTRUCTION and every one PRE-EXISTING (`scg` pre- and post-D39 identical, or the
+>      site is Rust-side and D39 did not touch it). D42 and D48 are in the SHIPPING back
+>      end; read those first.**
+>
+>      **D42 — inkwell has the SAME half-spelled nullable rule `scg` had, in two arms, and
+>      one of them refuses a legal program.** The Rust side asks "does this `?T` payload
+>      heap-indirect?" in EIGHT places. SIX spell the pair
+>      (`NullableInner::Struct(_) | GenericInstance(_)`): `llvm_dump.rs` 2372 `NullLit`,
+>      2388 the `WidenToNullable` refusal, 4210 `llvm_ty`; `sentinel-codegen/src/lib.rs`
+>      2205 `needs_drop`, 2381 `llvm_basic_type`, 5159 the drop emitter. TWO do not —
+>      `sentinel-codegen/src/lib.rs` **8571** (`NullLit`) and **8722**
+>      (`WidenToNullable`), both in inkwell's `lower_expr`.
+>      * **8722 is a real defect in `snc build`.** `let o: ?Bx<i64> = b;` type-checks and
+>        then dies in inkwell's own `verify()`: "Invalid InsertValueInst operands!
+>        `%widen_payload = insertvalue { i1, ptr } { i1 true, ptr undef }, %Bx_i64 %b1, 1`".
+>        The polarity control settles that it is a MISSING ARM and not a deferral: the
+>        identical `?Struct` widen (`let op: ?P = p;`) builds and RUNS 42, because 8722
+>        heap-boxes for `Struct`. Loud, not silent — and the loudness is protective, since
+>        the drop emitter at 5159 would otherwise `free` a payload that is a struct VALUE.
+>      * **8571 is currently harmless, and only by accident.** `?GI` falls to its `_` arm,
+>        which builds `const_zero()` of the INSTANCE type (`%Big_i64`, 32 bytes) as the
+>        payload of a `{ i1, ptr }`. It works because LLVM folds a mistyped ALL-ZERO
+>        element list to a `zeroinitializer` of the target type. Verified by construction,
+>        not assumed: `llvm-objdump` on the emitted object shows exactly 8+1 bytes written
+>        and the guard locals either side intact, on an assertions-OFF LLVM 18.1.8. It
+>        stops being correct the day a `NullLit` payload is non-zero.
+>      Fix 8722 before or with any attempt to un-defer the heap-box widen (see D39's
+>      deliberate regression) — otherwise `llvm_dump` stops refusing, the shape becomes
+>      corpus-legal, and `snc build` starts failing on it.
+>
+>      **D43 — `scg` ABORTS on an oracle-accepted program when a generic fn's type
+>      argument is inferred only from the expected RETURN type.**
+>      `fn mk<T>() -> ?T { null }` with `let x: ?i64 = mk();` → oracle exit 0 (533 bytes),
+>      `scg` prints `sentinel: index out of bounds: idx=-101, len=4` and exits 127 with no
+>      IR. Also fires at `?B<T>`. **This is a bootstrap-fixed-point violation** — the
+>      oracle EMITS, so it is not one of the structurally-unpinnable items; it is simply
+>      unreached (no program in the 349-program corpus has the shape).
+>      `-101` is the tell and it is the SAME tell as D37: `tbase()` is 100, so a `-1`
+>      "not found" type handle used as `h - tbase()` indexes at -101. **D37 (a generic
+>      `&T` parameter) and D43 are the same family** — `unify_one`
+>      (`selfhost/types/infer.sentinel:194`) failing to bind a type parameter and the
+>      unbound `-1` then being used as a handle. Whoever takes one should look at both;
+>      they may share a fix, and they certainly share the "make an unbound type argument
+>      LOUD instead of an index" half.
+>
+>      **D44 — `ll_type_to` is missing three dispatch arms `cgo_ty` has, so a `Fn`-typed
+>      struct field renders `i64` where the oracle renders `ptr`.** `cgo_ty` dispatches
+>      `cg_is_process` / `cg_is_sealed_channel` / `cg_is_fn`; `ll_type_to` does not, and
+>      falls to its trailing `i64`. `struct S { f: Fn<i64,i64>, n: i64 }` gives oracle
+>      `%Struct.0 = type { ptr, i64 }` against `scg`'s `{ i64, i64 }`; `llvm-as` rejects
+>      `scg` ("insertvalue operand and field disagree in type"). Oracle-accepted, so
+>      differentially LIVE and merely unreached.
+>      ⚠ **Both modules are 510 bytes.** A byte-COUNT check sees nothing here; only the
+>      byte-COMPARE catches it. Of the three missing arms only `Fn` is reachable —
+>      constructed: `Process`, `SealedChannel` and `Task` are all "unknown type" in field
+>      position — so the fixture can only pin that one. `ll_type_to`'s other callers are
+>      class fields, generic-instance fields, the nullable payload, and `extern "C"`
+>      declare signatures (whose ABI is public scalars only).
+>
+>      **D45 — a `null` ARGUMENT to a call on a MONOMORPHISED generic fn takes its type
+>      prefix from the un-inferred i64 seam.** The oracle renders the callee's declared
+>      `?T`; `scg` renders `i64`, giving `call ... @f(i64 { i1 0, i64 0 })` against the
+>      oracle's `{ i1, i64 } { i1 0, i64 0 }` — "constant expression type mismatch". A
+>      NON-generic callee is byte-identical, so it is specifically the mono path. It is
+>      NOT `?GI`-specific and NOT effect-specific: plain `?i64` through a three-line
+>      generic reproduces it, and so does a class `init` taking a `?i64`. Oracle exit 0,
+>      so this one is differentially live too.
+>
+>      **D46 — a `?&T` or `?Channel<T>` `null` constant is JOINT invalid IR: the oracle
+>      emits `ptr 0` and `scg` reproduces it byte-for-byte.**
+>      `store { i1, ptr } { i1 0, ptr 0 }` — "integer constant must have integer type".
+>      The oracle's `NullLit` `_` arm is `format!("{} 0", lty(inner))`, which spells a
+>      pointer payload's zero as `ptr 0` instead of `ptr null`; `scg`'s
+>      `cgo_ty(c, val); cgo_str(c, " 0")` mirrors it exactly. 432 bytes on both sides.
+>      The `llvm_rejects` gate is silent BY DESIGN here — it fires only when `scg` is
+>      rejected and the oracle is clean — so this is the both-wrong exemption, working as
+>      specified. **Oracle-first**, and it is the reason D39's predicate must stay narrow.
+>
+>      **D47 — `unwrap_or` on a heap-indirect nullable emits invalid IR in the ORACLE.**
+>      It extracts the `ptr` payload and feeds it straight into a `select` typed at the
+>      payload struct, with no load through the heap box:
+>      `%v7 = select i1 %v5, %Bx_i64 %v6, %Bx_i64 %v4` with `%v6 : ptr`. The oracle exits
+>      0, so the differential DOES run — and post-D39 `scg` is byte-identical to it, so
+>      the differential is green over IR neither back end can assemble. Not silent
+>      end-to-end: `snc build` refuses the same program at inkwell's `verify()`. The
+>      `?Struct` half is older than D39; D39 extended the shape's reach to `?GI`.
+>
+>      **D48 — the three back ends disagree about whether a nullable needs a DROP, and
+>      `llvm_dump`'s comment justifies its answer with a claim that is false for exactly
+>      the two payloads that heap-allocate.** `llvm_dump.rs::needs_drop` puts
+>      `?Struct`/`?GI` in its exhaustive `Type::Nullable(_) => false` group, explained as
+>      "every other nullable payload (`?scalar`/`?ptr`/`?Channel`/`?Ref`/…) is
+>      Copy/leaked"; inkwell answers TRUE for both (lib.rs 2205) and emits the payload
+>      free (5159). ⚠ **D39's fixture is the first corpus program with an annotated
+>      heap-indirect nullable BINDING**, so this is now observable on a program in
+>      `tests/pass`: inkwell emits two null-guarded `sentinel_free` calls for it where
+>      `snc llvm` and `scg` emit none. Benign today — the payload is statically `null` —
+>      but ADR 0045 A22 justified `scg`'s no-op nullable drop with "no heap-boxed nullable
+>      is ever bound-then-dropped", and that is no longer true of the corpus. A22 is
+>      corrected in place.
+>
+>      **D49 — a non-convergent generic STRUCT LAYOUT stack-overflows `scg` where the
+>      oracle refuses cleanly.** `struct S<T> { c: S<S<T>> }` plus any use gives oracle
+>      exit 1 with a real diagnostic ("generic instantiation does not converge: laying out
+>      `S` requires more than 4096 distinct generic-struct instances…") and `scg` exit
+>      `0xC00000FD` (STACK OVERFLOW), 0 bytes. Same root as D38 — mode 4 has no refusal
+>      channel — but a DIFFERENT walk: D38 is the monomorphisation worklist, this is the
+>      Pass-0 layout closure. Note the declaration ALONE is harmless (the oracle and both
+>      `scg` builds emit an identical 111 bytes); the use is the trigger, which is the
+>      same trap D32 records.
 >
 >      **D27 — `__spawn_wrapper_<FnId>` collection is a FOURTH mono root with exactly
 >      defect δ's shape.** D15's δ fix added class init, class methods and impl methods
@@ -815,6 +969,23 @@ reference as you work through the milestones.
 >      privately with the maintainer — ask before working it, and do not widen it.
 >
 >      **D36 — a generic fn that RETURNS its container param over-releases in `scg`.**
+>      **⚠ NEEDS A MAINTAINER DECISION BEFORE ANY CODE, and the question SPLITS IN TWO**
+>      (scoped 2026-09-04, read-only, no edit proposed — this is the container drop path).
+>      The two gates have different answers. The partial-move/field gate
+>      (`selfhost/types/borrow_arms.sentinel`) is UNCONTESTED: with the confound removed
+>      the oracle is net 0 in both the return and the forward shape while `scg` is −1, so
+>      "match the oracle" there installs no leak and is a strict fix. The whole-binding
+>      gate (`selfhost/types/borrow.sentinel`) IS contested, because the oracle's clone
+>      fires only for a named-`Var` argument. So the question to ask is "may the field gate
+>      be fixed now as plain parity, leaving the whole-binding gate blocked?", not one
+>      undivided go/no-go. Three further corrections to any costing: the `let`-local step
+>      is not writable as scoped (`let y: T = x;` is rejected — "unknown type `T`" — so the
+>      only reachable form is unannotated, and recovering abstractness there means
+>      propagating a bit through the RHS *expression* type, not a per-declaration flag);
+>      the `return` route emits an INDEPENDENT extra release, so a fix validated only on
+>      the tail-return shape leaves it red; and `is_named_shared_return` has TWO holes in
+>      the same `_ => false` match (the generic form AND an `if`-tail, which needs no
+>      generics at all) — close one and the shape still is not covered.
 >      `fn ident<T>(x: T) -> T { x }` at `Shared<i64>`: the oracle omits the scope-exit
 >      release in the mono body (correct — ownership moves out with the return value),
 >      `scg` emits it. Pre- and post-D31 `scg` emit the identical callee body, so D31
@@ -834,6 +1005,18 @@ reference as you work through the milestones.
 >      binaries with `sentinel: index out of bounds: idx=-101, len=4` while the oracle
 >      emits cleanly. Same family as D32's panic (a CALLED generic container fn), different
 >      trigger.
+>      **⚠ THE ROOT CAUSE IS LOCATED, AND IT IS SHARED WITH D43** (2026-09-04):
+>      `unify_one` (`selfhost/types/infer.sentinel:194`) has arms for kinds 9/1/4/3/10 and
+>      **no `k == 2` (Ref) arm**, so `T` is never bound; the unbound `-1` is then used as a
+>      type handle and `-1 - tbase()` = `-101` indexes a table. Do them together.
+>      ⚠ **Mirror the oracle's PREDICATE, not just its effect.** `crates/sentinel-types`
+>      `(Type::Ref(p), Type::Ref(a))` fires ONLY on (Ref, Ref) — a non-ref argument falls
+>      to its trailing `Err(Mismatch)` — and it returns Mismatch when the mutabilities
+>      differ. A mirror that binds unconditionally would make `scg` EMIT for four shapes
+>      the oracle REJECTS (`&mut T` given `&a`, `&T` given `&mut a`, `&T` given a non-ref,
+>      and the same for `Vec<T>` given `[i64]` if the `k == 11` arm is added the same way),
+>      and the codegen differential — which only runs oracle-ACCEPTED programs — could
+>      never see it. Those four want `tests/ui` rejections, not just a `tests/pass` pin.
 >
 >      **▸ Two small pins the D17 review found missing, one fixture each:**
 >      `MutexElementNotSupported` has NO ui fixture in either position, and

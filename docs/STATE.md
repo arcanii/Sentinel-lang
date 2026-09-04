@@ -14,7 +14,60 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
-**Latest (2026-09-03c) — the register's D29 is closed: `scg` strips the secret before
+**Latest (2026-09-04) — the register's D39 is closed: `scg` heap-indirects a nullable
+generic-instance payload** (`0bf7abb`). `?Struct` lowers to `{ i1, ptr }` so a recursive struct
+has a finite layout (ADR 0015 D11); ADR 0016 D6b added `GenericInstance` to `NullableInner` and
+ADR 0045 A22 prescribes the same for `scg` by name. `scg` implemented the struct half only, in
+all three of its places at once, so `?Node<i64>` rendered `{ i1, %Node_i64 }` — self-referential,
+`llvm-as`: "Cannot allocate unsized type". The three sites (`cgo_ty`, `ll_type_to`, `cgo_operand`
+kind 3) now share one named predicate, `cg_nullable_payload_indirect` = interner kind 6 or 10.
+
+**The register filed it as a *FIELD* defect and that was the wrong scope, in the direction that
+mattered.** It is every position where a `?GI` TYPE or `null` CONSTANT is rendered — a bare
+`let o: ?Bx<i64> = null;` diverges with no struct anywhere, and a monomorphised generic's `?T`
+parameter diverges in its own signature. That is the difference between unpinnable and pinnable:
+the local shape is oracle-ACCEPTED, so unlike most of this register the defect reaches the
+differential. `tests/pass/c17_nullable_generic_instance.sentinel` pins all three sites in one
+program. The entry's root-cause sentence was inverted too — it implied the by-value rendering
+drove D25's runaway closure, when the closure calls no renderer and the ORACLE needed the identical
+filter while already emitting `{ i1, ptr }`. Corrected in place.
+
+**⚠ The predicate's narrowness is load-bearing, and the site that proves it is `cgo_operand`.**
+`?&T` / `?Channel<T>` / `?Guard<T>` also lower to a pointer and reach `ptr` through the `else` in
+the two TYPE renderers anyway — widening would move no byte there. It is the null CONSTANT that
+differs: the oracle spells those `ptr 0`, not `ptr null`, so a predicate restated as "the payload
+lowers to a pointer" breaks a pair that is byte-identical today (432 bytes both sides, before and
+after). That `ptr 0` is invalid on BOTH sides — filed as D46, oracle-first, and the reason the
+`llvm_rejects` gate is silent there by design.
+
+**⚠ One deliberate regression, measured on all three of its positions** (a `let` initializer, a
+struct-literal field, a call argument): `cg_widen` still renders a widen payload by value, so the
+`?GI` widen goes from `llvm-as`-clean to `llvm-as`-rejected. Before the fix `cgo_ty` said
+`{ i1, %Bx_i64 }` and the chain was accidentally self-consistent. The oracle refuses every such
+program, so the differential skips it before `scg` runs; louder beats accidentally-consistent.
+
+Verified: the fixture is byte-identical at 745 bytes and `llvm-as` clean;
+`struct A<T> { x: ?A<A<T>>, n: i64 }` goes 427 → 408 with the never-declared `%A_A_A_i64` gone; a
+349-program sweep moved EXACTLY the new fixture; four-check green (1824 passed, exactly the 18
+known Windows failures), all 9 stages and both bootstrap fixed points byte-identical.
+
+**⚠ THE REVIEW FOUND NO CODE DEFECT AND FIVE FALSE CLAIMS IN THE COMMIT'S OWN PROSE** — an IR
+literal quoted with its fields in the wrong order (copied from the register entry, whose program
+declares them the other way round), a site census short by five, "both Rust back ends do" (false
+for inkwell's VALUE constructions), an anti-regression pair naming a fixture that pins the OPPOSITE
+branch, and an exit-code claim about a run that cannot happen. All corrected in the same commit.
+That ratio is the lesson: on a two-line predicate change the prose is where the defects were.
+
+**Eight items filed (D42-D49), two of them in the SHIPPING back end.** D42: inkwell carries the
+same half-spelled rule in two arms — `?GI` widen fails its own `verify()` on a program the type
+checker accepts (the `?Struct` control builds and runs, so it is a missing arm, not a deferral),
+and its `NullLit` twin is correct only because LLVM folds a mistyped ALL-ZERO element list to a
+`zeroinitializer` of the target type. D48: the three back ends disagree about nullable drop, and
+the new fixture is the first corpus program that makes it observable. D43 locates D37's root cause
+and shares it: `unify_one` has no Ref arm, so `T` is never bound and the `-1` becomes a `-101`
+index. D44/D45 are two more differentially-LIVE `scg` gaps, both pinnable today.
+
+**Previous (2026-09-03c) — the register's D29 is closed: `scg` strips the secret before
 the channel width dispatch** (`fbccc2b`). Two lines. The in-process CHANNEL arms
 dispatched element width on a raw type HANDLE, so a `secret` element — an interned
 handle, not a scalar code — matched no width arm and fell into the pointer catch-all,

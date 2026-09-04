@@ -833,9 +833,15 @@ Settled with the owner (as 5/N–7/N were), recommendations grounded in the scou
     (`{ i1, ptr }`, which is what makes `struct Node { next: ?Node }` representable — the cycle goes
     through a pointer-sized field). `llvm_ty` is self-contained (no table-threading; the layout is fully
     determined by `NullableInner`). Pass-0 struct decls + fn param/return types pick it up for free.
-  - **The exprs:** `null` → the `{ i1 0, <zero> }` **constant operand** (no instruction; `?Struct` →
-    `ptr null`) — Sentinel models it as a new operand **kind 3** (`cgo_operand`), keyed by the inner type
-    handle. `T → ?T` widening → the `{ i1 1, T }` **insertvalue** chain — Sentinel adds **`cg_widen`** (the
+  - **The exprs:** `null` → the `{ i1 0, <zero> }` **constant operand** (no instruction; `?Struct` **and
+    `?GenericInstance`** → `ptr null`) — Sentinel models it as a new operand **kind 3** (`cgo_operand`),
+    keyed by the inner type handle.
+    > ⚠ **This bullet said only `?Struct` until register D39 (2026-09-04), and that half-statement is the
+    > drafting seam the defect fell through.** The layout bullet directly above names the PAIR
+    > (`?Struct`/`?GenericInstance`); this one named one member, and `scg` implemented what was written —
+    > `struct_of_handle(..) >= 0` in `cgo_operand`, and, copying it, in `cgo_ty` and `ll_type_to` too.
+    > The rule is one rule and belongs in one place: see `cg_nullable_payload_indirect`
+    > (`selfhost/types/cg.sentinel`), which is now the single spelling for all three sites. `T → ?T` widening → the `{ i1 1, T }` **insertvalue** chain — Sentinel adds **`cg_widen`** (the
     codegen counterpart to `mir_widen`), called at every widen site (Int/Bool/Var/binop/…); a `secret`
     widen is a no-op (the value IS the inner). `x == null` (ADR 0014 D7) → extract each i1 valid bit
     (field 0) + `icmp` those (`cg_cmp_null`). `is_some` (FnId 2) → `extractvalue 0`; `unwrap_or` (FnId 1)
@@ -843,7 +849,18 @@ Settled with the owner (as 5/N–7/N were), recommendations grounded in the scou
   - **`?Struct` heap-box WidenToNullable is DEFERRED** (Err) — unexercised (the corpus only widens
     primitives + reaches `?Struct` via `null`). Drop stays a no-op for nullable (`needs_drop`/`cg_needs_drop`
     false) — correct for the corpus (no heap-boxed nullable is ever bound-then-dropped); pairs with the
-    deferred heap-box. ⚠ FIX in-flight: `cg_extract` returned `cg_reg`'s `0`, not its dest register — now
+    deferred heap-box.
+    > ⚠ **Two corrections, both measured at register D39 (2026-09-04).** (i) "DEFERRED (Err)" describes the
+    > TEXT oracle only. `scg` has no refusal channel (register D38), so it EMITS for the widen — and what it
+    > emits does not assemble (`insertvalue { i1, ptr } …, %Struct.0 %v2, 1`). inkwell is a third answer
+    > again: it implements the `?Struct` heap box and runs the program, but its `WidenToNullable`
+    > (`crates/sentinel-codegen/src/lib.rs:8722`) matches `NullableInner::Struct(_)` alone, so a
+    > `?GenericInstance` widen fails its `verify()`. Un-deferring this therefore needs all THREE back ends,
+    > not just the oracle plus a mirror. (ii) "no heap-boxed nullable is ever bound-then-dropped" was true of
+    > the corpus when written and is no longer: `tests/pass/c17_nullable_generic_instance.sentinel` binds a
+    > `?Node<i64>` local. inkwell emits two null-guarded `sentinel_free` calls for it where `snc llvm` and
+    > `scg` emit none — benign, because the payload is statically `null`, but the three back ends now
+    > disagree about nullable drop on a program that is in the corpus. ⚠ FIX in-flight: `cg_extract` returned `cg_reg`'s `0`, not its dest register — now
     returns `d` (its natural API; pre-existing callers ignored the return).
   - **Validation:** the 7 fixtures byte-identical (`scg` == `snc llvm`) + behaviourally equal to inkwell
     (exit/stdout) + leak-free (`leaks --atExit`: 0 leaks — nullable is inline / a null pointer, no heap).

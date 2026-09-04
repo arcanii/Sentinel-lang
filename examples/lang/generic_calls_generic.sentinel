@@ -21,9 +21,10 @@
 // Neither NESTING nor a generic function is required, contrary to the defect's first
 // filing — `wrap` returning a plain `Box<i64>` trips it just as well.
 //
-// ⚠ REGISTERED IN `DEFERRED_PROGRAMS`, and not because of the bug above — that is
-// fixed in both Rust back ends. The self-hosted `scg` diverges here for two of its
-// OWN reasons, filed separately and all three verified on THIS file:
+// ⚠ THIS FILE WAS REGISTERED IN `DEFERRED_PROGRAMS` UNTIL 2026-09-03, and not because
+// of the bug above — that is fixed in both Rust back ends. The self-hosted `scg`
+// diverged here for THREE reasons of its OWN, filed separately and all three verified
+// on THIS file:
 //   D24 — its monomorphisation worklist has no transitive closure at all, so `wrap`,
 //         reached only through `boxed_then`'s body, is called and never defined;
 //   D25 — it takes no generic-struct field closure, so it emits
@@ -32,8 +33,11 @@
 //   D26 — it emits a spurious `%Struct.2 = type { i64 }`, a runtime layout for the
 //         generic DECL `Shelf<S>` itself, which has none.
 // All three are independent of D15: they fire with no substitution-born instance
-// anywhere, and pre-interning does not touch them. Delete the registry entry when
-// `scg` grows a real worklist — but check all three, not just the first.
+// anywhere, and pre-interning does not touch them. All three were closed in `3b6bfa1`
+// and the registry entry is DELETED — deleting it is the only proof this project accepts
+// for that list — so `scg` is now byte-identical to the oracle here (1081 bytes) and
+// `sentinel_codegen_matches_oracle_on_real_programs` asserts it. Do not re-add the entry;
+// if this file ever diverges again, that is a regression, not a deferral.
 //
 // Trace: the α1 call returns its `k` of 20, the α2 shelf carries 22. 20 + 22 = 42.
 // Exit 42, no stdout.

@@ -17,7 +17,8 @@
 // already got this right, so the fix moved the two Rust back ends TO scg. That is what
 // makes this a `tests/pass` fixture at all — oracle and `scg` are byte-identical on
 // it, so it earns real differential coverage. Its `examples/lang/generic_calls_generic.sentinel`
-// sibling covers the routes where `scg` is the one that is wrong, and is deferred.
+// sibling covers the routes where `scg` was the one that is wrong; it USED to be
+// deferred for them and no longer is (D24/D25/D26 closed in `3b6bfa1`, entry deleted).
 //
 // ⚠ EACH ROOT CALLS `mk` AT A DIFFERENT TYPE, and that is the entire point of the
 // design. Three separate seed lists are being tested, and an earlier draft had all

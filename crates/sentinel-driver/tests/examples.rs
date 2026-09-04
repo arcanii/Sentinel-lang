@@ -567,9 +567,11 @@ const EXAMPLES: &[(&str, i32)] = &[
     // ADR 0016 D7 / register D15: a generic fn calling a generic fn, plus a generic
     // struct whose field is another generic instance reached only as a phantom type
     // argument. Both create instances the TYPE CHECKER never interned, which both Rust
-    // back ends then indexed out of bounds and CRASHED on. Registered in
-    // `DEFERRED_PROGRAMS` for `scg`'s own two gaps (no transitive mono worklist, no
-    // struct-field closure), not for D15. 20 + 18 + 3 + 1 = 42.
+    // back ends then indexed out of bounds and CRASHED on. It USED to be registered in
+    // `DEFERRED_PROGRAMS` for three `scg` gaps of its own (D24 no transitive mono
+    // worklist, D25 no generic-struct field closure, D26 a layout for a generic DECL);
+    // all three closed in `3b6bfa1` and the entry was DELETED, so `scg` is byte-identical
+    // to the oracle here and the codegen differential asserts it. 20 + 18 + 3 + 1 = 42.
     ("examples/lang/generic_calls_generic.sentinel", 42),
 ];
 
@@ -965,10 +967,10 @@ fn lang_phantom_type_param() {
 fn lang_generic_calls_generic() {
     // ADR 0016 D7 / register D15 (defect alpha). The exit code proves inkwell — which
     // PANICKED on this shape in `TypedProgram::generic_instance` before the fix —
-    // compiles and runs it. The byte comparison against `scg` is deliberately NOT
-    // asserted here: the program is in `DEFERRED_PROGRAMS` because `scg` has no
-    // transitive monomorphisation worklist and takes no generic-struct field closure,
-    // both of which are its own defects rather than this one. 20 + 18 + 3 + 1 = 42.
+    // compiles and runs it. The byte comparison against `scg` is not asserted HERE, but
+    // it is asserted: `sentinel_codegen_matches_oracle_on_real_programs` sweeps
+    // `examples/` and this program carries no `DEFERRED_PROGRAMS` entry any more (D24 /
+    // D25 / D26 closed it in `3b6bfa1`). 20 + 18 + 3 + 1 = 42.
     check_example("examples/lang/generic_calls_generic.sentinel", "generic_calls_generic", 42);
 }
 
