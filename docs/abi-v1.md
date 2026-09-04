@@ -309,19 +309,11 @@ importer-qualified with default linkage). The dedup is gated to
   `mangle_mono_name_dedup`, keyed by a driver-supplied `StructId`/`EnumId →
   origin` map);
 
-  ⚠ **This bullet used to justify `$` as "a valid-in-identifier separator that
-  can't appear in a bare name or path segment". That premise is FALSE** and the
-  correction matters, because it is the stated reason the dedup key is
-  unambiguous. The lexer accepts `$` inside an identifier
-  (`[A-Za-z_][A-Za-z0-9_$]*` — added deliberately so merged source round-trips),
-  so `struct geo$Point` in module `util` and `struct Point` in module
-  `util::geo` both tag `util$geo$Point`; a top-level `struct util$geo$Point`
-  produces it too (verified: the program compiles and mangles that name). What
-  actually keeps distinct instantiations off one `linkonce_odr` symbol is the
-  gate itself, not the separator — and the gate is doing real work here, so do
-  not widen it on the belief that `$` is unforgeable. Making the separator
-  genuinely unambiguous is `abi-v2` encoding work (see the type-tag warning in
-  §4);
+  ⚠ **The dedup GATE — not the separator — is what makes this key unambiguous.**
+  Do not widen `mono_args_dedup_safe` on the assumption that the separator
+  distinguishes origins. Making the encoding genuinely unambiguous is `abi-v2`
+  work (see the type-tag warning in §4). The detailed rationale is tracked
+  privately with the maintainer (register D19) — ask before changing this;
 - an array / nullable / vec of a safe element (recursively).
 
 A **local** struct/enum (importer-specific, no shared origin) or any **other**
@@ -330,13 +322,19 @@ sound importer-qualified per-unit emission. So `linkonce_odr` dedup now covers
 primitives + cross-module **structs and enums**; **class / generic-instance
 args + trait/class-method dedup remain the deferred tail.**
 
-**Intra-module `__` soft-spot (unchanged):** the *item* scheme is not
-length-prefixed, so exotic identifiers could in principle collide *within*
-a module (e.g. `a__b` vs a type tag producing `a_` + `_b`). No collision
-exists in the 1.0 surface (user-chosen identifiers); the item is wrapped
-verbatim as the length-prefixed blob above, so it never affects
-*cross-module* uniqueness (the module path is fully length-prefixed). Fully
-length-prefixing the item is a candidate `abi-v2` hardening (ADR 0029 D8).
+**Intra-module `__` soft-spot:** the *item* scheme is not length-prefixed, so a
+generated monomorphisation name and a user item can be spelled identically
+within a module (e.g. `a__b` vs a type tag producing `a_` + `_b`).
+
+⚠ **This paragraph used to say "no collision exists in the 1.0 surface
+(user-chosen identifiers)" and that the item "never affects *cross-module*
+uniqueness". Both are FALSE and are corrected here rather than removed, because
+a spec that tells an implementer this soft-spot is harmless is worse than one
+that says nothing.** Ordinary user-chosen identifiers reach it, and while the
+two definitions are intra-module *in source* they are emitted into different
+*objects* under `--separate`, where the linker is the only arbiter. Fully
+length-prefixing the item is `abi-v2` hardening (ADR 0029 D8). Details are
+tracked privately with the maintainer (register D19).
 
 ---
 

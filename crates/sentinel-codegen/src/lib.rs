@@ -3016,8 +3016,8 @@ fn mono_args_dedup_safe(args: &[Type], origins: &NamedTypeOrigins) -> bool {
             Type::Enum(id) => origins.enums.contains_key(&id),
             // ADR 0068 / register D16: a NESTED array (`[[T]]`) is never dedup-safe.
             // This arm is CONSERVATISM, not a claim — resolving the inner element
-            // would need the `arrays` interner, and widening the dedup gate on a
-            // guess is precisely what D19 warns against. It must come before the
+            // would need the `arrays` interner, and this gate is not widened on a
+            // guess. It must come before the
             // flat-Array arm below, whose `e.to_type()` would otherwise hit
             // `ArrayElem::to_type`'s `unreachable!` on user source.
             Type::Array(ArrayElem::Array(_)) => false,
@@ -3060,17 +3060,11 @@ fn mangle_mono_name_dedup(
 fn mangle_type_dedup(ty: Type, program: &TypedProgram, origins: &NamedTypeOrigins) -> String {
     // `$`-join the origin path onto the bare name. Empty origin → the bare name.
     //
-    // ⚠ This used to say `$` "can't appear in a bare type name or path segment, so
-    // distinct origins never collide". FALSE, and worth correcting because it was
-    // the stated safety argument: the lexer accepts `$` inside an identifier
-    // (`[A-Za-z_][A-Za-z0-9_$]*`, added so merged source round-trips), so
-    // `struct geo$Point` in module `util` tags identically to `Point` in module
-    // `util::geo`, and a top-level `struct util$geo$Point` does too — verified by
-    // compiling one. What keeps two distinct instantiations off one `linkonce_odr`
-    // symbol is `mono_args_dedup_safe` requiring a KNOWN ORIGIN, not the separator.
-    // Treat that gate as load-bearing; widening it on the belief that `$` is
-    // unforgeable would open exactly the aliasing this function exists to prevent.
-    // A genuinely unambiguous encoding is `abi-v2` work (docs/abi-v1.md §4).
+    // ⚠ `mono_args_dedup_safe`'s KNOWN-ORIGIN requirement is load-bearing for this
+    // symbol's uniqueness. Do NOT widen that gate, and do not rely on the separator
+    // alone. A genuinely unambiguous encoding is `abi-v2` work (docs/abi-v1.md §4).
+    // The rationale is tracked privately with the maintainer (register D19) — ask
+    // before touching this.
     let qualify = |origin: &[String], name: String| -> String {
         if origin.is_empty() {
             name

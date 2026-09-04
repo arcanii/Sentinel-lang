@@ -444,12 +444,11 @@ is safe by shadowing. Accepted because inkwell already used every one of these s
 *shipped* behaviour moves; LLVM uniquifies a duplicate) and the alternative is the printing
 back ends disagreeing forever with the one that ships. Against it, A1 removes a TEN-way
 UNCONDITIONAL collision and every unparseable name.
-(iii) **the `$` origin-separator premise in the `linkonce_odr` dedup was FALSE.** Its comment
-said `$` "can't appear in a bare type name"; the lexer accepts it (`[A-Za-z_][A-Za-z0-9_$]*`),
-and `struct util$geo$Point` compiles and tags identically to module `util::geo`'s `Point`.
-What actually keeps distinct instantiations off one symbol is `mono_args_dedup_safe` requiring
-a KNOWN ORIGIN — so that gate is load-bearing and must not be widened on the old belief. Both
-comments corrected here; no code change.
+(iii) **a security-class finding on the `linkonce_odr` cross-unit dedup path**, filed as
+register D19 and tracked privately with the maintainer rather than described here. Both
+comments were corrected in that commit; no code change. `mono_args_dedup_safe`'s
+KNOWN-ORIGIN requirement is load-bearing — **do not widen it, and ask before working the
+item.**
 
 **Two crashes on this surface were found in passing and are NOT fixed** (register D15/D16),
 both reachable from ordinary source and both in the SHIPPED compiler: `Box<[[u8]]>` panics
