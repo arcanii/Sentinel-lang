@@ -163,7 +163,7 @@ reference as you work through the milestones.
 >      scalar-4 arm, which it now has. Also worth doing with it: `examples/math/quadratic.sentinel` and
 >      `sentinel_library/std/math/float.sentinel` currently reach only lex/ast, because
 >      `snc merge`'s Bar-A printer rejects both a float literal and `sqrt` (menu item 5).
->   4. **THE FILED-DEFECT REGISTER — FORTY-ONE items (D1-D41); **D1, D2, D3, D5, D8, D9, D15, D16, D17, D24, D25, D26, D31 and D34 are DONE**, the rest verified against a pre-slice binary. MOST are
+>   4. **THE FILED-DEFECT REGISTER — FORTY-ONE items (D1-D41); **D1, D2, D3, D5, D8, D9, D15, D16, D17, D24, D25, D26, D29, D31 and D34 are DONE**, the rest verified against a pre-slice binary. MOST are
 >      unregistered in any `DEFERRED_PROGRAMS` / `KNOWN_SCG_BUGS` list because no corpus program
 >      reaches them — but FOUR are, and the blanket "NONE" that stood here was falsified by
 >      this register's own new entries: D24/D25/D26 share the
@@ -654,15 +654,38 @@ reference as you work through the milestones.
 >      `llvm_dump.rs` gate, THEN give `borrow_arms`'s `un_place` branch
 >      `cg_container_encode` and widen the store to `i64`.
 >
->      **D29 — `scg`'s CHANNEL arms (fid 22/23) never call `strip_secret`.** A `secret`
->      element is an interned HANDLE, not a scalar code, so it matches no width arm and
->      falls to the pointer catch-all: `Channel<secret i64>` — which the ORACLE REJECTS
->      ("`Channel<T>` element type is not supported yet") and `scg` ACCEPTS — emits
->      `ptrtoint i64 -> i64`, and `llvm-as` says "invalid cast opcode for cast from 'i64'
->      to 'i64'". The D17 container helpers strip first; these arms do not, and the arm now
->      carries a ⚠ warning not to be copied. Closing it properly is M1.4c-2's job
->      (`Channel<secret T>`), which also needs the reserved `channel_chanid_for` slots
->      6..=9 — see D23.
+>      **D29 — DONE (`__D29__`).** `scg`'s CHANNEL arms (fid 22/23) dispatched the
+>      element WIDTH on a raw type HANDLE, so a `secret` element — an interned handle,
+>      not a scalar code — matched no width arm and fell into the pointer catch-all.
+>      `Channel<secret i64>` emitted a bogus `ptrtoint` on send AND a bogus `inttoptr` on
+>      recv (`llvm-as` reports only the first and stops — never read an error count as a
+>      site count). Both arms now `strip_secret`. The pointer catch-all STAYS: it is
+>      load-bearing for `Channel<Channel<i64>>`, and `secret Channel<i64>` still lands in
+>      it correctly, because stripping unwraps to a handle that is still >= `tbase()`.
+>
+>      **This is the OPPOSITE call from D34 and the distinction is ADR 0066 D8's own**,
+>      not an inference from a diagnostic name: "In-process thread boundary → NO fence.
+>      Cross-process / IPC boundary → fence", and D8 names the in-process channel by hand,
+>      calling secrets over it "a *feature*: it enables parallel constant-time crypto over
+>      secret data". The review attacked the distinction from four directions — every
+>      escape path (process pipe, `sealed_channel` bridge, FFI, spawn, a declassify-free
+>      public read) is independently refused — and it held.
+>
+>      ⚠ **D8 ALSO SAYS "`recv` must *not* strip the qualifier"**, and this change adds
+>      `strip_secret` to the recv arm. They are compatible: D8's invariant is TYPE-level
+>      (so the receiver stays taint-checked) and this strip is the codegen WIDTH dispatch
+>      on a local. The arm carries a ⚠⚠ block saying so, because anyone grepping `recv`
+>      + `strip` lands on both.
+>
+>      ⚠ **UNPINNED, AND STRUCTURALLY UNPINNABLE by the current harness.** The
+>      differentials `continue` on a program the ORACLE rejects, before `scg` is ever run,
+>      so no `Channel<secret T>` can reach `llvm_rejects` — a straight revert of these two
+>      lines is caught by NOTHING, and a 380-program sweep moves zero. The best evidence
+>      it is right is that post-change `Channel<secret u8>` is byte-identical to the
+>      oracle's `Channel<u8>`, which is exactly the lowering M1.4c-2 needs.
+>      **D8 obliges a `tests/pass/` fixture and a `tests/ui/` rejection pinning "the
+>      element carries `secret` end-to-end"; that obligation is still UNMET and only
+>      M1.4c-2 can meet it. Carry it there.**
 >
 >      **D30 — an `f64` container element IS differentially reachable and DOES diverge,
 >      and TWO existing comments said it could not.** This is the claim the D17 review

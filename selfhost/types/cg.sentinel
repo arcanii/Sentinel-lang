@@ -1178,7 +1178,11 @@ fn cg_conv(c: &mut TyCtx, op: [u8], fromty: i64, k: i64, v: i64, toty: i64) -> i
 // ⚠ STRIP THE SECRET FIRST, and this is the detail a naive mirror of the CHANNEL arms
 // gets wrong. `cgat` holds a TYPE HANDLE, not a scalar code, so a `secret u8` element is
 // a handle `>= tbase()` — it matches none of the scalar arms and would fall to whatever
-// the final `else` does. The channel arms can afford that (their element map rejects
+// the final `else` does. ⚠ The channel arms USED to be the counter-example here — this
+// sentence said they "can afford" the fall-through because their element map rejects
+// secrets outright. Register D29 closed that: they now strip too, and the claim below
+// is retained only as the historical reason the containers were written this way.
+// (Their element map rejects
 // secrets outright) but the containers cannot: `Shared<secret u8>` is constructible, and
 // the oracle encodes it as its STRIPPED inner (`zext i8 … to i64`), because a secret
 // lowers identically to its inner — the taint lives in the type system, not the IR.

@@ -560,16 +560,42 @@ fn cg_emit_call(c: &mut TyCtx, src: &[u8], fid: i64, snap: i64, rty: i64) -> i64
         // needs a real code-4 arm first, or the `bitcast` renders `i64` on both sides
         // and converts nothing.)
         //
-        // ⚠ SECOND GAP IN THIS ARM, register-filed: it never calls `strip_secret`, so
-        // a `secret` element (an interned HANDLE, not a scalar code) matches no arm
-        // and falls to `ptrtoint`. `Channel<secret i64>` — which the ORACLE rejects
-        // and scg accepts — emits `ptrtoint i64 -> i64`, which `llvm-as` rejects.
-        // The container helpers strip first; this arm does not. Do not copy it.
+        // (register D29 — CLOSED) This block used to warn that the arm never called
+        // `strip_secret`, so a `secret` element fell to the pointer catch-all and emitted
+        // `ptrtoint i64 -> i64`. It does now; see the note on `cs_vt` below for why
+        // stripping is right HERE and wrong for the process pipe.
         let cs_chk: i64 = (*c).cgak[snap];
         let cs_chv: i64 = (*c).cgav[snap];
         let cs_vk: i64 = (*c).cgak[snap + 1];
         let cs_vv: i64 = (*c).cgav[snap + 1];
-        let cs_vt: i64 = (*c).cgat[snap + 1];
+        // (register D29) STRIP THE SECRET FIRST. `cgat` holds a type HANDLE, not a scalar
+        // code, so a `secret i64` element is a handle >= tbase(): it matched none of the
+        // width arms below and fell into the pointer catch-all, emitting
+        // `ptrtoint i64 %v to i64` — which `llvm-as` rejects with "invalid cast opcode
+        // for cast from 'i64' to 'i64'". A secret lowers identically to its inner
+        // (ADR 0019 D5/D12 erasure), so the width is the inner's width.
+        //
+        // BOTH ARMS were broken, not one: `Channel<secret i64>` emitted a bogus
+        // `ptrtoint` on send AND a bogus `inttoptr` on recv. `llvm-as` reports only the
+        // first and stops, so "one error" undercounts it — never read an error count as a
+        // site count. The reach is the four SECRETABLE SCALARS (i64/i32/u8/bool):
+        // `secret f64` is a type error, and `secret ptr` still lands in the catch-all
+        // unchanged, because `cgo_ty` renders f64 and ptr as `i64` anyway (D17/D33).
+        //
+        // ⚠ THIS IS THE OPPOSITE CALL FROM THE PROCESS PIPE, and the difference is not
+        // style. `process_send`'s encode is GATED on the element fence and deliberately
+        // does NOT strip, because a `secret` may not cross a process boundary at all
+        // (ADR 0066 D8, pinned by `c66_process_channel_secret_fence`) — stripping there
+        // turned a fail-closed boundary fail-open, which is register D34's lesson. An
+        // IN-PROCESS channel has no such fence: the oracle rejects `Channel<secret T>`
+        // with ChannelElementNotSupported, the same "not supported yet" it gives
+        // `Channel<u128>`, and M1.4c-2 is the item that will support it. So here
+        // stripping is the correct lowering and gating would be wrong.
+        //
+        // The pointer catch-all below STAYS, and must: `Channel<Channel<i64>>` is a real
+        // corpus shape (`examples/lang/addressed_reply.sentinel`) whose element genuinely
+        // is a handle, and it is byte-identical today only because of that arm.
+        let cs_vt: i64 = strip_secret(c, (*c).cgat[snap + 1]);
         let cs_enc: i64 = if cs_vt == 0 {
             0 - 1
         } else if cs_vt == 1 || cs_vt == 2 || cs_vt == 3 {
@@ -599,7 +625,35 @@ fn cg_emit_call(c: &mut TyCtx, src: &[u8], fid: i64, snap: i64, rty: i64) -> i64
         // (valid = status == 0). The element comes off recv's `?<elem>` return
         // type; `<ety>` (= `cgo_ty(elem)`) is `ptr` for a channel-of-channels
         // element, giving `{ i1, ptr }` = `?Channel`.
-        let cr_elem: i64 = nullable_inner_of(c, rty);
+        // (register D29) the decode twin of the send strip above — same reason, same
+        // deliberate difference from the process pipe. `cgo_ty` already strips a secret
+        // at its entry, so the AGGREGATE text was right even before this; it was only the
+        // width DISPATCH that fell through to the pointer arm.
+        //
+        // ⚠⚠ READ THIS BEFORE "FIXING" THE LINE BELOW. ADR 0066 D8 contains the sentence
+        // "the channel element type **carries `secret`** end-to-end — `recv` must *not*
+        // strip the qualifier", and calls dropping it "the security regression to catch".
+        // That invariant is about the TYPE, and it is intact: what is stripped here is
+        // `cr_elem`, a LOCAL used only to choose the width conversion and the `cgo_ty`
+        // text. `rty` is untouched, and the caller has already emitted the typed dump
+        // (`close_ty`) and the MIR node from the UNSTRIPPED type before `cg_emit_call`
+        // runs — so the recorded type still reads `:?secret i64` and `secret_leak` still
+        // checks every downstream use. That is established by the CALLER'S ORDERING
+        // (`borrow_arms.sentinel`: `close_ty` then `mir_emit_va` then `cg_emit_call`,
+        // all handed the unstripped `rt`), not by anything this arm does — and the
+        // types dump for a `Channel<secret i64>` recv does read `(targs secret i64)`.
+        //
+        // Worth knowing before reasoning about scg and secrets at all: `scg` does not
+        // implement `secret_leak` — zero hits for it under `selfhost/` — so it emits
+        // clean IR for `if <secret bool>` too. It is a codegen mirror, not the taint
+        // oracle, and there is no scg-side secret boundary for this arm to open.
+        //
+        // The distinction is the one D8 itself draws: a secret may not cross a PROCESS
+        // boundary (that fence is `process_send`'s — register D34 is what happens when
+        // you strip there), but in-process D8 calls allowing it "a *feature*: it enables
+        // parallel constant-time crypto over secret data". Stripping a WIDTH is not
+        // stripping a QUALIFIER.
+        let cr_elem: i64 = strip_secret(c, nullable_inner_of(c, rty));
         let cr_chk: i64 = (*c).cgak[snap];
         let cr_chv: i64 = (*c).cgav[snap];
         let cr_slot: i64 = cg_alloca(c, 0);

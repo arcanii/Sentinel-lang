@@ -1920,7 +1920,8 @@ fn pass_c71_container_widths() {
 fn pass_c71_secret_container_widths() {
     // ADR 0071 M1.4c / register D17: the SECRET half. `Shared<secret u8>` is
     // constructible, and a `secret u8` element is an interned HANDLE rather than a
-    // scalar code — so a mirror that copies the channel arms verbatim matches no width
+    // scalar code — so a mirror that copied the channel arms verbatim (as they stood
+    // before register D29 fixed them to strip too) matches no width
     // arm and falls through to the wrong encoding. The fix strips the qualifier first
     // and takes the width from the inner type, as the oracle's `unsecret()` does.
     //

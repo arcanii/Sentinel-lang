@@ -154,7 +154,8 @@ it no `Mutex<u8>` program that READS THROUGH ITS GUARD assembles — a `Mutex<u8
 `lock`s is byte-identical on the dispatcher arms alone, measured — and inspecting the
 dispatcher would never show the read path at all. `lock` needs nothing at all — its `?Guard` payload is the cell HANDLE, a ptr, for
 every element (verified over seven). The two new helpers strip the `secret` FIRST, which is
-what a verbatim copy of the channel arms gets wrong: `cgat` holds a type HANDLE, not a
+what a verbatim copy of the channel arms got wrong at the time (register D29 has since
+fixed those arms too): `cgat` holds a type HANDLE, not a
 scalar code, so a `secret u8` element matches no width arm and falls through.
 
 **`f64` and `ptr` deliberately get no arm, and that is the review's doing.** Mirroring the
