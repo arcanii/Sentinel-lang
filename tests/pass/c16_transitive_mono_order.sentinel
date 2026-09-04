@@ -1,0 +1,87 @@
+// Register D24: the monomorphisation worklist's TRANSITIVE CLOSURE, and specifically
+// the ORDER it emits in. `examples/lang/generic_calls_generic.sentinel` pins that the
+// closure happens at all; this file pins that it happens in the RIGHT SEQUENCE, which
+// is a separate property and the one that is easy to get wrong.
+//
+// The shape is a BRANCHING transitive graph — `main` calls two generics, each of which
+// calls a different generic — because a single chain cannot distinguish the candidate
+// implementations. On a chain they all agree; here they do not:
+//
+//   oracle / correct : g1__i64, g2__bool, h2__bool, h1__i64
+//   naive LIFO drain : g2__bool, h2__bool, g1__i64, h1__i64
+//   FIFO over a growing list : g1__i64, g2__bool, h1__i64, h2__bool
+//
+// ⚠ THE REGISTER'S PRESCRIPTION FOR D24 WAS "turn the loop into a LIFO worklist", AND
+// THAT IS THE MIDDLE ROW — wrong, and wrong in a way the deferred program cannot show.
+// The oracle keeps TWO structures: `order`, appended when an instance is first
+// DISCOVERED and emitted from; and `pending`, a LIFO stack that only decides which body
+// is re-walked next. Emission follows discovery, NOT the drain. A single emitting pass
+// cannot reproduce it, because `h1` is discovered only after `h2` would already have
+// been emitted — which is why `scg` now discovers under a muted pass and emits in a
+// second one.
+//
+// ⚠ The two branches are kept at DIFFERENT type arguments (i64 and bool) on purpose. If
+// both instantiated at the same type, the two halves would dedup against each other and
+// the file would pin neither — the same trap `generic_calls_generic`'s own header warns
+// about, and one an earlier draft of that file fell into.
+//
+// The exit code is the WEAK assertion here: it is identical under all three orderings.
+// The real pin is the codegen differential, which sweeps `tests/pass` and compares the
+// emitted IR byte-for-byte. If this file ever fails there, read the define order first.
+//
+// ⚠ THE SECOND HALF (`g`/`k1`/`k2`) EXISTS BECAUSE THE FIRST HALF IS ONE SHAPE SHORT.
+// In `g1`/`g2` each body discovers exactly ONE nested instance, so the order in which a
+// body's discoveries are pushed onto the pending stack is unobservable — a mutation
+// that pushes them in REVERSE survives the first half untouched. `g` calls BOTH `h1`
+// and `h2`, whose children are `k1` and `k2`, and the oracle emits
+// `g, h1, h2, k2, k1`: `k2` before `k1` is the forward-push signature, and reversing
+// the push flips exactly those two. The review found this gap; the first draft of this
+// file had only the first half and pinned three of the four orderings.
+//
+// Trace: h1 20 + h2 22 = 42 from the first half; the second half's `gsum` is asserted
+// to 0 so it cannot mask a wrong answer in the first. Exit 42, no stdout.
+
+fn h1<T>(x: T) -> i64 {
+    20
+}
+
+fn h2<T>(x: T) -> i64 {
+    22
+}
+
+fn g1<T>(x: T) -> i64 {
+    h1(x)
+}
+
+fn g2<T>(x: T) -> i64 {
+    h2(x)
+}
+
+fn k1<T>(x: T) -> i64 {
+    0
+}
+
+fn k2<T>(x: T) -> i64 {
+    0
+}
+
+// Two nested discoveries in ONE body — this is what makes the child-push ORDER
+// observable. `hh1`/`hh2` sit at different type arguments so they cannot dedup.
+fn hh1<T>(x: T) -> i64 {
+    k1(x)
+}
+
+fn hh2<T>(x: T) -> i64 {
+    k2(x)
+}
+
+fn g<T>(x: T) -> i64 {
+    hh1(x) + hh2(true)
+}
+
+fn main() -> i64 {
+    let a: i64 = g1(1);
+    let b: i64 = g2(true);
+    let gsum: i64 = g(1);
+    a + b + gsum
+}

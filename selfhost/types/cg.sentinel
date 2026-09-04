@@ -567,34 +567,36 @@ fn ll_type_to(out: &mut Vec<u8>, c: &mut TyCtx, h: i64) -> i64 {
 // (8c-1) Pass 0: emit `%Struct.N = type { <field-ll-types> }` for every struct in
 // StructId order (= the oracle's `program.structs` order); an empty struct → `type
 // {}`. Field types come from the flat field table (`fldo`/`fldty`), filtered by
-// owner StructId, in declaration order. Generic structs are Bar B (8h) — no
-// oracle-emitting fixture declares one, so iterating all structs matches the
-// oracle's `type_params.is_empty()` skip for the Bar-A subset (ADR 0045 A4).
-// (Bar B) true iff struct `sid` is a GENERIC decl — detected by a TypeParam-bearing
-// field (`Box<T> { value: T }`). Generic decls have no runtime layout (only their
-// concrete instances do), so Pass 0 skips them — mirroring the oracle's
-// `type_params.is_empty()` skip. (A generic struct with no TypeParam field — e.g. a
-// phantom `<T>` — isn't in the corpus; it would need a real type-param count.)
+// owner StructId, in declaration order. Generic decls have no runtime layout (only
+// their concrete instances do), so Pass 0 skips them — mirroring the oracle's
+// `type_params.is_empty()` skip.
+//
+// (register D26) Is this struct DECLARATION generic? Read straight off the decl's
+// type-param count.
+//
+// ⚠ TWO PARAGRAPHS THAT STOOD HERE ARE DELETED, not amended, because both were false
+// and one of them licensed the bug: "no oracle-emitting fixture declares [a generic
+// struct]" (`examples/lang/generic_calls_generic.sentinel` declares three) and
+// "detected by a TypeParam-bearing field … a phantom `<T>` isn't in the corpus; it
+// would need a real type-param count". That last clause correctly predicted this fix
+// and was then used as a reason not to make it.
+//
+// ⚠ THIS USED TO SCAN THE FIELDS for a type param, and that is unsound in one
+// direction: a PHANTOM parameter leaves no trace in the field table, so
+// `struct Shelf<S> { label: i64 }` answered `false` and Pass 0 emitted
+// `%Struct.N = type { i64 }` — a runtime layout for a declaration that has none. Both
+// Rust back ends skip generic decls in Pass 0 on the decl's own type-param count, and
+// now so does this. (The field scan was never WRONG when it answered true — a field
+// mentioning a type param does imply a generic decl — it was just incomplete, which is
+// the harder kind of wrong to notice.)
 fn cg_struct_is_generic(c: &mut TyCtx, sid: i64) -> bool {
-    let nf: i64 = len((*c).fldo);
-    let mut i: i64 = 0;
-    let mut g: bool = false;
-    while i < nf {
-        if (*c).fldo[i] == sid {
-            let fh: i64 = (*c).fldty[i];
-            if cg_has_typeparam(c, fh) {
-                g = true;
-                0
-            } else {
-                0
-            };
-            0
-        } else {
-            0
-        };
-        i = i + 1;
+    if sid < 0 {
+        false
+    } else if sid >= len((*c).sttp) {
+        false
+    } else {
+        (*c).sttp[sid] > 0
     }
-    g
 }
 
 // (Bar B / generics-b) record a monomorphic fn instance `(fid, concrete args)` unless
@@ -737,8 +739,98 @@ fn cg_pass0(out: &mut Vec<u8>, c: &mut TyCtx) -> i64 {
     }
     // (Bar B) concrete generic-struct instance decls: `%<mangled> = type { <subst
     // fields> }` for each kind-10 interner entry whose args have no TypeParam. The
-    // emission order (interner order) must match the oracle's `generic_instances`
-    // order; the corpus has ≤1 concrete instance per fixture, so order is moot today.
+    // emission order (interner order) must match the oracle's `generic_instances` order.
+    //
+    // (register D25) ⚠ THE INTERNER GROWS DURING THIS LOOP, and the bound must be
+    // re-read every iteration. `subst_type` on a field whose declared type is itself a
+    // generic instance calls `mk_generic`, which INTERNS a new entry at the end of `tk`.
+    // `struct Wrap<T> { b: Box<T> }` laid out at `bool` therefore CREATES `Box<bool>`
+    // here — an instance nothing in the source spells and the type checker never
+    // interned. With the bound snapshotted, that entry was never visited: scg emitted
+    // `%Wrap_bool = type { %Box_bool }` referencing a type it never declared
+    // (`llvm-as`: "use of undefined type named 'Box_bool'").
+    //
+    // Re-reading `len` also gets the ORDER right for free, and it is the oracle's:
+    // the new instance is appended, so it emits AFTER every entry that already existed
+    // — `Wrap_bool, Shelf_Wrap_bool, Box_i64, Box_bool`, byte-for-byte.
+    //
+    // The bound is the twin of the oracle's `MAX_INSTANCE_CLOSURE` and counts only the
+    // instances THIS closure creates, never the program's own type count.
+    //
+    // ⚠ Do NOT justify it with `struct S<T> { c: S<S<T>> }` — an earlier version of this
+    // comment did, and it is measurably wrong: that declaration alone is never
+    // instantiated, so the oracle and both scg builds emit an identical 111 bytes and
+    // the bound never fires. The shape that actually needs it is the NULLABLE self-
+    // reference, `struct A<T> { x: ?A<A<T>>, n: i64 }`, and only because of the filter
+    // above — scg renders that field BY VALUE where the oracle renders `{ i1, ptr }`,
+    // so without the declared-type filter the closure follows it for ever.
+    // (register D25) CLOSURE PHASE. Walk the concrete generic instances and intern the
+    // ones their BY-VALUE fields require, to a fixpoint. `struct Wrap<T> { b: Box<T> }`
+    // laid out at `bool` needs `Box<bool>` NAMED, and nothing in the source spells it —
+    // the type checker never interned it, so the emission loop below never saw it and
+    // scg emitted `%Wrap_bool = type { %Box_bool }` referencing a type it never declared.
+    //
+    // ⚠ FILTER ON THE **DECLARED** FIELD TYPE, AND ONLY CHASE A BARE INSTANCE. A field
+    // behind a `?`/array/ref renders as a POINTER, so its layout is never needed — and
+    // chasing it does not terminate. `struct A<T> { x: ?A<A<T>>, n: i64 }` is the case:
+    // the oracle emits ONE decl for it, and a first version of this fix (a bare re-read
+    // of the loop bound below, with no filter) chased `?A<A<T>>` forever and emitted
+    // 8.4 MB of declarations where the pre-change compiler emitted 428 bytes. That is
+    // the identical mistake the ORACLE made when D15 first added ITS closure, fixed
+    // there the same way — filter on the declared type, because filtering AFTER
+    // substitution still emits a spurious `%A_A_A_i64`.
+    let mut gcl: i64 = 0;
+    let gcap: i64 = len((*c).tk) + 4096;
+    while gcl < len((*c).tk) && len((*c).tk) < gcap {
+        if (*c).tk[gcl] == 10 {
+            let clh: i64 = tbase() + gcl;
+            if cg_has_typeparam(c, clh) {
+                0
+            } else {
+                let clsid: i64 = gi_decl_of(c, clh);
+                let mut clargs: Vec<i64> = vec_new();
+                let clas: i64 = gi_argstart(c, clh);
+                let clae: i64 = gi_argend(c, clh);
+                let mut clj: i64 = clas;
+                while clj < clae {
+                    push(&mut clargs, (*c).gia[clj]);
+                    clj = clj + 1;
+                }
+                let clnf: i64 = len((*c).fldo);
+                let mut clfi: i64 = 0;
+                while clfi < clnf {
+                    if (*c).fldo[clfi] == clsid {
+                        let cldh: i64 = (*c).fldty[clfi];
+                        // BARE generic instance (kind 10) or type param (kind 9) only.
+                        let clbare: bool = if cldh < tbase() {
+                            false
+                        } else {
+                            (*c).tk[cldh - tbase()] == 10 || (*c).tk[cldh - tbase()] == 9
+                        };
+                        if clbare {
+                            subst_type(c, cldh, &clargs);
+                            0
+                        } else {
+                            0
+                        };
+                        0
+                    } else {
+                        0
+                    };
+                    clfi = clfi + 1;
+                }
+                0
+            };
+            0
+        } else {
+            0
+        };
+        gcl = gcl + 1;
+    }
+    // EMISSION. The bound is snapshotted DELIBERATELY: the closure above has already
+    // interned everything that needs a declaration, and `subst_type` on a pointer-shaped
+    // field below may still intern an instance whose layout is NOT required. Emitting
+    // those is what produced the 8.4 MB module.
     let nt: i64 = len((*c).tk);
     let mut ti: i64 = 0;
     while ti < nt {

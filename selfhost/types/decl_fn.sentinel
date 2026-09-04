@@ -403,6 +403,11 @@ fn scan_struct_fields(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], p1: 
     // (`struct Box<T> { value: T }` → field `value: <T#0>`); `tp_setup` advances
     // past `>` (or no-ops, leaving the cursor at `{`).
     tp_setup(c, k, s, e, src, &mut cur);
+    // (register D26) record the DECLARATION's type-param count while the scope is live.
+    // One push per struct, in StructId order, so `sttp` stays aligned with `sts`/`ste`.
+    // This is the only place that sees `<…>` for a struct, and it is the only sound
+    // genericity signal: a phantom parameter leaves no trace in the field table.
+    push(&mut (*c).sttp, len((*c).tpns));
     cur = cur + 1;                 // skip `{`
     scan_fields_loop(k, s, e, src, &mut cur, sid, c, gb);
     tp_reset(c)

@@ -711,7 +711,15 @@ const DEFERRED_PROGRAMS: &[(&str, &str)] = &[
     // the `llvm_rejects` validity gate below (it is guarded by `deferred_reason`), and
     // scg's IR for it IS invalid — that is disclosed here rather than discovered later.
     // Delete this entry when scg grows a real worklist, and re-check all three gaps.
-    ("examples/lang/generic_calls_generic.sentinel", "register D24/D25/D26: scg has no transitive mono worklist, no generic-struct field closure, and emits a layout for a generic decl — undefined symbols AND an undefined type"),
+    // (register D24/D25/D26 — the `generic_calls_generic` entry that used to sit here is
+    // GONE, deleted 2026-09-03 rather than re-labelled. All three are fixed: `scg` now
+    // takes a transitive mono closure (discovery pass under a LIFO stack, emission in
+    // discovery order), re-reads the interner bound while laying out generic-instance
+    // fields, and decides struct genericity from the DECL's type-param count instead of
+    // scanning its fields. The program is byte-identical to the oracle and `llvm-as`
+    // clean; `tests/pass/c16_transitive_mono_order.sentinel` additionally pins the
+    // emission ORDER, which this program's single chain cannot distinguish. Do not
+    // re-add it.)
 ];
 
 /// Programs whose divergence is a REAL BUG in `scg`, not a deferred feature —

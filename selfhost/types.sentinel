@@ -112,6 +112,12 @@ struct TyCtx {
     snb: Vec<u8>,
     sts: Vec<i64>,
     ste: Vec<i64>,
+    // (register D26) per-struct TYPE-PARAM COUNT, index-aligned with `sts`/`ste`
+    // (`scan_struct_fields` pushes one per struct, in StructId order). 0 = non-generic.
+    // ⚠ This exists because genericity CANNOT be inferred from the fields: `struct
+    // Shelf<S> { label: i64 }` has a PHANTOM parameter, so a field scan answers "not
+    // generic" and Pass 0 emits a runtime layout for a declaration that has none.
+    sttp: Vec<i64>,
     // --- field table (flat, one entry per struct field, in StructId order) ---
     fldo: Vec<i64>,   // owner StructId
     flds: Vec<i64>,   // field-name blob start (into `snb`)
@@ -384,6 +390,9 @@ struct TyCtx {
     cggfn_id: Vec<i64>,
     cggfn_pos: Vec<i64>,
     cg_mono_on: bool,
+    // (register D24) mute the codegen byte sink. Set during the mono DISCOVERY pass,
+    // which walks generic bodies only to find nested instances and must emit nothing.
+    cg_mute: bool,
     cg_mono_args: Vec<i64>,
     cg_targs: Vec<i64>,
     cgout: Vec<u8>,   // accumulated .ll across all fns (the mode-4 result)
@@ -1221,9 +1230,105 @@ pub fn run(src: [u8], mode: i64, result: &mut Vec<u8>) -> i64 {
         // symbol). APPENDS to cgout (after the non-generic fns) + sets cg_used_*, so it
         // MUST run before the declares below. Insertion order = the recorded order
         // (matches the oracle's worklist seed; the corpus has no transitive generics).
-        let nmono: i64 = len(ctx.cgmono_fid);
+        // (register D24) PASS 1 — DISCOVERY. Drain a LIFO stack of recorded instances,
+        // re-walking each body with output MUTED, purely so nested generic calls get
+        // recorded. Two passes are structurally required, and the reason is worth
+        // stating because the register's one-line prescription ("make the loop a LIFO
+        // worklist") does NOT work:
+        //
+        //   The oracle keeps TWO structures. `order` is appended when an instance is
+        //   first DISCOVERED and is what gets emitted; `pending` is a LIFO stack that
+        //   only decides which body is re-walked next. They are not the same sequence.
+        //   Measured on `main -> g1,g2; g1 -> h1; g2 -> h2`, the oracle emits
+        //   `g1, g2, h2, h1` while the body-walk order is `g2, h2, g1, h1`. A single
+        //   emitting pass cannot produce the first, because `h1` is discovered only
+        //   AFTER `h2` would already have been emitted.
+        //
+        // So: discover under LIFO here, emit in discovery order below. The LIFO is what
+        // makes the discovery ORDER match; emitting in `cgmono_*` order is what makes
+        // the OUTPUT match.
+        let mut mpend: Vec<i64> = vec_new();
+        let mut mseed: i64 = 0;
+        let nseed: i64 = len(ctx.cgmono_fid);
+        while mseed < nseed {
+            push(&mut mpend, mseed);
+            mseed = mseed + 1;
+        }
+        // ⚠ THE DISCOVERY DRAIN IS CAPPED, and leaving it uncapped was a REGRESSION the
+        // review caught. `fn grow<T>(x: T, n: i64) -> i64 { let b = [x]; grow(b, n) }`
+        // instantiates itself at a strictly larger type argument for ever: five accepted
+        // lines took the pre-change compiler 0.1s and 846 bytes and took the uncapped
+        // version into a STACK OVERFLOW after ~60 seconds. The oracle caps the identical
+        // walk at MAX_MONO_INSTANCES and returns a diagnostic
+        // (`collect_mono_instantiations`); scg is dump-only and has no diagnostic channel
+        // here, so it stops instead — the oracle refuses such a program first, so the
+        // truncated output is never compared.
+        //
+        // This cap is the same rule the D25 comment in `cg.sentinel` states, and I wrote
+        // that sentence and then did not apply it to the loop THIS item added. If you are
+        // adding a third closure to this compiler, bound it in the same commit.
+        let mono_cap: i64 = len(ctx.cgmono_fid) + 4096;
+        ctx.cg_mute = true;
+        while len(mpend) > 0 && len(ctx.cgmono_fid) < mono_cap {
+            let dtop: i64 = pop(&mut mpend);
+            let dbefore: i64 = len(ctx.cgmono_fid);
+            let dfid: i64 = ctx.cgmono_fid[dtop];
+            clear_i64(&mut ctx.cg_mono_args);
+            let das: i64 = ctx.cgmono_as[dtop];
+            let dae: i64 = ctx.cgmono_ae[dtop];
+            let mut dai: i64 = das;
+            while dai < dae {
+                let darg: i64 = ctx.cgmono_pool[dai];
+                push(&mut ctx.cg_mono_args, darg);
+                dai = dai + 1;
+            }
+            let dng: i64 = len(ctx.cggfn_id);
+            let mut dgi: i64 = 0;
+            let mut dpos: i64 = 0 - 1;
+            while dgi < dng {
+                if ctx.cggfn_id[dgi] == dfid {
+                    dpos = ctx.cggfn_pos[dgi];
+                    0
+                } else {
+                    0
+                };
+                dgi = dgi + 1;
+            }
+            ctx.cg_mono_on = true;
+            let mut dcur: i64 = dpos;
+            let mut dbuf: Vec<u8> = vec_new();
+            type_fn(&mut dbuf, &kinds, &starts, &ends, &src, &mut dcur, &mut ctx, &mut garbage, dfid - 42);
+            let _dbx: [u8] = vec_to_array(dbuf);
+            ctx.cg_mono_on = false;
+            // Newly discovered instances go on the stack in discovery order, so popping
+            // takes the LAST one first — the oracle's `pending.push` / `pending.pop`.
+            let dafter: i64 = len(ctx.cgmono_fid);
+            let mut dnew: i64 = dbefore;
+            while dnew < dafter {
+                push(&mut mpend, dnew);
+                dnew = dnew + 1;
+            }
+        }
+        ctx.cg_mute = false;
+        // If the cap stopped the drain, the instance set is NON-CONVERGENT: the program
+        // instantiates a generic at a strictly larger type argument for ever. The oracle
+        // returns `Err` and emits NOTHING for such a program, and the closest scg can get
+        // without a diagnostic channel is to emit no mono defines at all. Emitting a
+        // truncated arbitrary prefix is worse than useless — capping alone (without this)
+        // turned a stack overflow into a 70 MB module, where the pre-change compiler
+        // produced 846 bytes. The oracle refuses these programs, so nothing here is ever
+        // compared; what matters is not melting the machine.
+        let mono_overflowed: bool = len(ctx.cgmono_fid) >= mono_cap;
+        // PASS 2 — EMISSION, in discovery order. `cgmono_*` is closed under nested generic
+        // calls by the pass above, and the guard in `dump_generic_call` is off during
+        // emission, so nothing appends here.
         let mut mqi: i64 = 0;
-        while mqi < nmono {
+        let mono_stop: i64 = if mono_overflowed {
+            0
+        } else {
+            len(ctx.cgmono_fid)
+        };
+        while mqi < mono_stop {
             let mfid: i64 = ctx.cgmono_fid[mqi];
             clear_i64(&mut ctx.cg_mono_args);
             let mas: i64 = ctx.cgmono_as[mqi];
@@ -1875,7 +1980,12 @@ fn cg_fresh_block(c: &mut TyCtx) -> i64 {
 // Route one byte to cgbody (during the body walk) or cgout (at teardown — the
 // header, the hoisted allocas, the return).
 fn cg_putc(c: &mut TyCtx, b: u8) -> i64 {
-    if (*c).cg_to_body {
+    // (register D24) the discovery pass walks for side effects only — every byte is
+    // dropped here. This is the single sink for all codegen output, so one branch
+    // suppresses the whole walk.
+    if (*c).cg_mute {
+        0
+    } else if (*c).cg_to_body {
         push(&mut (*c).cgbody, b);
         0
     } else if (*c).cg_to_cls {

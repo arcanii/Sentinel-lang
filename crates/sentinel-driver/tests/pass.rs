@@ -1871,8 +1871,9 @@ fn pass_c16_mono_root_method_bodies() {
     // ⚠ Polarity reversed from the rest of the family — `scg` already got this right,
     // so the fix moved the two Rust back ends TO it. That is what makes this a
     // `tests/pass` fixture: the two are byte-identical, so it earns real differential
-    // coverage, unlike its deferred `examples/lang/generic_calls_generic.sentinel`
-    // sibling. 4 + 16 + 22 = 42.
+    // coverage. (Its `examples/lang/generic_calls_generic.sentinel` sibling used to be
+    // called out here as DEFERRED by contrast; it no longer is — register D24/D25/D26
+    // closed it and deleted the entry.) 4 + 16 + 22 = 42.
     assert_eq!(run_exit("c16_mono_root_method_bodies.sentinel"), 42);
 }
 
@@ -1949,4 +1950,22 @@ fn pass_c71_generic_container_arg_rc() {
     // this harness runs. The codegen differential (which sweeps `tests/pass`) is the only
     // assertion that pins it. 7 + 9 + 9 + 7 + 6 + 4 = 42.
     assert_eq!(run_exit("c71_generic_container_arg_rc.sentinel"), 42);
+}
+
+#[test]
+fn pass_c16_transitive_mono_order() {
+    // Register D24: the transitive monomorphisation closure's EMISSION ORDER. A
+    // branching graph (main → g1,g2; g1 → h1; g2 → h2), because a single chain cannot
+    // tell the candidate implementations apart — on a chain they all agree.
+    //
+    // The oracle emits g1__i64, g2__bool, h2__bool, h1__i64. A naive LIFO drain gives
+    // g2, h2, g1, h1; a FIFO over a growing list gives g1, g2, h1, h2. The register's
+    // own prescription for D24 was the naive LIFO, i.e. the wrong one — emission
+    // follows DISCOVERY order, and the LIFO stack only decides which body is re-walked
+    // next. The two branches sit at different type arguments so they cannot dedup
+    // against each other and silently stop testing one route.
+    //
+    // The exit code is the weak assertion — it is 42 under all three orderings. The
+    // real pin is the codegen differential over `tests/pass`.
+    assert_eq!(run_exit("c16_transitive_mono_order.sentinel"), 42);
 }

@@ -331,10 +331,17 @@ fn dump_generic_call(out: &mut Vec<u8>, fid: i64, ca: Args, src: &[u8], c: &mut 
     }
     // (Bar B / generics-b) codegen: record this monomorphic instance (for later mono
     // emission) + stash the inferred type-args so the following `cg_emit_call` mangles
-    // the callee (`id__i64`). Recording is skipped during a mono re-walk (`cg_mono_on`)
-    // — its nested generic calls are concrete but the corpus has none (no transitive).
+    // the callee (`id__i64`).
+    //
+    // (register D24) Recording happens on the SEED walk and on the DISCOVERY pass, and
+    // is skipped only on the EMISSION pass — where every instance is already recorded
+    // and re-recording would be a no-op at best. This used to skip on `cg_mono_on`
+    // alone, i.e. on every mono re-walk, which is why the worklist had NO transitive
+    // closure: a generic reached only through another generic's body was called and
+    // never defined (`llvm-as`: "use of undefined value '@wrap__i64'").
     if cg_on(c) {
-        if (*c).cg_mono_on {
+        let cg_discovering: bool = (*c).cg_mute;
+        if (*c).cg_mono_on && cg_discovering == false {
             0
         } else {
             cg_mono_record(c, fid, &subst);
