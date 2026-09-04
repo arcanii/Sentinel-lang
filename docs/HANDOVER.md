@@ -124,7 +124,7 @@ reference as you work through the milestones.
 > confirming nothing pre-existing is newly refused; oracle-vs-scg byte-equality on the new
 > fixture at types, mir and llvm; and the secret-taint check in both directions.
 
-### ▶ RESUME HERE (2026-09-04 — committed at `fbccc2b`, four-check GREEN (**exactly the 18 known Windows failures**), both bootstrap fixed points byte-identical, tree CLEAN, **not pushed**. This session closed **D17** (`6337bea`), **D31** (`6f57d6a`), **D34** (`b9c0aa7`), **D24+D25+D26** (`3b6bfa1`) and **D29** (`fbccc2b`), and DELETED two `DEFERRED_PROGRAMS` entries — the only proof this project accepts for that list (six remain). Register: 41 items, 15 done. ⚠ **TREAT A REGISTER ENTRY THAT NAMES A FIX AS A HYPOTHESIS** — D24's prescription was wrong, and the program it was pinned on was the degenerate case where every candidate fix looked right; construct the input that distinguishes the CANDIDATES, not just one that reproduces the bug. ⚠ **THE REVIEWS KEEP FINDING WHAT THE FOUR-CHECK CANNOT** — this session: a fail-closed→fail-open regression on a security boundary (D34), a SILENT wrong-output regression with `llvm-as` clean on it that four attack lenses missed and only the settling lens found (D25), a fix already made in the oracle re-made as a bug in the mirror (D25), and a rule I wrote in a comment and did not apply one file over (D24). ⚠ A SECURITY-CLASS finding in the SHIPPING compiler is tracked privately with the maintainer and is deliberately not described here, in any commit message, or in any reachable git object — see the caveat block; **D35 is blocked behind it**. **NEXT:** D36/D37/D39 (the container and generic `scg` gaps), or D33→D30 together (f64/ptr — D33 blocks D30), or one of the six remaining deferred programs. Newly filed this session: **D35-D41**.)
+### ▶ RESUME HERE (2026-09-04 — committed at `8b0e64c`, four-check GREEN (**exactly the 18 known Windows failures**), both bootstrap fixed points byte-identical, tree CLEAN. `origin/main` is at `5325e6d`; the README + D19 redaction commits are **unpushed** — I push, you don't. This session closed **D17** (`6337bea`), **D31** (`6f57d6a`), **D34** (`b9c0aa7`), **D24+D25+D26** (`3b6bfa1`) and **D29** (`fbccc2b`), DELETED two `DEFERRED_PROGRAMS` entries (six remain), and moved **D19** to the private channel. Register: 41 items, 15 done, D19 redacted. ⚠ **TREAT A REGISTER ENTRY AS A HYPOTHESIS — ABOUT ITS FIX *AND* ABOUT ITS SEVERITY.** D24's prescribed fix was wrong, and the program it was pinned on was the degenerate case where every candidate looked right. D19's entry said its collision was "NOT constructed end-to-end — TAG level only"; constructing it took an hour and produced a **silently miscompiled running binary**, which is what set the item's priority wrong for months. ⚠ **THE REVIEWS KEEP FINDING WHAT THE FOUR-CHECK CANNOT** — this session: a fail-closed→fail-open regression on a security boundary (D34), a SILENT wrong-output regression with `llvm-as` clean on it that four attack lenses missed and only the settling lens found (D25), a fix already made in the oracle re-made as a bug in the mirror (D25), and a rule I wrote in a comment and did not apply one file over (D24). ⚠ TWO SECURITY-CLASS findings in the SHIPPING compiler are tracked privately with the maintainer and are deliberately not described here — see the caveat block. **D35 is blocked behind one of them; D19 IS the other.** If you find yourself in the container refcount/drop path, or in the cross-unit symbol mangling / `linkonce_odr` dedup, **ask first**. **NEXT:** D36/D37/D39 (the container and generic `scg` gaps), or D33→D30 together (f64/ptr — D33 blocks D30), or one of the six remaining deferred programs. Newly filed this session: **D35-D41**.)
 
 > **▶ THE OPEN MENU (2026-08-30) — real remaining work, verified against the repo.**
 >   1. **`select` over channels** — the flagship concurrency gap. Its RUNTIME is already PINNED
@@ -463,22 +463,13 @@ reference as you work through the milestones.
 >      runs correctly (verified end to end). It is the two PRINTING back ends that emit
 >      invalid IR. A1 added `process`/`sealedchannel` to this class deliberately — see D5.
 >
->      **D19 — the `linkonce_odr` dedup's `$`-separator justification was FALSE** (comments
->      corrected in the A1 commit; NO code change, and none is safe without thought).
->      `mangle_type_dedup` `$`-joins a module path onto a type name and its comment claimed
->      `$` "can't appear in a bare type name or path segment, so distinct origins never
->      collide". The lexer accepts `$` inside an identifier — added deliberately so merged
->      source round-trips — so `struct util$geo$Point` compiles and tags identically to
->      module `util::geo`'s `Point` (verified by compiling it), and module `util`'s
->      `struct geo$Point` would too. What actually keeps two distinct instantiations off one
->      `linkonce_odr` symbol is `mono_args_dedup_safe` requiring a KNOWN ORIGIN, not the
->      separator. **So that gate is load-bearing and must not be widened on the old belief** —
->      and the ABI doc already contemplates widening it ("class / generic-instance args +
->      trait/class-method dedup remain the deferred tail"). Same species as the
->      `is_process_channel_elem` bug: a fence resting on a false premise about the grammar.
->      NOT constructed end-to-end (a two-module `--separate` build; the four
->      `separate_*_linkonce_*` tests fail on Windows at `link.exe` for unrelated reasons), so
->      the aliasing is shown at the TAG level only — that much is certain from the code.
+>      **D19 — REDACTED.** A security-class finding on the `linkonce_odr` cross-unit
+>      dedup path, in the SHIPPING compiler. It is tracked privately with the maintainer
+>      and is deliberately not described here. `mono_args_dedup_safe`'s KNOWN-ORIGIN
+>      requirement is load-bearing: **do not widen that gate, do not rely on the
+>      separator, and ask before working this item.** The `abi-v1` deferred tail
+>      ("class / generic-instance args + trait/class-method dedup") is exactly the
+>      widening to ask about first.
 >
 >      **D20 — `scg` has no unknown-type diagnostic: an unrecognised type name in type
 >      position silently resolves to handle 0 (`i64`).** Verified with `Bogus`, `Task<i64>`,
