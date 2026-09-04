@@ -14,7 +14,44 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
-**Latest (2026-09-03b) — the register's D24, D25 and D26 are closed: `scg` now closes
+**Latest (2026-09-03c) — the register's D29 is closed: `scg` strips the secret before
+the channel width dispatch** (`fbccc2b`). Two lines. The in-process CHANNEL arms
+dispatched element width on a raw type HANDLE, so a `secret` element — an interned
+handle, not a scalar code — matched no width arm and fell into the pointer catch-all,
+emitting a bogus `ptrtoint` on send AND a bogus `inttoptr` on recv. The catch-all stays:
+it is load-bearing for `Channel<Channel<i64>>`, and `secret Channel<i64>` still lands in
+it correctly because stripping unwraps to a handle still >= `tbase()`.
+
+**This is the OPPOSITE call from D34**, where the process-pipe encode was GATED and
+deliberately not stripped. The distinction is ADR 0066 D8's own — "In-process thread
+boundary → NO fence. Cross-process / IPC boundary → fence" — and D8 names the in-process
+channel by hand, calling secrets over it "a *feature*: it enables parallel constant-time
+crypto over secret data". The review attacked it from four directions and it held: every
+escape path (process pipe, the `sealed_channel` bridge, FFI, spawn, a declassify-free
+public read) is independently refused, and `Shared<secret T>` / `Mutex<secret T>` are
+already shipped policy on the sibling containers.
+
+**⚠ D8 also says "`recv` must *not* strip the qualifier".** Compatible, and the arm now
+says why: D8's invariant is TYPE-level so the receiver stays taint-checked, while this
+strips a LOCAL used only for the width conversion — `rty` is untouched and the caller
+emits the typed dump and MIR node from the unstripped type before codegen runs.
+Stripping a WIDTH is not stripping a QUALIFIER. A review lens also established the wider
+frame: **`scg` does not implement `secret_leak` at all**, so it emits clean IR for
+`if <secret bool>` too. It is a codegen mirror, not the taint oracle.
+
+**⚠ The fix is UNPINNED and structurally unpinnable by the current harness** — the
+differentials `continue` on an oracle-rejected program before `scg` runs, so a straight
+revert is caught by nothing and three independent sweeps (347, 348, 380 programs) move
+zero. The strongest evidence it is right is that post-change `Channel<secret u8>` is
+byte-identical to the oracle's `Channel<u8>` — exactly the lowering M1.4c-2 needs. D8's
+obligation of a `tests/pass` fixture plus a `tests/ui` rejection is still unmet and is
+carried into M1.4c-2.
+
+Four sites that asserted the opposite of what now ships were corrected in the same
+commit, all describing the channel catch-all as safe "because its element map rejects
+`secret` outright". It was not safe; it was unreachable through the oracle.
+
+**Previous (2026-09-03b) — the register's D24, D25 and D26 are closed: `scg` now closes
 both of its generic walks** (`3b6bfa1`). All three were verified on
 `examples/lang/generic_calls_generic.sentinel`, whose `DEFERRED_PROGRAMS` entry naming
 all three is DELETED — the only proof this project accepts for that list.
