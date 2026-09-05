@@ -1,0 +1,40 @@
+// ADR 0059 Phase 1b / filed-defect register D54: the `&mut [u8]` export param, and the
+// header it generates. Both byte-slice forms in one library, deliberately:
+//
+//   * `fill(dst: &mut [u8], v: i64)` — Sentinel WRITES through the caller's buffer, so
+//     the generated prototype must be `uint8_t*`;
+//   * `total(src: &[u8])` — Sentinel only reads, so it must stay `const uint8_t*`.
+//
+// ⚠ WHY BOTH, AND WHY THIS FILE EXISTS. `emit_c_header` used to render EVERY byte-slice
+// param `const uint8_t*`, so a generated header promised a read-only pointer to memory
+// the callee writes through. A downstream C++ host (Sentinel-IDE) trusted the header,
+// wrote through the const pointer, and hit an access violation — with no compiler
+// diagnostic anywhere, because nothing in the pipeline checks that the header's promise
+// matches the callee's behaviour. A fixture with only the `&mut` form would go green
+// again the moment someone "simplified" the rendering back to an unconditional
+// `uint8_t*`, which breaks the shared form instead. The pair is the pin.
+//
+// The other export demonstrators in this directory are exercised end-to-end through a C
+// driver, which needs a `cc` this repo's Windows CI does not have. This one asserts on
+// the generated HEADER TEXT alone, so it runs everywhere.
+
+export "C" fn fill(dst: &mut [u8], v: i64) -> i64 {
+    let n: i64 = len(*dst);
+    let mut i: i64 = 0;
+    while i < n {
+        (*dst)[i] = i64_to_u8(v);
+        i = i + 1;
+    }
+    n
+}
+
+export "C" fn total(src: &[u8]) -> i64 {
+    let n: i64 = len(*src);
+    let mut i: i64 = 0;
+    let mut acc: i64 = 0;
+    while i < n {
+        acc = acc + u8_to_i64((*src)[i]);
+        i = i + 1;
+    }
+    acc
+}

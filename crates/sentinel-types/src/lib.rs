@@ -786,8 +786,14 @@ fn is_ffi_safe(ty: Type) -> bool {
 
 /// ADR 0059 Phase 1b: `true` iff `ty` is `&[u8]` / `&mut [u8]` — a reference to
 /// a byte array. Such a param is presented to C as the idiomatic
-/// `(const uint8_t* data, int64_t len)` pair (the export wrapper rebuilds the
-/// Sentinel `[u8]` fat pointer internally). The buffer ABI for byte-slice
+/// `(uint8_t* data, int64_t len)` pair (the export wrapper rebuilds the
+/// Sentinel `[u8]` fat pointer internally). ⚠ (register D54) The pointer is
+/// `const`-qualified for `&[u8]` ONLY; `&mut [u8]` renders a plain `uint8_t*`,
+/// because the header must tell a C caller which of its buffers Sentinel writes
+/// through. This comment asserted `const` for BOTH forms until D54, and a
+/// downstream host that trusted the header hit an access violation.
+/// The rendering itself lives in the driver (`byte_slice_ref_header_mut`); this
+/// predicate only decides byte-slice-ness, so it stays a `bool`. The buffer ABI for byte-slice
 /// EXPORT params; a non-byte-slice ref or an owned `[u8]` return is not yet
 /// FFI-safe (later phases).
 fn is_byte_slice_ref(ty: Type, refs: &[RefData]) -> bool {

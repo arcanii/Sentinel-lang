@@ -1560,9 +1560,13 @@ fn run_build_lib(
 }
 
 /// ADR 0059: bundle the emitted object together with the runtime staticlib into
-/// ONE self-contained `.a` (so a consumer links a single archive). macOS uses
-/// `libtool -static`; the Sentinel toolchain currently targets macOS (Linux's
-/// `ar`-MRI path is a follow-up).
+/// ONE self-contained archive (so a consumer links a single file). THREE branches:
+/// MSVC `lib.exe`, macOS `libtool -static`, and the Linux `ar`-MRI path.
+/// ⚠ (register D55) This comment said "the Sentinel toolchain currently targets
+/// macOS (Linux's `ar`-MRI path is a follow-up)" long after all three branches
+/// existed, and ADR 0059's prose is still macOS-shaped for the same reason. The
+/// Windows branch in particular is load-bearing for a downstream consumer and
+/// was documented nowhere.
 fn archive_lib(object: &Path, lib: &Path) -> Result<(), String> {
     let runtime = find_runtime()?;
     if cfg!(target_os = "windows") {
@@ -1678,18 +1682,32 @@ fn c_type_name(ty: sentinel_types::Type) -> Option<&'static str> {
     }
 }
 
-/// ADR 0059 Phase 1b: `true` iff `ty` is `&[u8]` / `&mut [u8]` — presented to
-/// C as a `(const uint8_t* data, int64_t len)` pair in the generated header.
-fn is_byte_slice_ref_header(ty: sentinel_types::Type, typed: &sentinel_types::TypedProgram) -> bool {
+/// ADR 0059 Phase 1b / register D54: `Some(mutable)` iff `ty` is `&[u8]` or
+/// `&mut [u8]` — presented to C as a `(uint8_t* data, int64_t len)` pair, with
+/// the pointer `const`-qualified only for the SHARED form.
+///
+/// ⚠ THE MUTABILITY IS THE WHOLE POINT OF THE RETURN TYPE. This used to answer a
+/// bare `bool` and the caller rendered `const uint8_t*` for both forms, so a
+/// generated header advertised a READ-ONLY pointer to memory Sentinel writes
+/// through. A downstream host that trusted the header reproduced an access
+/// violation, with no compiler diagnostic anywhere — the const-ness is a promise
+/// the header makes and the callee breaks. Keep the two forms distinguishable
+/// here; do not collapse this back to a predicate.
+fn byte_slice_ref_header_mut(
+    ty: sentinel_types::Type,
+    typed: &sentinel_types::TypedProgram,
+) -> Option<bool> {
     if let sentinel_types::Type::Ref(id) = ty {
         if let Some(rd) = typed.refs.get(id.0 as usize) {
-            return matches!(
+            if matches!(
                 rd.inner,
                 sentinel_types::Type::Array(sentinel_types::ArrayElem::U8)
-            );
+            ) {
+                return Some(rd.mutable);
+            }
         }
     }
-    false
+    None
 }
 
 /// ADR 0059: write a C header from the `export "C"` signatures — `#include
@@ -1723,10 +1741,16 @@ fn emit_c_header(typed: &sentinel_types::TypedProgram, header: &Path) -> Result<
         };
         let mut pieces: Vec<&str> = Vec::new();
         for pty in sig.param_types.iter() {
-            // ADR 0059 Phase 1b: a `&[u8]` param expands to the idiomatic C
-            // `(const uint8_t* data, int64_t len)` pair.
-            if is_byte_slice_ref_header(*pty, typed) {
-                pieces.push("const uint8_t*");
+            // ADR 0059 Phase 1b: a byte-slice param expands to the idiomatic C
+            // `(uint8_t* data, int64_t len)` pair. (register D54) `&[u8]` is
+            // `const`-qualified and `&mut [u8]` is NOT — the header has to tell
+            // a C caller which of its buffers Sentinel may write through.
+            if let Some(mutable) = byte_slice_ref_header_mut(*pty, typed) {
+                pieces.push(if mutable {
+                    "uint8_t*"
+                } else {
+                    "const uint8_t*"
+                });
                 pieces.push("int64_t");
             } else {
                 pieces.push(

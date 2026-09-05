@@ -1400,9 +1400,12 @@ pub fn compile_to_object_for_module(
         // (Sentinel-ABI) body lives under `<name>__sentinel_impl` (declared in
         // Pass 1, body in Pass 2); this wrapper, under the BARE C `<name>`,
         // translates the boundary:
-        //   * each `&[u8]` param is presented to C as a
-        //     `(const uint8_t* data, int64_t len)` pair, rebuilt into the Sentinel
-        //     `{ i64 len, ptr data }` fat pointer on the stack and forwarded;
+        //   * each byte-slice param is presented to C as a
+        //     `(uint8_t* data, int64_t len)` pair — `const`-qualified in the
+        //     header for `&[u8]` and NOT for `&mut [u8]` (register D54) —
+        //     rebuilt into the Sentinel `{ i64 len, ptr data }` fat pointer on
+        //     the stack and forwarded. The wrapper's own lowering is identical
+        //     for both; only the generated header differs;
         //   * value params (`i64`/`f64`) pass straight through;
         //   * a value return (`i64`/`f64`) is forwarded straight back;
         //   * a `[u8]` return (A7) is handed to C via TWO trailing out-params
@@ -2934,7 +2937,10 @@ fn walk_expr_for_mono(
 /// this function with a non-empty path.
 /// ADR 0059 Phase 1b: `true` iff `ty` is `&[u8]` / `&mut [u8]` (a reference to
 /// a byte array) — the export buffer-ABI param type presented to C as a
-/// `(const uint8_t* data, int64_t len)` pair.
+/// `(uint8_t* data, int64_t len)` pair. ⚠ (register D54) `const`-qualified for
+/// the SHARED form only; this said `const` for both until D54. The mutability
+/// does not reach codegen — it is a header-text distinction — so this predicate
+/// is correct as a `bool`; see the driver's `byte_slice_ref_header_mut`.
 fn is_byte_slice_ref_cg(ty: Type, program: &TypedProgram) -> bool {
     if let Type::Ref(id) = ty {
         if let Some(rd) = program.refs.get(id.0 as usize) {

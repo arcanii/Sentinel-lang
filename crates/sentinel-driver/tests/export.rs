@@ -367,6 +367,58 @@ fn lib_without_exports_is_rejected() {
 /// The export path is unused by the build-and-run example harness; this asserts
 /// the demonstrator source files exist (so a rename can't silently orphan them).
 #[test]
+fn export_header_const_qualifies_shared_byte_slices_only() {
+    // ADR 0059 Phase 1b / register D54. `emit_c_header` rendered EVERY byte-slice param
+    // `const uint8_t*`, so a generated header advertised a READ-ONLY pointer to memory
+    // Sentinel writes through. A downstream C++ host trusted it, wrote through the const
+    // pointer and hit an access violation — with no compiler diagnostic, because nothing
+    // checks that the header's promise matches the callee's behaviour.
+    //
+    // ⚠ BOTH DIRECTIONS ARE ASSERTED ON PURPOSE. Checking only the `&mut` form would go
+    // green again under an unconditional `uint8_t*`, which breaks the shared form
+    // instead. The pair is what pins the distinction.
+    //
+    // Header text only — no `cc` — so unlike its sibling export tests this one runs on
+    // Windows too.
+    let root = repo_root();
+    let dir = temp_dir("mut_buffer_header");
+    let lib_src = dir.join("mut_buffer_lib.sentinel");
+    std::fs::copy(root.join("examples/export/mut_buffer_lib.sentinel"), &lib_src)
+        .expect("copy mut_buffer_lib.sentinel");
+    let lib_a = dir.join("libmutbuf.a");
+    let header = dir.join("mutbuf.h");
+
+    let build = Command::new(env!("CARGO_BIN_EXE_snc"))
+        .arg("build")
+        .arg("--lib")
+        .arg(&lib_src)
+        .arg("-o")
+        .arg(&lib_a)
+        .arg("--emit-header")
+        .arg(&header)
+        .output()
+        .expect("run snc build --lib");
+    assert!(
+        build.status.success(),
+        "snc build --lib failed; stderr:
+{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+
+    let h = std::fs::read_to_string(&header).expect("read header");
+    assert!(
+        h.contains("int64_t fill(uint8_t*, int64_t, int64_t);"),
+        "a `&mut [u8]` param must NOT be const-qualified (register D54):
+{h}"
+    );
+    assert!(
+        h.contains("int64_t total(const uint8_t*, int64_t);"),
+        "a `&[u8]` param must stay const-qualified:
+{h}"
+    );
+}
+
+#[test]
 fn export_demonstrator_files_present() {
     let root = repo_root();
     assert!(root.join("examples/export/ct_select.sentinel").exists());
@@ -376,4 +428,6 @@ fn export_demonstrator_files_present() {
     assert!(root.join("examples/export/crypto_lib.sentinel").exists());
     assert!(root.join("examples/export/crypto_driver.c").exists());
     assert!(root.join("examples/export/dlopen_driver.c").exists());
+    // register D54: header-only demonstrator (no C driver — it needs no `cc`).
+    assert!(root.join("examples/export/mut_buffer_lib.sentinel").exists());
 }

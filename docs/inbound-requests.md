@@ -36,7 +36,7 @@ written, two are partly true, none were wrong.
 |---|---|---|---|---|
 | **R1** | secure-zero for `[secret u8]` / `Vec<secret u8>` | STILL-TRUE | **NEEDS-ADR** | medium |
 | **R2** | host-controllable failure path for runtime aborts | STILL-TRUE | **NEEDS-ADR** | small |
-| **R3** | `--emit-header` marks `&mut [u8]` params `const` | STILL-TRUE | **DEFECT** | small |
+| ~~R3~~ | `--emit-header` marks `&mut [u8]` params `const` | **DONE** | D54, landed | small |
 | R4 | `chacha20poly1305_open` in the stdlib | STILL-TRUE | BACKLOG | small |
 | R5 | bulk `[secret u8]` throughput (opt-in `-O`, LTO) | PARTLY-TRUE | NEEDS-ADR | large |
 | R6 | hoist `k_constants()` out of the SHA-256 hot path | **PARTLY-TRUE** | BACKLOG | small |
@@ -48,16 +48,22 @@ written, two are partly true, none were wrong.
 | R12 | capturing closures | STILL-TRUE | BACKLOG | large |
 | R13 | AES-256 key schedule + `pub` GF(2⁸)/GHASH | STILL-TRUE | BACKLOG | small |
 | R14 | chunked / streaming AEAD | STILL-TRUE | BACKLOG | small |
-| **R15** | documentation corrections | STILL-TRUE | **DEFECT** | small |
+| ~~R15~~ | documentation corrections | **DONE** | D55, landed | small |
 
 ### What to do first, and why
 
-**R3 is the cheapest real win in the list — about four lines.** `emit_c_header`
+**▶ R3 and R15 are DONE (2026-09-05).** The rest of this section is the case for what
+remains.
+
+**R3 was the cheapest real win in the list — about four lines.** `emit_c_header`
 ([`main.rs:1697`](../crates/sentinel-driver/src/main.rs)) pushes `"const uint8_t*"`
 unconditionally and never reads `RefData.mutable`, so a generated header advertises a
 read-only pointer to memory Sentinel writes through. The filer reproduced an access
-violation with no compiler diagnostic. Three stale source comments assert the const
-rendering and need correcting with it. **Filed as register D54.**
+violation with no compiler diagnostic. Three source comments asserted the const rendering for BOTH forms and were corrected
+with it. **Register D54, landed** — `fill(&mut [u8], i64)` now emits
+`int64_t fill(uint8_t*, int64_t, int64_t);` while `total(&[u8])` keeps
+`const uint8_t*`, pinned by `export_header_const_qualifies_shared_byte_slices_only`
+(header text only, so unlike its sibling export tests it runs on Windows).
 
 **R8 is about five lines** of comment in the same generated header — the correct library
 list already exists in the driver source and is simply never surfaced. The filer's own

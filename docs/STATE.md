@@ -14,7 +14,43 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
-**Latest (2026-09-05) — the register's D42 and D44 are closed: inkwell heap-boxes a nullable
+**Latest (2026-09-05b) — D47 option A, D54 and D55 are closed, and this repo now has an
+INBOUND-REQUEST LEDGER** (`2b32b78`, plus this slice). Three items, one theme: a downstream
+consumer had been telling us things we were not listening to.
+
+**Sentinel-IDE filed a 57 KB capability request against this compiler on 2026-07-19.** Nothing
+here referenced it — `grep -rniE 'Sentinel-IDE|capability request' docs/` returned zero hits.
+Seven weeks, no intake, from a consumer that ships 1,503 lines of Sentinel in a released binary
+through the C-ABI path. [`docs/inbound-requests.md`](inbound-requests.md) is now the ledger: it
+records the RESPONSE, not the request — the request text stays canonical in the filer's repo,
+because duplicating it would drift the way `BACKLOG.md`/`BACKLOG2.md` already have. All fifteen
+requests were re-verified against the live tree; **none had been satisfied in the meantime**, and
+only two were defects.
+
+**D54 — `--emit-header` promised C something the callee breaks.** It rendered EVERY byte-slice
+export param `const uint8_t*`, never reading `RefData.mutable`, so a generated header advertised
+a read-only pointer to memory Sentinel writes through. A host that trusted the header hit an
+access violation with **no compiler diagnostic anywhere** — nothing in the pipeline checks that
+the header's promise matches the callee's behaviour. ~4 lines. Pinned by a fixture carrying BOTH
+forms, because a `&mut`-only fixture goes green again under an unconditional `uint8_t*`.
+
+**D55 — three docs claimed capabilities the source contradicts, and the mechanism is the
+interesting part.** ADR 0059's A7, A8 and A9 amendments each restated the previous one's "STILL
+deferred" list instead of re-deriving it, so one true sentence propagated forward through three
+amendments and outlived what it described — then reached STATE.md, which outranks every other
+doc here. Both listed items ship: `&mut [u8]` export params (D54 exists *because* they work) and
+the Linux `cc -shared` path. Separately, `SENTINEL_DESIGN2.md` §9.3 advertised Argon2id, P-256
+and post-quantum primitives that exist nowhere in the tree, and its §15.1 "In 1.0" list repeated
+the Argon2id claim — the filer designed a password-KDF around that sentence before checking.
+§9.3 now lists what actually ships and says plainly that array-shaped secrets are neither
+mlock'd nor scrubbed. **When an amendment carries a capability list, re-measure it; do not copy
+it.** Nothing in the four-check reads these files.
+
+⚠ **Adding one file to `examples/` tripped the lexer and parser real-program count guards**
+(121 → 122). That is the tripwire working — it is what catches a program silently dropping out
+of a sweep — so bump it only when you know why it moved.
+
+**Previous (2026-09-05a) — the register's D42 and D44 are closed: inkwell heap-boxes a nullable
 generic-instance, and `scg`'s Pass-0 field renderer gains the three arms it claimed to mirror**
 (`b2dc569`). Two items, one in each Rust back end's mirror of the other.
 
@@ -2399,8 +2435,15 @@ resolution; no lex/parse/IR change) → no re-bless / `selfhost` mirror. Item-le
   `dlopen`s a `--shared`-built `digest_lib.dylib`, `dlsym`s `sha256_oneshot` +
   `sentinel_free_bytes`, and runs the verified-constant-time SHA-256 through the shared
   library (the substrate the Python/Rust binding generators build on). Still deferred: the
-  caller-provides-buffer convention (fixed-size, no-alloc outputs), the Linux `cc -shared`
-  path, and the per-language binding generators.
+  per-language binding generators.
+  ⚠ **(register D55) This sentence used to also list the caller-provides-buffer convention
+  and the Linux `cc -shared` path as deferred. BOTH SHIP** — `&mut [u8]` export params work
+  (register D54 exists because they do), and the Linux PIC-shared-object path is
+  implemented under ADR 0060 Phase 2. The claim was inherited from ADR 0059's amendment
+  chain, where the same stale list propagated through three amendments. **STATE.md outranks
+  every other doc in this repo**, so a wrong capability claim here is the most expensive
+  kind there is: a downstream consumer planned against it and lost time. Re-measure a
+  capability list against the source before restating it.
   The float follow-ups also landed: the libm transcendentals (above), `f64`⇄string conversion
   (`std/text/str::parse_f64`/`f64_to_str`), and `std/data/json` now parsing/serializing
   non-integer numbers as `Float(f64)`.

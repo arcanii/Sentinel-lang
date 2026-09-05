@@ -321,6 +321,28 @@ struct exports, and the Python/Rust generators are deferred to later phases.
   mirror stays deferred (driver-only; the emitted object is byte-identical — only the link
   step differs, so the ADR 0045 differential is untouched).
 
+> ⚠ **A11 — TWO OF THE ABOVE DEFERRALS ARE STALE, AND HAVE BEEN FOR A WHILE**
+> (register D55, 2026-09-05; reported by the Sentinel-IDE team, who lost time to them).
+> The A7/A8/A9 lines above each repeat "STILL deferred: the caller-provides-buffer
+> convention". **It is not deferred — it ships.** A `&mut [u8]` export parameter works and
+> is, by the filer's account, the single most useful part of this whole feature; register
+> D54 exists precisely because it works and `--emit-header` mis-declared it `const`.
+> **The Linux `cc -shared` + `soname` path also ships** (`crates/sentinel-driver/src/main.rs`,
+> "Linux: a PIC shared object with a soname (ADR 0060 Phase 2)"). And the `--shared` /
+> archive text is macOS-shaped throughout while `archive_lib` has had a working MSVC
+> `lib.exe` branch that this ADR never mentions.
+> What IS still deferred from those lists: the Python/Rust binding generators, and the
+> `scg` mirror.
+> ⚠ **The failure mode is worth naming, because it is not "someone forgot".** Each
+> amendment restated the previous one's deferral list rather than re-deriving it from the
+> source, so one true sentence propagated forward through three amendments and outlived
+> the thing it described. When an amendment carries a "still deferred" list, re-measure it
+> — do not copy it. Nothing in the four-check reads this file.
+> ⚠ Also outstanding here (register R8 in [`inbound-requests.md`](../inbound-requests.md),
+> not yet actioned): this ADR should carry the Windows system libraries a foreign host
+> must add to its own link line. The correct list exists in the driver source and is
+> surfaced nowhere.
+
 - **A10 — the "first `export` fixture" trigger has FIRED, and the mirror it required was ONE
   dispatcher arm.** A5/A6/A9 each defer the `scg` mirror on the stated precondition that *no
   corpus or `selfhost` source uses `export`*, so every differential is byte-identical by

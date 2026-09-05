@@ -385,15 +385,30 @@ than imposing uniform mitigation across the entire program.
 
 ### 9.3 Cryptographic Primitives
 
-The standard library exposes Argon2id, the SHA-2 and SHA-3 families,
-the AEAD constructions (AES-GCM, ChaCha20-Poly1305), the modern
-elliptic curves (Curve25519, P-256), and the post-quantum primitives
-selected by NIST. All operate on `secret`-tagged buffers by default and
-integrate with the broker's secret memory policies.
+⚠ **This section described an intended library, not the shipped one, and it was
+read as a capability list** — a downstream consumer designed a password-KDF around
+its Argon2id sentence before checking (register D55). Corrected 2026-09-05 against
+`sentinel_library/std/security/`; what follows is what EXISTS.
 
-Argon2id specifically is exposed as the standard password hashing and
-low-entropy key derivation primitive, with the broker ensuring its
-working memory is mlock'd, zeroed on completion, and isolated.
+The standard library exposes the SHA-2 family (SHA-256, SHA-512), SHA-3, HMAC and
+HKDF; the AEAD constructions ChaCha20-Poly1305 and AES-GCM, plus a keyed,
+sequence-numbered record sealer; SipHash; and the Edwards/Montgomery curves
+Curve25519 and Curve448 (X25519, X448, Ed25519, Ed448). All operate on
+`secret`-tagged buffers.
+
+**Not implemented, and not currently planned in this document:** Argon2id or any
+password-hashing KDF, BLAKE2, the NIST prime curves (P-256), and the post-quantum
+selections. Argon2id in particular is ecosystem/future work — see
+`docs/decisions/0030-go-no-go-tls-handshake.md`, which has always been the accurate
+statement. For password-based derivation today the closest shipped primitive is
+HKDF, which is a key-DERIVATION function and explicitly not a password hash;
+PBKDF2-HMAC-SHA256 is requested but not present (`docs/inbound-requests.md`, R7).
+
+⚠ **The broker's secret-memory policy does NOT cover these.** mlock + zero-on-drop
+applies to `Shared<secret T>` / `Mutex<secret T>` cells and only over a scalar
+payload. Every buffer in the list above is `[secret u8]`-shaped, and array-shaped
+secrets do not enter that path at all — they are neither locked nor scrubbed
+(register D55; the capability itself is requested as R1).
 
 ---
 
@@ -533,7 +548,14 @@ supply-chain security. Structured concurrency with actors.
 Cross-process safety via `@shared`. Classes with delegation and named
 trait implementations. Witness-table generics with opt-in
 monomorphization. Stable ABI. Reproducible builds. Standard
-cryptographic primitives including Argon2id.
+cryptographic primitives.
+
+⚠ **(register D55) This clause read "…including Argon2id", and 1.0 has since
+shipped, so it was a claim about the delivered product rather than a plan.**
+There is no Argon2 implementation anywhere in the tree. §9.3 above lists what the
+crypto library actually contains. The rest of this section is the pre-1.0 scope
+plan as written and has not been re-audited against the shipped compiler — read
+[`STATE.md`](STATE.md) for delivered status, not this list.
 
 ### 15.2 Research Track (Post-1.0)
 
