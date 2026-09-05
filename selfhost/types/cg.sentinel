@@ -169,17 +169,14 @@ fn cg_is_nullable(c: &mut TyCtx, h: i64) -> bool {
 // rendered `{ i1, %Node_i64 }`: a self-referential aggregate, `llvm-as` "Cannot
 // allocate unsized type".
 //
-// ⚠ THE RUST SIDE ASKS THIS QUESTION IN EIGHT PLACES AND TWO OF THEM ANSWER IT WRONG —
-// so do NOT read this comment as "the Rust back ends are the reference, go copy them".
-// Measured (`grep -n 'NullableInner::Struct'`):
-//   SPELL THE PAIR (6) — `llvm_dump.rs` 2372 `NullLit`, 2388 the `WidenToNullable`
-//     REFUSAL, 4210 `llvm_ty`; `sentinel-codegen/src/lib.rs` 2205 `needs_drop`,
-//     2381 `llvm_basic_type`, 5159 the drop emitter.
-//   STRUCT-ONLY, i.e. still carrying the defect this helper fixes (2) —
-//     `sentinel-codegen/src/lib.rs` 8571 `NullLit` and 8722 `WidenToNullable`, both in
-//     inkwell's `lower_expr`. 8722 fails LLVM verification on a `?GI` widen; 8571 is
-//     harmless only because its payload is all-zero and LLVM folds a mistyped all-zero
-//     element list to a `zeroinitializer` of the target type. Both are filed.
+// ⚠ THE RUST SIDE ASKS THIS QUESTION IN EIGHT PLACES, and as of register D42 all eight
+// spell the pair — `llvm_dump.rs`'s `NullLit`, its `WidenToNullable` REFUSAL and
+// `llvm_ty`; `sentinel-codegen/src/lib.rs`'s `needs_drop`, `llvm_basic_type`, drop
+// emitter, `NullLit` and `WidenToNullable`. The last two were STRUCT-ONLY until D42 and
+// are the reason this paragraph exists: when D39 landed, the Rust side was NOT a clean
+// reference to copy from. Grep the set (`grep -n 'NullableInner::Struct'` over both
+// files) rather than trusting a count written here — this one has already been wrong
+// once, in the commit that introduced it, and line numbers rot on the first edit.
 //
 // ⚠ THE NARROWNESS IS LOAD-BEARING, NOT CAUTION, and the site that proves it is
 // `cgo_operand`. `?&T` / `?Channel<T>` / `?Guard<T>` also lower to a pointer, and in
@@ -586,6 +583,48 @@ fn ll_type_to(out: &mut Vec<u8>, c: &mut TyCtx, h: i64) -> i64 {
             append_str(out, "ptr")
         } else if cg_is_channel(c, hs) {
             // (ADR 0066 M1.2) a `Channel<T>` is an opaque `*SentinelChannel`.
+            append_str(out, "ptr")
+        } else if cg_is_process(c, hs) {
+            // (ADR 0066 M2.1) a `Process` is an opaque `*SentinelProcess`.
+            append_str(out, "ptr")
+        } else if cg_is_sealed_channel(c, hs) {
+            // (ADR 0066 M2.4a / ADR 0069) a `SealedChannel` is the same opaque ptr.
+            append_str(out, "ptr")
+        } else if cg_is_fn(c, hs) {
+            // (ADR 0070) a `Fn<T,R>` value is a bare function POINTER.
+            //
+            // (register D44) These three arms were missing while this function's own
+            // header claimed it "Mirrors `cgo_ty`'s mapping exactly" — it did not, and
+            // that false claim is why nobody looked. A `Fn`-typed field fell to the
+            // trailing `i64`, so `struct S { f: Fn<i64,i64>, n: i64 }` gave
+            // `%Struct.0 = type { i64, i64 }` against the oracle's `{ ptr, i64 }`.
+            // Oracle-accepted, so differentially LIVE and merely unreached.
+            //
+            // ⚠ IT IS THREE POSITIONS, NOT ONE, and the one that matters most is the one
+            // a first draft of this comment did not name. Measured, `Fn` in:
+            //   * a STRUCT field  — pre-fix `llvm-as` REJECTS (loud). Pinned by
+            //     `tests/pass/c70_fn_field_in_struct.sentinel`.
+            //   * a GENERIC-INSTANCE field — pre-fix `llvm-as` REJECTS (loud).
+            //   * a CLASS field   — pre-fix `llvm-as` is **CLEAN**. A function pointer
+            //     stored into an `i64` slot assembles happily, so the byte-COMPARE the
+            //     differential does is the ONLY thing that could ever catch it. Pinned
+            //     by `tests/pass/c70_fn_field_in_class.sentinel`.
+            // The struct and class modules are also the SAME LENGTH before and after
+            // (534 and 943 bytes respectively — oracle, pre-fix and post-fix all equal),
+            // so a byte-COUNT check sees nothing in either.
+            //
+            // ⚠ `cg_is_sealed_channel` IS DEAD TODAY, AND NOT FOR THE REASON A FIRST
+            // DRAFT OF THIS COMMENT GAVE. It said `SealedChannel` is "unknown type" in
+            // field position; that was measured on the bare atom. The real spelling is
+            // `SealedChannel<secret i64>`, the ORACLE ACCEPTS IT as a struct field and
+            // emits `ptr`, and `scg` still emits `i64` WITH this arm in place — because
+            // `type_of_typeexpr` (`interner.sentinel`) has no `SealedChannel` arm at
+            // all, so no kind-15 handle is ever minted from an annotation and this test
+            // never fires. That is a live divergence in its own right, filed separately;
+            // this arm is correct in advance of it. `Process` and `Task` genuinely are
+            // unspellable in field position (constructed). The arms are restored
+            // regardless, because the chain's job is to BE the mirror its header claims
+            // — a partial mirror is exactly what produced this defect.
             append_str(out, "ptr")
         } else if cg_is_shared(c, hs) {
             // (ADR 0071 M1.4a) a `Shared<T>` is an opaque `*SentinelShared`.

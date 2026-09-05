@@ -1,0 +1,45 @@
+// ADR 0070 / register D44: a `Fn<T,R>`-typed CLASS field. The sibling of
+// `c70_fn_field_in_struct.sentinel`, and the more important half of the pair.
+//
+// `scg`'s Pass-0 field renderer (`ll_type_to`) had no `cg_is_fn` arm, so a `Fn` field
+// fell to the trailing `i64` in every aggregate it renders. In a class that gives
+// `%Class.0 = type { i64, i64 }` against the oracle's `{ ptr, i64 }`.
+//
+// ⚠ THIS POSITION IS SILENT AND THE STRUCT ONE IS LOUD — that is why both exist.
+// Measured on the pre-fix binary:
+//   * struct field  → `llvm-as` REJECTS ("insertvalue operand and field disagree in
+//     type: 'ptr' instead of 'i64'"), so the validity gate would have caught it;
+//   * class field   → `llvm-as` is **CLEAN**. Storing a function pointer into an `i64`
+//     slot assembles without a word, so the codegen differential's byte-COMPARE is the
+//     ONLY thing in the harness that can see it. The two modules are even the same
+//     LENGTH (943 bytes for the oracle, for pre-fix `scg` and for post-fix `scg`
+//     alike), so a byte-COUNT check sees nothing either.
+// A defect that is loud in one aggregate kind and silent in another is exactly the
+// shape that survives a corpus sweep, and `ll_type_to` renders three of them (struct,
+// class, generic instance) from one chain.
+//
+// The exit code is 42 either way — `snc build` goes through inkwell, which was always
+// right. The pin is the differential.
+//
+// 40 + 2 = 42.
+fn inc(x: i64) -> i64 { x + 1 }
+
+class Holder {
+    let f: Fn<i64, i64>;
+    let n: i64;
+
+    pub init(g: Fn<i64, i64>) {
+        self.f = g;
+        self.n = 40;
+        0
+    }
+
+    pub fn read(self: &Self) -> i64 {
+        self.n
+    }
+}
+
+fn main() -> i64 {
+    let h: Holder = Holder::init(inc);
+    h.read() + 2
+}

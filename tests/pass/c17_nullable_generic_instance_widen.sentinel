@@ -1,0 +1,57 @@
+// C1.7.4b / ADR 0016 D6b over ADR 0015 D11, register D42: WIDENING a generic-struct
+// instance into a nullable — `let some: ?Bx<i64> = b;`. ADR 0015 D11 heap-boxes a
+// `?Struct` payload (alloc + store + pointer payload) and ADR 0016 D6b extended
+// `NullableInner` to instances, so `?Bx<i64>` takes the same box.
+//
+// inkwell implemented the box for `Struct` and let `GenericInstance` fall to the inline
+// branch, which passed a `%Bx_i64` VALUE into a slot `llvm_basic_type` types as `ptr`.
+// This program therefore did not COMPILE: it type-checked and then died inside
+// `sentinel-codegen`'s own `verify()` with "Invalid InsertValueInst operands!
+// %widen_payload = insertvalue { i1, ptr } { i1 true, ptr undef }, %Bx_i64 %b1, 1".
+// The polarity control is what shows it was a missing arm and not a deferral: the
+// identical `?Struct` widen (`let op: ?P = p;`) built and ran throughout.
+//
+// ⚠ WHY THIS FIXTURE ASSERTS ONLY `is_some`, AND NOT THE PAYLOAD. You cannot read a
+// heap-indirect nullable payload back in ANY of the three emitters: `unwrap_or` on a
+// `?Struct` or `?GI` feeds the raw `ptr` into a `select` typed at the payload struct
+// with no load through the box. `snc llvm` emits IR `llvm-as` rejects, `scg` reproduces
+// that invalid IR byte-for-byte, and `snc build` stops — but HOW it stops depends on the
+// shape, and both were measured: bind the result first (`let g: P = unwrap_or(o, d);`)
+// and you get a `verify_failed` diagnostic; use it directly (`unwrap_or(o, d).v`) and
+// inkwell PANICS at `enums.rs:333` before verify ever runs, which is the
+// no-panic-on-user-program-input rule broken on a program the type checker accepts.
+// That is register D47, and it is OLDER and WIDER than D42 — it applies to `?Struct`,
+// nominally supported since C1.6. So D42 completes the CONSTRUCTION half only, which is
+// exactly what this file pins.
+//
+// ⚠ THE CODEGEN DIFFERENTIAL CANNOT SEE THIS PROGRAM. The text oracle refuses the widen
+// ("widen-to-nullable of a struct/generic payload (heap-box) deferred"), so it is
+// skipped before `scg` runs; `scg`'s own `cg_widen` is unmirrored for the same reason.
+// The pin here is `snc build` + run, through inkwell. The front-end differentials
+// (lex/ast/resolve/types/borrow/effects/mir) DO compare it.
+//
+// The exit code carries one more assertion than it looks: the box is heap-allocated and
+// scope-exit dropped (`needs_drop` is true for a `?GI`, and the drop emitter frees the
+// payload when valid), so a double free or a free of a non-pointer would crash rather
+// than return 42. Verified that a double free really is observable here: a hand-built
+// two-`sentinel_free` program exits 0xC0000374 STATUS_HEAP_CORRUPTION.
+//
+// ⚠ WHAT THE EXIT CODE DOES *NOT* WITNESS: the box drop is SHALLOW. It frees the box and
+// does not recurse into the payload's own heap, so a payload that owns anything leaks
+// it — `struct Bx<T> { xs: [T] }` at `[i64]` measures 2 `sentinel_alloc` against 1
+// `sentinel_free`, while the same struct bound WITHOUT the box measures 1 and 1. The
+// `?Struct` control is byte-identical, so this is pre-existing ADR 0015 D11 behaviour
+// that D42 newly lets a `?GI` reach, not something D42 introduces. Filed separately.
+// This fixture's own payload owns no heap, so it is unaffected either way.
+//
+// 40 + 2 = 42.
+struct Bx<T> { v: T }
+
+fn main() -> i64 {
+    let b: Bx<i64> = Bx { v: 40 };
+    let some: ?Bx<i64> = b;
+    let none: ?Bx<i64> = null;
+    let a: i64 = if is_some(some) { 40 } else { 0 };
+    let c: i64 = if is_some(none) { 0 } else { 2 };
+    a + c
+}

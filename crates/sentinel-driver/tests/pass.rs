@@ -472,6 +472,17 @@ fn pass_c17_nullable_generic_instance() {
 }
 
 #[test]
+fn pass_c17_nullable_generic_instance_widen() {
+    // ADR 0016 D6b over ADR 0015 D11, register D42: widening a generic-struct instance
+    // into a nullable heap-boxes the payload. inkwell had the arm for `Struct` only, so
+    // this program type-checked and then failed its own `verify()` — a legal program the
+    // SHIPPING compiler could not build. Asserts `is_some` only: reading a heap-indirect
+    // payload back is broken in all three emitters (register D47), for `?Struct` too.
+    // 40 + 2 = 42.
+    assert_eq!(run_exit("c17_nullable_generic_instance_widen.sentinel"), 42);
+}
+
+#[test]
 fn pass_c17_go_no_go() {
     // ADR 0016 D12 phase-go: Pair<A, B> + make_pair / fst / snd +
     // pick_int composition. The full generic-struct + generic-fn
@@ -1200,6 +1211,27 @@ fn pass_c70_scg_fn_apply() {
     let r = build_and_run("c70_scg_fn_apply.sentinel");
     assert_eq!(r.exit, 42);
     assert_eq!(r.stdout, "");
+}
+
+#[test]
+fn pass_c70_fn_field_in_struct() {
+    // ADR 0070 / register D44: a `Fn<i64,i64>`-typed struct FIELD. `scg`'s Pass-0 field
+    // renderer had no `cg_is_fn` arm, so it emitted `%Struct.0 = type { i64, i64 }`
+    // against the oracle's `{ ptr, i64 }` — same 534-byte module, different bytes, and
+    // `llvm-as` rejects `scg`'s. The exit code is 42 either way (this path is inkwell,
+    // which was always right); the pin is the codegen differential's byte-compare.
+    assert_eq!(run_exit("c70_fn_field_in_struct.sentinel"), 42);
+}
+
+#[test]
+fn pass_c70_fn_field_in_class() {
+    // ADR 0070 / register D44, the SILENT half of the pair. A `Fn`-typed CLASS field
+    // gave `%Class.0 = type { i64, i64 }` against the oracle's `{ ptr, i64 }` — and
+    // unlike the struct-field sibling, `llvm-as` ACCEPTS the pre-fix module (a function
+    // pointer in an `i64` slot assembles fine), so the codegen differential's
+    // byte-compare is the only thing in the harness that can see it. Same 943-byte
+    // length before and after. 40 + 2 = 42.
+    assert_eq!(run_exit("c70_fn_field_in_class.sentinel"), 42);
 }
 
 #[test]

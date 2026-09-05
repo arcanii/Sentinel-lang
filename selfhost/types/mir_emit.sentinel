@@ -195,13 +195,18 @@ fn mir_widen(c: &mut TyCtx, w: bool, exp: i64) -> i64 {
 // differential skips them before scg runs, and scg has no refusal channel of its own
 // (register D38).
 //
-// ⚠ FIXING IT NEEDS THREE BACK ENDS, NOT TWO. Oracle-first: give `llvm_dump.rs` the
-// real heap box (alloc + store + pointer payload), then mirror it here. But the moment
-// `llvm_dump` stops refusing, the shape becomes corpus-legal and `snc build` starts
-// failing on it — inkwell's own `WidenToNullable`
-// (`crates/sentinel-codegen/src/lib.rs:8722`) matches `NullableInner::Struct(_)` alone
-// and passes a `%Bx_i64` VALUE into a `{ i1, ptr }` aggregate, which its `verify()`
-// rejects. inkwell has to be fixed in the same slice or ahead of it.
+// ⚠ FIXING IT NEEDS TWO BACK ENDS — inkwell's half is ALREADY DONE (register D42). Its
+// `WidenToNullable` used to match `NullableInner::Struct(_)` alone and pass the instance
+// VALUE into a `{ i1, ptr }` aggregate, which its own `verify()` rejected; it now
+// heap-boxes a `?GI` exactly as it always did a `?Struct`. So `snc build` compiles and
+// runs the shape TODAY, and what remains is oracle-first: give `llvm_dump.rs` the real
+// heap box (alloc + store + pointer payload), then mirror it HERE.
+//
+// ⚠ AND THIS FUNCTION IS THE ONLY THING STANDING BETWEEN THAT SLICE AND SILENTLY
+// INVALID IR. `scg` cannot refuse (register D38) and `cg_widen` has no struct/GI guard,
+// so the ONLY reason no `?GI` widen reaches the differential is the oracle's refusal.
+// Lift that refusal without mirroring this function and `scg` emits an unassemblable
+// module, exit 0, empty stderr, nothing red. Mirror first, un-defer second.
 fn cg_widen(c: &mut TyCtx, w: bool, exp: i64) -> i64 {
     if cg_on(c) {
         if w {

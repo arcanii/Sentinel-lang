@@ -8555,9 +8555,22 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
             }
             TypedExprKind::NullLit => {
                 // ADR 0014 D2: NullLit lowers to `{ i1 false, undef payload }`.
-                // C1.6 / ADR 0015 D11: for `?Struct`, the payload is
-                // a pointer (heap-indirected); the null case uses a
-                // null pointer.
+                // C1.6 / ADR 0015 D11 + C1.7.4b / ADR 0016 D6b: for `?Struct`
+                // AND `?GenericInstance` the payload is a pointer
+                // (heap-indirected), so the null case uses a null pointer.
+                //
+                // Register D42: `GenericInstance` used to be missing here, and
+                // this arm was correct only by accident. It fell to the `_`
+                // branch, which built `const_zero()` of the INSTANCE type — a
+                // `%Node_i64` aggregate — as the payload of a `{ i1, ptr }`
+                // named struct. `llvm_basic_type` (which types the aggregate)
+                // has always spelled the pair, so the two disagreed. It never
+                // miscompiled because the element list is ALL ZERO and LLVM
+                // folds such a mismatch to a `zeroinitializer` of the target
+                // type — measured with `llvm-objdump` on the emitted object:
+                // exactly pointer-sized-plus-flag bytes written, adjacent
+                // locals intact, on an assertions-off LLVM 18.1.8. That is not
+                // a property to keep relying on.
                 let nullable_inner = match expr.ty {
                     Type::Nullable(ni) => ni,
                     _ => unreachable!("type-check guarantees NullLit.ty is Nullable"),
@@ -8568,7 +8581,7 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                 };
                 let valid = self.context.bool_type().const_int(0, false);
                 let payload: BasicValueEnum = match nullable_inner {
-                    NullableInner::Struct(_) => {
+                    NullableInner::Struct(_) | NullableInner::GenericInstance(_) => {
                         // null pointer
                         self.context
                             .ptr_type(inkwell::AddressSpace::default())
@@ -8707,8 +8720,40 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
             TypedExprKind::WidenToNullable(inner) => {
                 // ADR 0014 D3: lower the inner T value and wrap.
                 // For primitives: `{ i1 true, T payload }` inline.
-                // C1.6 / ADR 0015 D11: for Struct, allocate the
-                // payload on the heap and wrap as `{ i1 true, ptr }`.
+                // C1.6 / ADR 0015 D11 + C1.7.4b / ADR 0016 D6b: for Struct AND
+                // GenericInstance, allocate the payload on the heap and wrap as
+                // `{ i1 true, ptr }`.
+                //
+                // Register D42: `GenericInstance` used to be missing here, and
+                // unlike its `NullLit` twin above this one was a REAL defect in
+                // `snc build`. `let o: ?Bx<i64> = b;` type-checks and then died
+                // in this crate's own `verify()` — "Invalid InsertValueInst
+                // operands! %widen_payload = insertvalue { i1, ptr }
+                // { i1 true, ptr undef }, %Bx_i64 %b1, 1" — because the `_` arm
+                // passed the instance VALUE into a slot `llvm_basic_type` types
+                // as `ptr`. The polarity control is what settles that it was a
+                // missing arm and not a deferral: the identical `?Struct` widen
+                // (`let op: ?P = p;`) built and ran here throughout.
+                //
+                // ⚠ The failure was LOUD, and that was protective: the drop
+                // emitter treats a `?GI` payload as an owned heap pointer and
+                // frees it, so had this verified it would have freed a struct
+                // value. Keep the two in step.
+                //
+                // The TEXT oracle (`snc llvm`) still refuses this shape
+                // ("widen-to-nullable of a struct/generic payload (heap-box)
+                // deferred"), so the codegen differential `continue`s on these
+                // programs BEFORE `scg` is ever run; only `snc build` runs them.
+                //
+                // ⚠ DO NOT READ THAT AS TWO SAFETY NETS. `scg` does NOT refuse
+                // this shape and CANNOT: it has no error channel in codegen mode
+                // (register D38), and its `cg_widen` carries no struct/GI guard
+                // at all — it emits the inline `insertvalue` chain for every
+                // nullable, exits 0 with empty stderr, and produces a module
+                // `llvm-as` rejects. The oracle's refusal is the SINGLE point of
+                // protection, and it is exactly the thing whoever un-defers this
+                // will remove. Mirror `cg_widen` first, or that slice ships
+                // silently invalid IR with no signal anywhere.
                 let nullable_inner = match expr.ty {
                     Type::Nullable(ni) => ni,
                     _ => unreachable!("WidenToNullable.ty is Nullable"),
@@ -8719,7 +8764,7 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                 };
                 let payload_val = self.lower_expr(inner, program)?;
                 let payload_in_struct: BasicValueEnum = match nullable_inner {
-                    NullableInner::Struct(_) => {
+                    NullableInner::Struct(_) | NullableInner::GenericInstance(_) => {
                         // Heap-allocate the inner struct, store the
                         // value, use the pointer as the payload.
                         let inner_ty = self.llvm_basic_type(inner.ty);

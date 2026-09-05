@@ -1,0 +1,29 @@
+// ADR 0070 / register D44: a `Fn<T,R>`-typed STRUCT FIELD. A `Fn` value is a bare
+// function pointer, so the Pass-0 aggregate must be `%Struct.0 = type { ptr, i64 }`.
+//
+// `scg`'s `ll_type_to` — the Pass-0 field renderer — had no `cg_is_fn` arm (nor
+// `cg_is_process` / `cg_is_sealed_channel`) while its own header claimed it "Mirrors
+// `cgo_ty`'s mapping exactly". The field fell through to the trailing `i64`, giving
+// `%Struct.0 = type { i64, i64 }` and an `insertvalue` `llvm-as` rejects with
+// "insertvalue operand and field disagree in type".
+//
+// ⚠ THE TWO MODULES ARE THE SAME LENGTH — measured on THIS program, 534 bytes for the
+// oracle, for pre-fix `scg` and for post-fix `scg` alike. A byte-COUNT check sees
+// nothing here. This is a pin only because the codegen differential does a
+// byte-COMPARE, and it is worth knowing that the two are not interchangeable when
+// triaging a sweep.
+//
+// The oracle accepts this program, so the divergence was differentially LIVE and merely
+// unreached: no corpus program had ever put a `Fn` in a struct field. That is the whole
+// reason this file exists — the exit code below would be 42 either way, because
+// `snc build` goes through inkwell, which was always right.
+//
+// 40 + 2 = 42.
+fn inc(x: i64) -> i64 { x + 1 }
+
+struct Holder { f: Fn<i64, i64>, n: i64 }
+
+fn main() -> i64 {
+    let h: Holder = Holder { f: inc, n: 40 };
+    h.n + 2
+}
