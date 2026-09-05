@@ -124,7 +124,7 @@ reference as you work through the milestones.
 > confirming nothing pre-existing is newly refused; oracle-vs-scg byte-equality on the new
 > fixture at types, mir and llvm; and the secret-taint check in both directions.
 
-### ▶ RESUME HERE (2026-09-05 — committed at `b2dc569`, four-check GREEN (1827 passed / **exactly the 18 known Windows failures**, identical failure set), all 9 differential stages and BOTH bootstrap fixed points byte-identical, tree CLEAN. `origin/main` is at `5325e6d`; everything after it is **unpushed** — I push, you don't. This session closed **D39** (`0bf7abb`) and **D42 + D44** (`b2dc569`), and filed **D42-D52**. Register: 52 items, 18 done, D19 redacted. ⚠ **A REGISTER ENTRY IS A HYPOTHESIS ABOUT ITS SCOPE**, and this session hit it TWICE — the second time in the slice that had just written the lesson down. D39 was filed as a nullable generic-instance *FIELD* defect and is every position a `?GI` is rendered; D44 was filed as a *struct*-field defect and is three positions, the third being a CLASS field where `llvm-as` is CLEAN, i.e. the only one the byte-compare alone can catch. Both times the omitted position was the one that mattered most. ⚠ **THE REVIEWS FIND PROSE, NOT CODE, ON SMALL CHANGES** — two five- and four-lens runs returned ZERO code defects and NINE false claims in my own commits' comments, four of them blocker-grade: a comment asserting a fail-CLOSED property ("and so does `scg`'s mirror") that is fail-OPEN, a reachability claim measured on the wrong spelling of a type, and two site censuses that a later commit in the same session falsified. **Re-measure every literal against the program printed beside it, and generate any site census with a grep at writing time.** ⚠ TWO SECURITY-CLASS findings in the SHIPPING compiler are tracked privately with the maintainer and are deliberately not described here — see the caveat block. **D35 is blocked behind one of them; D19 IS the other.** A THIRD was raised privately on 2026-09-05. If you find yourself in the container refcount/drop path, in class-field move tracking, or in the cross-unit symbol mangling / `linkonce_odr` dedup, **ask first**. **NEXT:** **D51** (`type_of_typeexpr` has no `SealedChannel` arm — differentially live, and likely the root of all THREE `sealed_*` deferred entries, so it may delete three at once), **D52** (those entries and D20 both assert valid-IR-on-both-sides and all three are `llvm-as`-invalid, with the gate disabled for exactly them), **D45** (a `null` argument to a monomorphised generic call), **D37+D43** together (same `-101` unbound-type-argument family), or D33→D30 (f64/ptr). **D47 option A has LANDED** (the refusal; options B/C still open). **D36 still needs a maintainer decision — tabulated in [`open-decisions.md`](open-decisions.md)** — D36 is the container drop path and its question splits in two; D47 is an ownership question, not a lowering bug. Six deferred programs remain.)
+### ▶ RESUME HERE (2026-09-05 — committed at `b2dc569`, four-check GREEN (1827 passed / **exactly the 18 known Windows failures**, identical failure set), all 9 differential stages and BOTH bootstrap fixed points byte-identical, tree CLEAN. `origin/main` is at `5325e6d`; everything after it is **unpushed** — I push, you don't. This session closed **D39** (`0bf7abb`), **D42 + D44** (`b2dc569`) and **D47 option A** (`2b32b78`), and filed **D42-D55**. It also triaged the Sentinel-IDE capability requests R1-R15 against the live tree — see [`inbound-requests.md`](inbound-requests.md); none had been satisfied, and only two are DEFECTS (D54/D55), the rest being absent capabilities that need an ADR or the backlog. Register: 55 items, 19 done, D19 redacted. ⚠ **A REGISTER ENTRY IS A HYPOTHESIS ABOUT ITS SCOPE**, and this session hit it TWICE — the second time in the slice that had just written the lesson down. D39 was filed as a nullable generic-instance *FIELD* defect and is every position a `?GI` is rendered; D44 was filed as a *struct*-field defect and is three positions, the third being a CLASS field where `llvm-as` is CLEAN, i.e. the only one the byte-compare alone can catch. Both times the omitted position was the one that mattered most. ⚠ **THE REVIEWS FIND PROSE, NOT CODE, ON SMALL CHANGES** — two five- and four-lens runs returned ZERO code defects and NINE false claims in my own commits' comments, four of them blocker-grade: a comment asserting a fail-CLOSED property ("and so does `scg`'s mirror") that is fail-OPEN, a reachability claim measured on the wrong spelling of a type, and two site censuses that a later commit in the same session falsified. **Re-measure every literal against the program printed beside it, and generate any site census with a grep at writing time.** ⚠ TWO SECURITY-CLASS findings in the SHIPPING compiler are tracked privately with the maintainer and are deliberately not described here — see the caveat block. **D35 is blocked behind one of them; D19 IS the other.** A THIRD was raised privately on 2026-09-05. If you find yourself in the container refcount/drop path, in class-field move tracking, or in the cross-unit symbol mangling / `linkonce_odr` dedup, **ask first**. **NEXT:** **D51** (`type_of_typeexpr` has no `SealedChannel` arm — differentially live, and likely the root of all THREE `sealed_*` deferred entries, so it may delete three at once), **D52** (those entries and D20 both assert valid-IR-on-both-sides and all three are `llvm-as`-invalid, with the gate disabled for exactly them), **D45** (a `null` argument to a monomorphised generic call), **D37+D43** together (same `-101` unbound-type-argument family), or D33→D30 (f64/ptr). **D47 option A has LANDED** (the refusal; options B/C still open). **D36 still needs a maintainer decision — tabulated in [`open-decisions.md`](open-decisions.md)** — D36 is the container drop path and its question splits in two; D47 is an ownership question, not a lowering bug. Six deferred programs remain.)
 
 > **▶ THE OPEN MENU (2026-08-30) — real remaining work, verified against the repo.**
 >   1. **`select` over channels** — the flagship concurrency gap. Its RUNTIME is already PINNED
@@ -163,7 +163,7 @@ reference as you work through the milestones.
 >      scalar-4 arm, which it now has. Also worth doing with it: `examples/math/quadratic.sentinel` and
 >      `sentinel_library/std/math/float.sentinel` currently reach only lex/ast, because
 >      `snc merge`'s Bar-A printer rejects both a float literal and `sqrt` (menu item 5).
->   4. **THE FILED-DEFECT REGISTER — FIFTY-TWO items (D1-D52); **D1, D2, D3, D5, D8, D9, D15, D16, D17, D24, D25, D26, D29, D31, D34, D39, D42 and D44 are DONE**, the rest verified against a pre-slice binary. MOST are
+>   4. **THE FILED-DEFECT REGISTER — FIFTY-FIVE items (D1-D55); **D1, D2, D3, D5, D8, D9, D15, D16, D17, D24, D25, D26, D29, D31, D34, D39, D42, D44 and D47(option A) are DONE**, the rest verified against a pre-slice binary. MOST are
 >      unregistered in any `DEFERRED_PROGRAMS` / `KNOWN_SCG_BUGS` list because no corpus program
 >      reaches them — but FOUR are, and the blanket "NONE" that stood here was falsified by
 >      this register's own new entries: D24/D25/D26 share the
@@ -1141,6 +1141,35 @@ reference as you work through the milestones.
 >      check that would notice disabled for it. Correcting D20 and the three entry strings
 >      is what stops the claim being re-derived; consider whether `deferred_reason` should
 >      suppress the BYTE comparison only, and leave `llvm_rejects` armed.
+>
+>      **▸ D54-D55 came from the Sentinel-IDE capability requests (2026-09-05). The full
+>      triage of R1-R15 is [`inbound-requests.md`](inbound-requests.md); only the two that
+>      are DEFECTS get register numbers, because the rest are absent capabilities rather
+>      than defects and belong in an ADR or the backlog.**
+>
+>      **D54 — `--emit-header` renders a `&mut [u8]` export parameter as
+>      `const uint8_t*`.** `emit_c_header` pushes `"const uint8_t*"` unconditionally
+>      (`crates/sentinel-driver/src/main.rs`, the `is_byte_slice_ref_header` branch) and
+>      never consults `RefData.mutable`, so the generated header advertises a READ-ONLY
+>      pointer to memory Sentinel writes through. The filer reproduced an access violation
+>      from a host that trusted the header, with no compiler diagnostic. ~4 lines: make the
+>      probe return the mutability instead of a bool and branch at its single call site.
+>      Three source comments assert the const rendering and must be corrected with it.
+>      ⚠ Low blast radius, and worth stating precisely: it is text generation DOWNSTREAM of
+>      verification, so it touches neither the `secret` fence (a `&mut [secret u8]` export
+>      is still refused) nor `abi-v1` — `const` is a C-header annotation, not part of the
+>      symbol or its calling convention, so this is not an `abi-v2` matter.
+>
+>      **D55 — `docs/STATE.md` lists two SHIPPED capabilities as "still deferred".** It
+>      says "Still deferred: the caller-provides-buffer convention …, the Linux
+>      `cc -shared` path". The Linux shared-object path is implemented
+>      (`crates/sentinel-driver/src/main.rs`, "Linux: a PIC shared object with a soname
+>      (ADR 0060 Phase 2)"), and `&mut [u8]` export parameters work — D54 exists precisely
+>      because they work and the header mis-declares them. **STATE.md outranks every other
+>      doc in this repo**, so a wrong capability claim there is the highest-authority wrong
+>      claim in the tree, and the filer lost time planning against a sibling of it. The
+>      request's own three bullets (an Argon2id claim with no implementation, and two stale
+>      ADR 0059 statements) travel with this one.
 >
 >   5. **Widen `snc merge`'s Bar-A source printer** — the highest-leverage COVERAGE item.
 >      `crates/sentinel-driver/src/source_dump.rs` rejects **98 of the 119** real programs
