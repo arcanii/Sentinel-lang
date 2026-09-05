@@ -124,7 +124,7 @@ reference as you work through the milestones.
 > confirming nothing pre-existing is newly refused; oracle-vs-scg byte-equality on the new
 > fixture at types, mir and llvm; and the secret-taint check in both directions.
 
-### ▶ RESUME HERE (2026-09-04b — committed at `0bf7abb`, four-check GREEN (1824 passed / **exactly the 18 known Windows failures**, zero new), all 9 differential stages and BOTH bootstrap fixed points byte-identical, tree CLEAN. `origin/main` is at `5325e6d`; everything after it is **unpushed** — I push, you don't. This session closed **D39** (`0bf7abb`) and filed **D42-D49**. Register: 49 items, 16 done, D19 redacted. ⚠ **A REGISTER ENTRY IS A HYPOTHESIS ABOUT ITS SCOPE, NOT ONLY ITS FIX AND SEVERITY.** D39 was filed as a nullable generic-instance *FIELD* defect; it is every position a `?GI` type or `null` constant is rendered, and the position the entry missed — a bare `let o: ?Bx<i64> = null;` — is the ORACLE-ACCEPTED one, i.e. the only reason the fix could be pinned at all. Read an entry's scope claim as something to falsify by construction before you plan around it. ⚠ **THE REVIEW FOUND NO CODE DEFECT AND FIVE FALSE CLAIMS IN MY OWN COMMIT'S PROSE**, which is the ratio to expect: an IR literal quoted with its fields in the wrong order (copied from the register entry, whose program declares them the other way), a site census short by five, "both Rust back ends do" (false for inkwell's VALUE constructions — that became D42), an anti-regression pair naming a fixture that pins the OPPOSITE branch, and an exit-code claim about a run that cannot happen. **Run the review on the prose, and re-measure every literal against the program printed beside it.** ⚠ TWO SECURITY-CLASS findings in the SHIPPING compiler are tracked privately with the maintainer and are deliberately not described here — see the caveat block. **D35 is blocked behind one of them; D19 IS the other.** If you find yourself in the container refcount/drop path, or in the cross-unit symbol mangling / `linkonce_odr` dedup, **ask first**. **NEXT:** **D42** (inkwell refuses a legal `?GI` widen — the only new item in the shipping back end), **D44** + **D45** (two differentially-LIVE `scg` gaps, both pinnable today), **D37+D43** together (same `-101` unbound-type-argument family), or D33→D30 (f64/ptr — D33 blocks D30). **D36 needs a maintainer decision first** (it is the container drop path, and its question splits in two — see its entry). Six deferred programs remain.)
+### ▶ RESUME HERE (2026-09-05 — committed at `b2dc569`, four-check GREEN (1827 passed / **exactly the 18 known Windows failures**, identical failure set), all 9 differential stages and BOTH bootstrap fixed points byte-identical, tree CLEAN. `origin/main` is at `5325e6d`; everything after it is **unpushed** — I push, you don't. This session closed **D39** (`0bf7abb`) and **D42 + D44** (`b2dc569`), and filed **D42-D52**. Register: 52 items, 18 done, D19 redacted. ⚠ **A REGISTER ENTRY IS A HYPOTHESIS ABOUT ITS SCOPE**, and this session hit it TWICE — the second time in the slice that had just written the lesson down. D39 was filed as a nullable generic-instance *FIELD* defect and is every position a `?GI` is rendered; D44 was filed as a *struct*-field defect and is three positions, the third being a CLASS field where `llvm-as` is CLEAN, i.e. the only one the byte-compare alone can catch. Both times the omitted position was the one that mattered most. ⚠ **THE REVIEWS FIND PROSE, NOT CODE, ON SMALL CHANGES** — two five- and four-lens runs returned ZERO code defects and NINE false claims in my own commits' comments, four of them blocker-grade: a comment asserting a fail-CLOSED property ("and so does `scg`'s mirror") that is fail-OPEN, a reachability claim measured on the wrong spelling of a type, and two site censuses that a later commit in the same session falsified. **Re-measure every literal against the program printed beside it, and generate any site census with a grep at writing time.** ⚠ TWO SECURITY-CLASS findings in the SHIPPING compiler are tracked privately with the maintainer and are deliberately not described here — see the caveat block. **D35 is blocked behind one of them; D19 IS the other.** A THIRD was raised privately on 2026-09-05. If you find yourself in the container refcount/drop path, in class-field move tracking, or in the cross-unit symbol mangling / `linkonce_odr` dedup, **ask first**. **NEXT:** **D51** (`type_of_typeexpr` has no `SealedChannel` arm — differentially live, and likely the root of all THREE `sealed_*` deferred entries, so it may delete three at once), **D52** (those entries and D20 both assert valid-IR-on-both-sides and all three are `llvm-as`-invalid, with the gate disabled for exactly them), **D45** (a `null` argument to a monomorphised generic call), **D37+D43** together (same `-101` unbound-type-argument family), or D33→D30 (f64/ptr). **D36 and D47 both need a maintainer decision first** — D36 is the container drop path and its question splits in two; D47 is an ownership question, not a lowering bug. Six deferred programs remain.)
 
 > **▶ THE OPEN MENU (2026-08-30) — real remaining work, verified against the repo.**
 >   1. **`select` over channels** — the flagship concurrency gap. Its RUNTIME is already PINNED
@@ -163,7 +163,7 @@ reference as you work through the milestones.
 >      scalar-4 arm, which it now has. Also worth doing with it: `examples/math/quadratic.sentinel` and
 >      `sentinel_library/std/math/float.sentinel` currently reach only lex/ast, because
 >      `snc merge`'s Bar-A printer rejects both a float literal and `sqrt` (menu item 5).
->   4. **THE FILED-DEFECT REGISTER — FORTY-NINE items (D1-D49); **D1, D2, D3, D5, D8, D9, D15, D16, D17, D24, D25, D26, D29, D31, D34 and D39 are DONE**, the rest verified against a pre-slice binary. MOST are
+>   4. **THE FILED-DEFECT REGISTER — FIFTY-TWO items (D1-D52); **D1, D2, D3, D5, D8, D9, D15, D16, D17, D24, D25, D26, D29, D31, D34, D39, D42 and D44 are DONE**, the rest verified against a pre-slice binary. MOST are
 >      unregistered in any `DEFERRED_PROGRAMS` / `KNOWN_SCG_BUGS` list because no corpus program
 >      reaches them — but FOUR are, and the blanket "NONE" that stood here was falsified by
 >      this register's own new entries: D24/D25/D26 share the
@@ -655,31 +655,34 @@ reference as you work through the milestones.
 >      site is Rust-side and D39 did not touch it). D42 and D48 are in the SHIPPING back
 >      end; read those first.**
 >
->      **D42 — inkwell has the SAME half-spelled nullable rule `scg` had, in two arms, and
->      one of them refuses a legal program.** The Rust side asks "does this `?T` payload
+>      **D42 — DONE (`b2dc569`).** inkwell had the SAME half-spelled nullable rule `scg`
+>      had, in two arms, and one of them refused a legal program. The Rust side asks "does this `?T` payload
 >      heap-indirect?" in EIGHT places. SIX spell the pair
 >      (`NullableInner::Struct(_) | GenericInstance(_)`): `llvm_dump.rs` 2372 `NullLit`,
 >      2388 the `WidenToNullable` refusal, 4210 `llvm_ty`; `sentinel-codegen/src/lib.rs`
 >      2205 `needs_drop`, 2381 `llvm_basic_type`, 5159 the drop emitter. TWO do not —
 >      `sentinel-codegen/src/lib.rs` **8571** (`NullLit`) and **8722**
 >      (`WidenToNullable`), both in inkwell's `lower_expr`.
->      * **8722 is a real defect in `snc build`.** `let o: ?Bx<i64> = b;` type-checks and
+>      * **8722 WAS a real defect in `snc build`.** `let o: ?Bx<i64> = b;` type-checked and
 >        then dies in inkwell's own `verify()`: "Invalid InsertValueInst operands!
 >        `%widen_payload = insertvalue { i1, ptr } { i1 true, ptr undef }, %Bx_i64 %b1, 1`".
 >        The polarity control settles that it is a MISSING ARM and not a deferral: the
->        identical `?Struct` widen (`let op: ?P = p;`) builds and RUNS 42, because 8722
+>        identical `?Struct` widen (`let op: ?P = p;`) built and RAN 42 throughout, because 8722
 >        heap-boxes for `Struct`. Loud, not silent — and the loudness is protective, since
 >        the drop emitter at 5159 would otherwise `free` a payload that is a struct VALUE.
->      * **8571 is currently harmless, and only by accident.** `?GI` falls to its `_` arm,
+>      * **8571 WAS harmless, and only by accident.** `?GI` fell to its `_` arm,
 >        which builds `const_zero()` of the INSTANCE type (`%Big_i64`, 32 bytes) as the
 >        payload of a `{ i1, ptr }`. It works because LLVM folds a mistyped ALL-ZERO
 >        element list to a `zeroinitializer` of the target type. Verified by construction,
 >        not assumed: `llvm-objdump` on the emitted object shows exactly 8+1 bytes written
 >        and the guard locals either side intact, on an assertions-OFF LLVM 18.1.8. It
 >        stops being correct the day a `NullLit` payload is non-zero.
->      Fix 8722 before or with any attempt to un-defer the heap-box widen (see D39's
->      deliberate regression) — otherwise `llvm_dump` stops refusing, the shape becomes
->      corpus-legal, and `snc build` starts failing on it.
+>      Both arms now spell the pair, so all EIGHT Rust sites agree. Pinned by
+>      `tests/pass/c17_nullable_generic_instance_widen.sentinel`, which asserts `is_some`
+>      only — see D47 for why the payload cannot be read back.
+>      **This satisfies the precondition `cg_widen`'s note used to carry**: un-deferring
+>      the oracle's heap-box is now a TWO-back-end job (`llvm_dump` + `scg`), not three.
+>      ⚠ **It also lets a `?GI` reach the SHALLOW box drop — see D50.**
 >
 >      **D43 — `scg` ABORTS on an oracle-accepted program when a generic fn's type
 >      argument is inferred only from the expected RETURN type.**
@@ -696,19 +699,27 @@ reference as you work through the milestones.
 >      they may share a fix, and they certainly share the "make an unbound type argument
 >      LOUD instead of an index" half.
 >
->      **D44 — `ll_type_to` is missing three dispatch arms `cgo_ty` has, so a `Fn`-typed
->      struct field renders `i64` where the oracle renders `ptr`.** `cgo_ty` dispatches
+>      **D44 — DONE (`b2dc569`).** `ll_type_to` was missing three dispatch arms `cgo_ty`
+>      has, so a `Fn`-typed field rendered `i64` where the oracle renders `ptr`. `cgo_ty` dispatches
 >      `cg_is_process` / `cg_is_sealed_channel` / `cg_is_fn`; `ll_type_to` does not, and
 >      falls to its trailing `i64`. `struct S { f: Fn<i64,i64>, n: i64 }` gives oracle
 >      `%Struct.0 = type { ptr, i64 }` against `scg`'s `{ i64, i64 }`; `llvm-as` rejects
 >      `scg` ("insertvalue operand and field disagree in type"). Oracle-accepted, so
 >      differentially LIVE and merely unreached.
->      ⚠ **Both modules are 510 bytes.** A byte-COUNT check sees nothing here; only the
->      byte-COMPARE catches it. Of the three missing arms only `Fn` is reachable —
->      constructed: `Process`, `SealedChannel` and `Task` are all "unknown type" in field
->      position — so the fixture can only pin that one. `ll_type_to`'s other callers are
->      class fields, generic-instance fields, the nullable payload, and `extern "C"`
->      declare signatures (whose ABI is public scalars only).
+>      ⚠ **IT WAS THREE POSITIONS, NOT THE ONE THIS ENTRY FIRST NAMED** — the same
+>      scope error D39 records, in the slice that fixed D39. Measured, `Fn` in:
+>      a STRUCT field (pre-fix `llvm-as` REJECTS — loud); a GENERIC-INSTANCE field
+>      (REJECTS — loud); and a **CLASS field, where `llvm-as` is CLEAN**. A function
+>      pointer in an `i64` slot assembles silently, so the differential's byte-COMPARE is
+>      the only thing in the harness that can see that one. Both pinned:
+>      `c70_fn_field_in_struct` (534 bytes) and `c70_fn_field_in_class` (943) — and each
+>      module is the SAME LENGTH before and after, so a byte-COUNT check sees neither.
+>      ⚠ **`cg_is_sealed_channel` LANDED DEAD, and the reason this entry first gave was
+>      wrong.** It said `SealedChannel` is "unknown type" in field position; that was
+>      measured on the bare atom. The real spelling is `SealedChannel<secret i64>`, the
+>      oracle ACCEPTS it as a struct field and emits `ptr`, and `scg` still emits `i64`
+>      with the arm in place — see D51. `Process` and `Task` genuinely are unspellable
+>      there (constructed).
 >
 >      **D45 — a `null` ARGUMENT to a call on a MONOMORPHISED generic fn takes its type
 >      prefix from the un-inferred i64 seam.** The oracle renders the callee's declared
@@ -734,9 +745,21 @@ reference as you work through the milestones.
 >      payload struct, with no load through the heap box:
 >      `%v7 = select i1 %v5, %Bx_i64 %v6, %Bx_i64 %v4` with `%v6 : ptr`. The oracle exits
 >      0, so the differential DOES run — and post-D39 `scg` is byte-identical to it, so
->      the differential is green over IR neither back end can assemble. Not silent
->      end-to-end: `snc build` refuses the same program at inkwell's `verify()`. The
->      `?Struct` half is older than D39; D39 extended the shape's reach to `?GI`.
+>      the differential is green over IR neither back end can assemble. The `?Struct` half
+>      is older than D39; D39 extended the shape's reach to `?GI`.
+>      ⚠ **`snc build` STOPS TWO DIFFERENT WAYS AND ONE OF THEM IS A PANIC**, measured:
+>      bind the result (`let g: P = unwrap_or(o, d);`) and inkwell reaches `verify()` and
+>      surfaces a diagnostic; use it directly (`unwrap_or(o, d).v`) and it PANICS at
+>      `inkwell-0.5.0/src/values/enums.rs:333` ("Found PointerValue ... but expected the
+>      StructValue variant") BEFORE verify runs. A panic on user-program input breaks the
+>      project's own no-`unwrap()`/no-`panic!` rule, on a program the type checker accepts,
+>      so that half is a bug independent of the missing load.
+>      **Scope it before planning a fix:** this is the whole READ-BACK path for a
+>      heap-indirect nullable. `?Struct` has been constructible since C1.6 and its payload
+>      has never been readable. The fix is not just "load through the box" — `unwrap_or`
+>      returns `T` BY VALUE, so a payload owning heap would give the copy and the box the
+>      same pointer. Safe subset first, behind an explicit list (the ADR 0072 shape), or
+>      an honest rejection; not a silent widening.
 >
 >      **D48 — the three back ends disagree about whether a nullable needs a DROP, and
 >      `llvm_dump`'s comment justifies its answer with a claim that is false for exactly
@@ -1031,6 +1054,47 @@ reference as you work through the milestones.
 >      the generic-struct field closure, for `struct S<T> { c: S<S<T>> }`, which is
 >      DECLARABLE (only the non-generic `struct N { n: N }` trips "recursive struct has no
 >      representable size") and has no finite layout.
+>      **▸ D50-D52 came out of the D42/D44 review (2026-09-05), all verified BY
+>      CONSTRUCTION, all PRE-EXISTING, none a regression of that change.**
+>
+>      **D50 — the heap-indirect nullable box's drop is SHALLOW: it frees the box and
+>      never recurses into the payload's own heap.** `struct Bx<T> { xs: [T] }` at
+>      `[i64]`, widened into a `?Bx<i64>`, measures **2 `sentinel_alloc` against 1
+>      `sentinel_free`** (relocation walk over the emitted object). The control settles
+>      that this is the BOX and not structs in general: the same struct bound WITHOUT the
+>      box measures 1 and 1 — the ordinary struct drop does recurse. LEAK ONLY, no double
+>      free and no UAF; the `?Struct` object is byte-identical to the `?GI` one after
+>      normalising the mangled name, so this is ADR 0015 D11 behaviour dating to C1.6 that
+>      D42 newly lets a `?GI` reach. Same class and severity as ADR 0032 D6's deferred
+>      recursive enum-payload drop — which IS documented, while this was not documented
+>      anywhere. Closing it means giving the drop emitter a recursive payload walk; note
+>      the payload is move-consumed by the widen, so the source contributes no free and a
+>      recursive drop would take the count to 2 and 2, not double-free it.
+>
+>      **D51 — `type_of_typeexpr` has no `SealedChannel` arm, so a `SealedChannel<T>`
+>      field or parameter renders `i64` where the oracle renders `ptr`.** Its `TGeneric`
+>      arm handles `Vec`, `Channel`, `Fn`, `Shared` and `Mutex` and nothing else, so the
+>      annotation falls to the placeholder and no kind-15 handle is ever minted — which
+>      is why D44's `cg_is_sealed_channel` arm landed DEAD. Oracle-accepted
+>      (`struct S { p: SealedChannel<secret i64>, n: i64 }` gives oracle
+>      `%Struct.0 = type { ptr, i64 }` against `scg`'s `{ i64, i64 }`), so differentially
+>      LIVE. ⚠ **This is very likely the root of all THREE `sealed_*` DEFERRED_PROGRAMS
+>      entries**, whose stated reason is "SealedChannel param i64 vs ptr" — the same
+>      divergence. Closing it may delete three deferred entries at once; measure before
+>      assuming, and see D52 for why those entries' current wording cannot be trusted.
+>
+>      **D52 — the three `sealed_*` deferred entries and D20 both assert their divergence
+>      is VALID-IR-on-both-sides, and all three are llvm-as-INVALID from `scg` today
+>      while the oracle is clean.** The entries call it "an ABI-shaped divergence" and D20
+>      calls it "the one no `llvm-as` gate can catch". The gate would in fact catch it —
+>      it fires exactly when `scg` is rejected and the oracle is clean — except that
+>      `selfhost_codegen.rs` switches the validity gate OFF for any program with a
+>      `deferred_reason`, which is precisely these three. So an invalid-IR case is filed
+>      under two labels that each assert it cannot be invalid, with the one automated
+>      check that would notice disabled for it. Correcting D20 and the three entry strings
+>      is what stops the claim being re-derived; consider whether `deferred_reason` should
+>      suppress the BYTE comparison only, and leave `llvm_rejects` armed.
+>
 >   5. **Widen `snc merge`'s Bar-A source printer** — the highest-leverage COVERAGE item.
 >      `crates/sentinel-driver/src/source_dump.rs` rejects **98 of the 119** real programs
 >      (re-measured after `demos/` joined the corpus), dominated by `cast` (37) and `declassify`

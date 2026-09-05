@@ -14,7 +14,47 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
-**Latest (2026-09-04) — the register's D39 is closed: `scg` heap-indirects a nullable
+**Latest (2026-09-05) — the register's D42 and D44 are closed: inkwell heap-boxes a nullable
+generic-instance, and `scg`'s Pass-0 field renderer gains the three arms it claimed to mirror**
+(`b2dc569`). Two items, one in each Rust back end's mirror of the other.
+
+**D42 is in the SHIPPING back end.** inkwell's `NullLit` and `WidenToNullable` matched
+`NullableInner::Struct(_)` alone while `llvm_basic_type` had always spelled
+`Struct | GenericInstance`, so `let o: ?Bx<i64> = b;` type-checked and then died inside inkwell's
+own `verify()` — a legal program `snc build` could not compile. The polarity control is what
+settles that it was a missing arm and not a deferral: the identical `?Struct` widen built and ran
+throughout. The `NullLit` twin was harmless, but only because LLVM folds a mistyped ALL-ZERO
+element list to a `zeroinitializer` of the target type — measured with `llvm-objdump` on the
+emitted object, not assumed.
+
+**D44 was filed as a struct-field defect and is THREE positions**, which is the same scope error
+D39 recorded, made again in the slice that recorded it. `Fn` in a struct field and in a
+generic-instance field are both `llvm-as`-REJECTED pre-fix — loud. `Fn` in a CLASS field is
+`llvm-as`-**CLEAN**: a function pointer in an `i64` slot assembles without a word, so the
+differential's byte-COMPARE is the only thing in the harness that can see it. Both modules are
+also the SAME LENGTH before and after (534 and 943 bytes), so a byte-COUNT check sees neither.
+Two fixtures, one per polarity. `ll_type_to`'s chain is now identical to `cgo_ty`'s arm-for-arm
+and in order, which makes its own header claim true for the first time.
+
+**⚠ THE REVIEW FOUND NO CODE DEFECT AND FOUR BLOCKER-GRADE FALSE CLAIMS IN THE COMMIT'S OWN
+PROSE.** The worst asserted a fail-CLOSED property that is fail-OPEN — "the oracle refuses this
+shape and so does `scg`'s mirror". `scg` cannot refuse (D38) and `cg_widen` has no guard: it exits
+0, empty stderr, and emits invalid IR. The oracle's refusal is the SINGLE point of protection and
+is exactly what the follow-up slice removes. That is the comment class this project's history
+names as its most damaging. Also: a reachability claim measured on the wrong spelling of a type
+(`SealedChannel`, not `SealedChannel<secret i64>` — the oracle accepts the latter as a field), and
+two site censuses that a later commit in the same session falsified.
+
+**Three items filed (D50-D52).** D50: the nullable box's drop is SHALLOW — 2 allocations against
+1 free for a payload that owns heap, where the same struct bound WITHOUT the box is 1 and 1, so it
+is the box and not structs in general. Leak only, pre-existing since C1.6, undocumented anywhere.
+D51: `type_of_typeexpr` has no `SealedChannel` arm, so a `SealedChannel<T>` field renders `i64`
+against the oracle's `ptr` — differentially live, and very likely the root of all THREE `sealed_*`
+deferred entries. D52: those three entries and D20 both assert their divergence is
+valid-IR-on-both-sides, and all three are `llvm-as`-invalid from `scg` while the oracle is clean,
+with the validity gate switched off for exactly them.
+
+**Previous (2026-09-04) — the register's D39 is closed: `scg` heap-indirects a nullable
 generic-instance payload** (`0bf7abb`). `?Struct` lowers to `{ i1, ptr }` so a recursive struct
 has a finite layout (ADR 0015 D11); ADR 0016 D6b added `GenericInstance` to `NullableInner` and
 ADR 0045 A22 prescribes the same for `scg` by name. `scg` implemented the struct half only, in
