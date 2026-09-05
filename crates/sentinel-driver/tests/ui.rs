@@ -127,6 +127,31 @@ ui_snapshot!(c66_spawn_builtin, "c66_spawn_builtin.sentinel");
 // NON-word-scalar element (here `u128`, which doesn't fit the i64 channel slot) is
 // still rejected with ChannelElementNotSupported.
 ui_snapshot!(c66_channel_element_unsupported, "c66_channel_element_unsupported.sentinel");
+
+// ---- ADR 0015 D11 / ADR 0016 D6b, register D47: the heap-indirected `?T` payload ----
+// `unwrap_or` has no load through the box in ANY back end, so the shape used to
+// type-check and then die in codegen — invalid IR from both text emitters, and from
+// inkwell either a `verify()` failure or an outright PANIC when the result was used
+// unbound. These refuse it at the type layer instead.
+// ⚠ THREE FILES ON PURPOSE, PINNING TWO INDEPENDENT AXES.
+//   * PAYLOAD axis — the gate is one match arm, `Struct(_) | GenericInstance(_)`, so a
+//     mutation dropping either disjunct must turn exactly one file red. Hence the
+//     `?Struct` and `?GenericInstance` pair, both in the BOUND position.
+//   * POSITION axis — before the gate, the two positions failed DIFFERENTLY: bound
+//     reached inkwell's `verify()` and produced a diagnostic, while UNBOUND
+//     (`unwrap_or(o, d).v`) PANICKED at `enums.rs:333` before verify. The panic is the
+//     rule violation this change exists to remove, and the bound fixtures do not reach
+//     it. Hence the third file.
+// Do not fold them: each covers a mutation the others leave green.
+ui_snapshot!(c15_unwrap_or_heap_payload, "c15_unwrap_or_heap_payload.sentinel");
+ui_snapshot!(
+    c15_unwrap_or_heap_payload_unbound,
+    "c15_unwrap_or_heap_payload_unbound.sentinel"
+);
+ui_snapshot!(
+    c17_unwrap_or_heap_payload_generic,
+    "c17_unwrap_or_heap_payload_generic.sentinel"
+);
 // ADR 0066 M2.2 / D8: the cross-process secret fence — a `[secret u8]` payload
 // cannot cross the public `[u8]` byte-pipe boundary (`process_write`), so the
 // program is rejected as a type mismatch (the type system IS the fence).

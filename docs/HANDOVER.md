@@ -124,7 +124,7 @@ reference as you work through the milestones.
 > confirming nothing pre-existing is newly refused; oracle-vs-scg byte-equality on the new
 > fixture at types, mir and llvm; and the secret-taint check in both directions.
 
-### ▶ RESUME HERE (2026-09-05 — committed at `b2dc569`, four-check GREEN (1827 passed / **exactly the 18 known Windows failures**, identical failure set), all 9 differential stages and BOTH bootstrap fixed points byte-identical, tree CLEAN. `origin/main` is at `5325e6d`; everything after it is **unpushed** — I push, you don't. This session closed **D39** (`0bf7abb`) and **D42 + D44** (`b2dc569`), and filed **D42-D52**. Register: 52 items, 18 done, D19 redacted. ⚠ **A REGISTER ENTRY IS A HYPOTHESIS ABOUT ITS SCOPE**, and this session hit it TWICE — the second time in the slice that had just written the lesson down. D39 was filed as a nullable generic-instance *FIELD* defect and is every position a `?GI` is rendered; D44 was filed as a *struct*-field defect and is three positions, the third being a CLASS field where `llvm-as` is CLEAN, i.e. the only one the byte-compare alone can catch. Both times the omitted position was the one that mattered most. ⚠ **THE REVIEWS FIND PROSE, NOT CODE, ON SMALL CHANGES** — two five- and four-lens runs returned ZERO code defects and NINE false claims in my own commits' comments, four of them blocker-grade: a comment asserting a fail-CLOSED property ("and so does `scg`'s mirror") that is fail-OPEN, a reachability claim measured on the wrong spelling of a type, and two site censuses that a later commit in the same session falsified. **Re-measure every literal against the program printed beside it, and generate any site census with a grep at writing time.** ⚠ TWO SECURITY-CLASS findings in the SHIPPING compiler are tracked privately with the maintainer and are deliberately not described here — see the caveat block. **D35 is blocked behind one of them; D19 IS the other.** A THIRD was raised privately on 2026-09-05. If you find yourself in the container refcount/drop path, in class-field move tracking, or in the cross-unit symbol mangling / `linkonce_odr` dedup, **ask first**. **NEXT:** **D51** (`type_of_typeexpr` has no `SealedChannel` arm — differentially live, and likely the root of all THREE `sealed_*` deferred entries, so it may delete three at once), **D52** (those entries and D20 both assert valid-IR-on-both-sides and all three are `llvm-as`-invalid, with the gate disabled for exactly them), **D45** (a `null` argument to a monomorphised generic call), **D37+D43** together (same `-101` unbound-type-argument family), or D33→D30 (f64/ptr). **D36 and D47 both need a maintainer decision first — tabulated with options and recommendations in [`open-decisions.md`](open-decisions.md)** — D36 is the container drop path and its question splits in two; D47 is an ownership question, not a lowering bug. Six deferred programs remain.)
+### ▶ RESUME HERE (2026-09-05 — committed at `b2dc569`, four-check GREEN (1827 passed / **exactly the 18 known Windows failures**, identical failure set), all 9 differential stages and BOTH bootstrap fixed points byte-identical, tree CLEAN. `origin/main` is at `5325e6d`; everything after it is **unpushed** — I push, you don't. This session closed **D39** (`0bf7abb`) and **D42 + D44** (`b2dc569`), and filed **D42-D52**. Register: 52 items, 18 done, D19 redacted. ⚠ **A REGISTER ENTRY IS A HYPOTHESIS ABOUT ITS SCOPE**, and this session hit it TWICE — the second time in the slice that had just written the lesson down. D39 was filed as a nullable generic-instance *FIELD* defect and is every position a `?GI` is rendered; D44 was filed as a *struct*-field defect and is three positions, the third being a CLASS field where `llvm-as` is CLEAN, i.e. the only one the byte-compare alone can catch. Both times the omitted position was the one that mattered most. ⚠ **THE REVIEWS FIND PROSE, NOT CODE, ON SMALL CHANGES** — two five- and four-lens runs returned ZERO code defects and NINE false claims in my own commits' comments, four of them blocker-grade: a comment asserting a fail-CLOSED property ("and so does `scg`'s mirror") that is fail-OPEN, a reachability claim measured on the wrong spelling of a type, and two site censuses that a later commit in the same session falsified. **Re-measure every literal against the program printed beside it, and generate any site census with a grep at writing time.** ⚠ TWO SECURITY-CLASS findings in the SHIPPING compiler are tracked privately with the maintainer and are deliberately not described here — see the caveat block. **D35 is blocked behind one of them; D19 IS the other.** A THIRD was raised privately on 2026-09-05. If you find yourself in the container refcount/drop path, in class-field move tracking, or in the cross-unit symbol mangling / `linkonce_odr` dedup, **ask first**. **NEXT:** **D51** (`type_of_typeexpr` has no `SealedChannel` arm — differentially live, and likely the root of all THREE `sealed_*` deferred entries, so it may delete three at once), **D52** (those entries and D20 both assert valid-IR-on-both-sides and all three are `llvm-as`-invalid, with the gate disabled for exactly them), **D45** (a `null` argument to a monomorphised generic call), **D37+D43** together (same `-101` unbound-type-argument family), or D33→D30 (f64/ptr). **D47 option A has LANDED** (the refusal; options B/C still open). **D36 still needs a maintainer decision — tabulated in [`open-decisions.md`](open-decisions.md)** — D36 is the container drop path and its question splits in two; D47 is an ownership question, not a lowering bug. Six deferred programs remain.)
 
 > **▶ THE OPEN MENU (2026-08-30) — real remaining work, verified against the repo.**
 >   1. **`select` over channels** — the flagship concurrency gap. Its RUNTIME is already PINNED
@@ -740,7 +740,9 @@ reference as you work through the milestones.
 >      rejected and the oracle is clean — so this is the both-wrong exemption, working as
 >      specified. **Oracle-first**, and it is the reason D39's predicate must stay narrow.
 >
->      **D47 — `unwrap_or` on a heap-indirect nullable emits invalid IR in the ORACLE.**
+>      **D47 — OPTION A DONE (`unwrap_or` on a heap-indirect payload is now REFUSED at
+>      the type layer); the READ-BACK itself is still missing.** Originally filed as
+>      "`unwrap_or` on a heap-indirect nullable emits invalid IR in the ORACLE".
 >      It extracts the `ptr` payload and feeds it straight into a `select` typed at the
 >      payload struct, with no load through the heap box:
 >      `%v7 = select i1 %v5, %Bx_i64 %v6, %Bx_i64 %v4` with `%v6 : ptr`. The oracle exits
@@ -762,6 +764,28 @@ reference as you work through the milestones.
 >      returns `T` BY VALUE, so a payload owning heap would give the copy and the box the
 >      same pointer. Safe subset first, behind an explicit list (the ADR 0072 shape), or
 >      an honest rejection; not a silent widening.
+>
+>      **▸ OPTION A LANDED (maintainer's call, 2026-09-05).** `TypeError::
+>      UnwrapOrHeapPayloadNotSupported` refuses the shape in `check_call`, keyed on
+>      `UNWRAP_OR_FN_ID` with an EXHAUSTIVE `NullableInner` match (no `_ =>` arm, so a new
+>      variant forces a deliberate classification). **The panic is gone — universally.**
+>      The unbound form now exits 1 with a `miette` diagnostic instead of aborting inside
+>      inkwell, and the review could construct no surviving panic route by any path,
+>      including through D53's bypass (there the monomorphised call boundary re-types the
+>      result, so `into_struct_value()` is never reached and the stop is a `verify_failed`
+>      diagnostic). ⚠ Be precise about the two halves: the PANIC is closed everywhere, the
+>      VERIFY FAILURE is closed only on the direct positions — through D53 it remains,
+>      byte-identically in both emitters, so self-host parity is preserved there.
+>      Three `tests/ui` fixtures pin two independent axes: PAYLOAD (`?Struct` vs
+>      `?GenericInstance`, so a mutation dropping either disjunct of the one match arm
+>      turns exactly one file red) and POSITION (bound vs unbound, because the two used to
+>      fail differently and only the unbound one panicked). No corpus program was affected;
+>      `?&T` and `?Channel<T>` were constructed and stay ACCEPTED — they are pointer-sized
+>      but stored INLINE, so rejecting them would have over-rejected working code.
+>      ⚠ **This is a refusal, not the feature.** Options B (safe subset behind an explicit
+>      allow-list) and C (full ownership semantics) are still open in
+>      [`open-decisions.md`](open-decisions.md), and the generic-body route is still open
+>      as **D53**.
 >
 >      **D48 — the three back ends disagree about whether a nullable needs a DROP, and
 >      `llvm_dump`'s comment justifies its answer with a claim that is false for exactly
@@ -1060,6 +1084,25 @@ reference as you work through the milestones.
 >      representable size") and has no finite layout.
 >      **▸ D50-D52 came out of the D42/D44 review (2026-09-05), all verified BY
 >      CONSTRUCTION, all PRE-EXISTING, none a regression of that change.**
+>
+>      **D53 — the D47 gate is bypassed through a GENERIC body, and that route still
+>      reaches the invalid lowering.** `fn first_or<T>(x: ?T, d: T) -> T { unwrap_or(x, d) }`
+>      called at a struct compiles to the same
+>      `select i1 %v, %Struct.0 %p, %Struct.0 %d` with `%p : ptr` that D47 refuses
+>      directly. The gate sees `?TypeParam` inside the body, where the payload is still
+>      ABSTRACT, so it cannot decide; the outer call is to a user fn, not to `unwrap_or`,
+>      so the gate does not run there either. **Deliberate, not overlooked** — answering
+>      `true` for `?TypeParam` would close it and would also reject `T = i64`, which works
+>      today and is pinned by `tests/pass/c17_generic_nullable.sentinel`. Closing it
+>      properly needs something that re-checks a MONOMORPHISED body, and nothing does
+>      today (the same gap D36's scoping found behind `is_named_shared_return`, which
+>      "runs pre-monomorphisation and nothing re-checks the instance"). Recorded in the
+>      gate's own comment and in
+>      `tests/ui/c17_unwrap_or_heap_payload_generic.sentinel`; the shape is unpinned by
+>      construction, because a fixture for it would have to be a program that still
+>      miscompiles.
+>      ⚠ **A generic instance re-check would close D53, D36's Target 3 and part of D51's
+>      family at once** — worth costing as one mechanism rather than three fixes.
 >
 >      **D50 — the heap-indirect nullable box's drop is SHALLOW: it frees the box and
 >      never recurses into the payload's own heap.** `struct Bx<T> { xs: [T] }` at

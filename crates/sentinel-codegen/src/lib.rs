@@ -7907,6 +7907,16 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
         // build_select on BasicValueEnum requires both arms to be
         // the same BasicValueEnum variant — payload and default are
         // both T, so they match.
+        // ⚠ (register D47) THIS ONLY HOLDS BECAUSE ANOTHER CRATE REFUSES THE
+        // EXCEPTION. `?Struct` / `?GenericInstance` lower to `{ i1, ptr }`, so the
+        // payload extracted here is a `ptr` while the default is the payload STRUCT —
+        // the operands do NOT match, and this `select` is where that showed up (an
+        // inkwell `verify()` failure, and formerly a panic). Nothing in this file
+        // prevents it: `TypeError::UnwrapOrHeapPayloadNotSupported` in `sentinel-types`
+        // does, via an exhaustive `NullableInner` match. If you add a heap-indirected
+        // payload kind, or relax that gate, this code needs a real load through the box
+        // first. One route is deliberately still open (register D53, a generic body),
+        // and it reaches exactly this instruction.
         let selected = self
             .builder
             .build_select(valid, payload, default_val, "unwrap_or_result")

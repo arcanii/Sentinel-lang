@@ -169,14 +169,17 @@ fn cg_is_nullable(c: &mut TyCtx, h: i64) -> bool {
 // rendered `{ i1, %Node_i64 }`: a self-referential aggregate, `llvm-as` "Cannot
 // allocate unsized type".
 //
-// ⚠ THE RUST SIDE ASKS THIS QUESTION IN EIGHT PLACES, and as of register D42 all eight
+// ⚠ THE RUST SIDE ASKS THIS QUESTION IN NINE PLACES ACROSS THREE FILES, and they all
 // spell the pair — `llvm_dump.rs`'s `NullLit`, its `WidenToNullable` REFUSAL and
 // `llvm_ty`; `sentinel-codegen/src/lib.rs`'s `needs_drop`, `llvm_basic_type`, drop
-// emitter, `NullLit` and `WidenToNullable`. The last two were STRUCT-ONLY until D42 and
-// are the reason this paragraph exists: when D39 landed, the Rust side was NOT a clean
-// reference to copy from. Grep the set (`grep -n 'NullableInner::Struct'` over both
-// files) rather than trusting a count written here — this one has already been wrong
-// once, in the commit that introduced it, and line numbers rot on the first edit.
+// emitter, `NullLit` and `WidenToNullable`; and `sentinel-types/src/lib.rs`'s
+// `unwrap_or` gate (register D47). The two `sentinel-codegen` `lower_expr` arms were
+// STRUCT-ONLY until D42, which is why this paragraph exists: when D39 landed, the Rust
+// side was NOT a clean reference to copy from.
+// ⚠ GENERATE THE LIST, DO NOT TRUST THE COUNT. `grep -rn 'NullableInner::Struct' crates/`
+// — over ALL of `crates/`, not two named files. This census has now been wrong TWICE:
+// once in the commit that introduced it, and again one commit later when D47 added a
+// ninth site in a third file the prescribed grep did not even cover.
 //
 // ⚠ THE NARROWNESS IS LOAD-BEARING, NOT CAUTION, and the site that proves it is
 // `cgo_operand`. `?&T` / `?Channel<T>` / `?Guard<T>` also lower to a pointer, and in

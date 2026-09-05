@@ -1,0 +1,53 @@
+// ADR 0015 D11 / filed-defect register D47: `unwrap_or` cannot read a HEAP-INDIRECTED
+// nullable payload, and this is the fail-closed refusal that says so.
+//
+// `?Struct` stores its payload behind a POINTER — that indirection is what gives a
+// recursive `struct Node { next: ?Node }` a finite layout — and no back end loads
+// through the pointer before the `select`. Until this refusal the shape type-checked
+// and then died in codegen, three different ways: the text oracle emitted
+// `select i1 %v5, %Struct.0 %v6, %Struct.0 %v4` with `%v6 : ptr` (IR `llvm-as`
+// refuses), `scg` reproduced those bytes exactly, and `snc build` either failed
+// inkwell's own `verify()` or — with the result used unbound, `unwrap_or(o, d).v` —
+// PANICKED at `enums.rs:333` before verify ran. A panic on a program the type checker
+// accepts breaks the project's own no-`panic!`-on-user-input rule.
+// ⚠ THIS FIXTURE DOES NOT PIN THE PANIC — it uses the BOUND form, which took the
+// verify() path. The panic needed the UNBOUND form and is pinned by
+// `c15_unwrap_or_heap_payload_unbound.sentinel`. An earlier draft of this header
+// claimed otherwise.
+//
+// ⚠ THE REFUSAL IS NOT THE FIX, and should not be mistaken for one. Reading the payload
+// back is a real gap — `?Struct` has been constructible since C1.6 and has never been
+// readable. It stays refused because `unwrap_or` returns `T` BY VALUE, so a payload that
+// owns heap would leave the returned copy and the box holding the same pointer. The
+// options are tabulated in `docs/open-decisions.md`; this file pins the interim state.
+//
+// ⚠ TWINNED WITH `c17_unwrap_or_heap_payload_generic.sentinel`, which pins the OTHER
+// disjunct (`?GenericInstance`). The gate is one match arm spelling
+// `Struct(_) | GenericInstance(_)`, so a mutation dropping either half still passes the
+// other file. Both are needed; do not fold them.
+//
+// ⚠ THE NEGATIVE SIDE IS ONLY PARTLY COVERED, and an earlier draft of this header
+// overstated it. It named four `tests/pass` nullables and concluded "every inline payload
+// still reads back". Measured, that conclusion is FALSE and the enumeration was never
+// checked against the filesystem:
+//   * the four named files reach three of the gate's eleven permissive arms — `?i64`
+//     (`c15_go_no_go`, `c15_maybe_compose`), `?u8` (`c66_nullable_u8`) and `?T` at i64
+//     (`c17_generic_nullable`);
+//   * the arms NEAREST the refusal line are covered by files it did not name —
+//     `?Channel` at `examples/lang/addressed_reply.sentinel`, `?i32`/`?bool` at
+//     `examples/lang/process_channel_typed.sentinel`;
+//   * and `?f64` does not read back AT ALL in the text oracle, which is the emitter the
+//     differential runs through — `snc: llvm: type not yet ported (8a scalars only): F64`
+//     (constructed). It passes inkwell. `?Guard` reads back nowhere, because `unwrap_or`
+//     needs a DEFAULT and a guard can only come from `lock()`.
+// So the gate is verified not to over-reject on the arms the corpus reaches, and three
+// arms are simply unreachable through the text oracle for reasons that predate it.
+// Do not restate this as blanket coverage.
+struct P { v: i64 }
+
+fn main() -> i64 {
+    let o: ?P = null;
+    let d: P = P { v: 42 };
+    let g: P = unwrap_or(o, d);
+    g.v
+}

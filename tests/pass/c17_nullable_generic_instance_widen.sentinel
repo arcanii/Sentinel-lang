@@ -14,15 +14,16 @@
 // ⚠ WHY THIS FIXTURE ASSERTS ONLY `is_some`, AND NOT THE PAYLOAD. You cannot read a
 // heap-indirect nullable payload back in ANY of the three emitters: `unwrap_or` on a
 // `?Struct` or `?GI` feeds the raw `ptr` into a `select` typed at the payload struct
-// with no load through the box. `snc llvm` emits IR `llvm-as` rejects, `scg` reproduces
-// that invalid IR byte-for-byte, and `snc build` stops — but HOW it stops depends on the
-// shape, and both were measured: bind the result first (`let g: P = unwrap_or(o, d);`)
-// and you get a `verify_failed` diagnostic; use it directly (`unwrap_or(o, d).v`) and
-// inkwell PANICS at `enums.rs:333` before verify ever runs, which is the
-// no-panic-on-user-program-input rule broken on a program the type checker accepts.
-// That is register D47, and it is OLDER and WIDER than D42 — it applies to `?Struct`,
-// nominally supported since C1.6. So D42 completes the CONSTRUCTION half only, which is
-// exactly what this file pins.
+// with no load through the box. That is register D47, and it is OLDER and WIDER than
+// D42 — it applies to `?Struct`, nominally supported since C1.6. So D42 completes the
+// CONSTRUCTION half only, which is exactly what this file pins.
+//
+// ⚠ D47 OPTION A HAS SINCE LANDED, so the paragraph above describes what USED to happen
+// rather than what a reader will see: `unwrap_or` on a heap-indirect payload is now
+// REFUSED at the type layer, and the inkwell PANIC (`enums.rs:333`, on the unbound form
+// `unwrap_or(o, d).v`) is gone. The refusal is not the feature — reading the payload
+// back is still missing, and options B/C are live in `docs/open-decisions.md`. One route
+// is still un-refused: a generic body sees an abstract `?T` (register D53).
 //
 // ⚠ THE CODEGEN DIFFERENTIAL CANNOT SEE THIS PROGRAM. The text oracle refuses the widen
 // ("widen-to-nullable of a struct/generic payload (heap-box) deferred"), so it is

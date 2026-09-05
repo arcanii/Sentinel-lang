@@ -31,7 +31,7 @@ use sentinel_resolve::{
     ResolvedExprKind, ResolvedFnDef, ResolvedPattern, ResolvedProgram, ResolvedStmt,
     ResolvedStmtKind, StructId, TraitId, TypeParamId, VarId, APPLY_FN_ID, CHANNEL_CLOSE_FN_ID,
     CHANNEL_NEW_FN_ID, LEN_FN_ID, PROCESS_RECV_FN_ID, PROCESS_SEND_FN_ID, RECV_FN_ID, SEND_FN_ID,
-    LOCK_FN_ID, MUTEX_NEW_FN_ID, SHARED_GET_FN_ID, SHARED_NEW_FN_ID,
+    LOCK_FN_ID, MUTEX_NEW_FN_ID, SHARED_GET_FN_ID, SHARED_NEW_FN_ID, UNWRAP_OR_FN_ID,
 };
 use sentinel_ast::SelfKind;
 
@@ -4113,6 +4113,26 @@ pub enum TypeError {
     )]
     ChannelElementNotSupported {
         #[label("unsupported Channel element type here")]
+        span: miette::SourceSpan,
+    },
+
+    /// Register D47: `unwrap_or` on a nullable whose payload is HEAP-INDIRECTED
+    /// (`?Struct` / `?Foo<T>`, ADR 0015 D11 + ADR 0016 D6b). Those payloads live
+    /// behind a pointer, and no back end loads through that pointer before the
+    /// `select`: the text oracle emits `select i1 %v, %Struct.0 %p, %Struct.0 %d`
+    /// with `%p : ptr` (IR `llvm-as` refuses), `scg` reproduces it byte-for-byte,
+    /// and inkwell either fails its own `verify()` or — when the result is used
+    /// without being bound — PANICS before verify. Rejecting is the fail-closed
+    /// answer until the ownership question is decided: `unwrap_or` returns `T` BY
+    /// VALUE, so a payload that owns heap would leave the copy and the box holding
+    /// the same pointer (see `docs/open-decisions.md`).
+    #[error("reading a heap-indirected `?T` payload is not supported yet")]
+    #[diagnostic(
+        code(sentinel::types::unwrap_or_heap_payload_not_supported),
+        help("`?Struct` and `?Foo<T>` keep their payload behind a pointer (ADR 0015 D11), and `unwrap_or` has no load through it in any back end; test the nullable with `is_some` instead, or hold the value in a scalar-payload nullable")
+    )]
+    UnwrapOrHeapPayloadNotSupported {
+        #[label("this `?T` has a heap-indirected payload")]
         span: miette::SourceSpan,
     },
 
@@ -8893,6 +8913,83 @@ fn check_call(
 
     let typed_args: Vec<TypedExpr> =
         typed_args.into_iter().map(|o| o.expect("filled above")).collect();
+
+    // (register D47) FAIL-CLOSED GATE: `unwrap_or` cannot read a HEAP-INDIRECTED
+    // payload. `?Struct` / `?GenericInstance` store their payload behind a pointer
+    // (ADR 0015 D11 + ADR 0016 D6b) and no back end loads through it before the
+    // `select`, so the shape reaches codegen and dies there — invalid IR from both
+    // text emitters, and from inkwell either a `verify()` failure or an outright
+    // PANIC when the result is used without being bound. Refusing here turns a
+    // compiler-internal crash into a language-level statement.
+    //
+    // ⚠ THE MATCH IS EXHAUSTIVE ON PURPOSE — do NOT add a `_ =>` arm. A new
+    // `NullableInner` variant must be classified deliberately, because getting it
+    // wrong in the permissive direction re-opens exactly this hole.
+    if id == UNWRAP_OR_FN_ID {
+        if let Some(arg0) = typed_args.first() {
+            if let Type::Nullable(ni) = arg0.ty {
+                let heap_indirected = match ni {
+                    // Payload is a pointer to a heap box.
+                    NullableInner::Struct(_) | NullableInner::GenericInstance(_) => true,
+                    // Inline `{ i1, T }` payloads, so the emitted `select` is
+                    // WELL-TYPED — which is the property this gate is about, and all
+                    // it claims. Constructed for `?&i64` and `?Channel<i64>`: both
+                    // give `select i1 %v, ptr %v`. They are pointer-SIZED but stored
+                    // inline rather than heap-boxed, which is exactly why rejecting
+                    // them would over-reject working code.
+                    // ⚠ `Guard` is classified here on shape alone and is NOT
+                    // constructible at this call: `unwrap_or` needs a DEFAULT of the
+                    // payload type, and a `Guard` can only come from `lock()`. So the
+                    // arm is unmeasured, and it is worth noting that if a default ever
+                    // became constructible the shape check would not be the whole
+                    // question — `unwrap_or` returns `T` by value, and duplicating a
+                    // guard is what the Move classification exists to prevent
+                    // (it would double-unlock). Revisit this arm, do not assume it.
+                    NullableInner::I64
+                    | NullableInner::I32
+                    | NullableInner::Bool
+                    | NullableInner::U8
+                    | NullableInner::U128
+                    | NullableInner::F64
+                    | NullableInner::Ptr
+                    | NullableInner::Ref(_)
+                    | NullableInner::Guard(_)
+                    | NullableInner::Channel(_) => false,
+                    // ⚠ THIS ARM IS FAIL-*OPEN*, WHICH IS WHY THE HEADER ABOVE SAYS
+                    // "gate" AND NOT "fence" — it is deliberate, not overlooked, and
+                    // it is the one place the boundary is not closed. Inside a generic
+                    // body `unwrap_or(x, d)` sees `?T`, so the payload is still
+                    // ABSTRACT here and this code cannot decide. Instantiating that
+                    // generic at a struct reaches the identical broken lowering:
+                    // `fn first_or<T>(x: ?T, d: T) -> T { unwrap_or(x, d) }` called at
+                    // a struct still compiles to the invalid `select`. Constructed and
+                    // filed as **register D53**.
+                    //
+                    // Answering `true` here would close it and would ALSO reject
+                    // `T = i64`, which works today and is pinned by
+                    // `tests/pass/c17_generic_nullable.sentinel` — a real
+                    // over-rejection bought for a partial win. Closing it properly
+                    // needs something that re-checks a MONOMORPHISED body, and nothing
+                    // does today.
+                    //
+                    // ⚠ Note the contrast with the tree's other exhaustive
+                    // `NullableInner` match (`sentinel-borrow-check`), which groups
+                    // `TypeParam` WITH `Struct | GenericInstance`. That one asks "is
+                    // this Copy?" and answers conservatively; this one asks "is the
+                    // payload heap-indirected?" and answers permissively on an unknown.
+                    // Different questions, but the permissive answer is the fail-open
+                    // direction, so it is spelled out rather than left to be inferred.
+                    NullableInner::TypeParam(_) => false,
+                };
+                if heap_indirected {
+                    return Err(TypeError::UnwrapOrHeapPayloadNotSupported {
+                        span: to_source_span(&args[0].span),
+                    });
+                }
+            }
+        }
+    }
+
     Ok((
         TypedExprKind::Call {
             id,
@@ -11827,6 +11924,11 @@ fn type_error_to_diagnostic(err: &TypeError) -> Diagnostic {
         TypeError::ChannelElementNotSupported { span } => (
             "sentinel::types::channel_element_not_supported",
             "`Channel<T>` element type is not supported yet".to_string(),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        TypeError::UnwrapOrHeapPayloadNotSupported { span } => (
+            "sentinel::types::unwrap_or_heap_payload_not_supported",
+            "reading a heap-indirected `?T` payload is not supported yet".to_string(),
             span.offset()..(span.offset() + span.len()),
         ),
         TypeError::SharedElementNotSupported { span } => (

@@ -3444,6 +3444,13 @@ impl Emit<'_> {
         // unwrap_or(x: ?T, default: T) -> T (Bar B / ADR 0014 D9): extract the valid
         // bit + payload, then `select` between the payload (valid) and the default
         // (null). `select` (not control flow) since both operands are already eval'd.
+        // ⚠ (register D47) THE OPERANDS MATCH ONLY BECAUSE ANOTHER CRATE REFUSES
+        // THE EXCEPTION. `?Struct` / `?GenericInstance` lower to `{ i1, ptr }`, so the
+        // extracted payload is a `ptr` while the default is the payload STRUCT, and
+        // this `select` emits IR `llvm-as` rejects. Nothing here prevents it:
+        // `TypeError::UnwrapOrHeapPayloadNotSupported` in `sentinel-types` does. If you
+        // add a heap-indirected payload kind, or relax that gate, this needs a real
+        // load through the box first. Register D53 is a route that is still open.
         if id == UNWRAP_OR_FN_ID {
             let x = self.lower_expr(&args[0])?;
             let d = self.lower_expr(&args[1])?;

@@ -1,0 +1,30 @@
+// ADR 0015 D11 / filed-defect register D47: the UNBOUND form of the heap-indirected
+// `unwrap_or`, and the shape the refusal actually exists to eliminate.
+//
+// ⚠ THE TWO STOP MODES WERE DIFFERENT, AND ONLY THIS ONE BROKE A PROJECT RULE.
+// Measured before the gate landed:
+//   * bound   — `let g: P = unwrap_or(o, d); g.v` reached inkwell's `verify()` and
+//     surfaced a diagnostic ("Invalid operands for select instruction!");
+//   * unbound — `unwrap_or(o, d).v` PANICKED first, at
+//     `inkwell-0.5.0/src/values/enums.rs:333` ("Found PointerValue ... but expected the
+//     StructValue variant"), before verify ever ran.
+// A panic on user-program input is exactly what `docs/project-context.md` forbids
+// ("Don't `unwrap()` / `panic!` on user-program input — surface a `miette` diagnostic"),
+// and it fired on a program the type checker ACCEPTED.
+//
+// ⚠ ITS SIBLINGS PIN THE PAYLOAD AXIS; THIS FILE PINS THE POSITION AXIS.
+// `c15_unwrap_or_heap_payload` and `c17_unwrap_or_heap_payload_generic` both use the
+// BOUND form and differ in payload kind (`?Struct` vs `?GenericInstance`), so between
+// them they pin the gate's one match arm. Neither reaches the unbound position — so
+// without this file the panicking shape, the headline of the change, would have been
+// covered by nothing at all. A later refactor that moved the check somewhere only the
+// bound form flows through would leave both siblings green and put the panic back.
+//
+// Same struct, same payload, same diagnostic — only the position of the call differs.
+struct P { v: i64 }
+
+fn main() -> i64 {
+    let o: ?P = null;
+    let d: P = P { v: 42 };
+    unwrap_or(o, d).v
+}

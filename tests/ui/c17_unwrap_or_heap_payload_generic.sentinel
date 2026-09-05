@@ -1,0 +1,26 @@
+// ADR 0016 D6b / filed-defect register D47: the `?GenericInstance` half of the
+// heap-indirected-payload refusal. `?Foo<T>` heap-indirects exactly as `?Struct` does
+// (ADR 0016 D6b added `GenericInstance` to `NullableInner` for that reason), so
+// `unwrap_or` cannot read it back either.
+//
+// ⚠ THIS FILE EXISTS BECAUSE THE GATE IS ONE MATCH ARM, `Struct(_) | GenericInstance(_)`.
+// Its twin `c15_unwrap_or_heap_payload.sentinel` pins the struct disjunct; an
+// implementation that dropped THIS disjunct would still pass that file, and the
+// `?GI` half is the one register D42 newly made constructible. Keep both.
+//
+// ⚠ ONE ROUTE IS DELIBERATELY NOT CLOSED, and it is recorded rather than hidden: inside
+// a generic body `unwrap_or(x, d)` sees an abstract `?T`, so the gate cannot decide, and
+// instantiating that generic at a struct reaches the identical broken lowering —
+// `fn first_or<T>(x: ?T, d: T) -> T { unwrap_or(x, d) }` called at a struct still
+// compiles to the invalid `select`. Rejecting `?TypeParam` outright would close it and
+// would also reject `T = i64`, which works today and is pinned by
+// `tests/pass/c17_generic_nullable.sentinel`. Closing it properly needs something that
+// re-checks a monomorphised body, and nothing does today. Filed separately.
+struct Bx<T> { v: T }
+
+fn main() -> i64 {
+    let o: ?Bx<i64> = null;
+    let d: Bx<i64> = Bx { v: 42 };
+    let g: Bx<i64> = unwrap_or(o, d);
+    g.v
+}

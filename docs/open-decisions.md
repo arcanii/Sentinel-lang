@@ -1,9 +1,13 @@
 # Open decisions awaiting the maintainer
 
-Two filed-defect register items cannot be actioned by an agent without a call from the
-maintainer. This file states each one's options, costs and risks so the decision can be
-made from one page. It is **not** an ADR — nothing here is ratified. When a row is
-chosen, the work becomes an ordinary slice and this section is deleted.
+Filed-defect register items that cannot be actioned by an agent without a call from the
+maintainer. Each states its options, costs and risks so the decision can be made from one
+page. It is **not** an ADR — nothing here is ratified. When a row is chosen the work
+becomes an ordinary slice; the section is then marked DECIDED and kept only while the
+remaining rows are still live, and deleted once none are.
+
+**Status:** D36 is open. D47's option A was chosen and has landed; its B and C rows are
+still live.
 
 Register entries: [`HANDOVER.md`](HANDOVER.md) menu item 4 (D36, D47).
 
@@ -83,6 +87,15 @@ positive case and the whole corpus.
 
 ## D47 — a heap-indirect nullable payload cannot be read back, in any emitter
 
+> **▶ DECIDED 2026-09-05: option A was chosen and has LANDED.** `unwrap_or` on a
+> `?Struct` / `?GenericInstance` is now refused at the type layer
+> (`TypeError::UnwrapOrHeapPayloadNotSupported`), so the compiler states the limit
+> instead of crashing on it — the inkwell PANIC is gone. **Options B and C remain
+> open**, and the section below is kept because it is the case for them: A bought
+> honesty, not the feature. One route is still un-refused, filed as register D53 (a
+> generic body sees an abstract `?T`, so the gate cannot decide, and instantiating that
+> generic at a struct still reaches the broken lowering).
+
 `unwrap_or` on a `?Struct` or `?GenericInstance` feeds the raw `ptr` into a `select`
 typed at the payload struct, with no load through the heap box.
 
@@ -118,14 +131,16 @@ without D50 changes which side owns the heap.
 
 | # | Option | Cost | Risk | Verdict |
 |---|---|---|---|---|
-| **A** | **Reject, fail-closed** — a type-check diagnostic for `unwrap_or` on a heap-indirect nullable | One slice, no ADR. One `tests/ui` fixture | None. Strictly better than today: it replaces a verify failure *and a panic* with a language-level statement | **RECOMMENDED NOW** |
+| ~~A~~ | ~~Reject, fail-closed~~ | Landed: one slice, no ADR, **three** `tests/ui` fixtures (two axes — payload kind, and bound vs unbound position) | None realised. No corpus program affected; `?&T` / `?Channel<T>` verified still accepted | **DONE 2026-09-05** |
 | **B** | **Safe subset behind an explicit allow-list** — load through the box for payloads with no owning fields; reject the rest | Medium; needs an ADR amendment for the ownership rule | Low if the list is explicit and pinned by a rejection fixture. This is the ADR 0072 shape | **RECOMMENDED NEXT** |
 | C | Full ownership semantics — move-out-of-box, or return a borrow | Large. Interacts with D50 and with the deferred heap-box widen | Real design risk: it decides what `unwrap_or` on an owning payload *means* | The end state; not a starting point |
 | D | Leave it | Zero | A panic on legal input persists, and the differential stays green over invalid IR | Not recommended — A is nearly free |
 
-**Recommendation: A now, B as its own designed slice.** A removes a rule violation for
-roughly the cost of writing the fixture. C should not begin before B has settled the
-ownership rule, because C is B plus the hard half.
+**A is done. B is the live recommendation**, as its own designed slice. C should not
+begin before B has settled the ownership rule, because C is B plus the hard half.
+Note that A's cost estimate was low by two fixtures: the review found the panicking
+shape (the whole point of A) pinned by nothing, because both original fixtures used the
+bound form. Position turned out to be an independent axis from payload kind.
 
 **Note on boundaries:** if B is chosen, the allow-list must be an explicit fail-closed
 enumeration pinned by a rejection fixture — not a derived predicate such as "the payload

@@ -1,0 +1,14 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c15_unwrap_or_heap_payload.sentinel\")"
+---
+sentinel::types::unwrap_or_heap_payload_not_supported
+
+  × reading a heap-indirected `?T` payload is not supported yet
+    ╭─[tests/ui/c15_unwrap_or_heap_payload.sentinel:51:26]
+ 50 │     let d: P = P { v: 42 };
+ 51 │     let g: P = unwrap_or(o, d);
+    ·                          ┬
+    ·                          ╰── 
+ 52 │     g.v
+    ╰────

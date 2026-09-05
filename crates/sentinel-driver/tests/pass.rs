@@ -477,8 +477,9 @@ fn pass_c17_nullable_generic_instance_widen() {
     // into a nullable heap-boxes the payload. inkwell had the arm for `Struct` only, so
     // this program type-checked and then failed its own `verify()` — a legal program the
     // SHIPPING compiler could not build. Asserts `is_some` only: reading a heap-indirect
-    // payload back is broken in all three emitters (register D47), for `?Struct` too.
-    // 40 + 2 = 42.
+    // payload back is missing in all three emitters (register D47), for `?Struct` too,
+    // and is now REFUSED at the type layer rather than crashing in codegen (D47 option
+    // A). 40 + 2 = 42.
     assert_eq!(run_exit("c17_nullable_generic_instance_widen.sentinel"), 42);
 }
 
