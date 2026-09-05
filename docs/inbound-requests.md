@@ -41,7 +41,7 @@ written, two are partly true, none were wrong.
 | R5 | bulk `[secret u8]` throughput (opt-in `-O`, LTO) | PARTLY-TRUE | NEEDS-ADR | large |
 | R6 | hoist `k_constants()` out of the SHA-256 hot path | **PARTLY-TRUE** | BACKLOG | small |
 | R7 | PBKDF2-HMAC-SHA256 + HMAC midstate | STILL-TRUE | BACKLOG | medium |
-| **R8** | emit the required Windows system libraries | STILL-TRUE | NEEDS-ADR | small |
+| ~~R8~~ | emit the required Windows system libraries | **DONE** | D56 / ADR 0059 A12 | small |
 | R9 | a `std::fs`-shaped stdlib module | STILL-TRUE | NEEDS-ADR | medium |
 | R10 | `snc build --shared` on Windows | STILL-TRUE | BACKLOG | small |
 | R11 | `?[T]` nullable arrays, or generic enums | STILL-TRUE | NEEDS-ADR | medium |
@@ -52,7 +52,7 @@ written, two are partly true, none were wrong.
 
 ### What to do first, and why
 
-**▶ R3 and R15 are DONE (2026-09-05).** The rest of this section is the case for what
+**▶ R3, R8 and R15 are DONE (2026-09-05).** The rest of this section is the case for what
 remains.
 
 **R3 was the cheapest real win in the list — about four lines.** `emit_c_header`
@@ -65,10 +65,16 @@ with it. **Register D54, landed** — `fill(&mut [u8], i64)` now emits
 `const uint8_t*`, pinned by `export_header_const_qualifies_shared_byte_slices_only`
 (header text only, so unlike its sibling export tests it runs on Windows).
 
-**R8 is about five lines** of comment in the same generated header — the correct library
-list already exists in the driver source and is simply never surfaced. The filer's own
-"done looks like" accepts a comment rather than `#pragma comment(lib, ...)`, so the cheap
-form fully satisfies it.
+**R8 is DONE, in its STRONGER form** — the header now carries both the plain-comment
+listing and a `#pragma comment(lib, …)` block guarded by
+`#if defined(_MSC_VER) && !defined(SENTINEL_NO_AUTOLINK)`. Their "done looks like" accepted
+either; the pragma means a host following the header alone links with **no system libraries
+named**, which is what the criterion actually asks for. Verified end-to-end on Windows: a C
+host naming none of the six links and runs; built with `/DSENTINEL_NO_AUTOLINK` it fails
+with `__imp_closesocket`, `__imp_NtReadFile`, `__imp_getaddrinfo`, `__imp_WSAGetLastError`
+— the class they reported. The escape hatch is real, because the pragma injects
+`/DEFAULTLIB:` and a host with a deliberate CRT model should keep control.
+**Register D56, ADR 0059 A12.**
 
 **R2's cheapest form is authorised by the request itself:** "*even a hook that is required
 to terminate afterwards would be a large improvement over the current silence*". That

@@ -419,6 +419,80 @@ fn export_header_const_qualifies_shared_byte_slices_only() {
 }
 
 #[test]
+fn export_header_carries_the_windows_autolink_set() {
+    // ADR 0059 A12 / register D56. A `--lib` archive bundles the Rust runtime staticlib,
+    // which pulls in native deps MSVC will not resolve on its own. The list lived only in
+    // the driver's executable link path — no header, no `--lib` output, no ADR — so a
+    // foreign host discovered it from 33 unresolved externals.
+    //
+    // ⚠ THE REQUIREMENT IS NOT INSPECTABLE, which is why the header must carry it: it
+    // depends on which Rust std paths the particular Sentinel program reaches, and a
+    // value-only library that never allocates links fine with none of these.
+    //
+    // Verified by hand on this box, and recorded here because the test itself cannot run
+    // a linker: `cl.exe /nologo /I. host.c lib.a` — a host naming NO system libraries —
+    // links and runs correctly, and the same command with `/DSENTINEL_NO_AUTOLINK`
+    // fails with `__imp_closesocket`, `__imp_NtReadFile`, `__imp_getaddrinfo`,
+    // `__imp_WSAGetLastError` … i.e. exactly the class the filer reported. So the pragmas
+    // are load-bearing and the opt-out is a real opt-out.
+    let root = repo_root();
+    let dir = temp_dir("autolink_header");
+    let lib_src = dir.join("mut_buffer_lib.sentinel");
+    std::fs::copy(root.join("examples/export/mut_buffer_lib.sentinel"), &lib_src)
+        .expect("copy mut_buffer_lib.sentinel");
+    let lib_a = dir.join("libautolink.a");
+    let header = dir.join("autolink.h");
+
+    let build = Command::new(env!("CARGO_BIN_EXE_snc"))
+        .arg("build")
+        .arg("--lib")
+        .arg(&lib_src)
+        .arg("-o")
+        .arg(&lib_a)
+        .arg("--emit-header")
+        .arg(&header)
+        .output()
+        .expect("run snc build --lib");
+    assert!(
+        build.status.success(),
+        "snc build --lib failed; stderr:
+{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+
+    let h = std::fs::read_to_string(&header).expect("read header");
+    // Gated on the CONSUMING compiler, not on the host that ran snc — a header generated
+    // on macOS for a Windows consumer must still carry this.
+    assert!(
+        h.contains("#if defined(_MSC_VER) && !defined(SENTINEL_NO_AUTOLINK)"),
+        "header missing the guarded autolink block:
+{h}"
+    );
+    // EVERY library, not a sample: the filer's conclusion was "always link all six",
+    // because the needed subset is not derivable by inspection.
+    for lib in [
+        "legacy_stdio_definitions.lib",
+        "kernel32.lib",
+        "ntdll.lib",
+        "userenv.lib",
+        "ws2_32.lib",
+        "dbghelp.lib",
+    ] {
+        assert!(
+            h.contains(&format!("#pragma comment(lib, \"{lib}\")")),
+            "header missing autolink pragma for {lib}:
+{h}"
+        );
+        assert!(
+            h.contains(&format!("     {lib}
+")),
+            "header missing the plain-comment listing for {lib} (needed by non-MSVC              hosts, which get no pragma):
+{h}"
+        );
+    }
+}
+
+#[test]
 fn export_demonstrator_files_present() {
     let root = repo_root();
     assert!(root.join("examples/export/ct_select.sentinel").exists());

@@ -14,7 +14,7 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
-**Latest (2026-09-05b) — D47 option A, D54 and D55 are closed, and this repo now has an
+**Latest (2026-09-05b) — D47 option A, D54, D55 and D56 are closed, and this repo now has an
 INBOUND-REQUEST LEDGER** (`2b32b78`, plus this slice). Three items, one theme: a downstream
 consumer had been telling us things we were not listening to.
 
@@ -45,6 +45,19 @@ the Argon2id claim — the filer designed a password-KDF around that sentence be
 §9.3 now lists what actually ships and says plainly that array-shaped secrets are neither
 mlock'd nor scrubbed. **When an amendment carries a capability list, re-measure it; do not copy
 it.** Nothing in the four-check reads these files.
+
+**D56 — the generated header now names the Windows system libraries a foreign host must
+link** (request R8, ADR 0059 A12). The set was in the driver and used by the EXECUTABLE link
+path, but a host linking the `--lib` ARCHIVE could not learn it from anywhere; the filer
+found it from 33 unresolved externals. The header now carries a plain-comment listing plus a
+`#pragma comment(lib, …)` block guarded by `_MSC_VER` and `SENTINEL_NO_AUTOLINK`.
+⚠ **The requirement is NOT INSPECTABLE, which is why emitting beats documenting** — which
+libraries are needed depends on which Rust std paths that program reaches, and a value-only
+library that never allocates links fine with none of them. Verified end-to-end: a C host
+naming NO system libraries links against the archive following the header alone and runs;
+built with `/DSENTINEL_NO_AUTOLINK` it fails with `__imp_closesocket`, `__imp_NtReadFile`,
+`__imp_getaddrinfo`, `__imp_WSAGetLastError` — the class the filer reported. So the pragmas
+are load-bearing and the opt-out is a real opt-out.
 
 ⚠ **Adding one file to `examples/` tripped the lexer and parser real-program count guards**
 (121 → 122). That is the tripwire working — it is what catches a program silently dropping out

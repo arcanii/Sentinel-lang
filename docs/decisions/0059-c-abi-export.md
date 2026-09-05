@@ -338,10 +338,35 @@ struct exports, and the Python/Rust generators are deferred to later phases.
 > source, so one true sentence propagated forward through three amendments and outlived
 > the thing it described. When an amendment carries a "still deferred" list, re-measure it
 > — do not copy it. Nothing in the four-check reads this file.
-> ⚠ Also outstanding here (register R8 in [`inbound-requests.md`](../inbound-requests.md),
-> not yet actioned): this ADR should carry the Windows system libraries a foreign host
-> must add to its own link line. The correct list exists in the driver source and is
-> surfaced nowhere.
+- **A12 — the generated header carries the WINDOWS SYSTEM-LIBRARY dependency** (register
+  D56, request R8). A `--lib` archive bundles the Rust runtime staticlib, which pulls in
+  native deps the MSVC linker will not resolve on its own. That set lives in
+  `WINDOWS_NATIVE_LIBS` (`crates/sentinel-driver/src/main.rs`) and the EXECUTABLE link
+  path has always used it — but a FOREIGN host linking the archive itself had no way to
+  learn it: no header, no `--lib` output, and nothing in this ADR. A downstream
+  integrator discovered it from **33 unresolved externals** and concluded "always link
+  all six", which is a workaround rather than an answer.
+  `--emit-header` now emits, after `#include <stdint.h>`: a plain C comment listing the
+  set (for non-MSVC and manual hosts), and a `#pragma comment(lib, …)` block guarded by
+  `#if defined(_MSC_VER) && !defined(SENTINEL_NO_AUTOLINK)`.
+  - **Guarded on the CONSUMING compiler, not the emitting host.** A header generated on
+    macOS for a Windows consumer still carries it, so the guard is `_MSC_VER` rather than
+    a `cfg!(target_os)` at emit time.
+  - **`SENTINEL_NO_AUTOLINK` is a real escape hatch.** `#pragma comment(lib, …)` injects
+    `/DEFAULTLIB:` directives, and a host with a deliberate CRT model should keep control
+    of its own link line.
+  - ⚠ **THE REQUIREMENT IS NOT INSPECTABLE, and that is the reason it must be emitted
+    rather than documented.** Which libraries are needed depends on which Rust std paths
+    the particular Sentinel program happens to reach — a value-only library that never
+    allocates links fine with none of them. A host cannot derive the answer by reading
+    its own code; it can only discover it by failing. Emitting the superset is the point.
+  - Verified end-to-end on Windows: a C host naming NO system libraries links against the
+    archive following the header alone and runs correctly; the same host built with
+    `/DSENTINEL_NO_AUTOLINK` fails with `__imp_closesocket`, `__imp_NtReadFile`,
+    `__imp_getaddrinfo`, `__imp_WSAGetLastError` … — the class the filer reported. Pinned
+    by `tests/export.rs::export_header_carries_the_windows_autolink_set` (header text
+    only; the link proof cannot run in-test on a box without MSVC on PATH).
+  - Non-oracle-moving: header text, no emitted symbol or IR change, no `scg` mirror.
 
 - **A10 — the "first `export` fixture" trigger has FIRED, and the mirror it required was ONE
   dispatcher arm.** A5/A6/A9 each defer the `scg` mirror on the stated precondition that *no
