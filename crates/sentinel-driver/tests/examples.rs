@@ -240,6 +240,13 @@ const EXAMPLES: &[(&str, i32)] = &[
     // bridged to `[secret u8]` via `vec_to_array` (ADR 0053). 42 = the full 114-byte
     // ciphertext AND the 16-byte tag matched the published vector byte-for-byte.
     ("examples/security/chacha20poly1305_full.sentinel", 42),
+    // The DECRYPT-AND-VERIFY half (request R4): the §2.8.2 record round-trips to the
+    // 114-byte plaintext byte-exact, the tag matches the RFC's published tag (so both
+    // halves agree with the document and not merely with each other), and a SINGLE
+    // FLIPPED CIPHERTEXT BIT is refused with an EMPTY plaintext buffer. That last one
+    // is the assertion that matters: an AEAD which decrypts a forgery and returns the
+    // bytes beside a flag the caller might ignore is a decryption oracle.
+    ("examples/security/chacha20poly1305_open.sentinel", 42),
     // Constant-time SHA-256 over a SECRET message (std::security::sha256, FIPS
     // 180-4) — the compression is branch-free over `secret i32` words; the schedule
     // is a Vec<secret i32> (ADR 0052) and the padded message a Vec<secret u8> ->
@@ -668,6 +675,20 @@ fn chacha20poly1305_aead() {
 #[test]
 fn chacha20poly1305_aead_full_vector() {
     check_example("examples/security/chacha20poly1305_full.sentinel", "chacha20poly1305_full", 42);
+}
+
+#[test]
+fn chacha20poly1305_aead_open() {
+    // Request R4 / ADR 0052: the open half of RFC 8439 §2.8. Verify-then-decrypt, so
+    // no plaintext exists on the failure path; branch-free tag compare accumulated
+    // into a `secret i64` so the CT checker enforces what would otherwise be only a
+    // convention (both tags are public, so an early-exit compare leaks no `secret` and
+    // the checker would not object — it would just leak the match length by timing).
+    check_example(
+        "examples/security/chacha20poly1305_open.sentinel",
+        "chacha20poly1305_open",
+        42,
+    );
 }
 
 #[test]

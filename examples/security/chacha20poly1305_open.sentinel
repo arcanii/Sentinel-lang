@@ -1,0 +1,140 @@
+// examples/security/chacha20poly1305_open.sentinel — the DECRYPT-AND-VERIFY half of
+// RFC 8439 §2.8, against the published §2.8.2 vector.
+//
+// `chacha20poly1305_encrypt` has shipped since ADR 0052; there was no corresponding
+// open, which makes a seal-only AEAD — usable for writing a record and not for
+// reading one back. Since unsealing is the operation that runs on every file open,
+// that gap was the whole feature for a downstream consumer.
+//
+// THIS PROGRAM ASSERTS FOUR THINGS, and the third is the one that matters:
+//   1. the §2.8.2 ciphertext + tag round-trip back to the 114-byte plaintext,
+//      byte-exact;
+//   2. `open` reproduces the RFC's own tag, i.e. it agrees with the seal half on
+//      the `mac_data` layout (AAD || pad16 || CT || pad16 || le64 || le64);
+//   3. a SINGLE FLIPPED CIPHERTEXT BIT is rejected — `ok == 0` — and the returned
+//      plaintext buffer is EMPTY;
+//   4. the SAME key/nonce bindings serve both opens. `open` borrows its key, so a
+//      caller can open many records from one long-lived key — which is what an open
+//      is for. This compiles only because the signature borrows; a by-value one
+//      made the second call a compile error.
+//
+// ⚠ (3) IS NOT A NICE-TO-HAVE. An AEAD that decrypts a forgery and returns the
+// bytes alongside a flag the caller might ignore is a decryption oracle. The
+// library verifies BEFORE it decrypts, so on the failure path no plaintext is
+// computed at all, and this program checks the emptiness rather than trusting it.
+//
+// CONSTANT-TIME: the key, the derived one-time key and the recovered plaintext are
+// SECRET throughout. The tag comparison is branch-free and accumulates into a
+// `secret i64` so the CT checker enforces it — both tags are public, so a
+// byte-at-a-time early exit would leak no `secret` and the checker would say
+// nothing, while leaking through timing exactly how many tag bytes an attacker had
+// guessed. Exit 42 = all three assertions held.
+use std::security::aead::AeadResult;
+use std::security::aead::AeadOpenResult;
+use std::security::aead::chacha20poly1305_encrypt;
+use std::security::aead::chacha20poly1305_open;
+
+fn main() -> i64 {
+    // The §2.8.2 key (bytes 0x80..0x9f) as 8 little-endian secret i32 words.
+    let k0: secret i32 = 2206368128 as i32;  // 0x83828180
+    let k1: secret i32 = 2273740164 as i32;  // 0x87868584
+    let k2: secret i32 = 2341112200 as i32;  // 0x8b8a8988
+    let k3: secret i32 = 2408484236 as i32;  // 0x8f8e8d8c
+    let k4: secret i32 = 2475856272 as i32;  // 0x93929190
+    let k5: secret i32 = 2543228308 as i32;  // 0x97969594
+    let k6: secret i32 = 2610600344 as i32;  // 0x9b9a9998
+    let k7: secret i32 = 2677972380 as i32;  // 0x9f9e9d9c
+
+    // The §2.8.2 nonce 07 00 00 00 | 40 41 42 43 | 44 45 46 47 as 3 LE words.
+    let n0: secret i32 = 7 as i32;           // 0x00000007
+    let n1: secret i32 = 1128415552 as i32;  // 0x43424140
+    let n2: secret i32 = 1195787588 as i32;  // 0x47464544
+
+    let pt_data: [i64] = [
+        76, 97, 100, 105, 101, 115, 32, 97, 110, 100, 32, 71,
+        101, 110, 116, 108, 101, 109, 101, 110, 32, 111, 102, 32,
+        116, 104, 101, 32, 99, 108, 97, 115, 115, 32, 111, 102,
+        32, 39, 57, 57, 58, 32, 73, 102, 32, 73, 32, 99,
+        111, 117, 108, 100, 32, 111, 102, 102, 101, 114, 32, 121,
+        111, 117, 32, 111, 110, 108, 121, 32, 111, 110, 101, 32,
+        116, 105, 112, 32, 102, 111, 114, 32, 116, 104, 101, 32,
+        102, 117, 116, 117, 114, 101, 44, 32, 115, 117, 110, 115,
+        99, 114, 101, 101, 110, 32, 119, 111, 117, 108, 100, 32,
+        98, 101, 32, 105, 116, 46
+    ];
+    let aad_data: [i64] = [
+        80, 81, 82, 83, 192, 193, 194, 195, 196, 197, 198, 199
+    ];
+    let exp_tag: [i64] = [
+        26, 225, 11, 89, 79, 9, 226, 106, 126, 144, 46, 203,
+        208, 96, 6, 145
+    ];
+
+    let mut aad_vec: Vec<u8> = vec_new();
+    let mut ai: i64 = 0;
+    while ai < 12 {
+        push(&mut aad_vec, i64_to_u8(aad_data[ai]));
+        ai = ai + 1;
+    }
+    let aad: [u8] = vec_to_array(aad_vec);
+
+    let mut pt_vec: Vec<secret u8> = vec_new();
+    let mut pi: i64 = 0;
+    while pi < 114 {
+        push(&mut pt_vec, i64_to_u8(pt_data[pi]));
+        pi = pi + 1;
+    }
+    let pt: [secret u8] = vec_to_array(pt_vec);
+
+    // ---- Seal, to obtain the RFC's ciphertext and tag from the shipped half.
+    let key1: [secret i32] = [k0, k1, k2, k3, k4, k5, k6, k7];
+    let nonce1: [secret i32] = [n0, n1, n2];
+    let sealed: AeadResult = chacha20poly1305_encrypt(key1, nonce1, &aad, pt);
+
+    // Assertion 2: the tag equals the RFC's published tag, so both halves agree
+    // with the document and not merely with each other.
+    let mut bad: i64 = 0;
+    let mut ti: i64 = 0;
+    while ti < 16 {
+        bad = bad | (u8_to_i64(sealed.tag[ti]) ^ exp_tag[ti]);
+        ti = ti + 1;
+    }
+
+    // ---- Assertion 1: open the authentic record and recover the plaintext.
+    // ⚠ ONE key binding, used for BOTH opens below. That is the point: `open`
+    // borrows its key, so a caller can open many records from one long-lived key.
+    // A first draft of this file built a fresh key/nonce pair per call because the
+    // signature took them by value and the second call was a compile error — the
+    // workaround was the tell, and the signature was what needed fixing.
+    let key2: [secret i32] = [k0, k1, k2, k3, k4, k5, k6, k7];
+    let nonce2: [secret i32] = [n0, n1, n2];
+    let opened: AeadOpenResult = chacha20poly1305_open(&key2, &nonce2, &aad, &sealed.ct, &sealed.tag);
+    if opened.ok == 1 { 0 } else { bad = bad | 1; 0 };
+    if len(opened.pt) == 114 { 0 } else { bad = bad | 1; 0 };
+    let mut ri: i64 = 0;
+    while ri < 114 {
+        // The recovered plaintext is SECRET; declassify each byte only to compare
+        // it against the public RFC vector, which is what this test is for.
+        bad = bad | (u8_to_i64(declassify(opened.pt[ri])) ^ pt_data[ri]);
+        ri = ri + 1;
+    }
+
+    // ---- Assertion 3: flip ONE bit of the ciphertext; the open must refuse and
+    // must hand back nothing.
+    let mut forged_vec: Vec<u8> = vec_new();
+    let mut fi: i64 = 0;
+    while fi < 114 {
+        let b: i64 = u8_to_i64(sealed.ct[fi]);
+        // Flip the low bit of byte 0 only.
+        if fi == 0 { push(&mut forged_vec, i64_to_u8(b ^ 1)); 0 } else { push(&mut forged_vec, i64_to_u8(b)); 0 };
+        fi = fi + 1;
+    }
+    let forged: [u8] = vec_to_array(forged_vec);
+    // Same key2/nonce2 bindings as the accept above — the reuse IS assertion 4.
+    let refused: AeadOpenResult = chacha20poly1305_open(&key2, &nonce2, &aad, &forged, &sealed.tag);
+    if refused.ok == 0 { 0 } else { bad = bad | 1; 0 };
+    // The contract is that a failed open releases NOTHING, so the buffer is empty.
+    if len(refused.pt) == 0 { 0 } else { bad = bad | 1; 0 };
+
+    if bad == 0 { 42 } else { 0 }
+}

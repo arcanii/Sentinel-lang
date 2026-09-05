@@ -493,10 +493,10 @@ fn sentinel_lexer_matches_oracle_on_real_programs() {
     let lexer = build_sentinel_lexer(&tmp);
     let work = tmp.join("work");
     std::fs::create_dir_all(&work).expect("create work dir");
-    // register D54: 121 -> 122 with `examples/export/mut_buffer_lib.sentinel`, the
-    // header-only export demonstrator. The count is a TRIPWIRE, not bookkeeping —
+    // 121 -> 122 (register D54, `examples/export/mut_buffer_lib.sentinel`) -> 123
+    // (request R4, `examples/security/chacha20poly1305_open.sentinel`). The count is a TRIPWIRE, not bookkeeping —
     // it is what catches a program silently dropping out of the sweep — so bumping
     // it is only correct when you know why it moved. Here: one file added.
-    real_program_differential("lex", &lexer, &work, 122, 23);
+    real_program_differential("lex", &lexer, &work, 123, 23);
     let _ = std::fs::remove_dir_all(&tmp);
 }

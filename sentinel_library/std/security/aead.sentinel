@@ -6,23 +6,44 @@
 // Poly1305 one-time MAC keyed by a per-message one-time key derived from the same
 // ChaCha20 key/nonce. This composes the shipped ChaCha20 and Poly1305 libraries.
 //
-// The pipeline (RFC 8439 §2.8):
+// The SEAL pipeline (RFC 8439 §2.8):
 //   1. OTK = first 32 bytes of chacha20_block(state, counter = 0)   (§2.6) — SECRET
 //   2. ciphertext = ChaCha20 encrypt of the plaintext, counter = 1          — SECRET
 //   3. mac_data = AAD || pad16(AAD) || CT || pad16(CT) || le64(|AAD|) || le64(|CT|)
 //   4. tag = Poly1305(OTK, mac_data)
 //
+// The OPEN pipeline is (1), (3), (4) — recomputing the tag over the SAME shared
+// `aead_mac_data` — then a branch-free compare, and only on a match does it run the
+// ChaCha20 keystream to recover the plaintext. Verify-then-decrypt, in that order.
+//
 // CONSTANT-TIME DISCIPLINE. The ChaCha20 key, the 16-word state, the derived OTK,
-// and the keystream are all SECRET and flow only through branch-free operations
-// (the libraries' CT check proves it). The ONE declassify boundary inside the
-// AEAD is the ciphertext: a stream cipher's ciphertext is public output (it goes
-// on the wire), so we declassify each CT byte as we copy it into the public
-// `mac_data` buffer. The AAD and the two 64-bit length fields are public from the
-// start. The OTK stays secret and enters Poly1305 as a `&[secret u8]` — the MAC
-// keeps it secret through the polynomial and only declassifies the final 16 tag
-// bytes (the tag, like the ciphertext, is public output). So the secret key/state
-// never reach a branch or a data-dependent index; only the two public outputs
-// (ciphertext, tag) cross a declassify.
+// the keystream and the recovered plaintext are all SECRET and flow only through
+// branch-free operations (the libraries' CT check proves it). The secret key and
+// state never reach a branch or a data-dependent index.
+//
+// THIS FILE HAS EXACTLY TWO DECLASSIFY BOUNDARIES. Count them by eye; the list is
+// meant to be exhaustive, and it was wrong once already (it described one boundary
+// and named the wrong location for it, which survived a refactor that moved the
+// site and a new function that added the second):
+//
+//   1. THE CIPHERTEXT, on seal. A stream cipher's ciphertext is public, wire-bound
+//      output, so each CT byte is declassified ONCE as it is copied into the public
+//      `ct_out` array. `aead_mac_data` then reads that already-public array — it
+//      contains no declassify of its own.
+//   2. THE ONE-BIT TAG VERDICT, on open. The branch-free tag comparison accumulates
+//      into a `secret i64` and declassifies a single bit: whether the tag matched.
+//      The caller has to be told that much, and nothing else crosses.
+//
+// The tag's own 16 bytes are declassified inside `poly1305`, not here. The AAD and
+// the two 64-bit length fields are public from the start; the OTK stays secret and
+// enters Poly1305 as a `&[secret u8]`.
+//
+// ⚠ ON OPEN, `want` — the recomputed tag — IS PUBLIC BY TYPE AND SENSITIVE BY
+// POSITION. Verifying a MAC means computing the correct one for the attacker's
+// chosen input, so `want` exists on the failure path by necessity. It carries no
+// `secret` qualifier, so nothing in the type system stops it being printed,
+// returned or logged, and doing so hands out a MAC-forgery oracle. See the note at
+// step (4) of `chacha20poly1305_open`.
 use std::security::chacha20::chacha20_block;
 use std::security::chacha20::chacha20_xor;
 use std::security::poly1305::poly1305;
@@ -83,6 +104,60 @@ fn pad16(v: &mut Vec<u8>) -> i64 {
     0
 }
 
+// Build the Poly1305 message (RFC 8439 §2.8):
+//   AAD || pad16(AAD) || CT || pad16(CT) || le64(|AAD|) || le64(|CT|)
+// Every input here is PUBLIC — the AAD is public by definition and the ciphertext
+// is an AEAD's public, wire-bound output — so the whole buffer is a plain `[u8]`
+// and no declassify happens inside.
+//
+// ⚠ SEAL AND OPEN MUST AGREE ON THIS BYTE-FOR-BYTE, so they share ONE
+// implementation rather than two that look alike. A mac_data layout that differs
+// between the halves does not fail loudly: it authenticates fine against itself
+// and rejects every message the other half produced, or — worse, if the
+// disagreement is in the length fields — accepts a message whose AAD/CT split has
+// been moved. RFC 8439 §2.8's length suffix exists precisely to stop that, and it
+// only works if one function writes it.
+fn aead_mac_data(aad: &[u8], ct: &[u8]) -> [u8] {
+    let alen: i64 = len(*aad);
+    let clen: i64 = len(*ct);
+    let mut mac: Vec<u8> = vec_new();
+    let mut ai: i64 = 0;
+    while ai < alen {
+        push(&mut mac, (*aad)[ai]);
+        ai = ai + 1;
+    }
+    pad16(&mut mac);
+    let mut ci: i64 = 0;
+    while ci < clen {
+        push(&mut mac, (*ct)[ci]);
+        ci = ci + 1;
+    }
+    pad16(&mut mac);
+    push_le64(&mut mac, alen);
+    push_le64(&mut mac, clen);
+    vec_to_array(mac)
+}
+
+// Assemble the 16-word ChaCha20 state (RFC 8439 §2.3): constants | key | counter |
+// nonce. Shared by both halves so the OTK derivation cannot drift between them.
+// ⚠ BORROWS, not by-value. `[secret i32]` is a Move type, so taking the key and
+// nonce by value would consume them here and leave the caller unable to pass them
+// on to `chacha20_xor` — which is exactly what both halves need to do next.
+fn aead_state(key: &[secret i32], nonce: &[secret i32], counter: secret i32) -> [secret i32] {
+    let c0: secret i32 = 1634760805 as i32;  // 0x61707865  "expa"
+    let c1: secret i32 = 857760878 as i32;   // 0x3320646e  "nd 3"
+    let c2: secret i32 = 2036477234 as i32;  // 0x79622d32  "2-by"
+    let c3: secret i32 = 1797285236 as i32;  // 0x6b206574  "te k"
+    let kk0: secret i32 = (*key)[0]; let kk1: secret i32 = (*key)[1];
+    let kk2: secret i32 = (*key)[2]; let kk3: secret i32 = (*key)[3];
+    let kk4: secret i32 = (*key)[4]; let kk5: secret i32 = (*key)[5];
+    let kk6: secret i32 = (*key)[6]; let kk7: secret i32 = (*key)[7];
+    let nn0: secret i32 = (*nonce)[0];
+    let nn1: secret i32 = (*nonce)[1];
+    let nn2: secret i32 = (*nonce)[2];
+    [c0, c1, c2, c3, kk0, kk1, kk2, kk3, kk4, kk5, kk6, kk7, counter, nn0, nn1, nn2]
+}
+
 // ChaCha20-Poly1305 AEAD encryption (RFC 8439 §2.8). Inputs:
 //   key       — the 256-bit ChaCha20 key, 8 little-endian `secret i32` words.
 //   nonce     — the 96-bit nonce, 3 little-endian `secret i32` words.
@@ -91,65 +166,21 @@ fn pad16(v: &mut Vec<u8>) -> i64 {
 // Returns the ciphertext (public) and the 16-byte Poly1305 tag.
 pub fn chacha20poly1305_encrypt(key: [secret i32], nonce: [secret i32],
                                 aad: &[u8], plaintext: [secret u8]) -> AeadResult {
-    // The ChaCha constants "expand 32-byte k" (RFC 8439 §2.3), as secret i32.
-    let c0: secret i32 = 1634760805 as i32;  // 0x61707865
-    let c1: secret i32 = 857760878 as i32;   // 0x3320646e
-    let c2: secret i32 = 2036477234 as i32;  // 0x79622d32
-    let c3: secret i32 = 1797285236 as i32;  // 0x6b206574
-
     // ---- (1) Derive the one-time Poly1305 key: chacha20_block with counter = 0.
-    let kk0: secret i32 = key[0]; let kk1: secret i32 = key[1];
-    let kk2: secret i32 = key[2]; let kk3: secret i32 = key[3];
-    let kk4: secret i32 = key[4]; let kk5: secret i32 = key[5];
-    let kk6: secret i32 = key[6]; let kk7: secret i32 = key[7];
-    let nn0: secret i32 = nonce[0];
-    let nn1: secret i32 = nonce[1];
-    let nn2: secret i32 = nonce[2];
     let ctr0: secret i32 = 0 as i32;
-    let otk_state: [secret i32] = [c0, c1, c2, c3, kk0, kk1, kk2, kk3,
-                                   kk4, kk5, kk6, kk7, ctr0, nn0, nn1, nn2];
-    let otk: [secret u8] = derive_otk(otk_state);
+    let otk: [secret u8] = derive_otk(aead_state(&key, &nonce, ctr0));
 
     // ---- (2) Encrypt the plaintext with ChaCha20, counter = 1 (RFC §2.8).
     let one: secret i32 = 1 as i32;
     let ct_secret: [secret u8] = chacha20_xor(plaintext, key, nonce, one);
 
-    // ---- (3) Build mac_data = AAD || pad16(AAD) || CT || pad16(CT) ||
-    //          le64(|AAD|) || le64(|CT|) as a PUBLIC Vec<u8>. The AAD is public;
-    //          the ciphertext is DECLASSIFIED here (public, wire-bound output).
-    let alen: i64 = len(*aad);
+    // ---- (3) Declassify the ciphertext ONCE. The CT bytes are the AEAD's public,
+    // wire-bound output, so this is boundary 1 of the two named in the file header.
+    // An earlier version declassified twice — once into the MAC buffer and again
+    // into the returned array — for the same bytes; folding it to one pass means
+    // the seal half has exactly one declassify, which is what makes the header's
+    // list checkable by eye.
     let clen: i64 = len(ct_secret);
-    let mut mac: Vec<u8> = vec_new();
-    // AAD bytes (public).
-    let mut ai: i64 = 0;
-    while ai < alen {
-        push(&mut mac, (*aad)[ai]);
-        ai = ai + 1;
-    }
-    pad16(&mut mac);
-    // Ciphertext bytes, declassified into the public mac buffer. The CT bytes
-    // are the AEAD's public output, so this is a sanctioned declassify boundary.
-    let mut ci: i64 = 0;
-    while ci < clen {
-        let cb: u8 = declassify(ct_secret[ci]);
-        push(&mut mac, cb);
-        ci = ci + 1;
-    }
-    pad16(&mut mac);
-    // The two little-endian 64-bit length fields (public).
-    push_le64(&mut mac, alen);
-    push_le64(&mut mac, clen);
-    let mac_data: [u8] = vec_to_array(mac);
-
-    // ---- (4) tag = Poly1305(OTK, mac_data). The OTK stays SECRET (a `&[secret u8]`
-    // borrow); the message (mac_data) is public; only the 16 tag bytes are
-    // declassified inside the MAC.
-    let tag: [u8] = poly1305(&mac_data, &otk);
-
-    // Materialize the public ciphertext bytes into a fresh [u8] to return alongside
-    // the tag (the secret ct buffer is consumed above only for the public copy in
-    // mac_data; rebuild the public ct here from a second declassify pass).
-    let zb: u8 = i64_to_u8(0);
     let mut ct_pub: Vec<u8> = vec_new();
     let mut di: i64 = 0;
     while di < clen {
@@ -158,5 +189,157 @@ pub fn chacha20poly1305_encrypt(key: [secret i32], nonce: [secret i32],
     }
     let ct_out: [u8] = vec_to_array(ct_pub);
 
+    // ---- (4) tag = Poly1305(OTK, mac_data). The OTK stays SECRET (a `&[secret u8]`
+    // borrow); the message is public; only the 16 tag bytes are declassified inside
+    // the MAC.
+    let mac_data: [u8] = aead_mac_data(aad, &ct_out);
+    let tag: [u8] = poly1305(&mac_data, &otk);
+
     AeadResult { ct: ct_out, tag: tag }
+}
+
+// The result of an AEAD open. `ok` is 1 when the tag verified and 0 when it did
+// not; `pt` is the recovered SECRET plaintext, and is EMPTY whenever `ok` is 0.
+//
+// ⚠ THE EMPTINESS ON FAILURE IS THE CONTRACT, not an implementation detail.
+// RFC 8439 §2.8 and the AEAD definition generally require that a failed open
+// release NOTHING: an attacker who can submit forgeries and observe even a
+// prefix of the would-be plaintext has a decryption oracle. `chacha20poly1305_open`
+// therefore verifies BEFORE it decrypts, so on the failure path no plaintext is
+// ever computed, let alone returned.
+//
+// ⚠ CHECK `ok` BEFORE READING `pt`. Sentinel has no sum type that could make that
+// unavoidable — `?[T]` is not representable (a struct-shaped result is the
+// convention, not an enforced one), so this is a discipline the caller has to
+// keep. It is stated here because a caller who ignores `ok` gets an empty buffer
+// rather than a wrong one, which fails safe but silently.
+pub struct AeadOpenResult { ok: i64, pt: [secret u8] }
+
+// ChaCha20-Poly1305 AEAD decrypt-and-verify (RFC 8439 §2.8), the inverse of
+// `chacha20poly1305_encrypt`. Inputs:
+//   key    — the 256-bit ChaCha20 key, 8 little-endian `secret i32` words.
+//   nonce  — the 96-bit nonce, 3 little-endian `secret i32` words.
+//   aad    — the public additional authenticated data.
+//   ct     — the public ciphertext.
+//   tag    — the received 16-byte Poly1305 tag.
+// Returns `ok = 1` and the recovered plaintext, or `ok = 0` and an empty buffer.
+//
+// ⚠ VERIFY-THEN-DECRYPT, in that order, and the order is load-bearing. The tag is
+// recomputed over the SAME `aead_mac_data` the seal half writes, compared against
+// the received one, and only on a match is the ChaCha20 keystream applied. A
+// decrypt-then-verify implementation produces the plaintext and then discards it,
+// which is a plaintext the compiler is free to leave in memory and one refactor
+// away from being returned.
+//
+// ⚠ THE TAG COMPARE IS BRANCH-FREE, AND IT IS TYPED SECRET TO KEEP IT THAT WAY.
+// Both tags are PUBLIC `[u8]`, so a byte-by-byte early-exit compare would leak no
+// `secret` and the constant-time checker would not object — it would simply leak,
+// through timing, how many leading tag bytes an attacker guessed correctly, which
+// is the classic route to forging a tag one byte at a time. Accumulating the
+// XOR differences into a `secret i64` and declassifying ONCE at the end makes the
+// checker enforce what discipline alone would otherwise have to. This is the shape
+// `std/net/ssh_cipher.sentinel`'s `ssh_open_verify` uses; it is written out here
+// rather than shared because that one is `chacha20-poly1305@openssh.com`, a
+// different construction with no AAD.
+// ⚠ KEY AND NONCE ARE BORROWED, and unlike `chacha20poly1305_encrypt`'s by-value
+// pair this is not an oversight to be tidied later — it is forced by TWO defects a
+// by-value signature produced here, both found by review and both measured:
+//
+//   1. A CALLER COULD NOT OPEN TWO RECORDS FROM ONE KEY. `[secret i32]` is a Move
+//      type, so the second call is a compile error. An open is the operation you
+//      perform repeatedly with a long-lived key; a first draft of the example
+//      quietly built three identical key/nonce pairs to work around it, which is
+//      the smell that should have been read as a signature defect.
+//   2. THE FAILURE PATH LEAKED THE KEY. Sentinel attaches a Move's drop to the
+//      MOVE SITE, not to scope exit, so params consumed only inside the `good == 1`
+//      arm were freed on the accept path and stranded on the REFUSE path —
+//      ~80 bytes of key and nonce per rejected open, unbounded and paced entirely
+//      by the attacker. Measured before the fix: 100k refusals 16.30 MB, 800k
+//      70.20 MB, perfectly linear, while the accept path stayed flat at 9.09 MB.
+//      Borrowing removes the conditional move, so there is nothing to strand.
+//
+// The asymmetry with the seal half is deliberate and stays: changing a shipped
+// public signature is a separate, breaking decision, and seal has neither problem
+// (it is branch-free and a caller seals once per key/nonce by construction).
+pub fn chacha20poly1305_open(key: &[secret i32], nonce: &[secret i32],
+                             aad: &[u8], ct: &[u8], tag: &[u8]) -> AeadOpenResult {
+    // ---- (1) Derive the same one-time Poly1305 key: counter = 0.
+    let ctr0: secret i32 = 0 as i32;
+    let otk: [secret u8] = derive_otk(aead_state(key, nonce, ctr0));
+
+    // ---- (2) Recompute the tag over the shared mac_data layout.
+    let mac_data: [u8] = aead_mac_data(aad, ct);
+    let want: [u8] = poly1305(&mac_data, &otk);
+
+    // ---- (3) Constant-time compare. A wrong LENGTH is a public, structural fact
+    // (the caller handed us a malformed record), so testing it is not a timing
+    // leak; the 16 byte comparisons that follow are the part that must not branch.
+    let tlen: i64 = len(*tag);
+    let mut acc: secret i64 = 0;
+    if tlen == 16 {
+        let mut i: i64 = 0;
+        while i < 16 {
+            acc = acc | ((want[i] as i64) ^ ((*tag)[i] as i64));
+            i = i + 1;
+        }
+        0
+    } else {
+        // Force a mismatch without branching on any byte value.
+        acc = acc | 1;
+        0
+    };
+    // `acc` is 0 iff every byte matched. Fold to 1/0 arithmetically and declassify
+    // that single bit.
+    //
+    // ⚠ THE FOLD IS `acc | (0 - acc)`, NOT `0 - acc`, AND THE DIFFERENCE IS THE
+    // ACCEPT/REJECT DECISION. `(0 - acc) >> 63` is a test for acc > 0, not for
+    // acc != 0: for any NEGATIVE `acc`, `0 - acc` is positive, its sign bit is
+    // clear, and the fold returns ACCEPT. An earlier version used the bare form and
+    // was safe only by an invariant it never stated — `u8` is unsigned
+    // (`docs/abi-v1.md`), so `(want[i] as i64) ^ ((*tag)[i] as i64)` zero-extends
+    // into [0,255] and `acc` cannot go negative. That is true and it is not a thing
+    // to rest a tag check on. OR-ing `acc` with its negation sets the sign bit for
+    // every non-zero value, positive or negative, so the fold is correct for all
+    // inputs rather than for the ones this call site happens to produce.
+    // (The same bare idiom appears in four other library files; they are
+    // structurally safe for the same unsigned reason, but see the register.)
+    let good: i64 = declassify(1 - (((acc | (0 - acc)) >> 63) & 1));
+
+    // ---- (4) Only now decrypt. NO PLAINTEXT is computed on the failure path.
+    //
+    // ⚠ BE PRECISE ABOUT WHAT "NOTHING IS COMPUTED" MEANS, because an earlier
+    // version of this comment overstated it and a reviewer turned the overstatement
+    // into a working forgery. The OTK, the mac_data and `want` — the CORRECT tag for
+    // the attacker's chosen (aad, ct) — are all computed above, unconditionally, as
+    // they must be: verifying a MAC means computing it. `want` is a public `[u8]`,
+    // so nothing stops a future edit from printing or returning it, and a single
+    // added `print(want)` on this path makes the function a MAC-forgery oracle
+    // (demonstrated: harvest `want` for a forged record, feed it back as the tag,
+    // get ok=1). What IS true, and is the property that matters, is that no
+    // PLAINTEXT exists on the failure path and the returned buffer is empty.
+    // Treat `want` as sensitive-by-position even though it is public-by-type.
+    if good == 1 {
+        let one: secret i32 = 1 as i32;
+        let clen: i64 = len(*ct);
+        let mut ctv: Vec<secret u8> = vec_new();
+        let mut ci: i64 = 0;
+        while ci < clen {
+            // Public -> secret is the ADR 0051 widen at an annotated binding; `as`
+            // is an integer-WIDTH cast and cannot add the qualifier.
+            let cb: secret u8 = (*ct)[ci];
+            push(&mut ctv, cb);
+            ci = ci + 1;
+        }
+        // `chacha20_xor` consumes its key/nonce, so rebuild them from the borrows.
+        // These locals are created ONLY on this arm and moved on it, so there is no
+        // conditional move and nothing to strand on the refuse path.
+        let kx: [secret i32] = [(*key)[0], (*key)[1], (*key)[2], (*key)[3],
+                                (*key)[4], (*key)[5], (*key)[6], (*key)[7]];
+        let nx: [secret i32] = [(*nonce)[0], (*nonce)[1], (*nonce)[2]];
+        let pt: [secret u8] = chacha20_xor(vec_to_array(ctv), kx, nx, one);
+        AeadOpenResult { ok: 1, pt: pt }
+    } else {
+        let empty: Vec<secret u8> = vec_new();
+        AeadOpenResult { ok: 0, pt: vec_to_array(empty) }
+    }
 }

@@ -37,7 +37,7 @@ written, two are partly true, none were wrong.
 | **R1** | secure-zero for `[secret u8]` / `Vec<secret u8>` | STILL-TRUE | **NEEDS-ADR** | medium |
 | **R2** | host-controllable failure path for runtime aborts | STILL-TRUE | **NEEDS-ADR** | small |
 | ~~R3~~ | `--emit-header` marks `&mut [u8]` params `const` | **DONE** | D54, landed | small |
-| R4 | `chacha20poly1305_open` in the stdlib | STILL-TRUE | BACKLOG | small |
+| ~~R4~~ | `chacha20poly1305_open` in the stdlib | **DONE** | landed, with D57 filed | small |
 | R5 | bulk `[secret u8]` throughput (opt-in `-O`, LTO) | PARTLY-TRUE | NEEDS-ADR | large |
 | R6 | hoist `k_constants()` out of the SHA-256 hot path | **PARTLY-TRUE** | BACKLOG | small |
 | R7 | PBKDF2-HMAC-SHA256 + HMAC midstate | STILL-TRUE | BACKLOG | medium |
@@ -52,7 +52,7 @@ written, two are partly true, none were wrong.
 
 ### What to do first, and why
 
-**▶ R3, R8 and R15 are DONE (2026-09-05).** The rest of this section is the case for what
+**▶ R3, R4, R8 and R15 are DONE (2026-09-05).** The rest of this section is the case for what
 remains.
 
 **R3 was the cheapest real win in the list — about four lines.** `emit_c_header`
@@ -100,6 +100,24 @@ a soname (ADR 0060 Phase 2)"), and `&mut [u8]` export parameters demonstrably wo
 exists precisely because they work and the generated header mis-declares them. A wrong
 capability claim in STATE.md is the highest-authority wrong claim in the tree.
 **Filed as register D55.**
+
+**R4 is DONE, and the helpers stayed PRIVATE.** Their fallback ask was "failing that, make
+`derive_otk`, `pad16` and `push_le64` `pub`" — shipping the open half instead means the
+~30 lines of security-relevant code they had restated in their own tree, unversioned, can
+be deleted rather than blessed as API. Seal and open now share one `aead_mac_data`, because
+a framing that differs between the halves does not fail loudly: it authenticates against
+itself and silently rejects everything the other half produced.
+`examples/security/chacha20poly1305_open.sentinel` verifies the RFC 8439 §2.8.2 vector,
+checks the tag against the RFC's PUBLISHED tag (so both halves agree with the document and
+not merely with each other), rejects a single flipped ciphertext bit with an empty buffer,
+and opens twice from one key binding.
+⚠ **The review found a blocker in the first cut and it is worth telling them about**: the
+by-value `key`/`nonce` signature leaked ~80 bytes per REFUSED open — unbounded and paced by
+the attacker — because Sentinel attaches a Move's drop to the move SITE, and the params were
+consumed only on the accept arm. Measured 100k refusals 16.30 MB → 800k 70.20 MB, against a
+flat accept path. Borrowing the key removed it (now 9.16 → 9.09 MB, flat) and also fixed a
+second defect the same signature caused: a caller could not open two records from one key.
+**If they wrote their own open against the by-value shape, they have the same leak.**
 
 ### Standing notes
 
