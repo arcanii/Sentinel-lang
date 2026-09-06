@@ -1,0 +1,29 @@
+// C1.7 / ADR 0016, register D45: a generic call pushes each parameter's type down into
+// its ARGUMENT, substituted with what the arguments to its LEFT have already bound.
+//
+// `f<T>(a: T, b: ?T)` called as `f(9, 5)`: `a` binds T = i64, so `b`'s declared `?T` is
+// `?i64` by the time argument 2 is walked, and the public literal `5` must WIDEN into it
+// (ADR 0051) — two `insertvalue` instructions before the call.
+//
+// ⚠ THIS DIVERGENCE WAS SILENT, which is why it is pinned separately from its `null`
+// sibling. `scg` dumped every generic-call argument with NO expected type and unified
+// only after the whole walk, so it passed a bare `i64 5` and emitted no widen at all —
+// 583 bytes against the oracle's 686. `llvm-as` accepted that module without a word,
+// because `scg`'s own callee signature agreed with its own call site. The codegen
+// differential's byte-COMPARE is the only thing in the harness that could see it.
+// Its twin `c17_generic_null_arg_second.sentinel` is the LOUD half (llvm-as rejects it),
+// and the pair is deliberate: a fix validated only on the loud one leaves this green.
+//
+// ⚠ NOT A `null` DEFECT. The register filed D45 as a `null`-argument problem; a widened
+// literal has no `null` anywhere and takes the identical path. What was actually missing
+// is the pushdown itself, which the NON-generic path (`dump_targs`) has always had — and
+// that is why a non-generic callee was byte-identical all along.
+//
+// 40 + 2 = 42.
+fn f<T>(a: T, b: ?T) -> i64 {
+    if is_some(b) { 40 } else { 0 }
+}
+
+fn main() -> i64 {
+    f(9, 5) + 2
+}

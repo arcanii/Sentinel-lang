@@ -1,0 +1,32 @@
+// C1.7 / ADR 0016, register D45: a bare `null` ARGUMENT to a generic call takes its type
+// from the parameter it fills, substituted with what the arguments to its left bound.
+//
+// `takes<T>(d: T, x: ?T)` called as `takes(true, null)`: `d` binds T = bool, so the
+// `null` is `?bool` and renders `{ i1, i1 } { i1 0, i1 0 }`. `scg` dumped arguments with
+// no expected type and unified only afterwards, so the `null` — whose type IS its
+// expectation — fell back to a default and rendered `i64 { i1 0, i64 0 }`.
+//
+// ⚠ T = bool ON PURPOSE. At T = i64 the wrong answer and the right answer coincide, and
+// the register entry was written from that degenerate case: it describes only a wrong
+// "type prefix", when at any other T the whole thing is wrong — and with the `null`
+// FIRST instead, the wrong default also binds T and the entire monomorphisation key
+// changes (`@takes__i64` for `@takes__bool`, wrong signature, wrong body). Pinning this
+// at i64 would have pinned nothing.
+//
+// ⚠ THE `null`-FIRST ORDER IS STILL BROKEN and is deliberately NOT pinned here — it
+// cannot be, because a `tests/pass` fixture must be byte-identical. Fixing it needs the
+// argument's already-emitted MIR value and LLVM operand slot to be PATCHED after the
+// walk (a bare `null` costs no LLVM register but DOES take a positional MIR slot, so it
+// cannot simply be deferred). See the register.
+//
+// This half is the LOUD one: pre-fix `llvm-as` rejects it with "constant expression type
+// mismatch". Its twin `c17_generic_arg_pushdown.sentinel` is the SILENT half. Keep both.
+//
+// 40 + 2 = 42.
+fn takes<T>(d: T, x: ?T) -> i64 {
+    if is_some(x) { 0 } else { 40 }
+}
+
+fn main() -> i64 {
+    takes(true, null) + 2
+}

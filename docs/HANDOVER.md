@@ -173,7 +173,7 @@ reference as you work through the milestones.
 >      scalar-4 arm, which it now has. Also worth doing with it: `examples/math/quadratic.sentinel` and
 >      `sentinel_library/std/math/float.sentinel` currently reach only lex/ast, because
 >      `snc merge`'s Bar-A printer rejects both a float literal and `sqrt` (menu item 5).
->   4. **THE FILED-DEFECT REGISTER — FIFTY-SEVEN items (D1-D57); **D1, D2, D3, D5, D8, D9, D15, D16, D17, D24, D25, D26, D29, D31, D34, D39, D42, D44, D47(option A), D54, D55 and D56 are DONE**, the rest verified against a pre-slice binary. MOST are
+>   4. **THE FILED-DEFECT REGISTER — FIFTY-EIGHT items (D1-D58); **D1, D2, D3, D5, D8, D9, D15, D16, D17, D24, D25, D26, D29, D31, D34, D39, D42, D44, D47(option A), D54, D55, D56 and D58 are DONE**, the rest verified against a pre-slice binary. MOST are
 >      unregistered in any `DEFERRED_PROGRAMS` / `KNOWN_SCG_BUGS` list because no corpus program
 >      reaches them — but FOUR are, and the blanket "NONE" that stood here was falsified by
 >      this register's own new entries: D24/D25/D26 share the
@@ -731,14 +731,62 @@ reference as you work through the milestones.
 >      with the arm in place — see D51. `Process` and `Task` genuinely are unspellable
 >      there (constructed).
 >
->      **D45 — a `null` ARGUMENT to a call on a MONOMORPHISED generic fn takes its type
->      prefix from the un-inferred i64 seam.** The oracle renders the callee's declared
->      `?T`; `scg` renders `i64`, giving `call ... @f(i64 { i1 0, i64 0 })` against the
->      oracle's `{ i1, i64 } { i1 0, i64 0 }` — "constant expression type mismatch". A
->      NON-generic callee is byte-identical, so it is specifically the mono path. It is
->      NOT `?GI`-specific and NOT effect-specific: plain `?i64` through a three-line
->      generic reproduces it, and so does a class `init` taking a `?i64`. Oracle exit 0,
->      so this one is differentially live too.
+>      **D45 — PARTLY DONE (this slice). `scg`'s generic-call walker dumped every argument
+>      before it knew that argument's parameter type.** Filed as "a `null` argument takes
+>      its type prefix from the un-inferred i64 seam"; that is the degenerate case. The
+>      real statement is the one above, and `null` is only the instance where the missing
+>      expectation is the argument's WHOLE type.
+>
+>      ⚠ **THE ENTRY WAS WRITTEN AT `T = i64`, WHERE THE WRONG ANSWER EQUALS THE RIGHT
+>      ONE.** At any other T the damage is larger, and with the `null` FIRST it is total:
+>      `takes(null, true)` gives oracle `@takes__bool({ i1, i1 } …, i1 1)` against `scg`'s
+>      `@takes__i64(i64 …, i1 1)` — wrong symbol, wrong signature, wrong body. The
+>      **argument ORDER separates two symptoms**: null-second is only the argument; null-
+>      first also corrupts the monomorphisation key, because the defaulted type then feeds
+>      `unify_one`. Neither is visible at i64.
+>
+>      **⚠ IT IS ALSO NOT A CODEGEN DEFECT.** `(targs …)` and `(null :?…)` both come from
+>      the shared dump walk, so the TYPES and MIR stages diverge too — one fix moves three
+>      differentials. And it is not a `null` defect: a widened literal takes the identical
+>      path (`f<T>(a: T, b: ?T)` called `f(9, 5)` emitted NO widen), and that half is
+>      **SILENT** — `llvm-as` accepts it because scg's own callee signature agrees with its
+>      own call site.
+>
+>      **LANDED HERE:** the pushdown. `dump_args_capture_all` now carries the callee's
+>      param span and the in-progress bindings, computes each argument's expected type from
+>      the parameter substituted under what the arguments to its LEFT bound, and unifies
+>      IMMEDIATELY rather than after the whole walk — which is what the NON-generic path
+>      (`dump_targs`, via `fn_param_ty`) has always done, and why a non-generic callee was
+>      byte-identical all along. Fixes null-second, multi-null-after-binder, and widened
+>      literal arguments. Corpus-neutral: a 357-program sweep moved ZERO. Pinned by
+>      `c17_generic_arg_pushdown` (the SILENT half) and `c17_generic_null_arg_second` (the
+>      LOUD half) — a fix validated on only one of those leaves the other green.
+>
+>      ⚠ **`arg_expected` IS AN EXPLICIT FAIL-CLOSED LIST** mirroring the oracle's own
+>      pushdown gate (nullable, or a secret-widen target). Widening it makes `scg` widen
+>      arguments the oracle does not — a divergence on programs identical today.
+>      ⚠ **`subst_fully`'s kind-10 arm RETURNS THE HANDLE UNCHANGED** and must not rebuild
+>      via `mk_generic` the way `subst_type` does. The oracle's `try_substitute` checks
+>      concreteness and returns the instance it was given. Rebuilding types a `null` at
+>      `?Bx<i64>` where the oracle says `?Bx<<T#0>>` — which the LLVM differential CANNOT
+>      SEE (both render `ptr null`) while types and MIR fail. **A fix validated on the .ll
+>      alone would look correct and break two other stages.**
+>
+>      **STILL OPEN — the null-FIRST residue.** A bare `null` whose parameter is still
+>      unsubstituted at its turn cannot be given an expectation, and it cannot simply be
+>      deferred: it costs no LLVM register, but it DOES take a positional MIR value slot
+>      (`mir_emit_opaque0` allocates in emission order and `mir_collect` pushes in argument
+>      order), so deferring renumbers MIR and drops it from the call's operand list. The
+>      design is emit-in-place-then-PATCH — `mvty[id]`, `cgat`/`cgav[slot]`, and a rebuild
+>      of that argument's text — which needs an INDEX ASSIGNMENT into a `TyCtx` `Vec`
+>      field. There are currently ZERO such assignments anywhere in `selfhost/`, so that
+>      slice would be the first, exercising an `scg` codegen path `scg`'s own sources have
+>      never used. Verify it against both fixed points before trusting it.
+>      **Also still open:** class `init` (`dump_cargs` family) is a parallel walker and
+>      untouched by this slice; and seeding the substitution from the expected RETURN type
+>      (the oracle does it before the argument walk) is its own slice, because it RENAMES
+>      emitted symbols for null-free programs (`let s: secret i64 = idg(7)` →
+>      `@idg__sec_i64`) and needs its own corpus sweep.
 >
 >      **D46 — a `?&T` or `?Channel<T>` `null` constant is JOINT invalid IR: the oracle
 >      emits `ptr 0` and `scg` reproduces it byte-for-byte.**
@@ -1112,6 +1160,24 @@ reference as you work through the milestones.
 >      `[secret u8]`, so those are safe by TYPE as well. Change them together or not at
 >      all: a lone corrected site invites the next reader to "restore consistency" in the
 >      wrong direction.
+>
+>      **D58 — `cg_mangle_to` had no guard for a NEGATIVE handle, so an unbound type
+>      argument KILLED the compiler on an oracle-accepted program.** FIXED in the D45
+>      slice, and worth its own number because the failure mode is not a byte divergence.
+>      `struct Bx<T> { v: T } fn idn<T>(x: ?Bx<T>) -> ?Bx<T> { x } fn main() -> i64 { let
+>      v: ?Bx<bool> = idn(null); 42 }` — the oracle emits 442 bytes and `llvm-as` accepts
+>      them; `scg` exited **127 with ZERO bytes on stdout** and
+>      `sentinel: index out of bounds: idx=-101, len=7`. A `-1` "not bound" sentinel
+>      reached `h - tbase()` and indexed at -101 — **the same `-101` signature as D37 and
+>      D43**, which is now three separate places where a not-found sentinel is used as an
+>      interner index. `cg_mangle_to` now has an explicit `h < 0` arm emitting
+>      `UNBOUND_TYPEARG`. ⚠ An explicit arm, NOT a widened trailing `else`: that arm's job
+>      is an unrecognised KIND, and letting it swallow a negative HANDLE would hide the
+>      inference failure that produced it. Post-fix the program emits 488 bytes and still
+>      diverges from the oracle (that is D45's null-first residue) — but a symbol nobody
+>      defines beats an abort with no output.
+>      ⚠ **Grep the family before calling this closed:** `gi_argstart`/`gi_argend`
+>      (`interner.sentinel`) are still unguarded and would give the identical message.
 >
 >      **D53 — the D47 gate is bypassed through a GENERIC body, and that route still
 >      reaches the invalid lowering.** `fn first_or<T>(x: ?T, d: T) -> T { unwrap_or(x, d) }`

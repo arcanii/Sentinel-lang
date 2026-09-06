@@ -242,7 +242,111 @@ fn unify_one(c: &mut TyCtx, pt: i64, at: i64, bi: &mut Vec<i64>, bt: &mut Vec<i6
 
 // Dump every call arg into `out`, pushing each arg's synthesized type onto `atys`
 // (so a generic call can unify the fn's params against them).
-fn dump_args_capture_all(out: &mut Vec<u8>, a: Args, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>, atys: &mut Vec<i64>) -> i64 {
+// (register D45) Substitute `h` under the bindings built SO FAR, answering -1 if any
+// type-param slot it mentions is still unbound. This is scg's mirror of the oracle's
+// `try_substitute`, and the mirror has to be exact in one place that is easy to get
+// wrong — see the kind-10 arm.
+fn subst_fully(c: &mut TyCtx, h: i64, bi: &mut Vec<i64>, bt: &mut Vec<i64>) -> i64 {
+    if h < tbase() {
+        h
+    } else {
+        let idx: i64 = h - tbase();
+        let k: i64 = (*c).tk[idx];
+        if k == 9 {
+            // A type param: its binding, or -1 if not bound yet.
+            subst_get(bi, bt, (*c).ta[idx])
+        } else if k == 4 {
+            let inner: i64 = subst_fully(c, (*c).ta[idx], bi, bt);
+            if inner < 0 {
+                0 - 1
+            } else {
+                mk_nullable(c, inner)
+            }
+        } else if k == 1 {
+            let el: i64 = subst_fully(c, (*c).ta[idx], bi, bt);
+            if el < 0 {
+                0 - 1
+            } else {
+                mk_array(c, el)
+            }
+        } else if k == 3 {
+            let sinner: i64 = subst_fully(c, (*c).ta[idx], bi, bt);
+            if sinner < 0 {
+                0 - 1
+            } else {
+                mk_secret(c, sinner)
+            }
+        } else if k == 10 {
+            // ⚠ RETURN THE HANDLE UNCHANGED. Do NOT rebuild it with `mk_generic` the way
+            // `subst_type` does. The oracle's `try_substitute` CHECKS that every argument
+            // of a generic instance substitutes and then returns the instance handle it
+            // was given — its own comment says "Doesn't re-intern — that's the mutable-
+            // substitute path". Rebuilding here types a `null` at `?Bx<i64>` where the
+            // oracle types it `?Bx<<T#0>>`, which the LLVM differential CANNOT SEE
+            // (both render `ptr null`) while the types and MIR differentials fail. A fix
+            // validated on the .ll alone would look correct and break two other stages.
+            let gas: i64 = gi_argstart(c, h);
+            let gae: i64 = gi_argend(c, h);
+            let mut gj: i64 = gas;
+            let mut ok: bool = true;
+            while gj < gae {
+                let ga: i64 = (*c).gia[gj];
+                if subst_fully(c, ga, bi, bt) < 0 {
+                    ok = false;
+                    0
+                } else {
+                    0
+                };
+                gj = gj + 1;
+            }
+            if ok {
+                h
+            } else {
+                0 - 1
+            }
+        } else {
+            // Every other kind is either already concrete or one this walk deliberately
+            // does not reshape. Answering `h` is safe because the ONLY consumer is
+            // `arg_expected`, which then applies its own fail-closed pushdown list.
+            h
+        }
+    }
+}
+
+// (register D45) The expected type to push down into argument `pi` of a generic call,
+// or -1 for "no expectation" (the walk's behaviour before this existed).
+//
+// ⚠ THIS IS AN EXPLICIT FAIL-CLOSED LIST, mirroring the oracle's `check_call`, which
+// pushes a param type down ONLY when the substituted form `is_nullable()` or
+// `is_secret_widen_target()`. Everything else synthesises without a pushdown so the
+// more specific arg-mismatch diagnostic surfaces there. Widening the list here would
+// make scg widen arguments the oracle does not, which is a byte divergence on programs
+// that are identical today; narrowing it re-opens D45. Do not restate it as "the
+// substituted type looks concrete enough".
+fn arg_expected(c: &mut TyCtx, pty: i64, bi: &mut Vec<i64>, bt: &mut Vec<i64>) -> i64 {
+    if pty < 0 {
+        0 - 1
+    } else {
+        let sub: i64 = subst_fully(c, pty, bi, bt);
+        if sub < 0 {
+            0 - 1
+        } else if cg_is_nullable(c, sub) {
+            sub
+        } else if is_secret_ty(c, sub) {
+            sub
+        } else {
+            0 - 1
+        }
+    }
+}
+
+// (register D45) Carries the callee's PARAM SPAN and the in-progress type-param
+// bindings, so each argument can be dumped with the expectation its parameter implies
+// and unified IMMEDIATELY — left to right, exactly as the oracle's `check_call` walks.
+// Before this, every argument was dumped with no expectation and unification ran only
+// after the whole walk, so a `null` argument (whose type IS its expectation) was typed
+// from a default and, when it came first, that default then bound the type parameter.
+fn dump_args_capture_all(out: &mut Vec<u8>, a: Args, ps: i64, pi: i64, np: i64, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>, atys: &mut Vec<i64>, bi: &mut Vec<i64>, bt: &mut Vec<i64>) -> i64 {
     match a {
         Args::End => 0,
         Args::Cell(x, rest) => {
@@ -252,8 +356,16 @@ fn dump_args_capture_all(out: &mut Vec<u8>, a: Args, src: &[u8], c: &mut TyCtx, 
             // (register D31) snapshot the node counter so the clone gate below can tell
             // a BARE `Var` argument from a compound one whose tail merely happens to be
             // a Var. See the gate.
+            // (register D45) The parameter this argument fills, and the expectation it
+            // implies under the bindings built by the arguments to its LEFT.
+            let pty: i64 = if pi < np {
+                (*c).ufpp[ps + pi]
+            } else {
+                0 - 1
+            };
+            let aexp: i64 = arg_expected(c, pty, bi, bt);
             let n0: i64 = (*c).ndump;
-            let t0: i64 = dump_texpr(out, x, 0 - 1, src, c, gb);
+            let t0: i64 = dump_texpr(out, x, aexp, src, c, gb);
             mir_collect(c);
             // (ADR 0071 M1.4a slice 3 / register D31) rc++ a named container arg into
             // the callee's owning param, as `dump_targs` does. ⚠ THIS WAS MISSING and the
@@ -288,7 +400,15 @@ fn dump_args_capture_all(out: &mut Vec<u8>, a: Args, src: &[u8], c: &mut TyCtx, 
             // pass it to the monomorphic callee (mirrors dump_targs / dump_args_capture_first).
             cg_collect(c, t0);
             push(atys, t0);
-            dump_args_capture_all(out, rest, src, c, gb, atys)
+            // (register D45) Unify HERE, not after the walk, so argument i+1's expectation
+            // can see what argument i bound. `subst_bind` is first-binding-wins, matching
+            // the oracle's `unify_one` into a shared subst.
+            if pty < 0 {
+                0
+            } else {
+                unify_one(c, pty, t0, bi, bt)
+            };
+            dump_args_capture_all(out, rest, ps, pi + 1, np, src, c, gb, atys, bi, bt)
         },
     }
 }
@@ -301,26 +421,16 @@ fn dump_args_capture_all(out: &mut Vec<u8>, a: Args, src: &[u8], c: &mut TyCtx, 
 fn dump_generic_call(out: &mut Vec<u8>, fid: i64, ca: Args, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
     let mut abuf: Vec<u8> = vec_new();
     let mut atys: Vec<i64> = vec_new();
-    dump_args_capture_all(&mut abuf, ca, src, c, gb, &mut atys);
     let ntp: i64 = (*c).uftp[fid - 42];
     let ps: i64 = (*c).ufps[fid - 42];
     let pe: i64 = (*c).ufpe[fid - 42];
     let np: i64 = pe - ps;
-    let na: i64 = len(atys);
-    let lim: i64 = if np < na {
-        np
-    } else {
-        na
-    };
+    // (register D45) The bindings are built DURING the argument walk now, not after it,
+    // so argument i's expectation can use what arguments 0..i-1 bound. The walk owns the
+    // unification; there is deliberately no second pass here.
     let mut bi: Vec<i64> = vec_new();
     let mut bt: Vec<i64> = vec_new();
-    let mut pi: i64 = 0;
-    while pi < lim {
-        let pty: i64 = (*c).ufpp[ps + pi];
-        let aty: i64 = atys[pi];
-        unify_one(c, pty, aty, &mut bi, &mut bt);
-        pi = pi + 1;
-    }
+    dump_args_capture_all(&mut abuf, ca, ps, 0, np, src, c, gb, &mut atys, &mut bi, &mut bt);
     // Build the resolved subst list in type-param INDEX order (0..ntp).
     let mut subst: Vec<i64> = vec_new();
     let mut ti: i64 = 0;

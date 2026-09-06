@@ -484,6 +484,26 @@ fn pass_c17_nullable_generic_instance_widen() {
 }
 
 #[test]
+fn pass_c17_generic_arg_pushdown() {
+    // ADR 0016 / register D45: a generic call pushes each param type down into its
+    // argument, substituted with what the arguments to its LEFT bound. `f<T>(a: T, b: ?T)`
+    // called `f(9, 5)` must WIDEN the literal into `?i64`.
+    // ⚠ This divergence was SILENT — `scg` emitted no widen at all (583 vs 686 bytes) and
+    // `llvm-as` accepted the result, because scg's own callee signature agreed with its own
+    // call site. Only the differential's byte-compare could see it. 40 + 2 = 42.
+    assert_eq!(run_exit("c17_generic_arg_pushdown.sentinel"), 42);
+}
+
+#[test]
+fn pass_c17_generic_null_arg_second() {
+    // ADR 0016 / register D45, the LOUD half: a bare `null` argument takes its type from
+    // the parameter it fills. At T = bool the pre-fix output is `llvm-as`-rejected
+    // ("constant expression type mismatch"); at T = i64 the defect is invisible, which is
+    // the degenerate case the register entry was written from. 40 + 2 = 42.
+    assert_eq!(run_exit("c17_generic_null_arg_second.sentinel"), 42);
+}
+
+#[test]
 fn pass_c17_go_no_go() {
     // ADR 0016 D12 phase-go: Pair<A, B> + make_pair / fst / snd +
     // pick_int composition. The full generic-struct + generic-fn

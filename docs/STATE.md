@@ -14,7 +14,49 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
-**Latest (2026-09-06) — the stdlib AEAD can now OPEN, and the review caught a leak on its
+**Latest (2026-09-06b) — the register's D45 is PARTLY closed and D58 is closed: `scg`'s
+generic-call walker now pushes each parameter's type down into its argument.** Before this,
+every argument of a generic call was dumped with NO expected type and unification ran only
+after the whole walk — so an argument whose type comes from its parameter got a default.
+
+**The entry was written at `T = i64`, where the wrong answer equals the right one.** It
+described a wrong "type prefix" on a `null` argument. At any other T the damage is larger,
+and with the `null` FIRST it is total: `takes(null, true)` gives oracle `@takes__bool` and
+`scg` `@takes__i64` — wrong symbol, wrong signature, wrong body, because the defaulted type
+then feeds `unify_one`. **Argument ORDER separates the two symptoms**, which is the
+experiment that made the root visible.
+
+**It is also not a codegen defect and not a `null` defect.** `(targs …)` and `(null :?…)`
+both come from the shared dump walk, so TYPES and MIR diverge too. And a widened literal
+takes the identical path: `f<T>(a: T, b: ?T)` called `f(9, 5)` emitted NO widen at all —
+**and that half is SILENT**, because `llvm-as` accepts it when scg's own callee signature
+agrees with its own call site. Two fixtures, one per polarity.
+
+The fix is the mechanism the NON-generic path has always had (`dump_targs` passes
+`fn_param_ty`), which is why a non-generic callee was byte-identical all along. A
+357-program sweep moved ZERO.
+
+⚠ **Two traps recorded in the code, both found by the review rather than by me.** The
+pushdown gate is an EXPLICIT fail-closed list mirroring the oracle's own (nullable, or a
+secret-widen target) — widening it makes `scg` widen arguments the oracle does not. And
+`subst_fully`'s generic-instance arm must return the handle UNCHANGED rather than rebuild
+it: the oracle's `try_substitute` checks concreteness and returns what it was given, so
+rebuilding types a `null` at `?Bx<i64>` where the oracle says `?Bx<<T#0>>` — invisible to
+the LLVM differential (both render `ptr null`) and fatal to the types and MIR ones. **A fix
+validated on the .ll alone would have looked correct and broken two other stages.**
+
+**D58, found on the way:** `cg_mangle_to` had no guard for a negative handle, so an unbound
+type argument computed `idx = -101` and killed the compiler — exit 127, ZERO bytes — on a
+program the oracle accepts and `llvm-as` accepts. Same `-101` signature as D37 and D43;
+that is now three places where a not-found sentinel is used as an interner index.
+
+**Still open in D45:** the null-FIRST residue. A bare `null` costs no LLVM register but DOES
+take a positional MIR value slot, so it cannot be deferred — the design is emit-in-place-
+then-patch, which needs the first index assignment into a `TyCtx` `Vec` field anywhere in
+`selfhost/`. Class `init` is a parallel walker, untouched. Seeding from the expected RETURN
+type is its own slice because it RENAMES emitted symbols for null-free programs.
+
+**Previous (2026-09-06a) — the stdlib AEAD can now OPEN, and the review caught a leak on its
 refusal path** (`4f33bd6`, request R4). `chacha20poly1305_encrypt` had shipped since ADR 0052
 with no inverse — a seal-only AEAD, usable for writing a record and not for reading one back,
 on a format whose unseal runs at every file open.

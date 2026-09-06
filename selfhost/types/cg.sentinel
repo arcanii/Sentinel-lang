@@ -249,7 +249,22 @@ fn cg_fn_name_to(out: &mut Vec<u8>, c: &mut TyCtx, fid: i64) -> i64 {
 // mirroring the oracle's `mangle_type`/`mangle_instance`. Used for generic-instance
 // LLVM type names (`%<mangled>`) + (Bar B mono) monomorphic fn symbols.
 fn cg_mangle_to(out: &mut Vec<u8>, c: &mut TyCtx, h: i64) -> i64 {
-    if h == 0 {
+    // (register D45) FAIL CLOSED ON AN UNBOUND TYPE ARGUMENT. A type-param slot that
+    // inference never bound arrives here as -1; without this arm the `else` branch
+    // below computes `idx = h - tbase()` = -101 and the whole compiler DIES —
+    // `sentinel: index out of bounds: idx=-101, len=N`, exit 127, ZERO bytes emitted —
+    // on programs the ORACLE ACCEPTS. That is a total failure of the self-hosted
+    // compiler, not a byte divergence, and it is the same `-101` signature as registers
+    // D37 and D43: a "not found" sentinel used as an interner index.
+    //
+    // ⚠ AN EXPLICIT ARM, NOT A WIDENED `else`. The trailing arm's job is to render an
+    // unrecognised KIND; letting it also swallow a negative HANDLE would hide the
+    // inference failure that produced it. Emitting a marker name keeps it loud: the
+    // program is one the oracle rejects or one whose type argument scg failed to infer,
+    // and either way a symbol nobody defines is better than an abort with no output.
+    if h < 0 {
+        append_str(out, "UNBOUND_TYPEARG")
+    } else if h == 0 {
         append_str(out, "i64")
     } else if h == 1 {
         append_str(out, "i32")
