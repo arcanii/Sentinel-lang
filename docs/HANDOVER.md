@@ -173,7 +173,7 @@ reference as you work through the milestones.
 >      scalar-4 arm, which it now has. Also worth doing with it: `examples/math/quadratic.sentinel` and
 >      `sentinel_library/std/math/float.sentinel` currently reach only lex/ast, because
 >      `snc merge`'s Bar-A printer rejects both a float literal and `sqrt` (menu item 5).
->   4. **THE FILED-DEFECT REGISTER — FIFTY-EIGHT items (D1-D58); **D1, D2, D3, D5, D8, D9, D15, D16, D17, D24, D25, D26, D29, D31, D34, D39, D42, D44, D4, D43, D47(option A), D51, D54, D55, D56 and D58 are DONE**, the rest verified against a pre-slice binary. MOST are
+>   4. **THE FILED-DEFECT REGISTER — FIFTY-EIGHT items (D1-D58); **D1, D2, D3, D5, D8, D9, D15, D16, D17, D24, D25, D26, D29, D31, D34, D39, D42, D44, D4, D37, D43, D47(option A), D51, D54, D55, D56 and D58 are DONE**, the rest verified against a pre-slice binary. MOST are
 >      unregistered in any `DEFERRED_PROGRAMS` / `KNOWN_SCG_BUGS` list because no corpus program
 >      reaches them — but FOUR are, and the blanket "NONE" that stood here was falsified by
 >      this register's own new entries: D24/D25/D26 share the
@@ -1137,7 +1137,25 @@ reference as you work through the milestones.
 >      running it). The general question of what that guard does and does not cover is
 >      tracked PRIVATELY with the maintainer; ask before extending it.
 >
->      **D37 — `scg` PANICS on a generic `&T` parameter given a container.**
+>      **D37 — DONE (this slice), and the fix also closed the `Vec<T>` twin.** `unify_one`
+>      had arms for type-param, array, nullable, secret and generic-instance params and
+>      NONE for a REF or a VEC, so `T` was never bound; the unbound `-1` then reached the
+>      mangler. Both arms added, both mirroring the ORACLE'S PREDICATE rather than its
+>      effect: ref fires only on (Ref, Ref) with equal mutability, vec only on a vec.
+>      ⚠ **Four over-acceptance shapes were constructed and ALL FOUR ARE ORACLE-REJECTED**
+>      (`&mut T` given `&a`; `&T` given `&mut a`; `&T` given a non-ref; `Vec<T>` given
+>      `[i64]`) — so the codegen differential, which runs only oracle-ACCEPTED programs,
+>      **could never have caught a laxer predicate**. That is the reason to copy the
+>      predicate rather than the outcome, and it is worth restating whenever a mirror arm
+>      is written.
+>      ⚠ **The `Vec` arm deliberately does NOT use `array_elem_of`**, which answers the
+>      element for kind 1 AND kind 11 so `len`/`v[i]` work uniformly — right for indexing,
+>      wrong for unification, where the oracle refuses to mix the two shapes in BOTH
+>      directions (constructed). The neighbouring ARRAY arm does route through it and
+>      therefore over-binds `[T]` from a `Vec<i64>` argument: pre-existing, unobservable
+>      for the same reason, and left alone rather than "made consistent".
+>      Pinned by `tests/pass/c17_generic_ref_param_infer.sentinel`; sweep 357, zero moved.
+>      **(historical) D37 — `scg` PANICS on a generic `&T` parameter given a container.**
 >      `fn takes<T>(x: &T)` called as `takes(&s)` with `s: Shared<i64>` aborts both `scg`
 >      binaries with `sentinel: index out of bounds: idx=-101, len=4` while the oracle
 >      emits cleanly. Same family as D32's panic (a CALLED generic container fn), different

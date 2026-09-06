@@ -504,6 +504,20 @@ fn pass_c17_generic_null_arg_second() {
 }
 
 #[test]
+fn pass_c17_generic_ref_param_infer() {
+    // ADR 0017 D11 / register D37: a generic type param behind a REF (`&T`) or a
+    // `Vec<T>`. `unify_one` had no arm for either, so `T` never bound and the unbound
+    // `-1` reached the mangler — where `scg` used to die outright (exit 127, zero bytes,
+    // `idx=-101`) on programs the oracle compiles cleanly.
+    // ⚠ The arms mirror the oracle's PREDICATE: ref fires only on (Ref, Ref) with equal
+    // mutability, vec only on a vec. Four over-acceptance shapes were constructed and all
+    // four are oracle-REJECTED — so the codegen differential, which runs only
+    // oracle-accepted programs, could never have caught a laxer predicate.
+    // 1 + 1 + 40 = 42.
+    assert_eq!(run_exit("c17_generic_ref_param_infer.sentinel"), 42);
+}
+
+#[test]
 fn pass_c17_generic_return_only_infer() {
     // ADR 0016 / register D43: `fn mk<T>() -> ?T` under `let x: ?i64 = mk();` — the type
     // parameter appears ONLY in the return, so the expectation is the sole source. Before

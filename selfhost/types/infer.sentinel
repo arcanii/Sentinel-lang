@@ -212,6 +212,61 @@ fn unify_one(c: &mut TyCtx, pt: i64, at: i64, bi: &mut Vec<i64>, bt: &mut Vec<i6
             let pin3: i64 = (*c).ta[idx];
             let ain3: i64 = strip_secret(c, at);
             unify_one(c, pin3, ain3, bi, bt)
+        } else if k == 2 {
+            // (register D37) A REFERENCE param (`fn takes<T>(x: &T)`) unifies against a
+            // reference ARGUMENT. Without this arm `T` was never bound at all, and the
+            // unbound -1 then reached `cg_mangle_to` — which is where scg used to die
+            // with `idx=-101` (register D58 turned that into a loud marker name).
+            //
+            // ⚠ MIRROR THE ORACLE'S PREDICATE, NOT JUST ITS EFFECT, and this is the whole
+            // difficulty of the arm. `crates/sentinel-types`'s `(Type::Ref(p),
+            // Type::Ref(a))` fires ONLY on (Ref, Ref) — a non-ref argument falls through
+            // to its trailing `Err(Mismatch)` — and it returns Mismatch when the two
+            // MUTABILITIES differ. Binding unconditionally would look like it works and
+            // would make scg bind `T` for four shapes the oracle REJECTS: `&mut T` given
+            // `&a`, `&T` given `&mut a`, `&T` given a non-ref, and the `Vec<T>` analogue.
+            // The codegen differential only runs oracle-ACCEPTED programs, so it could
+            // never see that over-acceptance — which is exactly why the predicate has to
+            // be copied rather than the outcome.
+            //
+            // Binding nothing on a mismatch is the right failure: `T` stays unbound and
+            // renders `UNBOUND_TYPEARG`, which is loud and is a program the oracle
+            // refuses anyway.
+            //
+            // ⚠ The neighbouring array / nullable / secret arms do NOT have this
+            // property — `array_elem_of` and `nullable_inner_of` answer i64 for a
+            // non-matching argument, so they bind where the oracle would not. That is
+            // pre-existing and unmeasured; do not "make this arm consistent" with them.
+            if cg_is_ref(c, at) {
+                let aridx: i64 = at - tbase();
+                if (*c).ta[idx] == (*c).ta[aridx] {
+                    unify_one(c, (*c).tb[idx], (*c).tb[aridx], bi, bt)
+                } else {
+                    0
+                }
+            } else {
+                0
+            }
+        } else if k == 11 {
+            // (register D37, same family) A `Vec<T>` param binds T only from a `Vec`
+            // ARGUMENT. Constructed: the oracle rejects both cross-shape directions —
+            // `Vec<T>` given `[i64]` is "expected Vec<<T#0>>, found [i64]", and `[T]`
+            // given `Vec<i64>` is its mirror — so firing only on a same-kind argument is
+            // the oracle's own predicate, not caution.
+            //
+            // ⚠ DO NOT ROUTE THIS THROUGH `array_elem_of`. That helper deliberately
+            // answers the element for kind 1 AND kind 11, so `len`/`v[i]` work uniformly
+            // over arrays and vecs — which is right for indexing and WRONG for
+            // unification, where the two shapes are distinct types the oracle refuses to
+            // mix. The neighbouring `k == 1` arm does route through it and therefore
+            // over-binds `[T]` from a `Vec<i64>` argument; that is pre-existing, is
+            // unobservable (the oracle rejects the program, so the differential never
+            // compares it), and is recorded rather than "made consistent" with this arm.
+            if cg_is_vec(c, at) {
+                unify_one(c, (*c).ta[idx], (*c).ta[at - tbase()], bi, bt)
+            } else {
+                0
+            }
         } else if k == 10 {
             // A generic-instance param (e.g. `p: Pair<A, B>`) unifies pairwise against
             // a same-decl arg instance (`Pair<i64, i64>`), binding each type-param.

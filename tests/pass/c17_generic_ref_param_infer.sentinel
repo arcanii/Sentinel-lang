@@ -1,0 +1,43 @@
+// C2 / ADR 0017 D11 + ADR 0016, register D37: a generic fn's type parameter behind a
+// REFERENCE (`fn takes<T>(x: &T)`) and behind a `Vec<T>`.
+//
+// `unify_one` had arms for type-param, array, nullable, secret and generic-instance
+// params, and none for a REF or a VEC — so `T` was never bound at all. The unbound `-1`
+// then reached the mangler, where `scg` used to die outright: `index out of bounds:
+// idx=-101`, exit 127, zero bytes emitted, on programs the oracle compiles cleanly.
+// (That abort is register D58 and is separately guarded now; this file pins the
+// inference itself.)
+//
+// ⚠ THE ARMS MIRROR THE ORACLE'S PREDICATE, NOT ITS EFFECT, and that distinction is the
+// whole difficulty. `crates/sentinel-types`'s ref arm fires ONLY on (Ref, Ref) and only
+// when the two MUTABILITIES match; anything else falls to its trailing `Mismatch`.
+// Binding unconditionally would look identical on every program here and would make
+// `scg` bind `T` for four shapes the oracle REJECTS — `&mut T` given `&a`, `&T` given
+// `&mut a`, `&T` given a non-ref, `Vec<T>` given `[i64]`. All four were constructed and
+// all four are oracle-rejected, which means **the codegen differential could never catch
+// the over-acceptance**: it only runs oracle-accepted programs. The predicate has to be
+// copied because nothing downstream would notice if it were not.
+//
+// ⚠ THE `Vec<T>` ARM DOES NOT ROUTE THROUGH `array_elem_of`, even though that helper is
+// right there and answers the element for both kinds. It is deliberately uniform over
+// `[T]` and `Vec<T>` so `len`/`v[i]` work on either — correct for INDEXING and wrong for
+// UNIFICATION, where the oracle refuses to mix them in both directions (constructed).
+// The neighbouring array arm does route through it and therefore over-binds `[T]` from a
+// `Vec<i64>` argument; pre-existing, unobservable for the same reason, and recorded
+// rather than "made consistent".
+//
+// 1 + 1 + 40 = 42.
+fn by_ref<T>(x: &T) -> i64 {
+    1
+}
+
+fn by_vec<T>(v: Vec<T>) -> i64 {
+    1
+}
+
+fn main() -> i64 {
+    let a: i64 = 7;
+    let mut v: Vec<i64> = vec_new();
+    push(&mut v, 1);
+    by_ref(&a) + by_vec(v) + 40
+}

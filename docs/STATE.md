@@ -14,7 +14,31 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
-**Latest (2026-09-06d) — D4, D43 and D45's Step 2 are closed, and they were ONE change.**
+**Latest (2026-09-06e) — D37 is closed, and the same change closed its unfiled `Vec<T>`
+twin.** `unify_one` had arms for type-param, array, nullable, secret and generic-instance
+params and none for a REF or a VEC, so a `fn takes<T>(x: &T)` never bound `T` at all. The
+unbound `-1` then reached the mangler, which is where `scg` used to die outright.
+
+⚠ **BOTH ARMS MIRROR THE ORACLE'S PREDICATE, NOT ITS EFFECT, and nothing downstream would
+have noticed if they had not.** The ref arm fires only on (Ref, Ref) with equal
+mutability; the vec arm only on a vec. Four over-acceptance shapes were constructed —
+`&mut T` given `&a`, `&T` given `&mut a`, `&T` given a non-ref, `Vec<T>` given `[i64]` —
+and **all four are ORACLE-REJECTED**, so the codegen differential, which runs only
+oracle-accepted programs, could never catch a laxer predicate. Copying the outcome would
+have passed every test that exists.
+
+⚠ The `Vec` arm deliberately avoids `array_elem_of`, which answers the element for kind 1
+AND kind 11 so `len`/`v[i]` work uniformly over both — right for indexing, wrong for
+unification, where the oracle refuses to mix the shapes in both directions (constructed).
+The neighbouring ARRAY arm does route through it and over-binds `[T]` from a `Vec<i64>`
+argument; pre-existing, unobservable for the same reason, and recorded rather than
+"made consistent".
+
+**The `-101` family is now closed.** D37, D43 and D58 were three faces of one thing: a
+"not found" sentinel used as an interner index. D58 made it loud, D43's seed and D37's arms
+removed the two ways it arose.
+
+**Previous (2026-09-06d) — D4, D43 and D45's Step 2 are closed, and they were ONE change.**
 `dump_generic_call` was the only call sub-path that never received the caller's expected
 type, so it could not seed the type-parameter substitution from the expected RETURN type
 the way the oracle does (`unify_one(signature.return_type, exp, …)` in `check_call`, before
