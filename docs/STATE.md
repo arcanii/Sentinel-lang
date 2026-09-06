@@ -14,7 +14,48 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
-**Latest (2026-09-05b) — D47 option A, D54, D55 and D56 are closed, and this repo now has an
+**Latest (2026-09-06) — the stdlib AEAD can now OPEN, and the review caught a leak on its
+refusal path** (`4f33bd6`, request R4). `chacha20poly1305_encrypt` had shipped since ADR 0052
+with no inverse — a seal-only AEAD, usable for writing a record and not for reading one back,
+on a format whose unseal runs at every file open.
+`chacha20poly1305_open(&key, &nonce, aad, ct, tag) -> AeadOpenResult { ok, pt }` closes it.
+VERIFY-THEN-DECRYPT, so no plaintext exists on the failure path; `ok = 0` means `pt` is EMPTY,
+and the example checks the emptiness rather than trusting it.
+
+**The helpers stayed PRIVATE.** The filer's fallback ask was to make `derive_otk` / `pad16` /
+`push_le64` `pub`; shipping the open half instead means the ~30 lines of security-relevant code
+they had restated in their own tree can be deleted rather than blessed as API. Seal and open now
+share ONE `aead_mac_data`, because a framing that differs between the halves does not fail
+loudly — it authenticates against itself and silently rejects everything the other half
+produced, which is exactly what RFC 8439's length suffix exists to prevent.
+
+**⚠ THE TAG COMPARE IS TYPED `secret i64` ON PURPOSE.** Both tags are PUBLIC `[u8]`, so a
+byte-at-a-time early-exit compare would leak no `secret` and **the CT checker would say
+nothing** — while leaking, by timing, how many leading tag bytes an attacker had guessed. That
+is the classic route to forging a tag one byte at a time. Accumulating XOR differences into a
+secret and declassifying ONE bit makes the checker enforce what would otherwise be discipline
+alone.
+
+**⚠ THE REVIEW FOUND A BLOCKER IN THE FIRST CUT, ON THE ONE PATH AN ATTACKER DRIVES.** With
+`key`/`nonce` taken BY VALUE they were consumed only inside the accept arm, and Sentinel
+attaches a Move's drop to the move SITE rather than to scope exit — so every REFUSED open
+stranded ~80 bytes of key and nonce. Measured: 100k refusals 16.30 MB, 800k 70.20 MB, linear,
+against a flat accept path; after borrowing, 9.16 and 9.09 MB. Borrowing also fixed a second
+defect the same signature caused — a caller could not open two records from one key, and the
+example's first draft built three identical key/nonce pairs to work around it. **The workaround
+was the signature telling me it was wrong, and I read it as noise.**
+
+Two more review findings landed with it. "This is the ONLY declassify on the failure path" was
+false, and a reviewer escalated it to a WORKING FORGERY: `poly1305` runs unconditionally to
+produce `want`, the correct tag for the attacker's chosen input, public by type — one added
+`print(want)` makes the function a MAC-forgery oracle, which they demonstrated end to end.
+Verifying a MAC means computing it, so that is inherent; the comment claiming otherwise was not.
+And the fold `1 - (((0 - acc) >> 63) & 1)` tests `acc > 0`, not `acc != 0` — for any negative
+`acc` it returns ACCEPT, and that expression IS the accept/reject decision. Unreachable today
+because `u8` is unsigned, but the invariant was unstated; now `acc | (0 - acc)`. Four other
+library sites carry the bare form — filed as **D57**, to be changed together or not at all.
+
+**Previous (2026-09-05b) — D47 option A, D54, D55 and D56 are closed, and this repo now has an
 INBOUND-REQUEST LEDGER** (`2b32b78`, plus this slice). Three items, one theme: a downstream
 consumer had been telling us things we were not listening to.
 
