@@ -124,17 +124,69 @@ reference as you work through the milestones.
 > confirming nothing pre-existing is newly refused; oracle-vs-scg byte-equality on the new
 > fixture at types, mir and llvm; and the secret-taint check in both directions.
 
-### ▶ RESUME HERE (2026-09-06 — committed at `4f33bd6`, four-check GREEN (1833 passed / **exactly the 18 known Windows failures**, identical failure set), all 9 differential stages and BOTH bootstrap fixed points byte-identical, tree CLEAN. `origin/main` is at `5325e6d`; **thirteen commits are unpushed** — I push, you don't. Register: **57 items, 22 done**, D19 redacted.
+### ▶ RESUME HERE (2026-09-06 — **PUSHED**: `origin/main` and HEAD are both at `68576a2`, nothing unpushed. Four-check GREEN (1838 passed / **exactly the 18 known Windows failures**, identical failure set), all 9 differential stages and BOTH bootstrap fixed points byte-identical, tree CLEAN. Register: **58 items, 27 done**, D19 redacted.
 
-> **What this session did.** Closed **D39** (`0bf7abb`), **D42 + D44** (`b2dc569`), **D47 option A** (`2b32b78`), **D54 + D55** (`4160275`), **D56 / request R8** (`d46e73f`) and **request R4** (`4f33bd6`); filed **D42-D57**. Opened two new docs: [`open-decisions.md`](open-decisions.md) (items blocked on a maintainer call, options tabulated) and [`inbound-requests.md`](inbound-requests.md) (the disposition ledger for downstream capability requests). **Sentinel-IDE had filed a 57 KB request document against this compiler on 2026-07-19 and nothing here referenced it** — zero grep hits across `docs/`. All fifteen of its requests were triaged against the live tree; none had been satisfied in seven weeks; four are now DONE.
-
-> ⚠ **A REGISTER ENTRY IS A HYPOTHESIS ABOUT ITS SCOPE, AND THIS SESSION HIT THAT TWICE — the second time in the slice that had just written the lesson down.** D39 was filed as a nullable generic-instance *FIELD* defect and is every position a `?GI` is rendered; D44 was filed as a *struct*-field defect and is three positions, the third being a CLASS field where `llvm-as` is CLEAN — i.e. the only one the byte-compare alone can catch. Both times the omitted position was the one that mattered most. **Falsify an entry's scope by construction before planning around it.**
-
-> ⚠ **ON SMALL CHANGES THE REVIEWS FIND PROSE; ON THE CRYPTO SLICE ONE FOUND A REAL BLOCKER.** Four multi-lens runs returned ZERO code defects and roughly a dozen false claims in my own commits' comments — a comment asserting a fail-CLOSED property that was fail-OPEN, a reachability claim measured on the wrong spelling of a type, two site censuses a later commit in the same session falsified, and three pasted byte counts that were never re-measured against the program printed beside them. Then the R4 review found a genuine blocker: the AEAD open's by-value `key`/`nonce` leaked ~80 bytes per REFUSED open, unbounded and attacker-paced (100k refusals 16.30 MB → 800k 70.20 MB; flat after borrowing). **Budget for the review on anything an attacker calls repeatedly, and re-measure every literal against the program beside it.**
-
-> ⚠ **SECURITY-CLASS FINDINGS ARE TRACKED PRIVATELY WITH THE MAINTAINER and are deliberately not described here.** D35 is blocked behind one; D19 IS another. **Two more were raised privately on 2026-09-05/06** — ask the maintainer before working in class-field move tracking, or in `std/net/ssh_cipher.sentinel`'s record-length handling. If you find yourself in the container refcount/drop path, in class-field move tracking, or in the cross-unit symbol mangling / `linkonce_odr` dedup, **ask first**.
-
-> **NEXT, roughly by value.** **D45** (a `null` argument to a monomorphised generic call — differentially LIVE and pinnable today); **D51** (`type_of_typeexpr` has no `SealedChannel` arm, and it is likely the root of all THREE `sealed_*` deferred entries, so one fix may delete three); **D52** (those entries and D20 both assert valid-IR-on-both-sides while all three are `llvm-as`-invalid, with the validity gate disabled for exactly them); **D37+D43** together (one `-101` unbound-type-argument family, root cause located: `unify_one` has no Ref arm); then D33→D30 (f64/ptr). From the request ledger, **R2** is small and its cheapest form is authorised by the filer's own text; **R1** is the item that decides whether their crypto port happens at all and needs an ADR in the `secret` discipline. **D36 still needs a maintainer decision** — tabulated in [`open-decisions.md`](open-decisions.md). Six `DEFERRED_PROGRAMS` entries remain.)
+> **What this session did.** Closed **D4, D37, D39, D42, D43, D44, D47(option A), D51, D54,
+> D55, D56, D58** and **requests R3, R4, R8, R15**; filed **D42-D58**. Deleted **three**
+> `DEFERRED_PROGRAMS` entries (the `sealed_*` trio, all from one missing `SealedChannel`
+> arm) — three remain: `delegation`, `fn_value`, `fn_value_generic`. Opened two docs:
+> [`open-decisions.md`](open-decisions.md) (items blocked on a maintainer call, options
+> tabulated) and [`inbound-requests.md`](inbound-requests.md) (the disposition ledger for
+> downstream capability requests — **Sentinel-IDE had filed a 57 KB request document
+> against this compiler on 2026-07-19 and nothing here referenced it**, zero grep hits;
+> all fifteen requests are now triaged against the live tree).
+>
+> ⚠ **A REGISTER ENTRY IS A HYPOTHESIS ABOUT ITS SCOPE, and this session hit that FOUR
+> times.** D39 was filed as a nullable generic-instance *FIELD* defect and is every
+> position a `?GI` is rendered. D44 was filed as a *struct*-field defect and is three
+> positions — the third a CLASS field where `llvm-as` is CLEAN, i.e. the only one the
+> byte-compare alone can catch. D45 was filed as a `null`-argument *type-prefix* problem
+> and is the whole monomorphisation key, plus widened literals, plus the types and MIR
+> stages. D37 was filed as a `&T` panic and its `Vec<T>` twin was unfiled. **Every time,
+> the entry was written from the one case where the wrong answer coincides with the right
+> one, and the omitted position was the one that mattered.** Falsify an entry's scope by
+> construction before planning around it.
+>
+> ⚠ **THE ORACLE'S STATED RULE AND THE ORACLE'S BEHAVIOUR CAME APART THREE TIMES**, and
+> each time the comment would have produced a wrong mirror. `check_call` says it seeds
+> only when "the signature's return type is exactly a TypeParam" — its code just unifies,
+> and `fn mk<T>() -> ?T` must seed through the `?` shell. `try_substitute`'s
+> generic-instance arm returns its argument UNCHANGED where scg's `subst_type` rebuilds —
+> and the difference is invisible to the LLVM differential while fatal to types and MIR.
+> The ref/vec unify arms fire on same-kind-only, and all four over-acceptance shapes are
+> oracle-REJECTED, so a laxer predicate would have passed every test that exists.
+> **Mirror the code, not the comment — and when a mirror arm can only be wrong on
+> programs the oracle rejects, the differential will never tell you.**
+>
+> ⚠ **ON SMALL CHANGES THE REVIEWS FIND PROSE; ON THE CRYPTO SLICE ONE FOUND A REAL
+> BLOCKER.** Six multi-lens runs returned ZERO code defects and roughly a dozen false
+> claims in my own commits' comments — a comment asserting a fail-CLOSED property that was
+> fail-OPEN, a reachability claim measured on the wrong spelling of a type, two site
+> censuses a later commit in the same session falsified, and four pasted byte counts never
+> re-measured against the program printed beside them. Then the R4 review found a genuine
+> blocker: the AEAD open's by-value `key`/`nonce` leaked ~80 bytes per REFUSED open,
+> unbounded and attacker-paced (100k refusals 16.30 MB → 800k 70.20 MB; flat after
+> borrowing). **Budget for the review on anything an attacker calls repeatedly, and
+> re-measure every literal against the program beside it.**
+>
+> ⚠ **SECURITY-CLASS FINDINGS ARE TRACKED PRIVATELY WITH THE MAINTAINER and are
+> deliberately not described here.** D35 is blocked behind one; D19 IS another. **Two more
+> were raised privately on 2026-09-05/06.** If you find yourself in the container
+> refcount/drop path, in `clone_if_shared_var` and its twins, in **class-field move
+> tracking**, in **`std/net/ssh_cipher.sentinel`'s record-length handling**, or in the
+> cross-unit symbol mangling / `linkonce_odr` dedup — **ask first, and before writing
+> anything down.**
+>
+> **NEXT, roughly by value.** **D45's null-FIRST residue** — the design is fully worked
+> out and reviewed, but it needs the first index-assignment into a `TyCtx` `Vec` field
+> anywhere in `selfhost/`, so give it its own session and its own fixed-point budget.
+> **D52** — D20's stale valid-IR claim, and whether `deferred_reason` should stop
+> disabling `llvm_rejects`. **D33→D30** (f64/ptr; D33 blocks D30). **D57** — the
+> `1 - (((0 - acc) >> 63) & 1)` fold at four remaining library sites, together or not at
+> all. From the request ledger: **R2** is small and its cheapest form is authorised by the
+> filer's own text; **R1** decides whether their crypto port happens at all and needs an
+> ADR in the `secret` discipline. **D36 still needs a maintainer decision** — tabulated in
+> [`open-decisions.md`](open-decisions.md).)
 
 > **▶ THE OPEN MENU (2026-08-30) — real remaining work, verified against the repo.**
 >   1. **`select` over channels** — the flagship concurrency gap. Its RUNTIME is already PINNED
@@ -173,7 +225,7 @@ reference as you work through the milestones.
 >      scalar-4 arm, which it now has. Also worth doing with it: `examples/math/quadratic.sentinel` and
 >      `sentinel_library/std/math/float.sentinel` currently reach only lex/ast, because
 >      `snc merge`'s Bar-A printer rejects both a float literal and `sqrt` (menu item 5).
->   4. **THE FILED-DEFECT REGISTER — FIFTY-EIGHT items (D1-D58); **D1, D2, D3, D5, D8, D9, D15, D16, D17, D24, D25, D26, D29, D31, D34, D39, D42, D44, D4, D37, D43, D47(option A), D51, D54, D55, D56 and D58 are DONE**, the rest verified against a pre-slice binary. MOST are
+>   4. **THE FILED-DEFECT REGISTER — FIFTY-EIGHT items (D1-D58); **D1, D2, D3, D4, D5, D8, D9, D15, D16, D17, D24, D25, D26, D29, D31, D34, D37, D39, D42, D43, D44, D47(option A), D51, D54, D55, D56 and D58 are DONE (27 of 58)**, the rest verified against a pre-slice binary. MOST are
 >      unregistered in any `DEFERRED_PROGRAMS` / `KNOWN_SCG_BUGS` list because no corpus program
 >      reaches them — but FOUR are, and the blanket "NONE" that stood here was falsified by
 >      this register's own new entries: D24/D25/D26 share the

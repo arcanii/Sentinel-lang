@@ -15,7 +15,7 @@ the current state of the workspace without re-reading every commit.
 > overview.
 
 **Latest (2026-09-06e) — D37 is closed, and the same change closed its unfiled `Vec<T>`
-twin.** `unify_one` had arms for type-param, array, nullable, secret and generic-instance
+twin. Everything through `68576a2` is PUSHED.** `unify_one` had arms for type-param, array, nullable, secret and generic-instance
 params and none for a REF or a VEC, so a `fn takes<T>(x: &T)` never bound `T` at all. The
 unbound `-1` then reached the mangler, which is where `scg` used to die outright.
 
