@@ -670,12 +670,21 @@ const DEFERRED_PROGRAMS: &[(&str, &str)] = &[
     // feature.
     ("examples/lang/fn_value.sentinel", "ADR 0070 D3-revisit: direct call of a Fn-typed var is unmirrored in scg (lowers as a kont resume)"),
     ("examples/lang/fn_value_generic.sentinel", "ADR 0070 M-cont: generic Fn<T,R> instantiations are snc-only"),
-    // ADR 0069 / ADR 0066 M2.4a-c: the SealedChannel bridge + the sealed stdlib
-    // are snc-side; scg types a SealedChannel param `i64` where the oracle uses
-    // `ptr` (an ABI-shaped divergence).
-    ("examples/lang/sealed_bytes.sentinel", "ADR 0069 M2.4c-1: sealed stdlib snc-only (SealedChannel param i64 vs ptr)"),
-    ("examples/lang/sealed_channel.sentinel", "ADR 0069 M2.4a: sealed stdlib snc-only (SealedChannel param i64 vs ptr)"),
-    ("examples/lang/sealed_session.sentinel", "ADR 0069 M2.4b-crypto: sealed stdlib snc-only"),
+    // (ADR 0069 / ADR 0066 M2.4a-c, register D51 — the THREE `sealed_*` entries that
+    // used to sit here are GONE, deleted rather than re-labelled. They were all one
+    // defect: `type_of_typeexpr` had no `SealedChannel` arm, so the annotation fell
+    // through to `struct_lookup`, found nothing, and resolved to the i64 placeholder —
+    // `scg` typed a `SealedChannel` param `i64` where the oracle types `ptr`. Adding the
+    // arm made all three byte-identical to the oracle in one change. Deleting the
+    // entries is the proof; do not re-add them.
+    //
+    // ⚠ Their stated reason — "an ABI-shaped divergence", i.e. valid IR on both sides —
+    // was FALSE, and register D52 records why that mattered: all three emitted
+    // `llvm-as`-INVALID IR from `scg` while the oracle was clean, which is exactly what
+    // the `llvm_rejects` gate exists to catch, and `deferred_reason` switches that gate
+    // OFF for any listed program. An invalid-IR case sat under two labels that each
+    // asserted it could not be invalid, with the one automated check that would have
+    // noticed disabled for precisely those programs.)
     // (ADR 0066 M1.2b-cont `channel_generic` + M1.2c `addressed_reply` were here —
     // generic word-scalar channel elements and channel-of-channels, both snc-only
     // because scg's channel typing hardcoded an i64 element and its lowering had no

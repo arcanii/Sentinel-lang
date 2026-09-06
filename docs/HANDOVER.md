@@ -173,7 +173,7 @@ reference as you work through the milestones.
 >      scalar-4 arm, which it now has. Also worth doing with it: `examples/math/quadratic.sentinel` and
 >      `sentinel_library/std/math/float.sentinel` currently reach only lex/ast, because
 >      `snc merge`'s Bar-A printer rejects both a float literal and `sqrt` (menu item 5).
->   4. **THE FILED-DEFECT REGISTER — FIFTY-EIGHT items (D1-D58); **D1, D2, D3, D5, D8, D9, D15, D16, D17, D24, D25, D26, D29, D31, D34, D39, D42, D44, D47(option A), D54, D55, D56 and D58 are DONE**, the rest verified against a pre-slice binary. MOST are
+>   4. **THE FILED-DEFECT REGISTER — FIFTY-EIGHT items (D1-D58); **D1, D2, D3, D5, D8, D9, D15, D16, D17, D24, D25, D26, D29, D31, D34, D39, D42, D44, D47(option A), D51, D54, D55, D56 and D58 are DONE**, the rest verified against a pre-slice binary. MOST are
 >      unregistered in any `DEFERRED_PROGRAMS` / `KNOWN_SCG_BUGS` list because no corpus program
 >      reaches them — but FOUR are, and the blanket "NONE" that stood here was falsified by
 >      this register's own new entries: D24/D25/D26 share the
@@ -694,8 +694,17 @@ reference as you work through the milestones.
 >      the oracle's heap-box is now a TWO-back-end job (`llvm_dump` + `scg`), not three.
 >      ⚠ **It also lets a `?GI` reach the SHALLOW box drop — see D50.**
 >
->      **D43 — `scg` ABORTS on an oracle-accepted program when a generic fn's type
->      argument is inferred only from the expected RETURN type.**
+>      **D43 — no longer an ABORT (D58), and it is the SAME WORK as D45's return-type
+>      seeding.** Measured 2026-09-06: `fn mk<T>() -> ?T { null }` with `let x: ?i64 =
+>      mk();` now exits 0 with 557 bytes (was exit 127, ZERO bytes), emitting
+>      `@mk__UNBOUND_TYPEARG` against the oracle's `@mk__i64`, `llvm-as`-clean. ⚠ **The fix
+>      is D45 Step 2** — seed the substitution from the expected RETURN type before the
+>      argument walk, which the oracle does (`lib.rs` `check_call`) and `scg` does not.
+>      That slice is deferred because it RENAMES emitted symbols for null-free programs
+>      (`let s: secret i64 = idg(7)` → `@idg__sec_i64`) and needs its own corpus sweep.
+>      Do D43 and D45 Step 2 as one change; they are not two defects.
+>      **(historical) D43 — `scg` ABORTS on an oracle-accepted program when a generic fn's
+>      type argument is inferred only from the expected RETURN type.**
 >      `fn mk<T>() -> ?T { null }` with `let x: ?i64 = mk();` → oracle exit 0 (533 bytes),
 >      `scg` prints `sentinel: index out of bounds: idx=-101, len=4` and exits 127 with no
 >      IR. Also fires at `?B<T>`. **This is a bootstrap-fixed-point violation** — the
@@ -1114,6 +1123,14 @@ reference as you work through the milestones.
 >      binaries with `sentinel: index out of bounds: idx=-101, len=4` while the oracle
 >      emits cleanly. Same family as D32's panic (a CALLED generic container fn), different
 >      trigger.
+>      **⚠ NO LONGER AN ABORT (register D58, 2026-09-06).** This entry says `scg` "aborts"
+>      / "PANICS"; it does not any more. With `cg_mangle_to`'s fail-closed arm in place the
+>      same program exits **0 with 727 bytes** (was exit 127, ZERO bytes) and emits
+>      `@takes__UNBOUND_TYPEARG` where the oracle emits `@takes__shared_i64` —
+>      `llvm-as`-clean, because the marker is self-consistent across the call and the
+>      define. So the SEVERITY dropped from "the self-hosted compiler dies with no output"
+>      to "a byte divergence that names the unbound type argument". The underlying
+>      inference defect below is unchanged.
 >      **⚠ THE ROOT CAUSE IS LOCATED, AND IT IS SHARED WITH D43** (2026-09-04):
 >      `unify_one` (`selfhost/types/infer.sentinel:194`) has arms for kinds 9/1/4/3/10 and
 >      **no `k == 2` (Ref) arm**, so `T` is never bound; the unbound `-1` is then used as a
@@ -1212,8 +1229,24 @@ reference as you work through the milestones.
 >      the payload is move-consumed by the widen, so the source contributes no free and a
 >      recursive drop would take the count to 2 and 2, not double-free it.
 >
->      **D51 — `type_of_typeexpr` has no `SealedChannel` arm, so a `SealedChannel<T>`
->      field or parameter renders `i64` where the oracle renders `ptr`.** Its `TGeneric`
+>      **D51 — DONE (this slice), and it deleted THREE `DEFERRED_PROGRAMS` entries.**
+>      `type_of_typeexpr` had no `SealedChannel` arm, so a `SealedChannel<T>` annotation
+>      fell through to `struct_lookup`, found nothing, and resolved to the i64
+>      placeholder — a `SealedChannel` parameter rendered `i64` where the oracle renders
+>      `ptr`. Adding the arm made **all three `sealed_*` programs byte-identical to the
+>      oracle in one change** (186278 / 180921 / 794152 bytes, each matching exactly), so
+>      `sealed_bytes`, `sealed_channel` and `sealed_session` are deleted from the list —
+>      the only proof this project accepts. Half the remaining deferred set went at once.
+>      ⚠ The handle is UNIT (kind 15 carries no element, because D1 fixes the element at
+>      `secret i64`), so the type argument is resolved and DISCARDED — unlike the
+>      element-generic `Channel`/`Shared`/`Mutex` arms it sits beside. The
+>      `collect_tyargs` call is still NOT dead: it sinks the argument's NAMES into `gb`,
+>      which the dump's name blob depends on.
+>      Sweep: 357 programs, 6 moved — the 3 above to byte-identical, and 3 oracle-REJECTED
+>      ones the differential never compares (the two `main`-less library modules and the
+>      `c66_sealed_channel_public_element` ui fixture).
+>      **(historical) D51 —** `type_of_typeexpr` has no `SealedChannel` arm, so a
+>      `SealedChannel<T>` field or parameter renders `i64` where the oracle renders `ptr`. Its `TGeneric`
 >      arm handles `Vec`, `Channel`, `Fn`, `Shared` and `Mutex` and nothing else, so the
 >      annotation falls to the placeholder and no kind-15 handle is ever minted — which
 >      is why D44's `cg_is_sealed_channel` arm landed DEAD. Oracle-accepted
@@ -1224,9 +1257,11 @@ reference as you work through the milestones.
 >      divergence. Closing it may delete three deferred entries at once; measure before
 >      assuming, and see D52 for why those entries' current wording cannot be trusted.
 >
->      **D52 — the three `sealed_*` deferred entries and D20 both assert their divergence
->      is VALID-IR-on-both-sides, and all three are llvm-as-INVALID from `scg` today
->      while the oracle is clean.** The entries call it "an ABI-shaped divergence" and D20
+>      **D52 — PARTLY DONE (this slice): the three entries are gone, so their false
+>      "ABI-shaped divergence" wording went with them, and the deletion is recorded at the
+>      list itself. D20's own claim and the GATE question remain.** The entries and D20
+>      both asserted the divergence was VALID-IR-on-both-sides; all three were
+>      llvm-as-INVALID from `scg` while the oracle was clean. The entries call it "an ABI-shaped divergence" and D20
 >      calls it "the one no `llvm-as` gate can catch". The gate would in fact catch it —
 >      it fires exactly when `scg` is rejected and the oracle is clean — except that
 >      `selfhost_codegen.rs` switches the validity gate OFF for any program with a

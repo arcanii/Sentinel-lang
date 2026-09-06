@@ -518,8 +518,9 @@ const EXAMPLES: &[(&str, i32)] = &[
     // (runtime-verified crypto: the secret re-emerges secret, authenticated) plus a
     // GUARDED pipe path (`sealed_channel` / `sealed_send` / `sealed_recv` over the
     // bridge builtins, compiled but not run for cross-platform determinism). Reuses
-    // the verified-CT ssh record cipher (no new primitive). snc-only (the scg mirror
-    // is deferred, like process_channel_typed / task_generic). 42 = the opened value.
+    // the verified-CT ssh record cipher (no new primitive). 42 = the opened value.
+    // (register D51: the `scg` mirror is no longer deferred — this is byte-identical to
+    // the oracle and its DEFERRED_PROGRAMS entry is deleted.)
     ("examples/lang/sealed_channel.sentinel", 42),
     // ADR 0066 M2.4b / ADR 0069 D3/D4: the authenticated x25519 KEX that establishes
     // a SealedChannel's per-direction session keys, + the counter-nonce sealed stream
@@ -527,14 +528,16 @@ const EXAMPLES: &[(&str, i32)] = &[
     // authenticates the host via ed25519 sig + a pinned host key; a 3-message stream
     // with distinct counter nonces re-emerges secret). Reuses the verified-CT ssh KEX
     // (no new primitive). The real-pipe transport is deferred (needs a self-stdin
-    // builtin). snc-only. 5+15+20 + keyc_match + authed = 42.
+    // builtin). 5+15+20 + keyc_match + authed = 42. (register D51: byte-identical to
+    // the oracle now; the DEFERRED_PROGRAMS entry is deleted.)
     ("examples/lang/sealed_session.sentinel", 42),
     // ADR 0066 M2.4c / ADR 0069 D5: variable-length SECRET messages over a
     // SealedChannel with fixed-width padding — seal_bytes/open_bytes seal an arbitrary
     // [secret u8] message; the wire ciphertext length is constant for a given maxlen
     // (no length leak). Verified in-process: a variable-length message re-emerges
     // secret + authenticated (3 bytes summing to 42), and two different-length
-    // messages frame to the same length. snc-only. 42.
+    // messages frame to the same length. 42. (register D51: byte-identical to the
+    // oracle now; the DEFERRED_PROGRAMS entry is deleted.)
     ("examples/lang/sealed_bytes.sentinel", 42),
     // ADR 0037 / BACKLOG §10.9: the worked MULTI-FILE example — a program using
     // a `pub class` (`Rect`) defined in another file, the library module

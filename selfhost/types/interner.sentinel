@@ -1350,6 +1350,12 @@ fn type_of_typeexpr(c: &mut TyCtx, t: TypeE, gb: &mut Vec<u8>) -> i64 {
             // (ADR 0071 M1.4b) `Mutex<T>` in type position → the kind-18 Mutex type
             // (mirrors the Shared arm). Element-generic since ADR 0016 A1.
             let is_mutex: bool = name_eq_lit(&gn, "Mutex");
+            // (ADR 0066 M2.4a / ADR 0069, register D51) `SealedChannel<secret i64>` in
+            // type position → the kind-15 handle. WITHOUT this arm the name fell through
+            // to `struct_lookup`, found nothing, and the whole annotation resolved to the
+            // i64 placeholder — so `fn f(s: SealedChannel<secret i64>)` lowered its
+            // parameter as `i64` where the oracle lowers `ptr`.
+            let is_sealed: bool = name_eq_lit(&gn, "SealedChannel");
             let gsid: i64 = if is_vec {
                 0 - 1
             } else if is_channel {
@@ -1359,6 +1365,8 @@ fn type_of_typeexpr(c: &mut TyCtx, t: TypeE, gb: &mut Vec<u8>) -> i64 {
             } else if is_shared {
                 0 - 1
             } else if is_mutex {
+                0 - 1
+            } else if is_sealed {
                 0 - 1
             } else {
                 struct_lookup(c, &gn)
@@ -1401,6 +1409,29 @@ fn type_of_typeexpr(c: &mut TyCtx, t: TypeE, gb: &mut Vec<u8>) -> i64 {
                     0
                 };
                 mk_channel(c, celem)
+            } else if is_sealed {
+                // (ADR 0066 M2.4a / ADR 0069, register D51) `SealedChannel<secret i64>`.
+                // The handle is UNIT — kind 15 carries no element — because the element
+                // is fixed at `secret i64` by D1 at the M2.4a minimum. So the type
+                // argument is resolved and DISCARDED, unlike the element-generic arms
+                // above; it exists in the surface syntax to name the sealed payload, not
+                // to parameterise the handle.
+                //
+                // ⚠ THE `collect_tyargs` CALL IS NOT DEAD, and dropping it because the
+                // result is unused would be wrong: it walks the argument's type
+                // expression and sinks its NAMES into `gb`, which the dump's name blob
+                // depends on. The `is_shared`/`is_mutex` arms below make the same call
+                // for the same reason.
+                //
+                // The oracle's own rejections stay snc-only, per the house convention
+                // for this file (scg is dump-only over oracle-valid input, and the
+                // differential skips whatever the oracle rejects): a wrong ARITY
+                // (`TypeArgCountMismatch`) and a non-`secret i64` element
+                // (`SealedChannelElementNotSupported`) are both refused upstream before
+                // any program reaches here.
+                let mut scav: Vec<i64> = vec_new();
+                collect_tyargs(c, ga, gb, &mut scav);
+                mk_sealed_channel(c)
             } else if is_fn {
                 let mut fav: Vec<i64> = vec_new();
                 collect_tyargs(c, ga, gb, &mut fav);

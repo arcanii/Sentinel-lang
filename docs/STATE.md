@@ -14,7 +14,37 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
-**Latest (2026-09-06b) — the register's D45 is PARTLY closed and D58 is closed: `scg`'s
+**Latest (2026-09-06c) — the register's D51 is closed, and closing it DELETED THREE
+`DEFERRED_PROGRAMS` ENTRIES at once.** `type_of_typeexpr` had no `SealedChannel` arm, so a
+`SealedChannel<secret i64>` annotation fell through to `struct_lookup`, found nothing, and
+resolved to the i64 placeholder — every `SealedChannel` parameter rendered `i64` where the
+oracle renders `ptr`. One arm made `sealed_bytes`, `sealed_channel` and `sealed_session` all
+byte-identical to the oracle (186278 / 180921 / 794152 bytes, each exact), so all three
+entries are DELETED rather than re-labelled. **Half the remaining deferred set went in one
+change**; three entries remain (`delegation`, `fn_value`, `fn_value_generic`).
+
+⚠ The three had sat there since M2.4a under the stated reason "an ABI-shaped divergence",
+i.e. valid IR on both sides. That was FALSE — all three emitted `llvm-as`-invalid IR from
+`scg` while the oracle was clean, which is exactly what the `llvm_rejects` gate exists to
+catch, and `deferred_reason` switches that gate OFF for any listed program. An invalid-IR
+case sat under two labels each asserting it could not be invalid, with the one automated
+check that would have noticed disabled for precisely those programs (register D52; D20's
+own copy of the claim and the gate question are still open).
+
+⚠ The handle is UNIT — kind 15 carries no element, because ADR 0069 D1 fixes it at
+`secret i64` — so this arm resolves its type argument and DISCARDS it, unlike the
+element-generic `Channel`/`Shared`/`Mutex` arms it sits beside. The `collect_tyargs` call is
+still not dead: it sinks the argument's NAMES into the dump's name blob.
+
+**D37 and D43 both dropped a severity class, without being touched.** D58's fail-closed arm
+(landed with D45) converts them from "the self-hosted compiler dies with no output"
+(exit 127, ZERO bytes, `idx=-101`) to a byte divergence that NAMES the unbound type
+argument: `@takes__UNBOUND_TYPEARG` against `@takes__shared_i64`, `llvm-as`-clean because
+the marker is self-consistent across the call and the define. Their entries said "PANICS";
+that is now false and both are corrected. **D43 also turns out to be the same work as D45's
+return-type seeding, not a separate defect** — do them as one change.
+
+**Previous (2026-09-06b) — the register's D45 is PARTLY closed and D58 is closed: `scg`'s
 generic-call walker now pushes each parameter's type down into its argument.** Before this,
 every argument of a generic call was dumped with NO expected type and unification ran only
 after the whole walk — so an argument whose type comes from its parameter got a default.
