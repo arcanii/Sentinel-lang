@@ -504,6 +504,17 @@ fn pass_c17_generic_null_arg_second() {
 }
 
 #[test]
+fn pass_c17_generic_return_only_infer() {
+    // ADR 0016 / register D43: `fn mk<T>() -> ?T` under `let x: ?i64 = mk();` — the type
+    // parameter appears ONLY in the return, so the expectation is the sole source. Before
+    // the seed landed `scg` DIED here (exit 127, zero bytes, `idx=-101`) on a program the
+    // oracle accepts. ⚠ The return is `?T`, not `T`, deliberately: it is the discriminator
+    // for how the seed is gated — a mirror written from the oracle's COMMENT rather than
+    // its code would refuse to seed through the `?` shell. 42 = the nullable was empty.
+    assert_eq!(run_exit("c17_generic_return_only_infer.sentinel"), 42);
+}
+
+#[test]
 fn pass_c17_go_no_go() {
     // ADR 0016 D12 phase-go: Pair<A, B> + make_pair / fst / snd +
     // pick_int composition. The full generic-struct + generic-fn
@@ -1943,6 +1954,17 @@ fn pass_c16_mono_root_method_bodies() {
     // called out here as DEFERRED by contrast; it no longer is — register D24/D25/D26
     // closed it and deleted the entry.) 4 + 16 + 22 = 42.
     assert_eq!(run_exit("c16_mono_root_method_bodies.sentinel"), 42);
+}
+
+#[test]
+fn pass_c19_generic_return_seed_secret() {
+    // ADR 0051 / register D4: `let s: secret i64 = idg(7)` seeds T from the EXPECTED
+    // return type, so the ARGUMENT widens and the result carries no wrapper. `scg` had no
+    // expectation on this path and monomorphised at `i64`, wrapping outside — a different
+    // symbol AND a different instruction sequence. Not cosmetic: at a `?bool` expectation
+    // the same inversion emitted `store { i1, i1 } %v0` with `%v0` an `i1`, which
+    // `llvm-as` rejects. 7 + 35 = 42.
+    assert_eq!(run_exit("c19_generic_return_seed_secret.sentinel"), 42);
 }
 
 #[test]

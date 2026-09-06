@@ -14,7 +14,35 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
-**Latest (2026-09-06c) — the register's D51 is closed, and closing it DELETED THREE
+**Latest (2026-09-06d) — D4, D43 and D45's Step 2 are closed, and they were ONE change.**
+`dump_generic_call` was the only call sub-path that never received the caller's expected
+type, so it could not seed the type-parameter substitution from the expected RETURN type
+the way the oracle does (`unify_one(signature.return_type, exp, …)` in `check_call`, before
+a single argument is looked at). Threading `exp` in and seeding closes all three:
+`let s: secret i64 = idg(7)` now monomorphises at `secret i64` and widens the ARGUMENT
+rather than wrapping the result (D4); `fn mk<T>() -> ?T` under `let x: ?i64 = mk();` binds
+T from the expectation instead of leaving it unbound (D43); and D45's Step 2 is the same
+line. Three register entries, one seed.
+
+⚠ **THE GATE IS `ntp > 0` PLUS AN EXPECTATION, AND THE ORACLE'S OWN COMMENT WOULD HAVE LED
+ME WRONG.** It says it seeds only when "the signature's return type is exactly a
+TypeParam"; the code does no such check and simply unifies under those two guards.
+`fn mk<T>() -> ?T` is the discriminator — its return is a NULLABLE, not a bare type param,
+and it must still seed T through the `?` shell. A mirror written from the comment passes
+the `-> T` fixture and fails this one, which is why both shapes are pinned. **Mirror the
+code, not the comment.**
+
+⚠ **This was expected to move corpus bytes and did not — 357 programs, ZERO moved.** The
+prediction was that it renames symbols for null-free programs, and it does; the corpus just
+contains no annotated-let call to a generic USER fn whose expectation differs from what its
+arguments imply. `c16_mono_key_handle_tags.sentinel` was checked by name because it exists
+to pin mangled names: its annotated-let calls are all to BUILTINS, which route through a
+different walker, so it never had cover for this path. Verified byte-identical either way.
+
+D37 still diverges and is now the last of the `-1` family: it needs a Ref arm in
+`unify_one`, which is its own change.
+
+**Previous (2026-09-06c) — the register's D51 is closed, and closing it DELETED THREE
 `DEFERRED_PROGRAMS` ENTRIES at once.** `type_of_typeexpr` had no `SealedChannel` arm, so a
 `SealedChannel<secret i64>` annotation fell through to `struct_lookup`, found nothing, and
 resolved to the i64 placeholder — every `SealedChannel` parameter rendered `i64` where the

@@ -494,8 +494,13 @@ fn dump_texpr_node(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut Ty
         // So `crt` is never `exp` there and `widen_kind` never answers 0. NOT a
         // regression: pre-fix scg diverged too, and worse — for `?bool` it emitted
         // `store { i1, i1 } %v0` with `%v0` an `i1`, which `llvm-as` rejects, where
-        // post-fix IR assembles. Threading `exp` into `dump_generic_call` is the
-        // real fix; tracked with the other widen items.
+        // post-fix IR assembles.
+        // ⚠ THAT IS NOW HISTORY: `exp` IS threaded into `dump_generic_call` (registers
+        // D4 / D43 / D45), which seeds the substitution from the expected RETURN type
+        // before any argument is walked, exactly as the oracle does. `idg(7)` under a
+        // `secret i64` annotation monomorphises at `secret i64` and widens the ARGUMENT,
+        // so `crt` IS `exp` there and `widen_kind` answers 0 — the sentence above holds
+        // for every sub-path again.
         Expr::Call(cn, ca) => {
             let mut ctmp: Vec<u8> = vec_new();
             let crt: i64 = dump_te_call(&mut ctmp, cn, ca, exp, src, c, gb);

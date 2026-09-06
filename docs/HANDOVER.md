@@ -173,7 +173,7 @@ reference as you work through the milestones.
 >      scalar-4 arm, which it now has. Also worth doing with it: `examples/math/quadratic.sentinel` and
 >      `sentinel_library/std/math/float.sentinel` currently reach only lex/ast, because
 >      `snc merge`'s Bar-A printer rejects both a float literal and `sqrt` (menu item 5).
->   4. **THE FILED-DEFECT REGISTER — FIFTY-EIGHT items (D1-D58); **D1, D2, D3, D5, D8, D9, D15, D16, D17, D24, D25, D26, D29, D31, D34, D39, D42, D44, D47(option A), D51, D54, D55, D56 and D58 are DONE**, the rest verified against a pre-slice binary. MOST are
+>   4. **THE FILED-DEFECT REGISTER — FIFTY-EIGHT items (D1-D58); **D1, D2, D3, D5, D8, D9, D15, D16, D17, D24, D25, D26, D29, D31, D34, D39, D42, D44, D4, D43, D47(option A), D51, D54, D55, D56 and D58 are DONE**, the rest verified against a pre-slice binary. MOST are
 >      unregistered in any `DEFERRED_PROGRAMS` / `KNOWN_SCG_BUGS` list because no corpus program
 >      reaches them — but FOUR are, and the blanket "NONE" that stood here was falsified by
 >      this register's own new entries: D24/D25/D26 share the
@@ -243,7 +243,14 @@ reference as you work through the milestones.
 >      class `init`, enum construct, `spawn`, and generic — where the oracle widens a plain
 >      literal and scg does not.
 >
->      **D4 — a generic USER fn inverts the widen.** The oracle seeds `T` from the EXPECTED type
+>      **D4 — DONE (this slice).** `dump_generic_call` was the one call sub-path that never
+>      received `exp`, so it could not seed the substitution from the expected RETURN type
+>      the way the oracle does. It now does, and `let s: secret i64 = idg(7)`
+>      monomorphises at `secret i64` and widens the ARGUMENT — no outer wrapper, same
+>      mangled symbol as the oracle. Pinned by
+>      `tests/pass/c19_generic_return_seed_secret.sentinel`. The `borrow.sentinel` comment
+>      that named this as "the real fix; tracked with the other widen items" is updated.
+>      **(historical) D4 — a generic USER fn inverts the widen.** The oracle seeds `T` from the EXPECTED type
 >      (`unify_one(signature.return_type, exp, …)` in `check_call`) and widens the ARGUMENT, so
 >      `let s: secret i64 = idg(7)` monomorphises at `secret i64` with no outer wrapper; scg
 >      monomorphises at `i64` and wraps outside. `34e1a8f` improved it (pre-fix scg emitted
@@ -694,8 +701,17 @@ reference as you work through the milestones.
 >      the oracle's heap-box is now a TWO-back-end job (`llvm_dump` + `scg`), not three.
 >      ⚠ **It also lets a `?GI` reach the SHALLOW box drop — see D50.**
 >
->      **D43 — no longer an ABORT (D58), and it is the SAME WORK as D45's return-type
->      seeding.** Measured 2026-09-06: `fn mk<T>() -> ?T { null }` with `let x: ?i64 =
+>      **D43 — DONE (this slice), together with D4 and D45 Step 2 — they were one change.**
+>      `fn mk<T>() -> ?T { null }` under `let x: ?i64 = mk();` now emits `@mk__i64` and is
+>      byte-identical to the oracle; `?B<T>` likewise. Pinned by
+>      `tests/pass/c17_generic_return_only_infer.sentinel`, whose return type is `?T` and
+>      NOT a bare `T` on purpose — it is the discriminator for how the seed is gated. The
+>      oracle's own comment says it seeds only when the return "is exactly a TypeParam";
+>      its CODE does no such check, and a mirror written from the comment would refuse to
+>      seed through the `?` shell and leave T unbound — which is the state that used to
+>      kill the compiler. **Mirror the code, not the comment.**
+>      **(historical) D43 — no longer an ABORT (D58), and it is the SAME WORK as D45's
+>      return-type seeding.** Measured 2026-09-06: `fn mk<T>() -> ?T { null }` with `let x: ?i64 =
 >      mk();` now exits 0 with 557 bytes (was exit 127, ZERO bytes), emitting
 >      `@mk__UNBOUND_TYPEARG` against the oracle's `@mk__i64`, `llvm-as`-clean. ⚠ **The fix
 >      is D45 Step 2** — seed the substitution from the expected RETURN type before the
@@ -761,7 +777,10 @@ reference as you work through the milestones.
 >      **SILENT** — `llvm-as` accepts it because scg's own callee signature agrees with its
 >      own call site.
 >
->      **LANDED HERE:** the pushdown. `dump_args_capture_all` now carries the callee's
+>      **LANDED (2026-09-06):** the pushdown, and — in the following slice — Step 2, the
+>      return-type seed (with D4 and D43, which were the same change). What remains is the
+>      null-FIRST residue and the class-`init` walker.
+>      **The pushdown:** `dump_args_capture_all` now carries the callee's
 >      param span and the in-progress bindings, computes each argument's expected type from
 >      the parameter substituted under what the arguments to its LEFT bound, and unifies
 >      IMMEDIATELY rather than after the whole walk — which is what the NON-generic path

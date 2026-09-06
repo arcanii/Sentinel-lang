@@ -1,0 +1,27 @@
+// ADR 0016, register D43: a generic fn whose type parameter appears ONLY in its return
+// type. There is no argument to infer from, so the expected type is the only source.
+//
+// `fn mk<T>() -> ?T { null }` under `let x: ?i64 = mk();`: the oracle seeds T from the
+// expectation and emits `@mk__i64`. `scg` had nothing to bind T with and, before the
+// seed landed, DIED — `sentinel: index out of bounds: idx=-101, len=4`, exit 127, zero
+// bytes emitted, on a program the oracle accepts and `llvm-as` accepts. That abort is
+// register D58 and is separately guarded now; this fixture pins the actual inference.
+//
+// ⚠ THE RETURN TYPE IS `?T`, NOT `T`, ON PURPOSE. This is the discriminator for how the
+// seed is gated. The oracle's comment claims it seeds only when the return type "is
+// exactly a TypeParam"; its code just unifies. A mirror written from the comment would
+// refuse to seed here — the return is a NULLABLE whose inner is the type param — and T
+// would stay unbound, which is exactly the state that used to kill the compiler.
+//
+// ⚠ Its sibling `c19_generic_return_seed_secret.sentinel` pins the `-> T` shape. Keep
+// both: a gate written from the comment passes that one and fails this one.
+//
+// 42 = the nullable came back empty, as `mk` returns `null`.
+fn mk<T>() -> ?T {
+    null
+}
+
+fn main() -> i64 {
+    let x: ?i64 = mk();
+    if is_some(x) { 1 } else { 42 }
+}

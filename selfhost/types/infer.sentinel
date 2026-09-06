@@ -418,7 +418,14 @@ fn dump_args_capture_all(out: &mut Vec<u8>, a: Args, ps: i64, pi: i64, np: i64, 
 // (space-separated) BEFORE the args, and return the SUBSTITUTED declared return
 // type. Args are dumped to a temp buffer first — the targs precede them in the
 // output but are inferred from them.
-fn dump_generic_call(out: &mut Vec<u8>, fid: i64, ca: Args, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
+// (registers D4 / D43 / D45) Takes `exp` — the caller's expected type — because the
+// oracle SEEDS the type-parameter substitution from the expected RETURN type before it
+// looks at a single argument (`unify_one(signature.return_type, exp, …)` in
+// `check_call`). Without that seed `let s: secret i64 = idg(7)` monomorphises at `i64`
+// and wraps the RESULT, where the oracle monomorphises at `secret i64` and widens the
+// ARGUMENT; and `fn mk<T>() -> ?T` has no argument to infer from at all, so T stayed
+// unbound and the mangled name came out `UNBOUND_TYPEARG`.
+fn dump_generic_call(out: &mut Vec<u8>, fid: i64, ca: Args, exp: i64, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
     let mut abuf: Vec<u8> = vec_new();
     let mut atys: Vec<i64> = vec_new();
     let ntp: i64 = (*c).uftp[fid - 42];
@@ -430,6 +437,27 @@ fn dump_generic_call(out: &mut Vec<u8>, fid: i64, ca: Args, src: &[u8], c: &mut 
     // unification; there is deliberately no second pass here.
     let mut bi: Vec<i64> = vec_new();
     let mut bt: Vec<i64> = vec_new();
+    // (registers D4 / D43 / D45 Step 2) SEED FROM THE EXPECTED RETURN TYPE, before any
+    // argument is walked. `subst_bind` is first-binding-wins and the oracle seeds first
+    // too, so this ordering is part of the mirror, not an accident.
+    //
+    // ⚠ GATED ON `ntp > 0` AND AN EXPECTATION — NOTHING ELSE. The oracle's own comment
+    // says it seeds only when "the signature's return type is exactly a TypeParam", and
+    // its CODE does no such check: it unifies unconditionally under those two guards.
+    // Mirror the code. `fn mk<T>() -> ?T` is the discriminator — its return type is a
+    // NULLABLE, not a bare type param, and it must still seed T through the `?` shell.
+    //
+    // Best-effort, exactly as the oracle's `let _ = unify_one(…)` is: a mismatch here is
+    // silent, because a real one resurfaces downstream.
+    if ntp > 0 {
+        if exp < 0 {
+            0
+        } else {
+            unify_one(c, (*c).ufret[fid - 42], exp, &mut bi, &mut bt)
+        }
+    } else {
+        0
+    };
     dump_args_capture_all(&mut abuf, ca, ps, 0, np, src, c, gb, &mut atys, &mut bi, &mut bt);
     // Build the resolved subst list in type-param INDEX order (0..ntp).
     let mut subst: Vec<i64> = vec_new();

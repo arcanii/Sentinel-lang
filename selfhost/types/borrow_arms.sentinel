@@ -1101,7 +1101,7 @@ fn dump_te_call(out: &mut Vec<u8>, cn: [u8], ca: Args, exp: i64, src: &[u8], c: 
                 let rt: i64 = if is_generic_builtin(fid) {
                     dump_gcall(out, fid, ca, exp, src, c, gb)
                 } else if isgenfn {
-                    dump_generic_call(out, fid, ca, src, c, gb)
+                    dump_generic_call(out, fid, ca, exp, src, c, gb)
                 } else if fid == 37 {
                     // (ADR 0070) apply: the return type depends on the concrete
                     // Fn<T,R> passed as the first arg, not a fixed per-FnId table.
