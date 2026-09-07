@@ -1970,9 +1970,34 @@ impl Emit<'_> {
                 }
                 let dead = self.fresh_block();
                 writeln!(self.body, "bb{dead}:").unwrap();
-                // `return` is divergent: hand back a typed-zero placeholder operand
-                // (only ever stored into the now-dead block).
-                Ok("0".to_string())
+                // `return` is divergent: hand back a zero placeholder operand (only
+                // ever consumed in the now-dead block). It must be `zeroinitializer`
+                // and NOT `0` (register D10): the operand is a bare STRING, and the
+                // consumer prints it after ITS OWN LLVM type — which is an aggregate
+                // for a nullable / slice / struct return and `ptr` for a reference,
+                // and `{ i1, i64 } 0` / `ptr 0` are not constants LLVM parses. The
+                // whole module was then unassemblable, and scg reproduced it
+                // byte-for-byte, so the differential stayed green over invalid IR.
+                // `zeroinitializer` is the one spelling valid for EVERY type, which is
+                // what this site needs, because the consumer's type is not knowable here
+                // and is not always this node's type either. Measured example of the
+                // latter: in `fn f(b: bool) -> i64 { let x: ?i64 = if b { null } else
+                // { return 5 }; unwrap_or(x, 1) }` this node's type is the fn's `i64`,
+                // while the consumer — the if-merge slot, typed from the NON-divergent
+                // then-arm — is `{ i1, i64 }`, so the operand is printed as
+                // `store { i1, i64 } <placeholder>`. (Swap the arms and the divergent
+                // one is the THEN arm, which is a DIFFERENT and still-open defect: the
+                // merge slot is then typed from the divergence. That one is not fixed
+                // here and this spelling does not paper over it.)
+                //
+                // inkwell instead emits a typed `const_zero()` of `expr.ty` — the same
+                // type THIS arm has, not the consumer's; it gets away with it because it
+                // builds through a typed API rather than splicing text. The two back ends
+                // need not agree textually anyway: only snc and scg must.
+                //
+                // Zero rather than `poison` on purpose: if the block ever stopped being
+                // dead, a defined value fails safer than undefined behaviour.
+                Ok("zeroinitializer".to_string())
             }
             TypedExprKind::Cast(inner) => {
                 // ADR 0049: integer width conversion — trunc / sext / zext by

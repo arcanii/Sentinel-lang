@@ -303,10 +303,12 @@ struct TyCtx {
     //     side-build mirroring the mode-2 MIR machinery. PER-FN state reset in `type_fn`
     //     via `cg_reset`; `cgout` accumulates ALL fns (the mode-4 result). Straight-line
     //     (8a): ONE block, in-order; alloca/load/store (NO phi). Operands are threaded via
-    //     `cglk`/`cglv` (kind 0 register `%vN` / 1 literal; value). ---
+    //     `cglk`/`cglv` (kind 0 register `%vN` / 1 literal; value). Kinds 2-6 came
+    //     later — `cgo_operand` in `types/cg.sentinel` carries the full enumeration. ---
     cgnext: i64,      // per-fn SSA temp/slot counter (`%vN`)
-    cglk: i64,        // last operand KIND: 0 register, 1 literal
-    cglv: i64,        // last operand VALUE: the register N (kind 0) or the literal (kind 1)
+    cglk: i64,        // last operand KIND: 0 register, 1 literal, .. 6 (see `cgo_operand`)
+    cglv: i64,        // last operand VALUE: the register N (kind 0) or the literal (kind 1);
+                      //   unused by the kinds that print a fixed constant (2, 6)
     cgsv: Vec<i64>,   // slot pool (append-only): VarId
     cgsr: Vec<i64>,   // slot pool: the binding's alloca `%vN` (paired with cgsv)
     cgpty: Vec<i64>,  // this fn's param type handles (for the `define` header, in order)

@@ -12,6 +12,14 @@
 //!      run, behaves identically (exit code + stdout) to the inkwell backend
 //!      (`snc build`). Proves the textual backend is *correct*, not just a
 //!      parser-pleaser. (8a = the straight-line subset.)
+//!
+//! Plus **layer 2b** between them: every `.ll` the oracle emits for a
+//! `tests/pass` fixture parses AND verifies under `llvm-as` (register D10).
+//! Layer 3 subsumes it in principle — but layer 3 needs `cc` and a
+//! `libsentinel_runtime.a`, neither of which exists on Windows, where it fails on
+//! its first assert and checks nothing. D10 was found and filed BY HAND, not by a
+//! test: for as long as it was open no automated check in this repo rejected it,
+//! on any platform. Layer 2b needs neither tool, so it is the one that runs here.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -1080,10 +1088,18 @@ fn corpus_fixtures() -> Vec<PathBuf> {
 
 #[test]
 fn llvm_never_panics_over_corpus() {
-    // `snc llvm` is partial-by-Err: it either emits (0) or cleanly Errs (1) —
-    // never a panic (101) or a signal. Emission grows per sub-slice; the
+    // Over THIS CORPUS `snc llvm` is partial-by-Err: it either emits (0) or cleanly
+    // Errs (1) — never a panic (101) or a signal. Emission grows per sub-slice; the
     // floor guards against a regression that stops emitting the straight-line
     // subset entirely.
+    //
+    // ⚠ That is a property of the corpus, not of `snc llvm`. It used to be written as
+    // the latter, and it is false: a `return` inside a CLASS METHOD panics the oracle
+    // outright (register D60 — `dump_method` never binds `current_fn`, so the Return
+    // arm indexes the signature table at `u32::MAX`). No fixture has that shape, which
+    // is exactly why the claim survived. Layer 2b leans on the corpus-scoped reading —
+    // it treats a non-zero exit as "did not emit" — so keep this test sweeping the same
+    // `corpus_fixtures()` layer 2b does.
     let mut emitted = 0;
     let mut total = 0;
     for f in corpus_fixtures() {
@@ -1109,6 +1125,159 @@ fn llvm_never_panics_over_corpus() {
     assert!(
         emitted >= 15,
         "expected the straight-line subset (~16) to emit, got {emitted}"
+    );
+}
+
+// ---- Layer 2b: the emitted IR assembles (register D10) ------------------
+
+/// `llvm-as` from the same LLVM 18 the workspace already hard-requires to build.
+/// Looked for under `LLVM_SYS_180_PREFIX/bin` (the variable `llvm-sys` needs), then
+/// `llvm-config --bindir`, then `PATH`.
+///
+/// Fails closed twice over. A missing assembler is an environment defect, not a
+/// reason to skip — a gate that quietly checks nothing is the failure mode this
+/// layer exists to close, and `llvm_rejects` in `selfhost_codegen.rs` is an in-tree
+/// instance of it (it returns `None`, checking nothing, when `LLVM_SYS_180_PREFIX`
+/// is unset). And only the first of the three locations below is tied to LLVM 18 by
+/// construction, so every candidate is version-gated as well: an `llvm-as` from
+/// another toolchain accepts and rejects different IR, and one silently answering
+/// for a different LLVM is no better than none.
+fn llvm_as() -> PathBuf {
+    let exe = if cfg!(windows) { "llvm-as.exe" } else { "llvm-as" };
+    // `llvm-as --version` prints "  LLVM version 18.1.8" on stdout's second line.
+    let is_llvm_18 = |p: &Path| -> bool {
+        Command::new(p).arg("--version").output().is_ok_and(|o| {
+            o.status.success() && String::from_utf8_lossy(&o.stdout).contains("LLVM version 18.")
+        })
+    };
+    let mut looked: Vec<String> = Vec::new();
+
+    if let Ok(prefix) = std::env::var("LLVM_SYS_180_PREFIX") {
+        let p = PathBuf::from(&prefix).join("bin").join(exe);
+        if p.is_file() && is_llvm_18(&p) {
+            return p;
+        }
+        looked.push(format!("{} (absent or not LLVM 18)", p.display()));
+    }
+    if let Ok(out) = Command::new("llvm-config").arg("--bindir").output() {
+        if out.status.success() {
+            let dir = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            let p = PathBuf::from(&dir).join(exe);
+            if p.is_file() && is_llvm_18(&p) {
+                return p;
+            }
+            looked.push(format!("{} (absent or not LLVM 18)", p.display()));
+        }
+    }
+    let bare = PathBuf::from(exe);
+    if is_llvm_18(&bare) {
+        return bare;
+    }
+    looked.push(format!("{exe} on PATH (absent or not LLVM 18)"));
+    panic!(
+        "no LLVM 18 llvm-as found — looked at: {}.\n\
+         It ships with the LLVM 18 this workspace already requires to build; set \
+         LLVM_SYS_180_PREFIX or put llvm-config/llvm-as on PATH.",
+        looked.join(", ")
+    );
+}
+
+/// The `tests/ui` fixtures that `snc llvm` emits IR for, where that IR does NOT assemble.
+///
+/// An explicit fail-closed list, NOT a filter. `run_llvm` (`main.rs`) never runs
+/// effect-check at all, and runs borrow-check only to get its drop plan — discarding
+/// its errors — so a program that either of those two rejects still reaches the
+/// dump. `c37` performs an effect outside
+/// any `handle`; the unhandled `perform` lowers to a `Kont*` where the body wants an
+/// `i64`. Nothing consumes that IR — the fixture's whole job is to be REJECTED, and
+/// `snc build` does reject it — so it is a byproduct of dumping past a rejection,
+/// not an oracle defect. Pinned rather than skipped so that a SECOND such program
+/// has to be looked at by a human instead of joining a silent exemption.
+const UI_EMITS_UNASSEMBLABLE: &[&str] = &["c37_perform_outside_handle.sentinel"];
+
+#[test]
+fn llvm_emitted_ir_assembles_over_corpus() {
+    // `llvm-as` runs the VERIFIER unless `-disable-verify`, so this is parse +
+    // verify, not parse alone (checked: a dominance violation is rejected here).
+    let asm = llvm_as();
+    let dir = temp_dir("assemble");
+    let ll = dir.join("m.ll");
+    let bc = dir.join("m.bc");
+    let mut checked = 0;
+    let mut ui_unassemblable: Vec<String> = Vec::new();
+
+    for f in corpus_fixtures() {
+        // Match on the parent DIRECTORY rather than on a substring of the path. The
+        // substring form layer 3 uses is NOT broken on Windows, as one might assume:
+        // `corpus_fixtures()` builds the directory with `root.join("tests/pass")` and
+        // `Path::join` appends that literal, so the forward slash survives (measured —
+        // a "tests/pass" substring filter matches all 182). This form simply does not
+        // depend on that.
+        let corpus = f
+            .parent()
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let dump = Command::new(env!("CARGO_BIN_EXE_snc"))
+            .arg("llvm")
+            .arg(&f)
+            .output()
+            .expect("run snc llvm");
+        if !dump.status.success() {
+            continue; // did not emit — layer 2 already pinned that it Err'd cleanly
+        }
+        // llvm-as exits 0 on an empty file, and on one holding only the `target
+        // triple` preamble. Without this, a regression that stopped emitting bodies
+        // but kept exit 0 would score every fixture as "checked" and clear the floor.
+        assert!(
+            dump.stdout.windows(7).any(|w| w == b"define "),
+            "snc llvm exited 0 for {} but emitted no function definition",
+            f.display()
+        );
+        std::fs::write(&ll, &dump.stdout).expect("write .ll");
+        let out = Command::new(&asm)
+            .arg(&ll)
+            .arg("-o")
+            .arg(&bc)
+            .output()
+            .expect("run llvm-as");
+        let name = f.file_name().unwrap_or_default().to_string_lossy().to_string();
+
+        if corpus == "ui" {
+            if !out.status.success() {
+                ui_unassemblable.push(name);
+            }
+            continue;
+        }
+
+        assert!(
+            out.status.success(),
+            "snc llvm emitted IR for {} that does not assemble:\n{}\n\
+             (the .ll is at {})",
+            f.display(),
+            String::from_utf8_lossy(&out.stderr),
+            ll.display()
+        );
+        checked += 1;
+    }
+
+    // A floor, so a change that stops the oracle emitting cannot turn this green by
+    // checking nothing. 179 of the 182 `tests/pass` fixtures emitted on 2026-09-08
+    // (counted AFTER c65_return_aggregate_shapes was added by this same change — the
+    // first count taken was 178/181 and was stale by the time it was written down).
+    assert!(
+        checked >= 170,
+        "expected the emitting tests/pass subset (~179) to be checked, got {checked}"
+    );
+
+    ui_unassemblable.sort();
+    let mut expected: Vec<String> =
+        UI_EMITS_UNASSEMBLABLE.iter().map(|s| (*s).to_string()).collect();
+    expected.sort();
+    assert_eq!(
+        ui_unassemblable, expected,
+        "the set of tests/ui fixtures whose emitted IR does not assemble changed; \
+         see UI_EMITS_UNASSEMBLABLE — a new one is not automatically benign"
     );
 }
 

@@ -1,0 +1,109 @@
+// tests/pass/c65_return_aggregate_shapes.sentinel — `return` in a function whose return
+// type does NOT lower to a plain integer (register D10), self-contained.
+//
+// `return` is divergent, so after emitting the `ret` the backends park a dead block and
+// hand the enclosing expression a placeholder value for the unreachable remainder. That
+// placeholder is printed after the CONSUMER's LLVM type, and for these return types the
+// consumer's type is an aggregate or a pointer — `{ i1, i64 }` for `?i64`,
+// `{ i64, ptr }` for `[i64]`, `%Struct.N` for a struct, `ptr` for a reference. The text
+// oracle spelled the placeholder `0`, which is a constant of none of them, so `snc llvm`
+// emitted a module that would not assemble. It went unnoticed because `scg` reproduced
+// the bad byte for bad byte (the differential compares the two backends to each other,
+// not to LLVM) and because `snc build` goes through inkwell, which carries a real type
+// and so was always correct on these shapes: an exit-code fixture like this one could not
+// have caught D10 even if it had existed while D10 was open.
+//
+// The five functions below therefore exist to make the oracle PRINT that placeholder at a
+// non-integer type — five of the six placeholder sites in the emitted module; the sixth is
+// `main`'s own `return 42`, at plain `i64`, which was never broken. `tests/llvm.rs` layer
+// 2b is what actually reads them: it assembles every `.ll` the oracle emits over this
+// corpus. Exit 42 = every check held.
+//
+// ⚠ WHAT THIS FIXTURE DOES NOT COVER: every `if` here sits at its function's tail, where
+// the if's join type EQUALS the function's return type — which is exactly the arrangement
+// in which the oracle's merge-slot rule (it takes the slot type from the THEN branch)
+// happens to be right. Put a divergent `return` in the THEN arm of an `if` whose join type
+// differs, as in `let p: P = if b { return 5 } else { P { .. } }`, and the slot is sized
+// from the divergence instead. That is a SEPARATE, still-open defect, it is not what
+// `zeroinitializer` fixes, and no fixture can pin it here until it is fixed — a tests/pass
+// program has to run correctly, and that one does not.
+
+// `?i64` — the payload is inline, so the pair is `{ i1, i64 }`. The bare form (no `if`)
+// is the minimal reproducer: the placeholder lands straight in the epilogue's `ret`.
+fn always_five() -> ?i64 {
+    return 5
+}
+
+// The same shape with a live merge: the placeholder is stored into the if's result slot.
+fn maybe(b: bool) -> ?i64 {
+    if b {
+        return 7
+    } else {
+        9
+    }
+}
+
+// `[i64]` — a slice is `{ i64, ptr }`, and the returned buffer is moved out (freed by
+// the caller's scope, not here) on BOTH the early-return and the fall-through path.
+fn pair_or(b: bool) -> [i64] {
+    if b {
+        return [10, 11]
+    } else {
+        [20, 21]
+    }
+}
+
+struct Point {
+    x: i64,
+    y: i64,
+}
+
+// A struct return is a named aggregate `%Struct.N` — a distinct LLVM type from the
+// anonymous pairs above, and spelled by a different oracle path.
+fn origin_or(b: bool) -> Point {
+    if b {
+        return Point { x: 3, y: 4 }
+    } else {
+        Point { x: 0, y: 0 }
+    }
+}
+
+// A reference return is `ptr`, where the placeholder must be a POINTER constant. This is
+// the non-aggregate half of the defect: `ptr 0` is rejected for the same reason
+// `{ i1, i64 } 0` is, so a fix that only handled aggregates would still be wrong here.
+fn pick(b: bool, lo: &i64, hi: &i64) -> &i64 {
+    if b {
+        return hi
+    } else {
+        lo
+    }
+}
+
+fn main() -> i64 {
+    let a1: i64 = unwrap_or(always_five(), 0);   // 5
+    let a2: i64 = unwrap_or(maybe(true), 0);     // 7  (early return)
+    let a3: i64 = unwrap_or(maybe(false), 0);    // 9  (fall-through)
+
+    let s1: [i64] = pair_or(true);
+    let a4: i64 = s1[0] + s1[1];                 // 21 (early return)
+    let s2: [i64] = pair_or(false);
+    let a5: i64 = s2[0] + s2[1];                 // 41 (fall-through)
+
+    let p1: Point = origin_or(true);
+    let a6: i64 = p1.x + p1.y;                   // 7  (early return)
+    let p2: Point = origin_or(false);
+    let a7: i64 = p2.x + p2.y;                   // 0  (fall-through)
+
+    let lo: i64 = 100;
+    let hi: i64 = 200;
+    let a8: i64 = *pick(true, &lo, &hi);         // 200 (early return)
+    let a9: i64 = *pick(false, &lo, &hi);        // 100 (fall-through)
+
+    let ok: bool = a1 == 5 && a2 == 7 && a3 == 9 && a4 == 21 && a5 == 41
+        && a6 == 7 && a7 == 0 && a8 == 200 && a9 == 100;
+    if ok {
+        return 42
+    } else {
+        0
+    }
+}

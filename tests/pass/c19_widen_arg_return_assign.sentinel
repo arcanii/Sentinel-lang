@@ -29,17 +29,14 @@
 //     deliberately is not exercised here — `widen_kind` does not implement `[u8]` ->
 //     `[secret u8]` at all, which a `let`-annotated array shows just as well.
 //
-// ⚠ THIS FIXTURE'S ORACLE IR DOES NOT ASSEMBLE, and that is a PRE-EXISTING `snc` bug, not
-// a defect in the fixture or in scg. ANY `return` in a fn whose return type is NULLABLE
-// makes `snc llvm` emit `ret { i1, i64 } 0` for the synthesized fall-through — measured:
-// `fn rn() -> ?i64 { return 5 }` alone reproduces it, the same fn WITHOUT a `return` is
-// clean, and the `secret i64` twin is clean (secret lowers to i64). `ret_n` below is
-// therefore the one cell that cannot avoid it, and it is kept because it is the cell that
-// matters most — the return position is the one whose missing wrapper also RETYPED the
-// enclosing block. Nothing fails as a result: the codegen differential compares oracle
-// against scg (byte-identical here) and only flags scg when the ORACLE's IR is valid, and
-// `snc build` uses inkwell, which compiles and runs this correctly. Filed separately; when
-// it is fixed, this fixture's oracle IR should start assembling, which is a good check.
+// This fixture's oracle IR USED NOT TO ASSEMBLE — register D10, now CLOSED. `ret_n` below
+// makes the oracle print the `return` divergence placeholder into a `{ i1, i64 }` slot, and
+// the placeholder was the bare string `0`, which is not a constant of that type. It is
+// spelled `zeroinitializer` now and this file assembles; `tests/llvm.rs` layer 2b is the
+// check that keeps it that way, so the note this header used to carry ("when it is fixed,
+// this fixture's oracle IR should start assembling, which is a good check") is now a test
+// rather than a hope. `ret_n` is kept for the reason it was always kept — the return
+// position is the one whose missing wrapper also RETYPED the enclosing block.
 //
 // WHAT THIS FIXTURE DOES NOT COVER, so nobody reads it as more than it is: an argument
 // or assignment whose VALUE is a `struct` literal, a field read, an index, or another

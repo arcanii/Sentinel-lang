@@ -1094,8 +1094,10 @@ fn cg_extern_declares(out: &mut Vec<u8>, c: &mut TyCtx, src: &[u8]) -> i64 {
 // an operand: a register `%vN` (kind 0), an integer literal (kind 1), (8d-Vec) the
 // empty-`Vec` constant (kind 2 — `vec_new()`'s value, the same for every elem),
 // (Bar B) a `null` constant (kind 3 — `{ i1 0, <zero> }`, `val` = the inner type),
-// `%arg0` the self pointer (kind 4), or (ADR 0070) a `Fn` value — a bare
-// function-pointer constant `@<name>` (kind 5, `val` = FnId).
+// `%arg0` the self pointer (kind 4), (ADR 0070) a `Fn` value — a bare
+// function-pointer constant `@<name>` (kind 5, `val` = FnId) — or (register D10) the
+// `return` divergence placeholder `zeroinitializer` (kind 6, `val` unused).
+// This list is the enumeration; extend it when the body grows an arm.
 fn cgo_operand(c: &mut TyCtx, kind: i64, val: i64) -> i64 {
     if kind == 0 {
         cgo_str(c, "%v");
@@ -1114,6 +1116,16 @@ fn cgo_operand(c: &mut TyCtx, kind: i64, val: i64) -> i64 {
         let mut fnb: Vec<u8> = vec_new();
         cg_fn_name_to(&mut fnb, c, val);
         cgo_str(c, vec_to_array(fnb))
+    } else if kind == 6 {
+        // (register D10) the `return` divergence placeholder — the operand parked in
+        // the dead block after a `ret`. `val` is unused: this kind exists BECAUSE the
+        // consumer's type is not knowable here, and `zeroinitializer` is the one
+        // spelling LLVM parses at EVERY type. Kind 1 with value 0 (what this used to
+        // be) printed a bare `0`, which is not a constant of `{ i1, i64 }` (a nullable
+        // or slice or struct return) nor of `ptr` (a reference return) — the module
+        // did not assemble, and because scg reproduced the oracle byte-for-byte the
+        // differential stayed green over it. Mirrors `llvm_dump`'s Return arm.
+        cgo_str(c, "zeroinitializer")
     } else {
         // kind 3: `null` = `{ i1 0, <zero payload> }`. `?Struct` and (register D39)
         // `?GenericInstance` zero a pointer; `?primitive` zeroes its inline scalar.

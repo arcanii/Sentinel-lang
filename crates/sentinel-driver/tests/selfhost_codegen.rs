@@ -813,11 +813,16 @@ fn collect_programs() -> Vec<PathBuf> {
 /// while scg produced output no backend would accept. Byte-comparison alone
 /// cannot see that; this can.
 ///
-/// NOTE `llvm-as` exits 0 even when verification fails, printing
-/// "assembly parsed, but does not verify as correct!" — so the exit code is not
-/// a usable signal on its own and stderr must be inspected. Skipped (returns
-/// `None`) when `LLVM_SYS_180_PREFIX` is unset, so the test still runs without
-/// an LLVM install.
+/// NOTE this used to say `llvm-as` exits 0 when verification fails, so that only
+/// stderr was a usable signal. Measured on the LLVM 18.1.8 this repo builds
+/// against, that is false: it exits **1** for a verifier failure ("assembly
+/// parsed, but does not verify as correct!") exactly as it does for a parse
+/// error, and writes no `.bc`. The stderr test below is kept as belt-and-braces —
+/// it costs nothing and this claim has already been wrong once — but the exit
+/// code is the signal. Skipped (returns `None`) when `LLVM_SYS_180_PREFIX` is
+/// unset, so the test still runs without an LLVM install; `llvm_as()` in
+/// `llvm.rs` deliberately does NOT make that concession, because a gate that
+/// checks nothing is how the defect this one was written for stayed hidden.
 fn llvm_rejects(ll: &Path) -> Option<String> {
     let prefix = std::env::var("LLVM_SYS_180_PREFIX").ok()?;
     let tool = PathBuf::from(prefix).join("bin").join(if cfg!(windows) {

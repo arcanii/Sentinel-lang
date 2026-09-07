@@ -14,6 +14,80 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
+**Latest (2026-09-08) — D10 is closed, and the oracle's own IR is now gated. NOT PUSHED.**
+`return` is divergent, so after the `ret` each back end parks a dead block and hands the
+enclosing expression a placeholder for the unreachable remainder. The oracle's was the bare
+STRING `0`, and its consumer prints that operand after ITS OWN LLVM type — so the module did
+not assemble whenever that type was not a plain integer. It is `zeroinitializer` now, the one
+spelling LLVM parses at every type, which is what a site holding no type needs; `scg` mirrors
+it as operand kind 6 in `cgo_operand`.
+
+⚠ **D10's SCOPE was wrong, and this is the FIFTH consecutive entry whose scope was.** It was
+filed as a NULLABLE-return defect. Constructed, it is every return type that does not lower
+to an integer: `ret { i1, i64 } 0` (`?i64`), `store { i64, ptr } 0` (`[i64]`),
+`store %Struct.0 0` (a struct) and `store ptr 0` (a `&i64`). A fix keyed on nullables — or
+on aggregates — would have left the pointer case broken. Blast radius was three corpus
+programs; reverting only the `scg` side fails the corpus differential on exactly four, so the
+differential does reach the mirrored line.
+
+**The entry's own remedy note is now a test: `tests/llvm.rs` layer 2b.** It assembles every
+`.ll` the oracle emits over `tests/pass` — 179 of 182 emit, zero fail — under an `llvm-as`
+that is *version-gated* (only the `LLVM_SYS_180_PREFIX` path is tied to LLVM 18 by
+construction; an assembler from another toolchain answering for a different LLVM is no
+better than none). `tests/ui` is an explicit fail-closed exception LIST, not a filter, with
+one member: `c37_perform_outside_handle`, where `run_llvm` dumps past a rejection that
+`snc build` makes (it never runs effect-check, and discards borrow-check's errors). The gate
+also asserts the dump contains a `define`, because `llvm-as` exits 0 on an empty file and
+"checked 179 of them" would otherwise be satisfiable by emitting nothing. ⚠ **The gate sweeps
+`corpus_fixtures()` — `tests/pass` + `tests/ui` — and NOT `examples/`, `demos/`,
+`sentinel_library/` or the merged self-hosting compiler.** A review lens swept those by hand
+with the same pair and found **zero** unassemblable today, so nothing is being hidden; but
+`llvm_dump.rs:2148` records that the previous defect of exactly this class had its blast
+radius in `examples/`, so extending the sweep is the obvious next hardening. Fixture
+`tests/pass/c65_return_aggregate_shapes` pins all four shapes; measured against the
+pre-change binary it fails, so it pins the defect and not just the fix.
+
+⚠ **Corrected while there: this repo's lore about `llvm-as` was wrong in the code, not only
+in the docs.** `selfhost_codegen.rs`'s `llvm_rejects` carried "exits 0 even when verification
+fails ... stderr must be inspected". Measured on LLVM 18.1.8 it exits **1** for a verifier
+failure exactly as for a parse error, and writes no `.bc`. STATE.md had already recorded that
+correction on 2026-08-31; the harness comment it names was never actually changed. The
+implementation was defensive enough to be right anyway — but it still SKIPS entirely when
+`LLVM_SYS_180_PREFIX` is unset, which is the "gate that checks nothing" shape, and layer 2b
+deliberately does not copy that concession.
+
+⚠ **The adversarial review's most valuable finding was against the fix's own prose.** The
+justifying comment cited `let x: ?i64 = if b { return 5 } else { null }` as a case where the
+consumer's type differs from the node's — with the arms the wrong way round. In that program
+the divergent arm is the THEN arm, the merge slot is sized from it, and the module still does
+not assemble after this change. The true example is the mirror image (`if b { null } else
+{ return 5 }`: node type `i64`, consumer `{ i1, i64 }`), and it is what the comment says now.
+Five other prose claims were false and are corrected: "D10 shipped undetected" (it was found
+and filed by hand — what is true is that no automated test caught it, on any platform), a
+Windows path-separator NB that condemned working code (`Path::join` appends the literal
+`tests/pass`, so the substring filter does match — measured, all 182), two closed operand-kind
+enumerations that the same change extended, and c19's header, which still announced the defect
+as live and named "this fixture's oracle IR should start assembling" as a future check.
+
+**The review's completeness critic found a THIRD defect, now filed as D60**, by asking the
+one question no lens asked — not what the placeholder IS, but who the Return arm thinks the
+enclosing FUNCTION is. Inside a class method it is nobody: `dump_method` leaves `current_fn`
+at `FnId(u32::MAX)`, so a `return` in a method indexes the signature table at 4294967295 and
+panics `snc llvm` outright (exit 101), against the project rule that user input must produce a
+diagnostic. inkwell has the twin under a comment that LICENSES the placeholder, and since ADR
+0065 started reading that field the method gets whatever ABI the LAST-COMPILED function had —
+so an unrelated function's position in the file decides whether the same method is rejected,
+crashes, or happens to work. **The shape appears in none of the repo's 394 `.sentinel` files**,
+which is both why nothing catches it and why `tests/llvm.rs`'s layer-2 comment could assert
+"never a panic (101)" as a property of `snc llvm` rather than of the corpus; corrected there.
+
+**`pass` 181 → 182.** Four-check green (1840 passed / exactly the 18 known Windows failures,
+zero new — the two extra passes are this change's own); all 7 `selfhost_codegen` tests green,
+both bootstrap fixed points byte-identical. **Register: 60 items, 28 done.** ⚠ **A second,
+SEPARATE defect in the same divergence machinery was found while doing this and is filed
+REDACTED as D59 — it is pre-existing, it is not what this change fixes, and D10's new fixture
+deliberately avoids its shape. Ask before working it.**
+
 **Latest (2026-09-06e) — D37 is closed, and the same change closed its unfiled `Vec<T>`
 twin. Everything through `68576a2` is PUSHED.** `unify_one` had arms for type-param, array, nullable, secret and generic-instance
 params and none for a REF or a VEC, so a `fn takes<T>(x: &T)` never bound `T` at all. The

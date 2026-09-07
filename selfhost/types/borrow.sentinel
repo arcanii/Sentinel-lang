@@ -1215,7 +1215,7 @@ fn dump_texpr_node(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut Ty
         //   returned binding), then `ret` with the epilogue ABI (`main` i64→i32;
         //   effecting → `sentinel_kont_pure`; ordinary → the value), then park a dead
         //   block for the now-unreachable remainder. The produced operand is a
-        //   typed-zero placeholder (only ever stored into the dead block).
+        //   `zeroinitializer` placeholder (only ever consumed in the dead block).
         Expr::Return(ri) => {
             append_str(out, "(return ");
             let svc: bool = (*c).consuming;
@@ -1272,7 +1272,12 @@ fn dump_texpr_node(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut Ty
                 cgo_str(c, "bb");
                 cgo_int(c, dead);
                 cgo_str(c, ":\n");
-                (*c).cglk = 1;
+                // (register D10) operand kind 6 = `zeroinitializer`, NOT kind 1 /
+                // value 0. The consumer prints this operand after ITS OWN type,
+                // which is an aggregate for a nullable / slice / struct return and
+                // `ptr` for a reference return — and `0` is a constant of neither,
+                // so the module did not assemble. Mirrors `llvm_dump`'s Return arm.
+                (*c).cglk = 6;
                 (*c).cglv = 0;
                 0
             } else {

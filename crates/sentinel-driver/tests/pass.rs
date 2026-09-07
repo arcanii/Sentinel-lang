@@ -1699,6 +1699,21 @@ fn pass_c65_return_match() {
 }
 
 #[test]
+fn pass_c65_return_aggregate_shapes() {
+    // Register D10 c65_return_aggregate_shapes: `return` in functions whose return type
+    // is NOT a plain integer — `?i64`, `[i64]`, a struct, and `&i64`. The divergence
+    // placeholder the backends hand back for the unreachable remainder is printed at the
+    // CONSUMER's LLVM type, so each of these makes the oracle spell it at an aggregate or
+    // a pointer. This exit code is NOT what caught D10 and could not have been: inkwell
+    // carries a real type and is correct on these shapes, so this fixture would have exited
+    // 42 while D10 was open, had it existed then. What catches it is
+    // `tests/llvm.rs` layer 2b, which assembles the oracle's `.ll` — this fixture's job
+    // is to be IN the corpus that layer sweeps (and in the selfhost differential, which
+    // pins that scg spells the placeholder the same way). Exit 42.
+    assert_eq!(run_exit("c65_return_aggregate_shapes.sentinel"), 42);
+}
+
+#[test]
 fn pass_c19_widen_arg_return_assign() {
     // ADR 0014 D3 / ADR 0051 A5 c19_widen_arg_return_assign: the three positions that
     // supplied NO expected type, so `scg` dropped the widening wrapper in each — a call

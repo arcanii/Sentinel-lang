@@ -124,7 +124,7 @@ reference as you work through the milestones.
 > confirming nothing pre-existing is newly refused; oracle-vs-scg byte-equality on the new
 > fixture at types, mir and llvm; and the secret-taint check in both directions.
 
-### ▶ RESUME HERE (2026-09-06 — **PUSHED**: `origin/main` and HEAD are both at `68576a2`, nothing unpushed. Four-check GREEN (1838 passed / **exactly the 18 known Windows failures**, identical failure set), all 9 differential stages and BOTH bootstrap fixed points byte-identical, tree CLEAN. Register: **58 items, 27 done**, D19 redacted.
+### ▶ RESUME HERE (2026-09-06 — **PUSHED**: `origin/main` and HEAD are both at `68576a2`, nothing unpushed. Four-check GREEN (1838 passed / **exactly the 18 known Windows failures**, identical failure set), all 9 differential stages and BOTH bootstrap fixed points byte-identical, tree CLEAN. Register: **60 items, 28 done**, D19 redacted.
 
 > **What this session did.** Closed **D4, D37, D39, D42, D43, D44, D47(option A), D51, D54,
 > D55, D56, D58** and **requests R3, R4, R8, R15**; filed **D42-D58**. Deleted **three**
@@ -170,8 +170,8 @@ reference as you work through the milestones.
 > re-measure every literal against the program beside it.**
 >
 > ⚠ **SECURITY-CLASS FINDINGS ARE TRACKED PRIVATELY WITH THE MAINTAINER and are
-> deliberately not described here.** D35 is blocked behind one; D19 IS another. **Two more
-> were raised privately on 2026-09-05/06.** If you find yourself in the container
+> deliberately not described here.** D35 is blocked behind one; D19 IS another; **D59 is a
+> third.** **Two more were raised privately on 2026-09-05/06, and one on 2026-09-08.** If you find yourself in the container
 > refcount/drop path, in `clone_if_shared_var` and its twins, in **class-field move
 > tracking**, in **`std/net/ssh_cipher.sentinel`'s record-length handling**, or in the
 > cross-unit symbol mangling / `linkonce_odr` dedup — **ask first, and before writing
@@ -373,17 +373,27 @@ reference as you work through the milestones.
 >      two. Front end only: `snc build` compiles these but `snc llvm` refuses them, so the
 >      codegen differential cannot see the shape (filed separately).
 >
->      **D10 — ⚠ `snc llvm` emits an invalid fall-through for a NULLABLE return.** ANY
->      `return` in a fn whose return type is nullable makes the ORACLE emit a bare `0` into
->      the `{ i1, i64 }` merge slot — `fn rn() -> ?i64 { return 5 }` alone reproduces it, the
->      same fn without a `return` is clean, and the `secret i64` twin is clean (secret lowers
->      to i64). `llvm-as` rejects it; `snc build` (inkwell) compiles the same program
->      correctly, so this is text-oracle-only. NOTHING CATCHES IT: `selfhost_codegen`'s IR
->      check flags scg only when the ORACLE's IR is valid (deliberately — so scg is not blamed
->      for reproducing the oracle), and here both are invalid, so the differential stays green
->      and silent. Consider adding an assertion that the ORACLE's own IR assembles over the
->      fixtures it emits for; that whole class has no test today.
->      `tests/pass/c19_widen_arg_return_assign` contains the shape and documents it.
+>      **D10 — DONE (2026-09-08).** ⚠ `snc llvm` emitted an invalid divergence placeholder
+>      for a `return`. **The entry's SCOPE was wrong — the fifth time in a row.** It was
+>      filed as a NULLABLE-return defect; it is EVERY return type that does not lower to a
+>      plain integer. `return` hands its enclosing expression a placeholder for the dead
+>      block, the oracle's was the bare STRING `0`, and the consumer prints that operand
+>      after ITS OWN type: measured, `ret { i1, i64 } 0` (`?i64`), `store { i64, ptr } 0`
+>      (`[i64]`), `store %Struct.0 0` (a struct) and `store ptr 0` (a `&i64`) — a constant
+>      of none of them. Fixed to `zeroinitializer`, the one spelling valid at EVERY LLVM
+>      type, which is what a site with no type in hand needs; scg mirrors it as operand
+>      kind 6. Blast radius was three corpus programs. Reverting only the scg side makes
+>      the corpus differential fail on exactly four — the differential does reach it.
+>
+>      The entry's REMEDY note is also now done: **`tests/llvm.rs` layer 2b** assembles
+>      every `.ll` the oracle emits over `tests/pass` (179 of 182 today, zero failures)
+>      under a version-gated `llvm-as`, with `tests/ui` carried as an explicit
+>      fail-closed exception list (one member — `c37_perform_outside_handle`, where
+>      `run_llvm` dumps past a rejection `snc build` makes). Fixture
+>      `tests/pass/c65_return_aggregate_shapes` pins all four non-integer shapes.
+>      ⚠ That fixture is DEGENERATE for the sibling defect and says so in its header: its
+>      `if`s all sit at the fn tail, where the oracle's merge-slot rule is accidentally
+>      right. **See D59 before adding one that is not.**
 >
 >      **D11 — a BUILTIN's call argument is not widened.** The oracle widens it and scg does
 >      not, emitting `extractvalue i64 5, 0` — invalid IR. `let y: i64 = unwrap_or(5, 0);`
@@ -531,6 +541,41 @@ reference as you work through the milestones.
 >      uniquifies a duplicate type or function name, and the colliding program builds and
 >      runs correctly (verified end to end). It is the two PRINTING back ends that emit
 >      invalid IR. A1 added `process`/`sealedchannel` to this class deliberately — see D5.
+>
+>      **D60 — ⚠ a `return` inside a CLASS METHOD panics `snc llvm` outright, and makes
+>      `snc build` emit the WRONG ABI.** Found by the D10 review's completeness critic;
+>      reproduced here. `dump_method` (`llvm_dump.rs:1629`) sets `current_fn` to
+>      `FnId(u32::MAX)` as a placeholder — a class body has no `FnId` entry — and the
+>      Return arm's first act is `self.program.signature(self.current_fn)`, so the oracle
+>      indexes the signature table at 4294967295 and panics: exit **101**,
+>      `index out of bounds: the len is 43 but the index is 4294967295`. That violates the
+>      project rule that user-program input must surface a `miette` diagnostic, not a
+>      panic. Minimal: `class P { let x: i64; pub init(x: i64) { self.x = x; 0 }
+>      pub fn g(self: &Self) -> i64 { return 7 } }` — `snc types` accepts it (exit 0), the
+>      same method WITHOUT the `return` is clean.
+>
+>      inkwell has the twin under a comment that LICENSES the skip ("class init bodies
+>      don't participate in DropPlan … use a placeholder current_fn_id"): ADR 0065's
+>      `build_fn_return` later started reading that field, so the method is given
+>      **whatever ABI the last-compiled function had**. Measured: with `main` last,
+>      `snc build` is rejected by the LLVM verifier (`ret i32 7` in an i64 fn); the critic
+>      also constructed configurations where it is rejected differently, where inkwell
+>      raw-panics, and one where it comes out accidentally CORRECT — i.e. an unrelated
+>      function's POSITION IN THE FILE decides which. The critic went looking for a
+>      silent wrong-VALUE path and did not find one, so this is compile-time breakage;
+>      do not upgrade that claim without constructing it.
+>
+>      ⚠ **The shape is absent from all 394 `.sentinel` files in the repo**, which is why
+>      nothing catches it — and why `tests/llvm.rs`'s layer-2 comment was able to assert
+>      "never a panic (101)" as a property of `snc llvm`. It is corrected there to a
+>      claim about the corpus. D13 is the sibling in the same `dump_method`, not this.
+>
+>      **D59 — REDACTED.** A security-class finding in the SHIPPING compiler's codegen
+>      typing, raised privately with the maintainer on 2026-09-08 while closing D10, and
+>      deliberately not described here. It is PRE-EXISTING (measured against the
+>      pre-change binary), it is NOT what `zeroinitializer` fixes, and D10's new fixture
+>      deliberately avoids the shape. **Ask before working it and before writing anything
+>      about it down.**
 >
 >      **D19 — REDACTED.** A security-class finding on the `linkonce_odr` cross-unit
 >      dedup path, in the SHIPPING compiler. It is tracked privately with the maintainer
