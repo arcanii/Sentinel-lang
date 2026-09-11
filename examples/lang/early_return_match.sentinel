@@ -9,9 +9,11 @@
 // was rejected ("`match` arms have incompatible types: expected bool, found i64"); now the
 // diverging arm is skipped at the join (the deferred match-arm divergence, closed).
 //
-// snc-only demonstrator (the mismatched-divergent dump is a documented selfhost edge — the
-// CG result slot uses the live arm's type in both emitters; the demonstrator stays OUT of
-// the differential, the early_return / u128 / f64 pattern). Exit 42 = every check held.
+// The mismatched-divergent `match` type was a documented selfhost edge until register D59
+// made scg join a `match` as the typer does. The codegen real-program differential compares
+// this file, and so do lex and parse. The others cannot: `snc resolve` through `snc
+// ctverify` do not wire `use` imports yet, and the file has no merged form for them to
+// compare instead, because `snc merge` refuses `return`. Exit 42 = every check held.
 use std::test::check;
 
 enum Cmd { Run(i64), Halt }

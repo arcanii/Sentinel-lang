@@ -1,0 +1,13 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c65_return_before_perform.sentinel\")"
+---
+sentinel::codegen::effecting_fn_body_not_direct
+
+  × effecting fn `e1` cannot be lowered: something its tail evaluates before
+  │ the `perform` — a call, a `return`, an index, a division, a dereference, a
+  │ `&mut` borrow, an assignment, a loop, a `handle` or a concurrency form —
+  │ may be observable, and this body shape runs the `perform` first
+  help: an effecting fn returns a continuation, so only the shapes ADR 0072
+        enumerates can be lowered; reshape the body, or wait for the wider
+        seam that ADR 0072 defers

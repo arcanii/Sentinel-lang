@@ -1,0 +1,195 @@
+// tests/pass/c65_return_gaps.sentinel — the `return` shapes registers D59, D60 and D66 fixed
+// that no other pass fixture pins, self-contained.
+//
+// scg picks an `if`'s join, a `match`'s type and both result slots from a STRUCTURAL
+// divergence fact (`sdiv`, mirroring the type checker's `expr_diverges`), kept by a handful of
+// one-line resets, saves and restores. Each reset and restore has been deleted on its own,
+// and one restore rewritten as `saved || inner`; for all but one of those changes every
+// fixture except this one and ui `c65_secret_join_guarded`, written alongside it, stayed
+// byte-identical to the oracle. The functions here make scg's output differ under every one
+// of them, and each is named for the shape it exercises:
+//
+//   * `match_all_div`  — a `match` ALL of whose arms diverge makes its block diverge, and
+//                        that match, under an expected `[i64]`, still gets a slot of ITS OWN
+//                        type (`i64`), not the expectation's;
+//   * `let_div`        — a block diverges when a `let`'s VALUE is a `return`;
+//   * `assign_div`     — ... or an assignment's value is;
+//   * `no_leak`        — a nested block's statement-divergence does not leak into the
+//                        enclosing block (with the divergent inner arm walked FIRST, so this
+//                        one catches a restore rewritten as `saved || inner`, not a deleted
+//                        restore — `no_leak_last` and `no_leak_while` do that);
+//   * `nested_match`   — a match nested in a divergent arm does not hand its live-arm type to
+//                        the outer match;
+//   * `secret_let_div` — the `let_div` shape with a SECRET join, which must stay
+//                        `secret i64` as the type checker has it;
+//   * `d66_shape`      — register D66's reproducer: a divergent arm whose value is a LOAD of
+//                        another type, which the oracle used to store at the match's `i64`
+//                        (IR `llvm-as` rejects), so the `llvm-as` gate pins the oracle's half;
+//   * `no_leak_last`, `no_leak_while` — the same with the divergent inner arm walked LAST,
+//                        and with a `while` body's `return;` (a loop never diverges);
+//   * `reset_dead`     — dead code after `return 1;` starts a fresh block;
+//   * `sdiva_last`     — an all-divergent inner match in the LAST arm does not leak its
+//                        "every arm diverged" into the outer match;
+//   * `smlive_second`  — an inner match after the outer's first live arm starts its own
+//                        first-live-arm search;
+//   * `P::probe`       — register D60: a `return` in a STRUCT-target impl method, in a file
+//                        with NO class `init` and an EFFECTING fn last. scg clears its
+//                        effecting flag at each init and at each method; in the other D60
+//                        fixtures a class `init` is walked first and its clear hides the
+//                        method's own.
+//
+// Exit 42 = every check held.
+
+effect Io {
+    read() -> i64;
+}
+
+trait Probe {
+    fn probe(self: &Self, n: i64) -> i64;
+}
+
+enum E {
+    A,
+    B(i64),
+}
+
+struct P {
+    x: i64,
+    y: i64,
+}
+
+impl as Probe for P {
+    fn probe(self: &Self, n: i64) -> i64 {
+        if n < 0 {
+            return self.x
+        } else {
+            self.y + n
+        }
+    }
+}
+
+fn mk(n: i64) -> E {
+    if n == 0 {
+        E::A
+    } else {
+        E::B(n)
+    }
+}
+
+fn match_all_div(b: bool, n: i64) -> i64 {
+    let s: [i64] = if b { match mk(n) { E::A => return 1, E::B(v) => return v } } else { [40, 2] };
+    s[0] + s[1]
+}
+
+fn let_div(b: bool) -> i64 {
+    let s = if b { let z: i64 = return 5; true } else { [40, 2] };
+    s[0] + s[1]
+}
+
+fn assign_div(b: bool) -> i64 {
+    let mut z: i64 = 0;
+    let s = if b { z = return 5; true } else { [40, 2] };
+    s[0] + s[1] + z
+}
+
+fn no_leak(b: bool, c: bool) -> i64 {
+    let s: [i64] = if b { return 5 } else { if c { return 6; 7 } else { 8 }; [40, 2] };
+    s[0] + s[1]
+}
+
+fn nested_match(n: i64, m: i64) -> i64 {
+    let p = match mk(n) { E::A => { let q: i64 = match mk(m) { E::A => 1, E::B(v) => v }; return q }, E::B(v) => P { x: v, y: 2 } };
+    p.x + p.y
+}
+
+fn secret_let_div(b: bool, s: secret i64) -> secret i64 {
+    let x = if b { let z: secret i64 = return s; 0 } else { s };
+    x
+}
+
+fn d66_shape(n: i64, b: bool) -> P {
+    let v: i64 = match mk(n) { E::A => { if b { return P { x: 1, y: 1 } } else { return P { x: 2, y: 2 } } }, E::B(w) => w };
+    P { x: v, y: 2 }
+}
+
+fn no_leak_last(b: bool, c: bool) -> i64 {
+    let s: [i64] = if b { return 5 } else { if c { 8 } else { return 6; 7 }; [40, 2] };
+    s[0] + s[1]
+}
+
+fn no_leak_while(b: bool, c: bool) -> i64 {
+    let s: [i64] = if b { return 5 } else { while c { return 6; } [40, 2] };
+    s[0] + s[1]
+}
+
+fn reset_dead(b: bool, c: bool) -> i64 {
+    if b {
+        return 1;
+        let s = if c { return 6 } else { [40, 2] };
+        s[0] + s[1]
+    } else {
+        42
+    }
+}
+
+fn sdiva_last(b: bool, n: i64, m: i64) -> i64 {
+    let s: [i64] = if b { return 5 } else { match mk(n) { E::A => [40, 2], E::B(v) => match mk(m) { E::A => return 6, E::B(w) => return w } } };
+    s[0] + s[1]
+}
+
+fn smlive_second(n: i64, m: i64) -> i64 {
+    let p = match mk(n) { E::A => P { x: 40, y: 2 }, E::B(v) => { let q: i64 = match mk(m) { E::A => 1, E::B(w) => w }; P { x: q, y: v } } };
+    p.x + p.y
+}
+
+fn run_effecting() -> i64 {
+    handle effecting() with {
+        Io.read(k) => k(2)
+    }
+}
+
+fn main() -> i64 {
+    let a1: i64 = match_all_div(false, 3);  // 42
+    let a2: i64 = match_all_div(true, 0);   // 1 (the early return)
+    let a3: i64 = match_all_div(true, 7);   // 7 (the early return)
+    let b1: i64 = let_div(false);           // 42
+    let b2: i64 = let_div(true);            // 5
+    let c1: i64 = assign_div(false);        // 42
+    let c2: i64 = assign_div(true);         // 5
+    let d1: i64 = no_leak(false, false);    // 42
+    let d2: i64 = no_leak(false, true);     // 6
+    let e1: i64 = nested_match(40, 0);      // 42
+    let e2: i64 = nested_match(0, 9);       // 9
+    let s: secret i64 = 21;
+    let f1: i64 = declassify(secret_let_div(false, s)) * 2; // 42
+    let p1: P = d66_shape(40, true);        // 40 + 2
+    let p2: P = d66_shape(0, false);        // 2 + 2
+    let q: P = P { x: 7, y: 30 };
+    let g1: i64 = q.probe(0 - 1);           // 7 (early return)
+    let g2: i64 = q.probe(3);               // 33
+    let g3: i64 = run_effecting();          // 2
+    let h1: i64 = no_leak_last(false, true);   // 42
+    let h2: i64 = no_leak_last(false, false);  // 6
+    let h3: i64 = no_leak_while(false, false); // 42
+    let h4: i64 = no_leak_while(false, true);  // 6
+    let h5: i64 = reset_dead(false, false);    // 42
+    let h6: i64 = reset_dead(true, false);     // 1
+    let h7: i64 = sdiva_last(false, 0, 0);     // 42
+    let h8: i64 = sdiva_last(false, 1, 7);     // 7
+    let h9: i64 = smlive_second(0, 0);         // 42
+    let h10: i64 = smlive_second(1, 41);       // 42
+    if a1 == 42 && a2 == 1 && a3 == 7 && b1 == 42 && b2 == 5 && c1 == 42 && c2 == 5
+        && d1 == 42 && d2 == 6 && e1 == 42 && e2 == 9 && f1 == 42 && p1.x + p1.y == 42
+        && p2.x + p2.y == 4 && g1 == 7 && g2 == 33 && g3 == 2 && h1 == 42 && h2 == 6
+        && h3 == 42 && h4 == 6 && h5 == 42 && h6 == 1 && h7 == 42 && h8 == 7 && h9 == 42
+        && h10 == 42 {
+        42
+    } else {
+        0
+    }
+}
+
+// The LAST free fn is effecting — the layout `P::probe` needs.
+fn effecting() -> i64 ! { Io } {
+    perform Io.read()
+}

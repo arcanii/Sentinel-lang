@@ -124,7 +124,7 @@ reference as you work through the milestones.
 > confirming nothing pre-existing is newly refused; oracle-vs-scg byte-equality on the new
 > fixture at types, mir and llvm; and the secret-taint check in both directions.
 
-### ▶ RESUME HERE (2026-09-06 — **PUSHED**: `origin/main` and HEAD are both at `68576a2`, nothing unpushed. Four-check GREEN (1838 passed / **exactly the 18 known Windows failures**, identical failure set), all 9 differential stages and BOTH bootstrap fixed points byte-identical, tree CLEAN. Register: **64 items, 29 done**, D19 redacted.
+### ▶ RESUME HERE (2026-09-12 — **NOT PUSHED**: `origin/main` is at `3c7aa71` (D61); the D59+D60 commit (with D66, D69 closed in `snc build`, and D70's refusal) is local. The notes directly below are from the 2026-09-06 session; STATE.md's entries from 2026-09-08 on record what has happened since. Register: **73 items, 32 done**, D19 redacted.
 
 > **What this session did.** Closed **D4, D37, D39, D42, D43, D44, D47(option A), D51, D54,
 > D55, D56, D58** and **requests R3, R4, R8, R15**; filed **D42-D58**. Deleted **three**
@@ -170,8 +170,8 @@ reference as you work through the milestones.
 > re-measure every literal against the program beside it.**
 >
 > ⚠ **SECURITY-CLASS FINDINGS ARE TRACKED PRIVATELY WITH THE MAINTAINER and are
-> deliberately not described here.** D35 is blocked behind one; D19 IS another; **D59 is a
-> third.** Two more were raised privately on 2026-09-05/06; one of them — class-field move
+> deliberately not described here.** D35 is blocked behind one; D19 IS another. D59 was a
+> third, and is now CLOSED and described in the register. Two more were raised privately on 2026-09-05/06; one of them — class-field move
 > tracking — is CLOSED by **D61** (2026-09-11), together with the wider gap it was a symptom
 > of (no method body was borrow-checked at all), and both are described there. **Several more
 > were raised privately on 2026-09-11, during D61's review.** If you find yourself in the
@@ -228,7 +228,7 @@ reference as you work through the milestones.
 >      scalar-4 arm, which it now has. Also worth doing with it: `examples/math/quadratic.sentinel` and
 >      `sentinel_library/std/math/float.sentinel` currently reach only lex/ast, because
 >      `snc merge`'s Bar-A printer rejects both a float literal and `sqrt` (menu item 5).
->   4. **THE FILED-DEFECT REGISTER — SIXTY-FOUR items (D1-D64); **D1, D2, D3, D4, D5, D8, D9, D10, D15, D16, D17, D24, D25, D26, D29, D31, D34, D37, D39, D42, D43, D44, D47(option A), D51, D54, D55, D56, D58 and D61 are DONE (29 of 64)**, the rest verified against a pre-slice binary. MOST are
+>   4. **THE FILED-DEFECT REGISTER — SEVENTY-THREE items (D1-D73); **D1, D2, D3, D4, D5, D8, D9, D10, D15, D16, D17, D24, D25, D26, D29, D31, D34, D37, D39, D42, D43, D44, D47(option A), D51, D54, D55, D56, D58, D59, D60, D61 and D66 are DONE (32 of 73)**, the rest verified against a pre-slice binary. MOST are
 >      unregistered in any `DEFERRED_PROGRAMS` / `KNOWN_SCG_BUGS` list because no corpus program
 >      reaches them — but FOUR are, and the blanket "NONE" that stood here was falsified by
 >      this register's own new entries: D24/D25/D26 share the
@@ -395,8 +395,10 @@ reference as you work through the milestones.
 >      `run_llvm` dumps past a rejection `snc build` makes). Fixture
 >      `tests/pass/c65_return_aggregate_shapes` pins all four non-integer shapes.
 >      ⚠ That fixture is DEGENERATE for the sibling defect and says so in its header: its
->      `if`s all sit at the fn tail, where the oracle's merge-slot rule is accidentally
->      right. **See D59 before adding one that is not.**
+>      `if`s all sit at the fn tail, where a merge slot sized from the THEN branch (the rule
+>      until D59) happened to be right. D59 was that sibling defect, and is DONE;
+>      `c65_return_divergent_then` and `c65_return_stmt_divergent` are the non-degenerate
+>      fixtures.
 >
 >      **D11 — a BUILTIN's call argument is not widened.** The oracle widens it and scg does
 >      not, emitting `extractvalue i64 5, 0` — invalid IR. `let y: i64 = unwrap_or(5, 0);`
@@ -429,6 +431,8 @@ reference as you work through the milestones.
 >      `expr_suspends` deliberately does NOT treat method calls as suspending: under today's
 >      ABI they really do return a value. Decide first whether to give methods the ABI or to
 >      refuse an effect row on a method until that exists. Zero corpus programs have one.
+>      Since D60 a `return` in an effect-rowed method no longer fails LLVM verification by
+>      accident of file order, so such a method builds with this defect in every layout.
 >
 >      **D14 — scg's codegen aborts on a ZERO-FIELD struct.** `struct E { }` with
 >      `let e: E = E { };` and no impl anywhere: the oracle emits valid IR, scg exits 127 on an
@@ -545,33 +549,65 @@ reference as you work through the milestones.
 >      runs correctly (verified end to end). It is the two PRINTING back ends that emit
 >      invalid IR. A1 added `process`/`sealedchannel` to this class deliberately — see D5.
 >
->      **D60 — ⚠ a `return` inside a CLASS METHOD panics `snc llvm` outright, and makes
->      `snc build` emit the WRONG ABI.** Found by the D10 review's completeness critic;
->      reproduced here. `dump_method` (`llvm_dump.rs:1629`) sets `current_fn` to
->      `FnId(u32::MAX)` as a placeholder — a class body has no `FnId` entry — and the
->      Return arm's first act is `self.program.signature(self.current_fn)`, so the oracle
->      indexes the signature table at 4294967295 and panics: exit **101**,
->      `index out of bounds: the len is 43 but the index is 4294967295`. That violates the
->      project rule that user-program input must surface a `miette` diagnostic, not a
->      panic. Minimal: `class P { let x: i64; pub init(x: i64) { self.x = x; 0 }
->      pub fn g(self: &Self) -> i64 { return 7 } }` — `snc types` accepts it (exit 0), the
->      same method WITHOUT the `return` is clean.
+>      **D60 — DONE (2026-09-11). ⚠ A `return` inside a CLASS METHOD panicked `snc llvm`
+>      outright, and made `snc build` emit the WRONG ABI.** Found by the D10 review's
+>      completeness critic. `dump_method` set `current_fn` to `FnId(u32::MAX)` as a
+>      placeholder — a class body has no `FnId` entry — and the Return arm looked the
+>      current fn's signature up by it, so the oracle indexed the signature table at
+>      4294967295 and panicked: exit **101**, `index out of bounds: the len is 43 but the
+>      index is 4294967295` for `class P { let x: i64; pub init(x: i64) { self.x = x; 0 }
+>      pub fn g(self: &Self) -> i64 { return 7 } }` plus a `main` (the length grows with the
+>      number of free fns). That violated the project rule that user-program input must
+>      surface a `miette` diagnostic, not a panic.
 >
->      inkwell has the twin under a comment that LICENSES the skip ("class init bodies
+>      inkwell had the twin under a comment that LICENSED the skip ("class init bodies
 >      don't participate in DropPlan … use a placeholder current_fn_id"): ADR 0065's
->      `build_fn_return` later started reading that field, so the method is given
->      **whatever ABI the last-compiled function had**. Measured: with `main` last,
->      `snc build` is rejected by the LLVM verifier (`ret i32 7` in an i64 fn); the critic
->      also constructed configurations where it is rejected differently, where inkwell
->      raw-panics, and one where it comes out accidentally CORRECT — i.e. an unrelated
->      function's POSITION IN THE FILE decides which. The critic went looking for a
->      silent wrong-VALUE path and did not find one, so this is compile-time breakage;
->      do not upgrade that claim without constructing it.
+>      `build_fn_return` later started reading that field, so a method was given
+>      **whatever ABI the last-compiled function had** — with `main` last the LLVM verifier
+>      rejected `snc build` (`ret i32 7` in an i64 fn); after an effecting fn it tried to
+>      return a `Kont*`, which the verifier rejected too, and inkwell raw-panicked on
+>      non-`i64` method returns. scg had a third copy: a method inherited the effecting flag
+>      of the SOURCE-last free fn, because scg walks every free fn before any class. No corpus
+>      program had the shape. The critic found no silent wrong-VALUE path; this was
+>      compile-time breakage.
 >
->      ⚠ **The shape is absent from all 394 `.sentinel` files in the repo**, which is why
->      nothing catches it — and why `tests/llvm.rs`'s layer-2 comment was able to assert
->      "never a panic (101)" as a property of `snc llvm`. It is corrected there to a
->      claim about the corpus. D13 is the sibling in the same `dump_method`, not this.
+>      Fix: a method's `return` is always the plain value ABI, the one every method is emitted
+>      with — a method is never `main`, and no method has the `Kont*` ABI (not even one with an
+>      effect row: D13, open). The oracle's Return arm and inkwell's `build_fn_return` consult a
+>      signature only outside a method (D61's `current_method`); the Return arm keeps
+>      `inner.ty`, and its predicate is still NOT the function epilogue's. scg clears its
+>      effecting flag at each method/init entry — and NOT in `cg_reset`, which the effecting-fn
+>      emitters call again mid-emission: the first cut cleared it there and 11 corpus effects
+>      programs diverged; the codegen differential caught it. The same stale id reached
+>      inkwell's three effect RESUMER compilers (single let, embedded perform, chained lets),
+>      none of which set it for the resumer's body: a `return` there took the previous fn's ABI,
+>      a verifier failure unless that fn happened to be effecting. Each now sets it to its own fn
+>      (found by D60's review). ⚠ That fix let a CLASS of tails build wrong, caught by the third
+>      to fifth reviews. The embedded-perform shape runs the tail's `perform` first and replays
+>      the rest in the resumer (D69). Before D60 a `return` in that replay took the ABI of the
+>      fn compiled just before it, so the verifier refused such a tail unless that fn was
+>      effecting, and after an effecting fn the unfaithful ones built wrong. With the resumer's
+>      own id they built in every layout (bar D68's panics): a `return` evaluated before the
+>      `perform` (`(if n == 0 { return 42 } else { n }) + perform Io.read()`), in the other arm
+>      of the `if` holding it, behind `||`, in a local handler's arm, or on the `perform`'s own
+>      guarded path (`if n == 0 { return perform Io.read() } else { n + 1 }`), and a `print`
+>      before the `perform` with a `return` after it, each ran the handler, or the `print`, out
+>      of order. `snc build` now declines those tails (D69, ADR 0072 A1).
+>      ⚠ **`return` is now REFUSED inside an `init`** (`sentinel::types::return_in_init`). The
+>      typer typed it against the class, and every back end emits an init as `void`, so there
+>      is nothing for it to lower to; before D60 such a program passed types and borrow and was
+>      stopped only by a code-generation panic.
+>      ⚠ **What D60 made reachable.** A method with a `return` now compiles in every layout, so
+>      two open defects reach further: D64's early-exit leak/free divergence now shows in method
+>      bodies (see D64), and an effect-rowed method with a `return` builds with D13's defect
+>      where the verifier used to stop it by accident of file order (see D13).
+>      Fixtures: pass `c65_return_in_method` (`main` last: the oracle's panic and inkwell's
+>      `main` source), `c65_return_in_method_efflast` (an effecting fn source-last and no
+>      generic fn: scg's source and inkwell's other one, with methods returning `?i64`, `[i64]`
+>      and a struct), `c65_return_in_resumer` (all three resumer shapes; its `let_shape` is also
+>      a D59 shape inside a resumer, on which the pre-fix build panicked) and `c65_return_gaps`
+>      (a struct-target impl method with no class in the file, the layout that pins scg's
+>      per-method clear); ui `c65_return_in_init`, `c65_return_before_perform`.
 >
 >      **D61 — DONE (2026-09-11). ⚠ No METHOD body was ever borrow-checked.**
 >      `borrow_check` walked `program.fns` and nothing else, while class `init`s, class
@@ -629,8 +665,172 @@ reference as you work through the milestones.
 >      `c42_impl_move_out_of_self_struct`). `tests/llvm.rs` `llvm_method_moves_are_not_freed`
 >      pins the two oracle-only shapes, which no exit code and no `llvm-as` run can see.
 >
+>      **D73 — `snc build --separate` reuses per-unit objects an OLDER `snc` compiled.** Found
+>      by D59/D60's seventh review; pre-existing (ADR 0037 (3/N)). `unit_fingerprint` hashes the
+>      module path, its source and its imported items, plus `CARGO_PKG_VERSION`, which has been
+>      `0.0.1` in every build. So a `--separate` rebuild into a directory holding a `<unit>.o` /
+>      `.o.fp` pair from an earlier `snc` prints `snc: fresh` and links the old object, keeping
+>      whatever that compiler got wrong — after this commit, D59's miscompile and the effecting-
+>      fn lowerings ADR 0072 A1 refuses. Fix direction: fold the compiler's own identity (a
+>      build id, or the executable's size and modification time) into the fingerprint. Until
+>      then, build `--separate` into a fresh directory after upgrading `snc`.
+>
+>      **D72 — a fn or method body that diverges by a STATEMENT returns its dead TAIL in the
+>      epilogue.** Found by D59/D60's second review: another reader of a divergent block's own
+>      type, like D59's `if` slot and D66's `match` arm store. The type checker skips the
+>      tail-vs-return check for a diverging body, so `fn f(b: bool) -> [i64] { return [40, 2]; 5 }`
+>      is accepted; the oracle then emits `ret { i64, ptr } 5`, which `llvm-as` rejects, and
+>      `snc build` fails LLVM verification, even for shapes whose oracle IR is valid
+>      (`-> bool { return b; 0 }`). A `?T` or `secret` return is unaffected, because the body's
+>      expectation coerces the dead tail; a `Vec` return never gets that far, because the typer
+>      refuses the dead tail (`expected Vec<i64>, found i64`). A GENERIC return is affected once
+>      instantiated: `fn f<T>(x: T) -> T { return x; 5 }` called at `[i64]` gets
+>      `ret { i64, ptr } 5` from the oracle and a verifier failure from `snc build`, and at
+>      `bool` fails `snc build` too. Fails closed, and no corpus program has the shape.
+>      Pre-existing; since D60 a method with the shape reaches the oracle too.
+>
+>      **D71 — four scg-only parity gaps on programs the oracle compiles correctly.** Found by
+>      D59/D60's second review; pre-existing, identical at HEAD `3c7aa71`, no corpus reach.
+>      (a) A `match` whose `_` arm is not LAST: scg emits arms in source order and treats the
+>      wildcard as the final else, so its IR has a dangling block label; the oracle defers the
+>      wildcard to the end wherever it appears. (b) `return perform Op()` in an effecting free
+>      fn: the oracle treats it as the embedded-perform shape and emits a resumer; scg wraps
+>      the `perform`'s pointer in `sentinel_kont_pure(i64 ..)`, which `llvm-as` rejects.
+>      (c) A class that declares a method before its `init`: the oracle emits `@C__init` first
+>      and scg keeps source order, a byte difference whose size depends on the program (both
+>      assemble), so that layout cannot pin anything yet. (d) Found by the fifth review: an
+>      embedded-perform tail whose `perform` sits in an `if` CONDITION (`if perform Io.read()
+>      == 5 { 42 } else { n }`, a faithful shape `snc build` runs): scg compares the `perform`'s
+>      pointer (`icmp eq i64` on a `ptr`), which `llvm-as` rejects; the oracle lowers it
+>      correctly.
+>
+>      **D70 — `snc build` cannot lower a GENERIC effecting fn, and now REFUSES one
+>      (2026-09-12).** Found by D59/D60's second review; widened by the fifth and sixth. Each
+>      instance was declared, in the mono pre-pass, with the plain return type, and
+>      `compile_mono_fn` ended it with a plain `ret`; the resumer pre-pass skips generic fns, so
+>      no ADR 0072 shape applied to one. A bare `perform` tail failed LLVM verification, some
+>      bodies panicked, a let-bound call from a non-generic caller panicked too, some happened
+>      to run correctly, and others built with no diagnostic and returned the continuation's
+>      address as the value — ADR 0072's own reproducer did, given one unused type parameter.
+>      ADR 0072 A1 refuses every generic effecting fn before any fn is lowered
+>      (`effecting_fn_body_not_direct`, pinned in `tests/embedded_perform.rs`, the let-bound
+>      caller included). Still open, the feature: the oracle and scg give the
+>      instance the `Kont*` ABI and run it (`fn g<T>(x: T) -> i64 ! { Io } { perform Io.read()
+>      }` handled with `k(42)` gives 42), and `snc build` should too. No corpus program has a
+>      generic effecting fn.
+>
+>      **D69 — the embedded-perform shape runs a tail's one `perform` FIRST. CLOSED in `snc
+>      build` (2026-09-12, ADR 0072 A1); the text oracle and scg still lower tails the rule
+>      refuses.** Found by D59/D60's second review and widened by the third to fifth.
+>      `detect_embedded_perform_shape` accepted any effecting-fn tail with exactly one `perform`
+>      anywhere in it, ran that `perform` in the fn and replayed the rest of the tail in a
+>      resumer. At HEAD `3c7aa71`, each with no diagnostic, that ran the handler on paths that
+>      never reach the `perform` — `if n > 0 { perform Io.read() } else { 42 }` for `n == 0`,
+>      the right of `||` or `&&`, a loop that never runs — sent a `perform` inside a local
+>      `handle` to the OUTER handler, returned a garbage value from `(match mk(n) { E::A =>
+>      perform Io.read(), _ => 42 }) + 1`, ran a `print` before the `perform` after the handler
+>      (`p(1) + perform Io.read()`, with `fn p(x: i64) -> i64 { print(x); x }`), read back a
+>      param as it was before the `perform`'s own argument assigned it, dropped the effect of a
+>      call to an effecting fn in the replay, and read a narrow param back wrong. A tail holding
+>      a `return` built wrong in the same ways wherever the fn compiled just before it was
+>      effecting, and D60 made that every layout (see D60). ADR 0072 A1 accepts a tail only if
+>      the `perform` is on its unconditional path, everything evaluated before it is pure, its
+>      arguments can be evaluated after the frame is filled (no suspension, write or `return`,
+>      only params read), the replay suspends nowhere else, every name the replay reads is an
+>      `i64` or `secret i64` param, and so is the tail's value; one function,
+>      `embedded_perform_verdict`, decides and names the rule. The sixth review found the same
+>      frame and argument hazards outside the embedded shape, and A1 covers them too: every
+>      shape declines a `perform` or effecting call whose own arguments suspend (the inner
+>      continuation came back as data, its address passed on as the argument), and the let and
+>      chained shapes decline a value that writes a variable or `return`s. A declined block tail
+>      ending in the `perform` after statements that do not suspend goes to the direct shape,
+>      which lowers it in order; any other is refused. Up front, `snc build` also refuses an
+>      effect with a multi-parameter operation: `perform` lowering evaluated only the first
+>      argument (the text oracle drops the rest too; scg evaluates them, twice in the embedded
+>      shape). A1 is conservative and also refuses a few bodies HEAD happened to lower correctly
+>      (a division, `&mut` borrow or local `handle` before the `perform`, a local `handle` after
+>      it or in an argument, a let value that writes only a local, a multi-parameter operation
+>      whose second argument is pure). Pinned by
+>      `crates/sentinel-driver/tests/embedded_perform.rs` (a refusal for each rule, with its
+>      reason, and the faithful shapes run) and ui `c65_return_before_perform`. No existing
+>      corpus program's build changed, but that says little: outside this change's fixtures only
+>      three repo programs and one generated one reach the embedded shape's rules at all.
+>      **Still open:** the text oracle and scg do not apply A1. The oracle hoists the `if` form
+>      and refuses the `match` form, and scg emits invalid IR for them; for the `return`-first
+>      form both emit the same hoisted IR, which, run, answers the handler's value — so no
+>      differential sees any of it.
+>
+>      **D68 — `snc build` PANICS on user input in three effect / spawn corners; (a) is CLOSED
+>      (2026-09-12).** Found by
+>      D59/D60's second review; pre-existing, identical at HEAD. (a) An embedded-perform
+>      effecting fn whose tail binds a name — a `match` arm's payload (`perform Io.read() +
+>      (match mk(2) { E::A => return 5, E::B(v) => v })`) or a block-local `let` — trips
+>      `.expect("captured var bound from fn params")`: the embedded shape takes every Var the
+>      tail reads as a capture and, unlike the let and chained shapes, has no
+>      `captures_fit_kont_slots` gate. The oracle compiles the payload form and refuses the
+>      `let` form (`c35d: captured var is not a bound fn param`). The same missing gate panics
+>      a third way: a `&mut [i64]` param read in the tail (`(*a)[0] + perform Io.read() + n`)
+>      is captured and reloaded as an `i64`, and inkwell's `into_pointer_value` panics on it
+>      (found by the fourth review), and so does a `perform` whose own argument reads a name the
+>      tail binds (the fifth). ADR 0072 A1 gives the embedded shape the capture rule it lacked
+>      and checks the `perform`'s arguments, so each of these is now refused with a reason
+>      (`tests/embedded_perform.rs` pins the block-`let` and argument forms). (b) `spawn` inside
+>      a class method, an impl method or a generic fn trips `.expect("spawn wrapper synthesized
+>      in pre-walk")`, because the pre-walk visits only non-generic `program.fns`; D27 records
+>      only the oracle's half (invalid IR). (c) Found by the sixth and seventh reviews: an
+>      effecting fn whose value is not an `i64` or `secret i64` panics `snc build` (`f64`,
+>      `?i64`) or fails LLVM verification (`bool`, `u8`, `i32`) in the direct, pure-tail, let and
+>      chained shapes — `{ n as f64 }`, or an `f64` operation resumed with `k(5.0)` — because
+>      nothing checks the value against the continuation's `i64` seam; ADR 0072 A1 checks it only
+>      in the embedded shape. An operation with an `f64` PARAMETER panics too, in every shape.
+>      Each breaks the rule that user input surfaces a diagnostic. No corpus program reaches any
+>      of them.
+>
+>      **D67 — scg's effecting chained-let and let-shape emitters capture a different variable
+>      set from the oracle.** Found by D59/D60's review, at the ADR 0072 continuation seam.
+>      With chained effecting `let`s whose tail reads an EARLIER `let` (`let a = perform ..;
+>      let b = perform ..; if a == 0 { .. } else { a + b }`), the oracle captures `a` into a
+>      frame for the last resumer and scg captures nothing — its resumer loads from an
+>      undefined `%v-1`, which `llvm-as` rejects. So does a chained tail that reads a fn PARAM
+>      inside an `if` arm (`if b == 0 { 5 } else { b + n }`). And for `fn e3(c: bool) -> i64 ! { Out }
+>      { let v: i64 = perform Out.put(if c { 1 } else { 2 }); if v > 0 { v + 1 } else { 0 } }`
+>      the oracle captures nothing where scg captures `c` — an 8-byte `load i64` from `c`'s
+>      1-byte `alloca i1`. Pre-existing: on the review's probes HEAD scg emits the same output.
+>      scg-only; no corpus program has the shape (`c65_return_in_resumer`'s chained fn avoids
+>      it on purpose).
+>
+>      **D66 — DONE (2026-09-11, with D59). The text oracle, and scg with it, stored every
+>      `match` arm at the MATCH's type, so an arm whose divergent value is a register of another
+>      type emitted invalid IR.** Found by D59/D60's review; the `match` analog of D59.
+>      `lower_match` stored each arm body at `lty(result_ty)`. A divergent arm whose placeholder
+>      is a constant (`zeroinitializer`) happened to assemble, but an arm that ENDS in a
+>      both-divergent `if` hands back a `load` of the `if`'s own type: `match mke(n) { E::A =>
+>      { if b { return P {..} } else { return P {..} } }, E::B(v) => v }` in a `P` fn stored a
+>      `%Struct` load at `i64`, which `llvm-as` rejects. Dead code only: inkwell (`snc build`)
+>      ran every such program correctly. Fix: every back end stores each arm at its own type,
+>      as D59 has the `if` arms do — a live arm's type is the match's, so only a divergent arm's
+>      dead-block store changes (inkwell skips it, as for `if`). scg's own `match` slot took the
+>      caller's expectation rather than the match's type; it is now deferred and settled to the
+>      match's type, as D59 describes. Fixtures: pass `c65_match_join` and `c65_return_gaps`,
+>      whose `d66_shape` is the invalid-IR reproducer.
+>
+>      **D65 — `snc build` PANICS on a `handle` body `if` whose arm `return`s from a fn with a
+>      non-integer return type.** Found by D59/D60's review. `lower_body_as_kont`'s leaf arm
+>      lowers a divergent `return [5]` to its placeholder — a `{ i64, ptr }` zero — and then
+>      calls `into_int_value()` on it, which panics for every non-`IntValue`: slice, `?i64`,
+>      struct, class and `f64` returns were measured, through an `if` leaf, a `match`-arm leaf
+>      and a nested block. The oracle refuses these programs cleanly (a handle body that
+>      suspends through control flow is unsupported), so `snc build` accepts more than
+>      `snc llvm` and then panics. An `i64`-returning fn builds and runs correctly.
+>      Pre-existing, identical at HEAD `3c7aa71`; no corpus program reaches it. Fix direction:
+>      a `return` leaf is lowered for its `ret` and yields a null `Kont*` for its dead block.
+>
 >      **D64 — the Rust back ends LEAK a binding on an early exit that comes before its move,
->      and scg does not, so the two text back ends emit different IR.** The oracle and inkwell
+>      and scg does not, so the two text back ends emit different IR.** ⚠ D60 adds `return` as a
+>      route into METHOD bodies (the `break` / `continue` route reached them already): a method
+>      with an early `return` now compiles, and D60's second review found 95 generated programs,
+>      each with a class and a `return`, where the oracle `ret`s without freeing a live binding
+>      that scg frees (a slice in most of them). The oracle and inkwell
 >      skip a binding's free on every path once the DropPlan's whole-body moved-set holds it,
 >      so a `break` / `continue` / `return` that fires before the move leaks it — unbounded in
 >      a loop, paced by the iteration count. scg records moves as its walk proceeds and frees
@@ -656,12 +856,78 @@ reference as you work through the milestones.
 >      NOT established — the scalar param only rules out the param path. An attacker who
 >      controls the iteration count controls the crash.
 >
->      **D59 — REDACTED.** A security-class finding in the SHIPPING compiler's codegen
->      typing, raised privately with the maintainer on 2026-09-08 while closing D10, and
->      deliberately not described here. It is PRE-EXISTING (measured against the
->      pre-change binary), it is NOT what `zeroinitializer` fixes, and D10's new fixture
->      deliberately avoids the shape. **Ask before working it and before writing anything
->      about it down.**
+>      **D59 — DONE (2026-09-11). ⚠ An `if` whose THEN arm diverges had its result slot sized
+>      from the DIVERGENT branch — a memory-safety miscompile in the SHIPPING back end.**
+>      Raised privately on 2026-09-08 while closing D10; described here now that it is fixed.
+>      The type checker puts the join on the `if` node, but a divergent block keeps its own
+>      type — a `return`-tailed one the enclosing fn's return type, one that diverges by a
+>      statement (`{ return 5; true }`) its dead tail's — and all three back ends read the
+>      block. So `let s: [i64] = if b { return 5 } else { [40, 2] }` in an `i64` fn got an
+>      8-byte slot for a 16-byte slice: `snc build` built it and the program died with
+>      0xC0000374 (a struct twin returned garbage); the text oracle's IR did not assemble; and
+>      scg also printed the `if` as the then-type in its types, MIR and borrow (moved-set)
+>      dumps.
+>
+>      Fix: the slot takes the IF NODE's type in all three back ends, and each arm still stores
+>      at its own type — a divergent arm's store is dead code in its unreachable block (inkwell,
+>      which has no byte-parity duty, skips it). scg cannot know the join TYPE when it reserves
+>      the slot, right after the then walk, and selfhost/ has no index-assignment into a `Vec`
+>      anywhere, so the slot's alloca type is DEFERRED through an append-only side table and
+>      rendered by ONE helper shared by all three `define` assemblers (each used to carry its
+>      own copy of the `-2 -> ptr` test). scg picks the join as the typer does, by STRUCTURAL
+>      divergence: a new fact, `sdiv`, mirrors `expr_diverges` (a `return`; a block whose tail
+>      or any statement diverges; an `if` whose arms both do; a `match` whose arms all do) and
+>      is set as each node exits, so a child's fact cannot leak into its parent. A `match` is
+>      now typed by its first NON-divergent arm, as the typer joins it. It took its FIRST arm's
+>      type, which ADR 0065 called a dump-only edge; it was not — that type already reached
+>      scg's IR through a call argument or a generic's type argument — and D59's join would have
+>      carried it into an `if` slot too (ADR amended). A `match`'s own slot now takes the
+>      match's type, deferred like the `if`'s, where it took the caller's expectation (`i64`
+>      when nothing was expected, which cannot hold a slice or a struct, and not the match's
+>      type for a `match` all of whose arms diverge); a live arm stores at that type. That rule is
+>      defence in depth: while scg's typing matches the oracle's every live arm already has the
+>      type (deleting the rule changed no byte over 16,893 programs), and with a mistyping put
+>      back it turns a silent slot overrun into IR `llvm-as` rejects (measured by the third
+>      review), so no differential fixture can pin it.
+>      ⚠ **Two cheaper rules were tried, and both are wrong.** A flag meaning "the last node
+>      walked was a `return`" (`ediv`) reads TRUE after `if c { null } else { return 6 }`,
+>      which does not diverge. Comparing types — "the arm whose type is the `return`s' is the
+>      divergent one", the FIRST cut — cannot see an arm that diverges by a statement: its
+>      adversarial review measured scg picking the DEAD arm, emitting the D59 slot overflow in
+>      its own output, and, for a `secret` join, dropping the qualifier. The second review found
+>      `ediv` still deciding scg's widen splice, where it dropped `secret` from a value with a
+>      guarded `return` inside it (`xs[if i < len(xs) { i } else { return s }]`), so the
+>      self-hosted constant-time verifier missed a leak the Rust one reports — pre-existing, and
+>      fixed here: the splice reads `sdiv`, and `ediv` is gone. None of those shapes was in the
+>      corpus, so every differential had stayed green. The oracle's output changed for no
+>      pre-existing program among the repo's 401 tracked `.sentinel` files (llvm compared over
+>      the 212 either oracle emits; types, mir and ctverify over 214). Over the first review's
+>      6,235 generated and hand-written programs scg now matches the oracle on 1,628 of the
+>      1,692 both oracles emit llvm for (HEAD's scg: 1,115), on 5,915 of 5,917 at types and at
+>      mir (HEAD's: 1,233 and 3,695) and on all 5,917 at ctverify, and there is no program at
+>      any stage on which HEAD's scg matched and the new one does not. Over the second review's
+>      6,000 generated secret-join programs, scg matches the oracle at all four stages on all
+>      2,349 whose stage dumps the oracle emits, and the self-hosted verifier now reports all
+>      2,318 of the oracle's leaks among them (HEAD's missed 265). The third review deleted five
+>      of the new bookkeeping's resets and restores one at a time: four of the deletions passed
+>      every test, and each of those four can make the self-hosted verifier miss a leak (the
+>      review showed three; `second_arm` shows the fourth). All seven resets and restores
+>      are now caught when deleted, as is a restore rewritten as `saved || inner`; across the
+>      378-program differential corpus, only the two fixtures written for them notice any of
+>      those eight changes but one (deleting the per-node clear, which six fixtures notice).
+>      Fixtures:
+>      pass `c65_return_divergent_then` (dies with 0xC0000374 against the pre-fix binary, whose
+>      oracle IR for it does not assemble; both `ediv` mirror images), `c65_return_stmt_divergent`
+>      (statement divergence in let, argument, tail and statement position, both arms
+>      diverging, and a secret join; also 0xC0000374 pre-fix), `c65_match_join` (a `match` with
+>      no expected type, with and without a divergent first arm) and `c65_return_gaps`
+>      (functions named for the shapes they exercise, which between them catch every reset
+>      and restore deleted); ui `c65_secret_join_guarded` (the widen-splice shape, and a
+>      function for each of five lines whose deletion makes the self-hosted verifier miss a
+>      leak); and `tests/llvm.rs` `llvm_loads_match_their_slot_over_corpus`,
+>      which catches a half-revert that sizes the slot from the then arm but loads at the join's
+>      type in the oracle AND scg together — byte-identical, and `llvm-as` never relates a load
+>      to its alloca. (A full revert fails `llvm-as` instead.)
 >
 >      **D19 — REDACTED.** A security-class finding on the `linkonce_odr` cross-unit
 >      dedup path, in the SHIPPING compiler. It is tracked privately with the maintainer

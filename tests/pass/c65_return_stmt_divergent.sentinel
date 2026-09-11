@@ -1,0 +1,108 @@
+// tests/pass/c65_return_stmt_divergent.sentinel — `if` arms that diverge by a STATEMENT
+// (register D59), self-contained.
+//
+// An arm like `{ return 1; true }` diverges — the type checker's `block_diverges` counts a
+// diverging statement — but as a block it is typed by its dead TAIL (`bool` here), not by the
+// `return`. The `if`'s type is still the OTHER arm's. With no annotation to coerce that dead
+// tail, the two arms of such an `if` have different types and neither need be the `return`'s,
+// which is exactly where a join chosen by comparing types goes wrong. The first cut of the
+// self-hosted D59 fix did that; its review measured scg picking the dead arm, overflowing its
+// own result slot and, for a secret join, dropping the `secret` qualifier. scg now decides by
+// structural divergence, as the type checker does, and the differentials hold it to the
+// oracle on every function below.
+//
+// Exit 42 = every check held.
+
+struct P {
+    x: i64,
+    y: i64,
+}
+
+fn add1(x: i64) -> i64 {
+    x + 1
+}
+
+// THEN diverges by a statement; its dead tail is `bool` and the join is the else arm's slice.
+fn then_stmt_slice(b: bool) -> i64 {
+    let s = if b { return 5; true } else { [40, 2] };
+    s[0] + s[1]
+}
+
+// The same with a struct join, in a `bool` fn, so the dead tail `0` matches no other type.
+fn then_stmt_struct(b: bool) -> bool {
+    let p = if b { return false; 0 } else { P { x: 33, y: 9 } };
+    p.x + p.y == 42
+}
+
+// ELSE diverges by a statement. The LIVE then arm has the fn's return type, so it is the arm
+// that LOOKS `return`-typed — and the join is still the then arm.
+fn else_stmt_let(b: bool) -> i64 {
+    let x = if b { 42 } else { return 1; true };
+    x
+}
+
+// ... in argument position,
+fn else_stmt_arg(b: bool) -> i64 {
+    add1(if b { 41 } else { return 1; true })
+}
+
+// ... at the fn tail,
+fn else_stmt_tail(b: bool) -> i64 {
+    if b { 42 } else { return 1; true }
+}
+
+// ... and as a statement, whose value is discarded but still stored in the if's slot.
+fn else_stmt_stmt(b: bool) -> i64 {
+    if b { 42 } else { return 5; true };
+    42
+}
+
+// A `bool` fn whose divergent arm ends in the dead `0` tail.
+fn else_stmt_bool(xs: [i64]) -> bool {
+    let ok = if len(xs) > 0 { xs[0] > 0 } else { return false; 0 };
+    ok
+}
+
+// A struct join whose else arm diverges with an `i64` dead tail.
+fn else_stmt_struct(b: bool) -> P {
+    let p = if b { P { x: 40, y: 2 } } else { return P { x: 1, y: 1 }; 0 };
+    p
+}
+
+// BOTH arms of the inner `if` diverge, with different types: its type is the then arm's
+// (`?i64`), and the outer `if`'s else arm diverges as a whole.
+fn both_div(b: bool, c: bool) -> ?i64 {
+    let x: i64 = if b { 5 } else { if c { return null } else { return 6; 7 } };
+    x
+}
+
+// A secret join: the live then arm is `secret i64` and the dead else tail is a public `i64`.
+// The join must stay secret.
+fn secret_join(b: bool, s: secret i64) -> secret i64 {
+    let x = if b { s } else { return s; 0 };
+    x
+}
+
+fn main() -> i64 {
+    let a1: i64 = then_stmt_slice(false);                   // 42
+    let a2: i64 = then_stmt_slice(true);                    // 5 (the early return)
+    let a3: bool = then_stmt_struct(false);                 // true
+    let a4: i64 = else_stmt_let(true);                      // 42
+    let a5: i64 = else_stmt_let(false);                     // 1 (the early return)
+    let a6: i64 = else_stmt_arg(true);                      // 42
+    let a7: i64 = else_stmt_tail(true);                     // 42
+    let a8: i64 = else_stmt_stmt(true);                     // 42
+    let a9: bool = else_stmt_bool([3]);                     // true
+    let p: P = else_stmt_struct(true);                      // 40 + 2
+    let b1: i64 = unwrap_or(both_div(true, true), 0 - 1);   // 5
+    let b2: i64 = unwrap_or(both_div(false, true), 0 - 1);  // -1 (`return null`)
+    let b3: i64 = unwrap_or(both_div(false, false), 0 - 1); // 6
+    let s: secret i64 = 21;
+    let c1: i64 = declassify(secret_join(true, s)) * 2;     // 42
+    if a1 == 42 && a2 == 5 && a3 && a4 == 42 && a5 == 1 && a6 == 42 && a7 == 42 && a8 == 42
+        && a9 && p.x + p.y == 42 && b1 == 5 && b2 == 0 - 1 && b3 == 6 && c1 == 42 {
+        42
+    } else {
+        0
+    }
+}

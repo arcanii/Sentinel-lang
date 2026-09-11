@@ -160,8 +160,12 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
         // so `let v: secret i64 = if c { 42 } else { return 1 };` leaves the `return`
         // bare — and without this the splice wrapped it, an INTRODUCED parity break
         // that the adversarial review caught. Splice only when the node did not
-        // diverge; otherwise the temp is appended verbatim.
-        if (*c).ediv {
+        // diverge; otherwise the temp is appended verbatim. (register D59) `sdiv` IS
+        // `expr_diverges`. The flag this read before meant "the last node walked was a
+        // `return`", so it skipped the wrapper on `xs[if c { i } else { return s }]`, whose
+        // last-walked node is that `return`, under a `secret` expectation, dropped `secret`,
+        // and the self-hosted CT verifier missed a leak the oracle reports.
+        if (*c).sdiv {
             append_str(out, vec_to_array(wtmp));
             wrt
         } else {
@@ -174,10 +178,18 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
     }
 }
 
+// (register D59) every node is walked through here, so this is where a node's structural
+// divergence becomes `sdiv` — see the fields' comment in `types.sentinel`. The node's arm
+// sets `sdivn` as its last act; a child's own exit has already reset it, so an arm that
+// never sets it leaves `false`.
 fn dump_texpr_node(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
-    // (ADR 0065) reset the divergence flag on entry; only the `Return` arm re-sets it,
-    // and `dump_texpr`'s widen splice reads it immediately after this returns.
-    (*c).ediv = false;
+    let t: i64 = dump_texpr_arm(out, ex, exp, src, c, gb);
+    (*c).sdiv = (*c).sdivn;
+    (*c).sdivn = false;
+    t
+}
+
+fn dump_texpr_arm(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
     // (ADR 0046) reset the direct-Var tracker on entry; only the `Var` arm re-sets it. So
     // right after dumping a sub-expression, `mvbv >= 0` iff that sub-expression was a
     // directly-named binding read — the signal the FieldAccess arm needs for a partial move.
@@ -464,10 +476,17 @@ fn dump_texpr_node(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut Ty
             } else {
                 0
             };
+            // (register D59) a block diverges iff some statement or its tail does (the
+            // typer's `block_diverges`); `dump_tstmt` ORs each statement's fact into `sdivs`.
+            let sdivs_up: bool = (*c).sdivs;
+            (*c).sdivs = false;
             dump_tstmts(out, stmts, src, c, gb);
+            let stdiv: bool = (*c).sdivs;
+            (*c).sdivs = sdivs_up;
             push(out, ' ');
             // The block's value is its tail — thread the expectation through to it.
             let tt: i64 = dump_texpr(out, tail, exp, src, c, gb);
+            let tldiv: bool = (*c).sdiv;
             close_ty(out, tt, c);
             if cg_on(c) {
                 cg_drop_frame(c, cgmark);
@@ -475,6 +494,7 @@ fn dump_texpr_node(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut Ty
             } else {
                 0
             };
+            (*c).sdivn = stdiv || tldiv;
             tt
         },
         // Same widen splice as the `Unary` arm above, for the same reason and
@@ -947,8 +967,8 @@ fn dump_texpr_node(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut Ty
             append_str(out, " #");
             append_int(out, meid);
             // (8e-2) cg: SAVE the enclosing match state (nesting); extract the tag (field
-            // 0) + payload ptr (field 1); reserve the hoisted result slot (type = `exp`,
-            // the match's expectation == its type for a used match); open the merge block.
+            // 0) + payload ptr (field 1); reserve the hoisted result slot (its type is the
+            // match's own, settled after the arms — register D59); open the merge block.
             let cgm_save_tag: i64 = (*c).cg_m_tag;
             let cgm_save_pl: i64 = (*c).cg_m_payload;
             let cgm_save_res: i64 = (*c).cg_m_result;
@@ -963,7 +983,12 @@ fn dump_texpr_node(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut Ty
                 cgo_str(c, "extractvalue { i32, ptr } ");
                 cgo_operand(c, cgm_sk, cgm_sv);
                 cgo_str(c, ", 1\n");
-                let cgm_rs: i64 = cg_alloca(c, exp);
+                // (registers D59 / D66) the slot takes the match's OWN type, as the oracle's
+                // does — known only once every arm is walked, so it is reserved deferred and
+                // settled below. It took `exp`, the caller's expectation: -1 (rendered `i64`)
+                // when nothing is expected, and not the match's type even when something is,
+                // for a match all of whose arms diverge (its type is then its first arm's).
+                let cgm_rs: i64 = cg_alloca_deferred(c);
                 let cgm_mg: i64 = cg_fresh_block(c);
                 (*c).cg_m_tag = cgm_tg;
                 (*c).cg_m_payload = cgm_pl;
@@ -988,7 +1013,28 @@ fn dump_texpr_node(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut Ty
             } else {
                 0
             };
-            let mty: i64 = dump_tarms(out, marms, exp, src, c, gb);
+            // (register D59) a match diverges iff it has arms and every one does, and its type
+            // is its FIRST NON-divergent arm's — the typer skips a divergent arm at the join and
+            // falls back to the first arm only when every arm diverges. `dump_tarms` clears
+            // `sdiva` for an arm that does not diverge and records the first such arm's type in
+            // `smlive`. This used to be the first arm's type outright. ADR 0065 called that a
+            // dump-only edge; it was not — the type reached scg's IR through a call argument or
+            // a generic's type argument — and D59's `if` join reads an arm's type as well.
+            let sdiva_up: bool = (*c).sdiva;
+            let smlive_up: i64 = (*c).smlive;
+            (*c).sdiva = true;
+            (*c).smlive = 0 - 1;
+            let mfirst: i64 = dump_tarms(out, marms, exp, src, c, gb);
+            let alldiv: bool = (*c).sdiva;
+            let mlive: i64 = (*c).smlive;
+            (*c).sdiva = sdiva_up;
+            (*c).smlive = smlive_up;
+            let mdiv: bool = alldiv && mfirst != 0 - 1;
+            let mty: i64 = if mlive != 0 - 1 {
+                mlive
+            } else {
+                mfirst
+            };
             close_ty(out, mty, c);
             // (8e-2/8g) cg: the final else. A `_` wildcard arm (always last in the
             // selfhost sources) already emitted its body + store + `br merge` as the
@@ -1006,9 +1052,11 @@ fn dump_texpr_node(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut Ty
                 cgo_str(c, "bb");
                 cgo_int(c, (*c).cg_m_merge);
                 cgo_str(c, ":\n");
+                let cgm_slot: i64 = (*c).cg_m_result;
+                cg_alloca_settle(c, cgm_slot, mty);
                 let cgm_ld: i64 = cg_dst(c);
                 cgo_str(c, "load ");
-                cgo_ty(c, exp);
+                cgo_ty(c, mty);
                 cgo_str(c, ", ptr %v");
                 cgo_int(c, (*c).cg_m_result);
                 cg_putc(c, '\n');
@@ -1031,6 +1079,7 @@ fn dump_texpr_node(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut Ty
             } else {
                 0
             };
+            (*c).sdivn = mdiv;
             mty
         },
         // (4f) `Name::init(args)` → `(class-init #cid Name <typed-args> :Class)`.
@@ -1284,12 +1333,12 @@ fn dump_texpr_node(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut Ty
             } else {
                 0
             };
-            // (ADR 0065) mark this node DIVERGENT so `dump_texpr`'s widen splice leaves
-            // it alone — the oracle's `check_expr` skips `coerce_to_expected` for a
-            // diverging expression, so `let v: secret i64 = if c { 42 } else
-            // { return 1 };` must emit a bare `(return …)`, not a wrapped one. Set
-            // LAST, after the sub-dumps, because `dump_texpr` on the inner resets it.
-            (*c).ediv = true;
+            // (ADR 0065 / register D59) this node DIVERGES — see `sdiv` in `types.sentinel`.
+            // `dump_texpr`'s widen splice then leaves it bare, as the oracle's `check_expr`
+            // skips `coerce_to_expected` for a diverging expression: `let v: secret i64 = if
+            // c { 42 } else { return 1 };` emits a bare `(return …)`. Set LAST, after the
+            // sub-dumps, whose own exits reset it.
+            (*c).sdivn = true;
             it
         },
         // ADR 0049: integer cast `expr as T`. Type the operand, then the result is

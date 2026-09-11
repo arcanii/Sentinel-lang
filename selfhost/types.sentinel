@@ -235,22 +235,29 @@ struct TyCtx {
     // FieldAccess arm reads it (right after the target dump) to detect a `base.field`
     // PARTIAL move on a directly-named base.
     mvbv: i64,
-    // (ADR 0065 / register D2) Did the expression just dumped by `dump_texpr_node`
-    // DIVERGE? Reset on every entry, set only by the `Return` arm. The widen splice in
-    // `dump_texpr` reads it: the oracle's `check_expr` skips `coerce_to_expected`
-    // entirely when `expr_diverges(&synth)`, so a `return` in a widened position must
-    // NOT get a `(widen-secret …)` wrapper — `let v: secret i64 = if c { 42 } else
-    // { return 1 };` is the shape, and the oracle leaves the `return` bare.
-    //
-    // Only `Return` sets it, and that is MEASURED rather than a narrowing of the
-    // oracle's predicate. `expr_diverges` also covers a fully-diverging Block / If /
-    // Match, but the oracle REFUSES every program that would put one of those in a
-    // widened position (`let v: secret i64 = { return 1 };`, `= if c { return 1 } else
-    // { return 2 };`, `= match e { A => return 1, B => return 2 };` — all rejected), and
-    // a block whose non-tail STATEMENT returns already agrees. So the reachable set is
-    // exactly `Return`. If the front end ever accepts those shapes, this flag needs the
-    // propagation the oracle has.
-    ediv: bool,
+    // (register D59) STRUCTURAL divergence — the oracle's `expr_diverges`, which the typer's
+    // `if` and `match` joins are built on. `sdiv` is true iff the node `dump_texpr_node` last
+    // COMPLETED diverges: a `return`; a block whose tail or some statement diverges; an `if`
+    // whose two arms both do; a `match` all of whose arms do. Nothing else, so `f(return x)`
+    // does not. A node sets `sdivn` as its LAST act and the `dump_texpr_node` wrapper moves
+    // it into `sdiv`, so a child's fact cannot leak into its parent. `dump_texpr`'s widen
+    // splice reads it too: the oracle's `check_expr` skips `coerce_to_expected` exactly when
+    // `expr_diverges(&synth)`. (It replaced `ediv`, which meant "the last node walked was a
+    // `return`": every node cleared it on entry and only a `return` set it, so it read TRUE
+    // after `if c { null } else { return 6 }`, which does not diverge, and FALSE after
+    // `{ return 1; true }`, which does.) `sdivs` collects "some statement of the
+    // current block diverged" and `sdiva` "every arm of the current match diverged"; each
+    // is saved and restored around a nested
+    // block / match. `dump_te_if` reads `sdiv` after each arm to pick the join exactly as the
+    // typer does. A TYPE comparison cannot stand in for it: an arm that diverges by a
+    // statement, `{ return 1; true }`, is typed by its dead tail, not by the `return`.
+    // `smlive` is the type of the current match's first arm that does NOT diverge (-1 until
+    // one does), which is the match's type, as the typer joins it.
+    sdiv: bool,
+    sdivn: bool,
+    sdivs: bool,
+    sdiva: bool,
+    smlive: i64,
     // (register D31) A monotonic count of `dump_texpr_node` ENTRIES. Snapshot it before
     // dumping a sub-expression and the delta is that sub-expression's node count, so a
     // delta of exactly 1 means the sub-expression was a LEAF. Paired with `mvbv >= 0`
@@ -360,6 +367,15 @@ struct TyCtx {
     cgbody: Vec<u8>,       // the per-fn body .ll (folded into cgout at teardown)
     cgalloca_sl: Vec<i64>, // hoisted alloca slots (the %vN)
     cgalloca_ty: Vec<i64>, // hoisted alloca types (paired with cgalloca_sl)
+    // (register D59) deferred alloca types. An `if`'s result slot is RESERVED right after
+    // its then walk, so its number matches the oracle's, but its TYPE — the if's join — is
+    // known only after the else walk. Its `cgalloca_ty` entry is `0 - 3000000 - slot`
+    // until `cg_alloca_settle` appends the type here (`cgdefer_sl[i]` = the slot,
+    // `cgdefer_ty[i]` = its type). Append-only by design: selfhost/ has no
+    // index-assignment into a `Vec` anywhere, and the bootstrap is not the place to add
+    // the first one.
+    cgdefer_sl: Vec<i64>,
+    cgdefer_ty: Vec<i64>,
     cg_to_body: bool,      // route cg_putc to cgbody (walk) vs cgout (teardown)
     cgblk: i64,            // per-fn basic-block label counter (bbN; entry is implicit)
     cg_loop_cond: Vec<i64>, // enclosing loops' cond-block labels (continue target)
@@ -1943,6 +1959,8 @@ fn cg_reset(c: &mut TyCtx) -> i64 {
     clear_u8(&mut (*c).cgbody);
     clear_i64(&mut (*c).cgalloca_sl);
     clear_i64(&mut (*c).cgalloca_ty);
+    clear_i64(&mut (*c).cgdefer_sl);
+    clear_i64(&mut (*c).cgdefer_ty);
     clear_i64(&mut (*c).cg_loop_cond);
     clear_i64(&mut (*c).cg_loop_after);
     clear_i64(&mut (*c).cg_loop_floor);

@@ -1,0 +1,103 @@
+// tests/pass/c65_return_divergent_then.sentinel — an `if` whose THEN arm diverges takes
+// its result type from the ELSE arm (register D59), self-contained.
+//
+// `return` is divergent, so in `if b { return 5 } else { [40, 2] }` the `if`'s type is the
+// else arm's `[i64]`. The type checker has always said so — it puts the join on the `if`
+// node. But the divergent BLOCK keeps the `return`'s own type, which is the enclosing
+// function's return type (`i64` here), and all three back ends sized the if's result slot
+// from the THEN block. So an 8-byte slot received a 16-byte slice:
+//
+//   * `snc build` (inkwell, the shipping back end) built and linked it — LLVM's opaque
+//     pointers do not type-check a store against its alloca — and the program corrupted
+//     its own stack: `slice_or_bail(false)` below died with 0xC0000374
+//     STATUS_HEAP_CORRUPTION, and the struct twin returned garbage.
+//   * `snc llvm` (the text oracle) emitted `store i64 { i1 0, i64 0 }` for the `?i64`
+//     shape, which LLVM rejects.
+//   * scg, besides mirroring the codegen, printed the if as the then-type in its types and
+//     MIR dumps too, where the oracle prints the join.
+//
+// The fix sizes the slot from the `if` NODE. Each arm still stores at its own type, so a
+// divergent arm leaves a dead store in its unreachable block; the self-hosted side records
+// the slot's type only once both arms are known.
+//
+// `leaky` and `leaky_mirror` exist for the self-hosted side, which must decide "this arm
+// diverged" the way the type checker does — STRUCTURALLY. A flag that means "the last node
+// walked was a `return`" reads TRUE after `if c { null } else { return 6 }`, which does NOT
+// diverge, and a join built from it gets exactly one of these mirror images wrong. Choosing
+// by TYPE fails too, for an arm that diverges by a statement: see
+// `c65_return_stmt_divergent`.
+//
+// Exit 42 = every check held.
+
+struct P {
+    x: i64,
+    y: i64,
+}
+
+// The heap-corruption shape: the join is a slice, the then-type an `i64`.
+fn slice_or_bail(b: bool) -> i64 {
+    let s: [i64] = if b { return 5 } else { [40, 2] };
+    s[0] + s[1]
+}
+
+// The join is a struct — a named aggregate, a different LLVM type from the slice.
+fn point_or_bail(b: bool) -> i64 {
+    let p: P = if b { return 5 } else { P { x: 33, y: 9 } };
+    p.x + p.y
+}
+
+// The join is `?i64` — the shape the text oracle emitted unassemblable IR for.
+fn maybe_or_bail(b: bool) -> i64 {
+    let x: ?i64 = if b { return 5 } else { null };
+    unwrap_or(x, 42)
+}
+
+// The divergence is one block deeper; the then-type is still the `return`'s.
+fn nested_bail(b: bool) -> i64 {
+    let x: ?i64 = if b { { return 5 } } else { null };
+    unwrap_or(x, 42)
+}
+
+// Diverges by a STATEMENT, under an annotation that coerces the dead tail `7` to the join,
+// so the two arms' types agree. Without one they do not: see `c65_return_stmt_divergent`.
+fn stmt_bail(b: bool) -> i64 {
+    let x: ?i64 = if b { return 5; 7 } else { null };
+    unwrap_or(x, 42)
+}
+
+// Control: the ELSE arm diverges. The slot was already sized from the then arm, which is
+// the join here, so this was always right.
+fn else_bail(b: bool) -> i64 {
+    let x: ?i64 = if b { null } else { return 5 };
+    unwrap_or(x, 42)
+}
+
+// The THEN arm diverges; the else arm does not, but ENDS in a nested `return`.
+fn leaky(b: bool, c: bool) -> i64 {
+    let x: ?i64 = if b { return 5 } else { if c { null } else { return 6 } };
+    unwrap_or(x, 42)
+}
+
+// The mirror image: the else arm diverges; the then arm ends in a nested `return`.
+fn leaky_mirror(b: bool, c: bool) -> i64 {
+    let x: ?i64 = if b { if c { null } else { return 6 } } else { return 5 };
+    unwrap_or(x, 42)
+}
+
+fn main() -> i64 {
+    let a: i64 = slice_or_bail(false);     // 42
+    let a2: i64 = slice_or_bail(true);     // 5 (the early return)
+    let b: i64 = point_or_bail(false);     // 42
+    let c: i64 = maybe_or_bail(false);     // 42
+    let d: i64 = nested_bail(false);       // 42
+    let e: i64 = stmt_bail(false);         // 42
+    let f: i64 = else_bail(true);          // 42
+    let g: i64 = leaky(false, true);       // 42
+    let h: i64 = leaky_mirror(true, true); // 42
+    if a == 42 && a2 == 5 && b == 42 && c == 42 && d == 42 && e == 42 && f == 42
+        && g == 42 && h == 42 {
+        42
+    } else {
+        0
+    }
+}

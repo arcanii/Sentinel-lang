@@ -1,0 +1,32 @@
+// tests/ui/c65_return_before_perform.sentinel — an effecting fn whose tail evaluates a
+// `return` BEFORE its one `perform` is refused by `snc build` (register D69).
+//
+// `snc build` lowers a tail holding one `perform` by running the `perform` first and
+// replaying the rest of the tail in its resumer. Here the left operand returns 42 for
+// `n == 0` before the `perform` is ever evaluated, so the program means 42; performing
+// first answers the handler's 5 instead. Before register D60 a `return` in a resumer took
+// whatever fn id the compiler held last — in this file, where `e1` comes first, its initial
+// placeholder — and the LLVM verifier refused the build; after an effecting fn the same tail
+// built, and answered 5. D60 made it build in every layout; this refusal (ADR 0072 A1: the
+// `return` is evaluated before the `perform`) holds in every layout. The rule's other
+// refusals are pinned in `crates/sentinel-driver/tests/embedded_perform.rs`. The text oracle
+// and the self-hosted back end still emit the hoisted IR for this file, byte-identical to
+// each other (the rest of register D69).
+
+effect Io {
+    read() -> i64;
+}
+
+fn e1(n: i64) -> i64 ! { Io } {
+    (if n == 0 { return 42 } else { n }) + perform Io.read()
+}
+
+fn run(n: i64) -> i64 {
+    handle e1(n) with {
+        Io.read(k) => 5
+    }
+}
+
+fn main() -> i64 {
+    run(0)
+}

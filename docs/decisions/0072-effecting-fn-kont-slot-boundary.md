@@ -206,4 +206,68 @@ oracle's version — assembles cleanly; and the accept/reject drift between inkw
 
 ## Amendments
 
-_(none yet.)_
+**A1 (2026-09-12, registers D69 and D70) — the effecting-fn shapes refuse the bodies they were
+found to lower wrongly.** Seven adversarial reviews of registers D59/D60 found that the shipping
+back end lowered many effecting-fn bodies wrongly with no diagnostic, all present at HEAD
+`3c7aa71`. The amendment is fail-closed, like the ADR it amends: it refuses each class the reviews
+constructed, and conservatively some neighbours of it.
+
+*The embedded-perform shape (c35d)* runs the tail's one `perform` FIRST, in the fn, and replays the
+rest of the tail in a resumer. It accepted any tail with exactly one `perform` anywhere in it; one
+function, `embedded_perform_verdict`, now decides and explains, and requires
+
+1. the `perform` on the tail's UNCONDITIONAL path — not in an `if` or `match` arm, the right of
+   `&&` / `||`, a loop, a `handle` or a concurrency form (`perform_unconditional`);
+2. everything the tail evaluates BEFORE the `perform` pure — no call, `return`, index, division,
+   dereference, `&mut` borrow, assignment, loop or `handle` (`pure_before_perform`), since it runs
+   after the `perform` instead;
+3. the `perform`'s arguments, which the fn evaluates after it fills the continuation frame, free of
+   suspension, of writes and of `return` (which would leak the frame), and reading only the fn's
+   params (`perform_args_fit`, `expr_disturbs_frame`);
+4. nothing in the replayed tail that suspends (`expr_suspends` on the substituted tail): a call to
+   an effecting fn there, or a `perform` under a kind `substitute_perform_with_var` clones
+   unchanged (a `match`, a method call, a class init, an enum construction);
+5. every name the replay reads an `i64` or `secret i64` param (this ADR's D4); and
+6. the tail's own value an `i64` or `secret i64`, the other seam D4 names (`sentinel_kont_pure`).
+
+At HEAD each rule's failure was, respectively: a handler run on paths that never perform, an
+operation sent to the outer handler past a local `handle`, or a garbage value from a `match` arm; an
+effect before the `perform` run after it; a stale value read back after an argument assigned or
+mutably borrowed a param, or a leaked frame; a callee's effect that never reached a handler; a wrong
+value read out of a narrow param's slot; a panic or a verifier failure. Other bodies panicked or
+failed verification, and are now refused with a reason. Where the tail held a `return`, the
+verifier had refused most layouts by accident, and register D60, which gives a resumer its own fn
+id, made them all build, so the rules also close what D60 would otherwise have exposed.
+
+*Every shape* now declines a `perform` or effecting call whose own ARGUMENTS suspend
+(`tail_produces_kont`): the arguments are lowered as plain values, so an inner continuation came
+back as data — its effect dropped and its address passed on as the argument. The check is
+conservative: a local `handle` that discharges every effect it raises counts as suspending too.
+*The let (c35c) and chained (c35e) shapes* fill their frame before lowering the suspending value,
+as the embedded shape does before its arguments, so they decline a value that writes a variable or
+`return`s (`expr_disturbs_frame`). A block tail ending in the `perform` after statements that do not
+suspend goes to the direct shape, which lowers it in order; any other declined body is refused
+(`effecting_fn_body_not_direct`, with the rule named).
+
+*Up front*, before any fn is lowered, `snc build` refuses every generic effecting fn (register
+D70): `compile_mono_fn` lowered each instance as a plain fn, where no shape applies, so this ADR's
+own reproducer with one unused type parameter returned the continuation's address as its value, and
+a caller compiled first panicked. It also refuses an effect with a multi-parameter operation
+(`operation_arity_not_supported`): the runtime passes a handler one `i64`, and `perform` lowering
+evaluated only the first argument, so the others' effects never ran. Both wait on the continuation
+ABI and ADR 0020 D8's per-operation argument struct; no corpus program has either.
+
+The amendment is conservative. It also refuses some bodies HEAD built correctly — a division, a
+`&mut` borrow or a local `handle` before the `perform`, a local `handle` after it or in a
+`perform`'s or effecting call's argument, a loop condition that happens to run once, a name bound
+inside the `perform`'s own argument, a let or chained value that writes only a block-local or a
+param nothing reads afterwards, a generic effecting fn whose body happened to lower, and a
+multi-parameter operation whose second argument is pure — so the Consequences claim that no
+correct program gains a diagnostic does not hold after A1. No corpus program is among them — but the corpus says little either way:
+outside this change's own fixtures, only three repo programs and one review-generated program
+reach the embedded shape's rules at all, and all four are accepted unchanged.
+Still open: the text oracle and `scg` do not apply this amendment (the rest of D69), and only the
+embedded shape checks the fn's value against the `i64` seam — the direct, pure-tail, let and
+chained shapes do not (register D68(c)). Pinned by
+`crates/sentinel-driver/tests/embedded_perform.rs` — a refusal for each rule, with its reason, and
+accepted bodies built and run against their meaning — and ui `c65_return_before_perform`.

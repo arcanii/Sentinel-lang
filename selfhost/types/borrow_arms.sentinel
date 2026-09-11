@@ -823,8 +823,14 @@ fn dump_te_if(out: &mut Vec<u8>, cnd: Expr, thn: Expr, els: Expr, exp: i64, src:
             // Both branches inherit the `if`'s expectation, so a `?T`-returning `if`
             // widens each branch's tail (and the `if`'s type is that branch type).
             let tt: i64 = dump_texpr(out, thn, exp, src, c, gb);
-            // (8b) codegen: capture the then operand; reserve the if-result slot (its type
-            // `tt` is known only now); store the then value, branch to merge, open the else.
+            let tdiv: bool = (*c).sdiv;
+            // (8b) codegen: capture the then operand; reserve the if-result slot; store the
+            // then value AT ITS OWN TYPE, branch to merge, open the else. (register D59) The
+            // slot's TYPE is the if's join, known only after the else walk, so it is
+            // reserved deferred and settled below — it used to be `tt`, the then BLOCK's type,
+            // which is not the join when the then arm diverges. `tt` IS right for the store:
+            // a live then arm is the join, and a divergent one stores, in a dead block, at its
+            // own type as the oracle does.
             let cgT_k: i64 = if cg_on(c) {
                 (*c).cglk
             } else {
@@ -836,7 +842,7 @@ fn dump_te_if(out: &mut Vec<u8>, cnd: Expr, thn: Expr, els: Expr, exp: i64, src:
                 0
             };
             if cg_on(c) {
-                cg_rslot = cg_alloca(c, tt);
+                cg_rslot = cg_alloca_deferred(c);
                 cgo_str(c, "  store ");
                 cgo_ty(c, tt);
                 cg_putc(c, ' ');
@@ -882,7 +888,30 @@ fn dump_te_if(out: &mut Vec<u8>, cnd: Expr, thn: Expr, els: Expr, exp: i64, src:
                 0
             };
             push(out, ' ');
-            dump_texpr(out, els, exp, src, c, gb);
+            let et: i64 = dump_texpr(out, els, exp, src, c, gb);
+            let edv: bool = (*c).sdiv;
+            // (register D59) the if's type is the JOIN — the oracle's `If` node type, which the
+            // typer picks by DIVERGENCE: the else arm's type when only the then arm diverges,
+            // the then arm's otherwise (both diverging included). `tdiv` / `edv` are that
+            // structural fact (`sdiv`). Not a flag meaning "a `return` was walked last", which
+            // reads true after `if c { null } else { return 6 }`; nor a type comparison, which an
+            // arm that diverges by a
+            // STATEMENT defeats — `{ return 1; true }` is typed by its dead tail. The first cut
+            // compared types, and its review measured scg picking the dead arm and overflowing
+            // its own slot. tests/pass/c65_return_divergent_then and c65_return_stmt_divergent
+            // pin both kinds.
+            let join: i64 = if tdiv && !edv {
+                et
+            } else {
+                tt
+            };
+            // A live else arm is the join; a divergent one stores, in its dead block, at its
+            // own type as the oracle does.
+            let est: i64 = if edv {
+                et
+            } else {
+                join
+            };
             // (7b) MIR: build the merge — result param first, then one param per variable
             // that diverged across the arms (VarId-sorted), reconciled via the arms' jumps.
             if mir_on(c) {
@@ -890,7 +919,7 @@ fn dump_te_if(out: &mut Vec<u8>, cnd: Expr, thn: Expr, els: Expr, exp: i64, src:
                 let else_exit: i64 = (*c).mir_cur;
                 let elen: i64 = mir_vd_len(c);
                 let merge: i64 = mir_new_block(c);
-                let result: i64 = mir_add_param(c, merge, tt);
+                let result: i64 = mir_add_param(c, merge, join);
                 let mut then_args: Vec<i64> = vec_new();
                 let mut else_args: Vec<i64> = vec_new();
                 push(&mut then_args, then_val);
@@ -940,8 +969,9 @@ fn dump_te_if(out: &mut Vec<u8>, cnd: Expr, thn: Expr, els: Expr, exp: i64, src:
             if cg_on(c) {
                 let cgE_k: i64 = (*c).cglk;
                 let cgE_v: i64 = (*c).cglv;
+                cg_alloca_settle(c, cg_rslot, join);
                 cgo_str(c, "  store ");
-                cgo_ty(c, tt);
+                cgo_ty(c, est);
                 cg_putc(c, ' ');
                 cgo_operand(c, cgE_k, cgE_v);
                 cgo_str(c, ", ptr %v");
@@ -957,7 +987,7 @@ fn dump_te_if(out: &mut Vec<u8>, cnd: Expr, thn: Expr, els: Expr, exp: i64, src:
                 cgo_str(c, "  %v");
                 cgo_int(c, cg_ld);
                 cgo_str(c, " = load ");
-                cgo_ty(c, tt);
+                cgo_ty(c, join);
                 cgo_str(c, ", ptr %v");
                 cgo_int(c, cg_rslot);
                 cg_putc(c, '\n');
@@ -966,8 +996,10 @@ fn dump_te_if(out: &mut Vec<u8>, cnd: Expr, thn: Expr, els: Expr, exp: i64, src:
             } else {
                 0
             };
-            close_ty(out, tt, c);
-            tt
+            close_ty(out, join, c);
+            // (register D59) an `if` diverges iff both arms do.
+            (*c).sdivn = tdiv && edv;
+            join
 }
 
 fn dump_te_call(out: &mut Vec<u8>, cn: [u8], ca: Args, exp: i64, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {

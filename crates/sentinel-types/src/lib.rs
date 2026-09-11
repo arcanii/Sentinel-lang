@@ -4208,6 +4208,19 @@ pub enum TypeError {
         span: miette::SourceSpan,
     },
 
+    /// Register D60: a `return` inside a class `init`. Every back end emits an init as a
+    /// `void` function and discards any value, so there is nothing for the `return` to
+    /// lower to.
+    #[error("`return` is not allowed inside an `init`")]
+    #[diagnostic(
+        code(sentinel::types::return_in_init),
+        help("an `init` has no early exit: assign every field on every path through the body, and end it with its usual tail")
+    )]
+    ReturnInInit {
+        #[label("`return` inside an `init`")]
+        span: miette::SourceSpan,
+    },
+
     /// ADR 0071 M1.4b slice 3c: taking a reference THROUGH a lock guard (`& *g`
     /// or `&mut *g`) is rejected. The resulting reference aliases the mutex cell's
     /// protected slot; because a `?Guard` is pinned to its `let` (D3) and its
@@ -6579,9 +6592,14 @@ pub fn check_module(
             // `out_ptr`).
             env.insert(init_def.self_var_id, (Type::Class(cd.id), true));
             env.record_name(init_def.self_var_id, "self");
-            // ADR 0065: an `init` body produces the class value; a `return`
-            // inside it returns the constructed object.
+            // A `return` inside an init used to be typed against the class, as if it
+            // returned the constructed object. No back end ever lowered that: all three emit
+            // an init as a `void` function and discard the value. Register D60: `return` is
+            // refused in an init. The return
+            // type is still set, so that refusal is the only diagnostic a `return` here can
+            // produce.
             env.set_return_type(Type::Class(cd.id));
+            env.in_init = true;
             // Bind init params.
             for tp in &typed_class_decls[idx]
                 .init
@@ -7204,6 +7222,10 @@ struct VarTypeEnv {
     /// degenerate case of checking an expression with no enclosing fn (never
     /// happens for real bodies); the `Return` arm then skips the match.
     current_return_type: Option<Type>,
+    /// Register D60: `true` while checking a class `init` body, where a `return` is
+    /// refused ([`TypeError::ReturnInInit`]). A fresh env is built per body, so this
+    /// resets at every boundary like `current_return_type`.
+    in_init: bool,
     /// ADR 0071 M1.4b slice 3b (guard no-escape, conservative pin): `true` only
     /// while checking the DIRECT value of an immutable `let` whose RHS is a
     /// `lock()` call — the sole legal position for a `lock()`. `check_stmt`'s
@@ -10164,6 +10186,12 @@ fn check_expr(
             // primitives synthesise and compare). The `Return` node is
             // divergent — its `ty` is a placeholder treated as bottom at join
             // sites (see `expr_diverges`).
+            // Register D60: see `VarTypeEnv::in_init`.
+            if env.in_init {
+                return Err(TypeError::ReturnInInit {
+                    span: to_source_span(&expr.span),
+                });
+            }
             let ret_ty = env.current_return_type;
             let inner_expected = match ret_ty {
                 Some(rt)
@@ -11955,6 +11983,11 @@ fn type_error_to_diagnostic(err: &TypeError) -> Diagnostic {
         TypeError::MutexReturnNotSupported { span } => (
             "sentinel::types::mutex_return_not_supported",
             "returning a named `Mutex<T>` binding is not yet supported".to_string(),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        TypeError::ReturnInInit { span } => (
+            "sentinel::types::return_in_init",
+            "`return` is not allowed inside an `init`".to_string(),
             span.offset()..(span.offset() + span.len()),
         ),
         TypeError::GuardBorrowNotAllowed { span } => (

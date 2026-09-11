@@ -65,7 +65,11 @@ continuations.
     tail. Three pass fixtures (c35d_binop_with_perform,
     c35d_perform_with_capture_and_binop,
     c35d_perform_in_call_arg). +3 workspace tests (1065
-    total).
+    total). *(Narrowed by ADR 0072 A1, 2026-09-12, register
+    D69: "any pure surrounding context" is now checked —
+    among other rules the `perform` must be on the tail's
+    unconditional path with only pure code before it; a
+    declined fn is refused, or lowered by the direct shape.)*
   - **C3.5(e)** — chained effecting lets via resumers-can-
     perform — **SHIPPED**. `sentinel_kont_resume` widens its
     return type to `*mut SentinelKont` — either a PURE_RETURN
@@ -521,6 +525,7 @@ A rough split into 4-5 sub-phases:
 | C3.5(d) | Unified embedded-perform shape — single perform anywhere in   | 1 session    | **DONE** |
 |      | tail (binop, struct-lit, fn-call arg, field, index, ...).      |              |        |
 |      | Substitute-perform-with-Var walker; same resumer machinery.    |              |        |
+|      | Narrowed by ADR 0072 A1 (2026-09-12).                          |              |        |
 | C3.5(e) | Chained effecting lets + multiple performs in tail —          | 1-2 sessions | **DONE** |
 |      | requires resumers-can-perform (runtime resume loop bubbles     |              |        |
 |      | non-pure-return result konts through remaining frames).        |              |        |
@@ -655,6 +660,7 @@ A rough split per the D9 table:
 | C3.5(b) | Effecting fn ABI + handle-of-call + PURE_RETURN switch case   | 1 session    | **DONE** |
 | C3.5(c) | Let-bound perform via per-let resumer + sentinel_kont_push    | 1 session    | **DONE** |
 | C3.5(d) | Unified embedded-perform shape (binop / call-arg / etc.)      | 1 session    | **DONE** |
+|      | — narrowed by ADR 0072 A1 (2026-09-12).                        |              |        |
 | C3.5(e) | Chained effecting lets via resumers-can-perform               | 1-2 sessions | **DONE** |
 | C3.6(a) | Non-identity return arm (Phase B deep-handler re-wrap)        | 0-1 session  | **DONE** |
 | C3.6(b) | Nested handles (un-matched op propagates to outer)            | 1 session    | **DONE** |

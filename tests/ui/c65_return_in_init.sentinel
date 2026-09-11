@@ -1,0 +1,28 @@
+// tests/ui/c65_return_in_init.sentinel — `return` is refused inside a class `init`
+// (register D60).
+//
+// An `init` initializes the object it is handed; every back end emits it as a `void`
+// function and discards any value, so a `return` in it could only ever mean "stop
+// initializing", which no back end has a way to lower.
+//
+// Until D60 this program passed the type and borrow checks and was stopped only by a
+// code-generation panic. With `return` allowed in methods it reaches code generation, where
+// no back end can lower it (each emits the init as `void`), so the type checker refuses it
+// with a diagnostic instead.
+
+class H {
+    let v: [i64];
+    pub init(x: i64, spare: H) {
+        if x > 100 {
+            return spare
+        } else {
+            0
+        };
+        self.v = [x, x];
+        0
+    }
+}
+
+fn main() -> i64 {
+    0
+}

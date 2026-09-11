@@ -166,6 +166,12 @@ fn synth_one_method(buf: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>,
     if cg_on(c) {
         cg_reset(c);
         (*c).cgmain = false;
+        // (register D60) and not effecting: a method or init body never set `cg_eff`, so it
+        // inherited the flag of whatever fn scg walked last — for a class or impl body, the
+        // source-last non-generic free fn, since those are all walked first — and a `return`
+        // in it took the `Kont*` epilogue. Cleared here and NOT in `cg_reset`, which the
+        // effecting-fn emitters call again mid-emission (clearing it there broke 11 of them).
+        (*c).cg_eff = false;
         (*c).cg_self_var = selfvid;
         (*c).cg_arg_base = 1;
         0

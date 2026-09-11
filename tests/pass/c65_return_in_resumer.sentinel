@@ -1,0 +1,87 @@
+// tests/pass/c65_return_in_resumer.sentinel — `return` inside the part of an effecting fn
+// that runs AFTER a `perform` resumes (register D60), self-contained.
+//
+// `snc build` compiles that remainder as a separate RESUMER function, in one of three shapes:
+// a single effecting `let` then a pure tail, a tail with one `perform` embedded in it, and a
+// chain of effecting `let`s. None of the three resumer compilers set the current-fn id for
+// the resumer's body, so a `return` there read the signature of whichever fn had been
+// compiled just before — here always a plain fn — and got its plain value ABI where the
+// resumer returns a `Kont*`: `ret i64 5` in a function returning `ptr`, which the LLVM
+// verifier rejects (measured against the pre-fix binary on `embedded` and `chained` alone).
+// `let_shape` is also a D59 shape — a divergent-then `if` inside `len` — on which the pre-fix
+// build panicked before it got that far. The resumer now takes its own fn's id, so its
+// `return` wraps the value like any other effecting-fn return.
+//
+// A plain fn precedes each effecting one on purpose: an effecting predecessor would make the
+// stale id right by accident.
+//
+// Exit 42 = every check held.
+
+effect Io {
+    read() -> i64;
+}
+
+fn plain1(x: i64) -> i64 {
+    x + 1
+}
+
+// One effecting `let`, then a tail that `return`s from inside an `if`.
+fn let_shape(n: i64) -> i64 ! { Io } {
+    let z: i64 = perform Io.read();
+    len(if n == 0 { return 5 } else { [z, 2, n] }) * 14
+}
+
+fn plain2(x: i64) -> i64 {
+    x + 2
+}
+
+// One `perform` embedded in the tail, beside a `return`.
+fn embedded(n: i64) -> i64 ! { Io } {
+    perform Io.read() + (if n == 0 { return 5 } else { n })
+}
+
+fn plain3(x: i64) -> i64 {
+    x + 3
+}
+
+// Two effecting `let`s; the `return` is in the LAST resumer. Its tail reads only `b`, that
+// resumer's own resumed value: a tail that also read `a` would need `a` captured across the
+// second `perform`, and scg captures a different set from the oracle there (register D67).
+fn chained() -> i64 ! { Io } {
+    let a: i64 = perform Io.read();
+    let b: i64 = perform Io.read();
+    if b == 0 { return 5 } else { b + b + 2 }
+}
+
+fn run_let(n: i64) -> i64 {
+    handle let_shape(n) with {
+        Io.read(k) => k(40)
+    }
+}
+
+fn run_embedded(n: i64) -> i64 {
+    handle embedded(n) with {
+        Io.read(k) => k(40)
+    }
+}
+
+fn run_chained(v: i64) -> i64 {
+    handle chained() with {
+        Io.read(k) => k(v)
+    }
+}
+
+fn main() -> i64 {
+    let a1: i64 = run_let(1);         // len([40, 2, 1]) * 14 = 42
+    let a2: i64 = run_let(0);         // 5 (the early return)
+    let b1: i64 = run_embedded(2);    // 40 + 2
+    let b2: i64 = run_embedded(0);    // 5 (the early return)
+    let c1: i64 = run_chained(20);    // 20 + 20 + 2 (b is the second resumed value, 20)
+    let c2: i64 = run_chained(0);     // 5 (the early return)
+    let p: i64 = plain1(0) + plain2(0) + plain3(0); // 6
+    if a1 == 42 && a2 == 5 && b1 == 42 && b2 == 5 && c1 == 42 && c2 == 5 && p == 6 {
+        42
+    } else {
+        0
+    }
+}

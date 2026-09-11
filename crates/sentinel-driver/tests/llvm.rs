@@ -1094,10 +1094,10 @@ fn llvm_never_panics_over_corpus() {
     // subset entirely.
     //
     // ⚠ That is a property of the corpus, not of `snc llvm`. It used to be written as
-    // the latter, and it is false: a `return` inside a CLASS METHOD panics the oracle
-    // outright (register D60 — `dump_method` never binds `current_fn`, so the Return
-    // arm indexes the signature table at `u32::MAX`). No fixture has that shape, which
-    // is exactly why the claim survived. Layer 2b leans on the corpus-scoped reading —
+    // the latter, and it was false: until register D60, a `return` inside a CLASS METHOD
+    // panicked the oracle outright (`dump_method` never bound a `FnId`, so the Return arm
+    // indexed the signature table at `u32::MAX`). No fixture had that shape, which is
+    // exactly why the claim survived. Layer 2b leans on the corpus-scoped reading —
     // it treats a non-zero exit as "did not emit" — so keep this test sweeping the same
     // `corpus_fixtures()` layer 2b does.
     let mut emitted = 0;
@@ -1415,4 +1415,61 @@ fn llvm_behaviour_matches_inkwell_over_emitted_subset() {
         checked >= 15,
         "expected to behaviourally check the straight-line subset (~16), got {checked}"
     );
+}
+
+/// Register D59: every `load T, ptr %vN` from a hoisted `%vN = alloca U` must have `T == U`. A
+/// load wider than its slot reads past it. This does NOT catch D59 as it shipped: the oracle
+/// sized the `if` slot AND its load from the divergent THEN arm, so the two agreed, and the
+/// overrun was the other arm's store — a full revert fails `llvm-as` and the pass exit codes
+/// instead. What it catches is a half-revert that sizes the slot from the then arm again but
+/// loads at the join's type, in the oracle AND scg together. That is byte-identical, so the
+/// differential stays green; opaque pointers mean `llvm-as` never relates a load or a store to
+/// its alloca; and on Windows the one test that EXECUTES the oracle's IR
+/// (`llvm_behaviour_matches_inkwell_over_emitted_subset`) cannot run — so it would pass every
+/// other test here (both measured by the D59/D60 reviews). Stores are deliberately NOT
+/// checked: a divergent arm stores at its own type, into a dead block, by design.
+#[test]
+fn llvm_loads_match_their_slot_over_corpus() {
+    let mut checked = 0;
+    let mut bad: Vec<String> = Vec::new();
+    for f in corpus_fixtures() {
+        let dump = Command::new(env!("CARGO_BIN_EXE_snc"))
+            .arg("llvm")
+            .arg(&f)
+            .output()
+            .expect("run snc llvm");
+        if !dump.status.success() {
+            continue;
+        }
+        checked += 1;
+        let ll = String::from_utf8_lossy(&dump.stdout);
+        let mut func = String::new();
+        let mut slots: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        for line in ll.lines() {
+            if let Some(rest) = line.strip_prefix("define ") {
+                func = rest.split('@').nth(1).unwrap_or("").split('(').next().unwrap_or("").to_string();
+                slots.clear();
+                continue;
+            }
+            let t = line.trim();
+            if let Some((lhs, ty)) = t.split_once(" = alloca ") {
+                slots.insert(lhs.trim_start_matches('%').to_string(), ty.trim().to_string());
+                continue;
+            }
+            if let Some((_, rhs)) = t.split_once("= load ") {
+                if let Some((ty, ptr)) = rhs.rsplit_once(", ptr %") {
+                    if let Some(slot_ty) = slots.get(ptr.trim()) {
+                        if slot_ty != ty.trim() {
+                            bad.push(format!(
+                                "  {}: @{func}: `{t}` from a slot allocated `{slot_ty}`",
+                                f.file_name().unwrap_or_default().to_string_lossy()
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(checked >= 170, "expected the emitting corpus to be checked, got {checked}");
+    assert!(bad.is_empty(), "loads wider or narrower than their slot:\n{}", bad.join("\n"));
 }

@@ -20,13 +20,12 @@
 // corpus. Exit 42 = every check held.
 //
 // ⚠ WHAT THIS FIXTURE DOES NOT COVER: every `if` here sits at its function's tail, where
-// the if's join type EQUALS the function's return type — which is exactly the arrangement
-// in which the oracle's merge-slot rule (it takes the slot type from the THEN branch)
-// happens to be right. Put a divergent `return` in the THEN arm of an `if` whose join type
-// differs, as in `let p: P = if b { return 5 } else { P { .. } }`, and the slot is sized
-// from the divergence instead. That is a SEPARATE, still-open defect, it is not what
-// `zeroinitializer` fixes, and no fixture can pin it here until it is fixed — a tests/pass
-// program has to run correctly, and that one does not.
+// the if's join type EQUALS the function's return type, so a merge slot sized from the THEN
+// branch — the rule all three back ends had until register D59 — was right here by
+// coincidence. With a divergent `return` in the THEN arm of an `if` whose join type differs,
+// as in `let p: P = if b { return 5 } else { P { .. } }`, that rule sized the slot from the
+// divergence instead. D59 was that separate defect; it is not what `zeroinitializer` fixes,
+// and `tests/pass/c65_return_divergent_then` is the non-degenerate fixture that pins it.
 
 // `?i64` — the payload is inline, so the pair is `{ i1, i64 }`. The bare form (no `if`)
 // is the minimal reproducer: the placeholder lands straight in the epilogue's `ret`.

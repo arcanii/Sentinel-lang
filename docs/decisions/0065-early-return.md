@@ -219,6 +219,18 @@ selfhost compiler sources need not *use* `return` (they keep tail returns), but 
    cases (out of the differential, the u128/f64 pattern). The **selfhost typer needs no `expr_diverges`
    mirror** — it is a pure dumper (never rejects), and the only observable difference is the node type
    for a *mismatched*-divergent join, which is snc-only.
+   **Amended (register D59, 2026-09-11):** that stopped being true. D59 sizes an `if`'s result slot
+   from the `if`'s join, which the typer picks by divergence, so scg now mirrors `expr_diverges` (the
+   `sdiv` fact in `selfhost/types.sentinel`) and types a mismatched-divergent `match` by its first
+   non-divergent arm, as the typer does, sizing the match's own slot from that type rather than from
+   the caller's expectation. It was never only a node-type difference: the first arm's type already
+   reached scg's IR through a call argument or a generic's type argument, and D59's `if` join reads an
+   arm's type as well. The demonstrators sentence above is stale too, as are stage 2's and stage 3's
+   notes that `early_return` and `early_return_handle` stay out of the differential: all three
+   `examples/lang/early_return*.sentinel` are in the codegen real-program differential and match
+   there. Of the other real-program differentials only lex and parse compare them: `snc resolve`
+   through `snc ctverify` refuse a `use` program, and `snc merge` refuses `return`, so the files
+   have no merged form for those differentials to compare either.
 5. **ADR ACCEPTED** — pending stage 3 + a cross-platform (macOS) confirmation; update STATE/HANDOVER;
    (optionally) re-spell example tails as explicit `return`s where it reads clearer.
 

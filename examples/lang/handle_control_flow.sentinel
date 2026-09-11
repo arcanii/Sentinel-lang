@@ -9,9 +9,9 @@
 //
 // snc-only demonstrator: the lift is in the runtime + the inkwell back end; the `snc llvm`
 // text oracle + the selfhost still reject / don't mirror the normalization (a deferred
-// text-emitter follow-up), so this stays OUT of the differential (the early_return / u128 /
-// f64 pattern). A NON-tail perform in a branch (`perform Op() + 1`) and a `let`-bound
-// perform inside the body still need frame reification and are rejected. Exit 42.
+// text-emitter follow-up), so this stays OUT of the differential (the u128 / f64 pattern).
+// A NON-tail perform in a branch (`perform Op() + 1`) and a `let`-bound perform inside the
+// body still need frame reification and are rejected. Exit 42.
 use std::test::check;
 
 effect Io {

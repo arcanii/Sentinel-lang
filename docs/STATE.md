@@ -14,8 +14,81 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
+**Latest (2026-09-11b, finished 2026-09-12) — D59, D60 and D66 are closed: an `if`'s result
+slot is sized from the `if`, a `match` arm stores at its own type, and `return` works inside
+methods and effect resumers (and is refused inside inits). ADR 0072 A1 makes `snc build` refuse
+the effecting-fn bodies the reviews found it lowering wrongly: D69 is closed there, every generic
+effecting fn is refused (D70), and so is a multi-parameter operation. NOT PUSHED.**
+**D59** was a memory-safety miscompile in
+the shipping back end: an `if` whose THEN arm diverges got its result slot from the divergent
+branch (a divergent block keeps its own type), so `let s: [i64] = if b { return 5 } else
+{ [40, 2] }` put a 16-byte slice in an 8-byte slot and `snc build`'s binary died with
+0xC0000374. All three back ends now size the slot from the `if` node. scg defers the slot's
+alloca type through an append-only side table (there is no index-assignment into a `Vec` in
+selfhost/, and the bootstrap is not the place for the first), picks the join as the typer does,
+by STRUCTURAL divergence — a new `sdiv` fact mirroring `expr_diverges`, which now also decides
+its widen splice — and types and sizes a `match` by its first non-divergent arm. ⚠ Seven
+adversarial reviews shaped it. The first caught the first cut picking the join by comparing
+types, which chose the DEAD arm for an arm that diverges by a statement (`{ return 1; true }`);
+the second caught a pre-existing flag, `ediv`, still deciding the widen splice, which dropped
+`secret` under a guarded `return` so the self-hosted constant-time verifier missed a leak the
+Rust one reports (fixed; `ediv` is gone). No corpus program had those shapes; the new fixtures
+do. **D66**, the `match` analog: the oracle stored every arm at the match's type, so a divergent
+arm's value of another type made invalid IR; every back end now stores each arm at its own
+type. **D60**: `return` in a method panicked the oracle (a `FnId(u32::MAX)` signature lookup)
+and took the last-compiled fn's ABI in inkwell and scg; a method's `return` is now always the
+plain value ABI, and inkwell's three effect-resumer compilers no longer read a stale fn id
+either. ⚠ **`return` is now REFUSED in an `init`** (`sentinel::types::return_in_init`): the back
+ends emit an init as `void`. ⚠ The codegen differential caught a regression in the first cut:
+clearing scg's effecting flag in `cg_reset` broke 11 corpus effects programs, because the
+effecting emitters call `cg_reset` mid-emission; it is cleared at method/init entry instead.
+
+⚠ **D60's resumer fix exposed D69, and this closes D69 in `snc build`.** The embedded-perform
+shape runs a tail's one `perform` first and replays the rest in a resumer. Before D60 a `return`
+in that replay took the ABI of the fn compiled just before it, so the verifier refused such a
+tail unless that fn was effecting, in which case the unfaithful ones built wrong; the fix made
+every layout build them. The third to seventh reviews constructed them, and found the effecting-fn
+shapes wrong without any `return` too: pushed HEAD ran the handler on paths that never reach
+the `perform` (an `if` or `match` arm, the right of `||` or `&&`, a loop), sent a `perform` inside
+a local `handle` to the outer handler, returned a garbage value for one in a `match` arm, ran a
+`print` before the `perform` after it, read a param back stale after an argument assigned it,
+leaked the continuation frame when an argument `return`ed, dropped an effecting call's effect,
+read a narrow param back wrong, passed an inner continuation's address on as an argument, and
+never evaluated an operation's second argument — all with no diagnostic. ADR 0072 A1 accepts an
+embedded tail only if the `perform` is on its unconditional path, everything before it is pure,
+its arguments can be evaluated after the frame is filled, the replay suspends nowhere else, and
+every name the replay reads, and the tail's value, is an `i64` / `secret i64`; one function
+decides and names the rule. Every shape declines a `perform` or effecting call whose arguments
+suspend (conservatively, a local `handle` there too), the let and chained shapes decline a value
+that writes or `return`s, and `snc build` refuses up front every generic effecting fn (D70; its
+instances were lowered as plain fns) and every multi-parameter operation. D68(a)'s panics become
+refusals. A1 is conservative and refuses a few bodies HEAD happened to lower correctly (ADR 0072
+lists them). No existing corpus program's build changed (eight network and crypto examples fail
+to link on this box under both builds), but the corpus barely reaches the embedded rules: three
+repo programs and one generated one outside this change's fixtures. Still open: the text oracle
+and scg do not apply A1 (D69); only the embedded shape checks the fn's value width (D68(c)); and
+`snc build --separate` can reuse objects an older `snc` built (D73, filed here).
+
+The oracle's output changed for no pre-existing program among the repo's 401 tracked `.sentinel`
+files. Over the first review's 6,235 programs scg now matches the oracle at types and mir on
+5,915 of 5,917 (HEAD's scg: 1,233 and 3,695) and at llvm on 1,628 of 1,692 (HEAD's: 1,115),
+with no program at any stage on which HEAD's scg matched and the new one does not; over the
+second review's 6,000 secret-join programs it matches at all four stages on all 2,349 whose
+dumps the oracle emits, and the self-hosted verifier reports all 2,318 of the oracle's leaks
+among them (HEAD's missed 265). The third review found four one-line deletions in the new
+bookkeeping that passed every test, each able to make the self-hosted verifier miss a leak;
+every reset and restore in it is now caught when deleted. Four-check: 1,876 passed with
+exactly the 18 known Windows failures; doctests and clippy clean; both bootstrap fixed points
+hold. Pass `c65_return_divergent_then`, `c65_return_stmt_divergent` (both 0xC0000374 pre-fix),
+`c65_return_in_method`, `c65_return_in_method_efflast`, `c65_return_in_resumer`,
+`c65_match_join`, `c65_return_gaps`; ui `c65_return_in_init`, `c65_secret_join_guarded`,
+`c65_return_before_perform`; `tests/embedded_perform.rs` (a refusal for each A1 rule, with its
+reason, and accepted bodies run against their meaning); `llvm_loads_match_their_slot_over_corpus`.
+Filed D65-D73 from the reviews (D66 closed here). ADR 0065 amended; ADR 0072 amended (A1).
+**Register: 73 items, 32 done.**
+
 **Latest (2026-09-11) — D61: METHOD bodies are borrow-checked, closing three memory-safety
-holes that followed from their never having been. NOT PUSHED.** `borrow_check` walked
+holes that followed from their never having been. Pushed.** `borrow_check` walked
 `program.fns` and nothing else, so no class `init`, class method or impl method was ever
 checked: a double move, a move out of `self` and a use after move were accepted in a method
 while the identical free-fn body was rejected, and every back end freed memory the program
@@ -52,7 +125,7 @@ and the lexical checker's per-binding over-rejections. **Filed D62, D63 and D64*
 a class constructed in a loop overflows the stack (0xC00000FD at 2M iterations, pre- and
 post-fix, scalar init param; cause not established). **Register: 64 items, 29 done.**
 
-**Latest (2026-09-08) — D10 is closed, and the oracle's own IR is now gated. NOT PUSHED.**
+**Latest (2026-09-08) — D10 is closed, and the oracle's own IR is now gated. Pushed.**
 `return` is divergent, so after the `ret` each back end parks a dead block and hands the
 enclosing expression a placeholder for the unreachable remainder. The oracle's was the bare
 STRING `0`, and its consumer prints that operand after ITS OWN LLVM type — so the module did
@@ -2353,7 +2426,9 @@ longer coerced to the expected type, so `return e` is valid in any context — `
 on `expr_diverges`) and the **match-arm divergence** (the result-type join skips a diverging arm, like
 the if-join). Mismatched-divergent demonstrators (`examples/lang/early_return*.sentinel`) are snc-only
 (out of the differential, the u128/f64 pattern); the selfhost typer needs no `expr_diverges` mirror (it
-is a pure dumper). **Constant-time UNCHANGED.** Windows four-check green. **Remaining: stage 3 —
+is a pure dumper). *(Superseded 2026-09-11b, both clauses: all three demonstrators are in the codegen
+real-program differential and match there, and register D59 gave the selfhost typer an
+`expr_diverges` mirror.)* **Constant-time UNCHANGED.** Windows four-check green. **Remaining: stage 3 —
 `return` crossing a `handle` (D6).** Assessment (2026-06-29): blocked on a **pre-existing
 staged-effect-runtime gap** — a handle body whose control flow reaches a `perform` (an `if`/`match`
 branch that performs) is not a supported body shape and currently **silently miscompiles**,
@@ -2371,7 +2446,8 @@ gap was a kont **leak** (the abandoned continuation was never freed). FIXED: a n
 arm frees each active handle region's in-flight kont before the `ret` (the one-free invariant). The
 `return`-crossing-`handle` demonstrator is `examples/lang/early_return_handle.sentinel` (snc-only: the
 text-IR + selfhost-MIR mirror of `kont_free` are deferred faithfulness items, invisible to the exit
-code). See ADR 0065 Phasing stage 3 + HANDOVER §0.
+code). See ADR 0065 Phasing stage 3 + HANDOVER §0. *(Superseded 2026-09-11b: the demonstrator is in
+the codegen real-program differential and matches there; neither text back end emits `kont_free`.)*
 
 **Latest (2026-06-28) — explicit early `return`, effect-free path (ADR 0065 stages 1–2).** Sentinel
 now has a C-style **`return expr`** that exits a function early, instead of only the tail
@@ -2387,7 +2463,8 @@ for the now-unreachable remainder. **Constant-time UNCHANGED** — `return` is u
 flow, not a branch on a value, so it is no new `secret_leak` sink (a secret `if`-condition is still
 rejected at the `if`); returning a `secret` value is fine. Implemented **snc-side** with the
 demonstrator in `examples/` (`examples/lang/early_return.sentinel`, snc-only like u128/f64 — OUT of
-the scg differential, so both fixed points stay byte-identical without the stage-4 mirror) +
+the scg differential, so both fixed points stay byte-identical without the stage-4 mirror; *superseded
+2026-09-11b: it is in the codegen real-program differential and matches there*) +
 `tests/ui/c65_return_type_mismatch`. Windows four-check green; analysis unit tests + the selfhost
 **dump** differential unchanged (no regression). **Pending:** stage 3 (`return` crossing a `handle`
 — the D6 kont-frame unwind) + stage 4 (selfhost mirror + both fixed points). Known v1 stubs:

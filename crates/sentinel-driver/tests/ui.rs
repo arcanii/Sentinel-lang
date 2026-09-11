@@ -237,6 +237,17 @@ ui_snapshot!(c5d2_mixed_width, "c5d2_mixed_width.sentinel");
 
 // ---- ADR 0065 early-return type mismatch (types) ----
 ui_snapshot!(c65_return_type_mismatch, "c65_return_type_mismatch.sentinel");
+// Register D60: `return` is refused inside a class `init`.
+ui_snapshot!(c65_return_in_init, "c65_return_in_init.sentinel");
+// Register D59: secrets reaching `&&` through the joins D59 changed — a node with a guarded
+// `return` inside it, and matches typed by their first live arm. The constant-time pass
+// refuses each; the ctverify differential holds the self-hosted verifier to the same
+// verdicts, some of which it used to miss.
+ui_snapshot!(c65_secret_join_guarded, "c65_secret_join_guarded.sentinel");
+// Register D69: an effecting fn whose tail evaluates a `return` before its `perform` is
+// refused, not built to perform anyway. The rule's other refusals are in
+// `tests/embedded_perform.rs`.
+ui_snapshot!(c65_return_before_perform, "c65_return_before_perform.sentinel");
 
 // ---- ADR 0020 D9 / ADR 0065 stage 3a: a handle body that performs through
 // control flow (an if/match branch) is rejected, not silently miscompiled (codegen) ----

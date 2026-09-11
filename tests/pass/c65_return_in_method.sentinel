@@ -1,0 +1,123 @@
+// tests/pass/c65_return_in_method.sentinel — `return` inside a METHOD body (register D60),
+// self-contained.
+//
+// Method bodies are not in `program.fns` and have no `FnId`. The `return` arm picks its
+// epilogue ABI (`main`'s i32 truncation, an effecting fn's `Kont*`, or a plain value) from
+// the current function's signature, and a method had none:
+//
+//   * the text oracle keyed the lookup on a `FnId(u32::MAX)` placeholder and panicked —
+//     `index out of bounds: … the index is 4294967295`;
+//   * inkwell never assigned its current-fn id in a method at all, so a method took the
+//     ABI of whatever function had been compiled LAST: with `main` last it emitted
+//     `ret i32 7` in an i64 method (rejected by the LLVM verifier), and after an effecting
+//     fn it returned a `Kont*`;
+//   * scg never cleared its effecting flag for a method, so a method took the flag of the
+//     last free fn scg walked — and scg walks every free fn before any class or impl, so
+//     that is the SOURCE-last free fn.
+//
+// A method's `return` is always the plain value ABI, the one every method is emitted with: a
+// method is never `main`, and no method has the `Kont*` ABI (an effect-rowed method is
+// register D13, open).
+//
+// This layout, with `main` LAST, pins the oracle's panic and inkwell's `main` source. It does
+// NOT pin scg: the source-last free fn here is `main`, which is not effecting, so pre-fix scg
+// emitted the right `ret` anyway. `c65_return_in_method_efflast` puts an effecting fn last and
+// pins scg's half and inkwell's other source. A `return` inside a class `init` is refused
+// instead — see tests/ui/c65_return_in_init.
+//
+// Exit 42 = every check held.
+
+effect Io {
+    read() -> i64;
+}
+
+// An effecting free fn. Where it sits arms nothing in scg, which walks every free fn first.
+fn effecting() -> i64 ! { Io } {
+    perform Io.read()
+}
+
+trait Probe {
+    fn probe(self: &Self, n: i64) -> i64;
+}
+
+class Gate {
+    let limit: i64;
+    pub init(l: i64) {
+        self.limit = l;
+        0
+    }
+    // An early `return` in a class method.
+    pub fn clamp(self: &Self, n: i64) -> i64 {
+        if n > self.limit {
+            return self.limit
+        } else {
+            n
+        }
+    }
+    // A `return` from inside a loop, in a class method.
+    pub fn first_over(self: &Self, n: i64) -> i64 {
+        let mut i: i64 = 0;
+        while i < 100 {
+            if i * n > self.limit {
+                return i
+            } else {
+                0
+            };
+            i = i + 1;
+        }
+        0 - 1
+    }
+}
+
+// An impl method on a CLASS target.
+impl as Probe for Gate {
+    fn probe(self: &Self, n: i64) -> i64 {
+        if n == 0 {
+            return 0 - 1
+        } else {
+            n + self.limit
+        }
+    }
+}
+
+struct Pair {
+    a: i64,
+    b: i64,
+}
+
+// An impl method on a STRUCT target.
+impl as Probe for Pair {
+    fn probe(self: &Self, n: i64) -> i64 {
+        if n < 0 {
+            return self.a
+        } else {
+            self.b + n
+        }
+    }
+}
+
+fn run_effecting() -> i64 {
+    handle effecting() with {
+        Io.read(k) => k(2)
+    }
+}
+
+// `main` LAST, so a stale "current fn is main" would be set when the methods are emitted.
+fn main() -> i64 {
+    let g: Gate = Gate::init(10);
+    let p: Pair = Pair { a: 7, b: 30 };
+    let c1: i64 = g.clamp(50);        // 10 (early return)
+    let c2: i64 = g.clamp(4);         // 4
+    let c3: i64 = g.first_over(3);    // 4  (return from inside the loop)
+    let c4: i64 = g.probe(0);         // -1 (early return)
+    let c5: i64 = g.probe(5);         // 15
+    let c6: i64 = p.probe(0 - 1);     // 7  (early return, struct target)
+    let c7: i64 = p.probe(2);         // 32
+    let c8: i64 = run_effecting();    // 2
+    if c1 == 10 && c2 == 4 && c3 == 4 && c4 == 0 - 1 && c5 == 15 && c6 == 7 && c7 == 32
+        && c8 == 2 {
+        42
+    } else {
+        0
+    }
+}

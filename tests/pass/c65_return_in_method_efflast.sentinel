@@ -1,0 +1,114 @@
+// tests/pass/c65_return_in_method_efflast.sentinel — `return` inside METHOD bodies when the
+// last free fn in the file is EFFECTING (register D60), self-contained.
+//
+// The companion `c65_return_in_method` puts `main` last. This file pins the other stale
+// source. scg walks every non-generic free fn, in source order, before any class or impl, so
+// a method used to inherit the effecting flag of the source-LAST free fn and end its `return`
+// with the `Kont*` epilogue — `ret ptr` inside an `i64` method, which `llvm-as` rejects.
+// inkwell compiles the plain fns, then generic instances, then classes, so with no generic fn
+// its methods took the ABI of that same fn, and `snc build` of this file panicked lowering a
+// method's `return`. There
+// is deliberately NO generic fn here: an instance compiled between the free fns and the class
+// would hide inkwell's half.
+//
+// The methods also return `?i64`, `[i64]` and a struct, so the value ABI is exercised beyond
+// a plain integer.
+//
+// Exit 42 = every check held.
+
+effect Io {
+    read() -> i64;
+}
+
+trait Probe {
+    fn probe(self: &Self, n: i64) -> i64;
+}
+
+struct Pair {
+    a: i64,
+    b: i64,
+}
+
+class Gate {
+    let limit: i64;
+    pub init(l: i64) {
+        self.limit = l;
+        0
+    }
+    // An early `return` of a plain integer.
+    pub fn clamp(self: &Self, n: i64) -> i64 {
+        if n > self.limit {
+            return self.limit
+        } else {
+            n
+        }
+    }
+    // An early `return null` from a `?i64` method.
+    pub fn maybe(self: &Self, n: i64) -> ?i64 {
+        if n < 0 {
+            return null
+        } else {
+            n + self.limit
+        }
+    }
+    // An early `return` of a slice.
+    pub fn both(self: &Self, n: i64) -> [i64] {
+        if n == 0 {
+            return [self.limit, 0]
+        } else {
+            [n, self.limit]
+        }
+    }
+    // An early `return` of a struct.
+    pub fn pair(self: &Self, n: i64) -> Pair {
+        if n > 100 {
+            return Pair { a: self.limit, b: 0 }
+        } else {
+            Pair { a: n, b: self.limit }
+        }
+    }
+}
+
+// An impl method on the class.
+impl as Probe for Gate {
+    fn probe(self: &Self, n: i64) -> i64 {
+        if n == 0 {
+            return 0 - 1
+        } else {
+            n + self.limit
+        }
+    }
+}
+
+fn run_effecting() -> i64 {
+    handle effecting() with {
+        Io.read(k) => k(2)
+    }
+}
+
+fn main() -> i64 {
+    let g: Gate = Gate::init(10);
+    let c1: i64 = g.clamp(50);                    // 10 (early return)
+    let c2: i64 = g.clamp(4);                     // 4
+    let c3: i64 = unwrap_or(g.maybe(0 - 1), 99);  // 99 (early `return null`)
+    let c4: i64 = unwrap_or(g.maybe(5), 99);      // 15
+    let s1: [i64] = g.both(0);                    // [10, 0] (early return)
+    let s2: [i64] = g.both(3);                    // [3, 10]
+    let q1: Pair = g.pair(500);                   // {10, 0} (early return)
+    let q2: Pair = g.pair(7);                     // {7, 10}
+    let c5: i64 = g.probe(0);                     // -1 (early return)
+    let c6: i64 = g.probe(5);                     // 15
+    let c7: i64 = run_effecting();                // 2
+    if c1 == 10 && c2 == 4 && c3 == 99 && c4 == 15 && s1[0] + s1[1] == 10
+        && s2[0] + s2[1] == 13 && q1.a + q1.b == 10 && q2.a + q2.b == 17 && c5 == 0 - 1
+        && c6 == 15 && c7 == 2 {
+        42
+    } else {
+        0
+    }
+}
+
+// The LAST free fn in the file is effecting — the layout this fixture exists for.
+fn effecting() -> i64 ! { Io } {
+    perform Io.read()
+}

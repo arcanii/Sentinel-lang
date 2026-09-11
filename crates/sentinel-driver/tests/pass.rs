@@ -1719,6 +1719,77 @@ fn pass_c65_return_match() {
 }
 
 #[test]
+fn pass_c65_return_divergent_then() {
+    // Register D59: an `if` whose THEN arm diverges takes its result type from the ELSE
+    // arm. All three back ends sized the result slot from the divergent then-block — the
+    // enclosing fn's return type — so `slice_or_bail(false)` put a 16-byte slice into an
+    // 8-byte slot and, on `snc build`, died with 0xC0000374. This exit code is a real
+    // check: the pre-fix shipping binary does not reach it. Exit 42.
+    assert_eq!(run_exit("c65_return_divergent_then.sentinel"), 42);
+}
+
+#[test]
+fn pass_c65_return_in_method() {
+    // Register D60: `return` inside a class method, a class-target impl method and a
+    // struct-target impl method. The text oracle panicked on all of them and inkwell gave
+    // the method the ABI of the last-compiled fn, here `main` (the verifier rejected its
+    // `ret i32`). scg's stale source needs an effecting fn LAST: the next test. Exit 42.
+    assert_eq!(run_exit("c65_return_in_method.sentinel"), 42);
+}
+
+#[test]
+fn pass_c65_return_in_method_efflast() {
+    // Register D60, the other layout: the source-last free fn is EFFECTING and there is no
+    // generic fn, so pre-fix scg and pre-fix inkwell both gave a method's `return` the
+    // `Kont*` epilogue. The methods also return `?i64`, `[i64]` and a struct. The pre-fix
+    // shipping compiler panics building it. Exit 42.
+    assert_eq!(run_exit("c65_return_in_method_efflast.sentinel"), 42);
+}
+
+#[test]
+fn pass_c65_return_in_resumer() {
+    // Register D60's sibling: `return` inside an effect RESUMER, in all three resumer shapes
+    // (single let, embedded perform, chained lets). No resumer compiler set the current-fn
+    // id, so the `return` took the previous fn's plain ABI (`ret i64 5` in a `ptr` fn, which
+    // the verifier rejects); `let_shape` is also a D59 shape, on which the pre-fix build
+    // panicked first. Exit 42.
+    assert_eq!(run_exit("c65_return_in_resumer.sentinel"), 42);
+}
+
+#[test]
+fn pass_c65_return_stmt_divergent() {
+    // Register D59: `if` arms that diverge by a STATEMENT (`{ return 1; true }`), typed by
+    // their dead tail. The pre-fix shipping binary dies with 0xC0000374 on it, so this exit
+    // code pins inkwell; the differentials pin scg, whose first D59 cut chose the join by
+    // comparing types and got these wrong. Exit 42.
+    assert_eq!(run_exit("c65_return_stmt_divergent.sentinel"), 42);
+}
+
+#[test]
+fn pass_c65_match_join() {
+    // Registers D59 / D66: a `match` typed by its first NON-divergent arm, its slot sized from
+    // that type when nothing is expected of it, and each arm stored at its own type. The
+    // shipping back end ran it correctly before; the differentials pin scg and the oracle.
+    // Exit 42.
+    assert_eq!(run_exit("c65_match_join.sentinel"), 42);
+}
+
+#[test]
+fn pass_c65_return_gaps() {
+    // Registers D59 / D60 / D66: the shapes no other pass fixture pins — a match all of whose
+    // arms diverge (and its slot under an expectation), a `let` or an assignment whose value
+    // is a `return`, a nested block's statement-divergence that must not leak (walked first,
+    // walked last, and in a loop), dead code after a `return;`, nested matches in either
+    // order around a divergent or a live arm, a secret join through a `let`-divergent arm,
+    // D66's reproducer, and a `return` in a struct-target impl method with an effecting fn
+    // last and no class. Between them they make scg differ from the oracle when any reset or
+    // restore in its divergence bookkeeping is deleted. The differentials and the `llvm-as`
+    // gate pin scg and the oracle; the pre-fix shipping compiler fails LLVM verification on
+    // it. Exit 42.
+    assert_eq!(run_exit("c65_return_gaps.sentinel"), 42);
+}
+
+#[test]
 fn pass_c65_return_aggregate_shapes() {
     // Register D10 c65_return_aggregate_shapes: `return` in functions whose return type
     // is NOT a plain integer — `?i64`, `[i64]`, a struct, and `&i64`. The divergence

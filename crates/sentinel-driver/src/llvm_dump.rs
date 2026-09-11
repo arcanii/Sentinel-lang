@@ -1965,9 +1965,23 @@ impl Emit<'_> {
                 let val = self.lower_expr(inner)?;
                 // Floor 0: drain ALL open scope frames (params + body + any nested).
                 self.emit_loop_exit_drops(0)?;
-                let sig = self.program.signature(self.current_fn);
-                let is_main = sig.is_main;
-                let is_eff = uses_kont_abi(sig, self.program);
+                // Register D60: a METHOD body has no `FnId` — `current_fn` is a
+                // `FnId(u32::MAX)` placeholder there, and looking it up indexed the
+                // signature table at 4294967295 and panicked. A method's `return` is always
+                // the plain value ABI, the one every method is emitted with: a method is never
+                // `main`, and no method has the `Kont*` ABI — not even one with an effect row,
+                // whose `perform` is miscompiled with or without a `return` (register D13, open).
+                // For a FREE fn
+                // the predicate is unchanged, and it is deliberately not the function
+                // epilogue's, which adds `!produces_kont(tail)`: a `return` never has a
+                // `Kont*` in hand, so collapsing the two would stop wrapping `return 1` in
+                // an effecting fn.
+                let (is_main, is_eff) = if self.current_method.is_some() {
+                    (false, false)
+                } else {
+                    let sig = self.program.signature(self.current_fn);
+                    (sig.is_main, uses_kont_abi(sig, self.program))
+                };
                 if is_main {
                     let t = self.fresh();
                     writeln!(self.body, "  %v{t} = trunc i64 {val} to i32").unwrap();
@@ -1997,16 +2011,14 @@ impl Emit<'_> {
                 // whole module was then unassemblable, and scg reproduced it
                 // byte-for-byte, so the differential stayed green over invalid IR.
                 // `zeroinitializer` is the one spelling valid for EVERY type, which is
-                // what this site needs, because the consumer's type is not knowable here
-                // and is not always this node's type either. Measured example of the
-                // latter: in `fn f(b: bool) -> i64 { let x: ?i64 = if b { null } else
-                // { return 5 }; unwrap_or(x, 1) }` this node's type is the fn's `i64`,
-                // while the consumer — the if-merge slot, typed from the NON-divergent
-                // then-arm — is `{ i1, i64 }`, so the operand is printed as
-                // `store { i1, i64 } <placeholder>`. (Swap the arms and the divergent
-                // one is the THEN arm, which is a DIFFERENT and still-open defect: the
-                // merge slot is then typed from the divergence. That one is not fixed
-                // here and this spelling does not paper over it.)
+                // what this site needs, because the consumer's type is not knowable here.
+                // It was not always this node's type: before register D59 the if-merge slot
+                // was typed from the THEN arm and stored both arms at that type, so an
+                // else-arm `return` in `let x: ?i64 = if b { null } else { return 5 }` was
+                // printed as `store { i1, i64 } <placeholder>`. D59 sizes the slot from the
+                // `if` and stores each arm at its own type, and the D59/D60 reviews could
+                // construct no remaining consumer of another type; the spelling stays valid
+                // wherever one prints it.
                 //
                 // inkwell instead emits a typed `const_zero()` of `expr.ty` — the same
                 // type THIS arm has, not the consumer's; it gets away with it because it
@@ -2241,9 +2253,18 @@ impl Emit<'_> {
             TypedExprKind::Block(b) => self.lower_block_expr(b),
             // `if c { t } else { e }` — the no-phi memory-cell merge: a hoisted
             // result slot, a conditional branch, each arm storing its value into
-            // the slot, and a load at the merge. The result type is the (precomputed)
-            // then-branch type; the slot is reserved AFTER the then walk so the
-            // Sentinel side (which learns the type only then) numbers it identically.
+            // the slot, and a load at the merge. The slot is reserved AFTER the then
+            // walk so the Sentinel side numbers it identically.
+            //
+            // Register D59: the slot has the IF's type (`expr.ty`, the join the type
+            // checker puts on the node), NOT the then block's. They differ exactly when
+            // the then arm diverges: a `return`-tailed block keeps the `return`'s type,
+            // which is the enclosing fn's return type. Sizing the slot from it put a
+            // 16-byte slice into an 8-byte slot in `let s: [i64] = if b { return 5 }
+            // else { [40, 2] }` — invalid IR here, and on the shipping back end a stack
+            // overflow into the neighbouring locals. Each arm still STORES at its own
+            // type, so a divergent arm leaves a dead store in its unreachable block, which
+            // scg reproduces byte for byte; inkwell, bound by no byte parity, skips it.
             TypedExprKind::If { cond, then_branch, else_branch } => {
                 let c = self.lower_expr(cond)?;
                 let then_b = self.fresh_block();
@@ -2252,13 +2273,15 @@ impl Emit<'_> {
                 writeln!(self.body, "  br i1 {c}, label %bb{then_b}, label %bb{else_b}").unwrap();
                 writeln!(self.body, "bb{then_b}:").unwrap();
                 let tv = self.lower_block_expr(then_branch)?;
-                let rty = self.lty(then_branch.ty)?;
+                let rty = self.lty(expr.ty)?;
                 let slot = self.alloca(&rty);
-                writeln!(self.body, "  store {rty} {tv}, ptr %v{slot}").unwrap();
+                let tty = self.lty(then_branch.ty)?;
+                writeln!(self.body, "  store {tty} {tv}, ptr %v{slot}").unwrap();
                 writeln!(self.body, "  br label %bb{merge_b}").unwrap();
                 writeln!(self.body, "bb{else_b}:").unwrap();
                 let ev = self.lower_block_expr(else_branch)?;
-                writeln!(self.body, "  store {rty} {ev}, ptr %v{slot}").unwrap();
+                let ety = self.lty(else_branch.ty)?;
+                writeln!(self.body, "  store {ety} {ev}, ptr %v{slot}").unwrap();
                 writeln!(self.body, "  br label %bb{merge_b}").unwrap();
                 writeln!(self.body, "bb{merge_b}:").unwrap();
                 let d = self.fresh();
@@ -2676,7 +2699,12 @@ impl Emit<'_> {
                     writeln!(self.body, "bb{arm_b}:").unwrap();
                     self.bind_pattern_payloads(payload, enum_id, *variant_index, bindings)?;
                     let v = self.lower_expr(&arm.body)?;
-                    writeln!(self.body, "  store {rty} {v}, ptr %v{result}").unwrap();
+                    // Register D66: each arm stores at its OWN type, as D59 has the `if` arms
+                    // do. A live arm's type is the match's; a divergent one stores, in its dead
+                    // block, whatever it hands back, and `store {rty}` of a register of another
+                    // type was invalid IR.
+                    let aty = self.lty(arm.body.ty)?;
+                    writeln!(self.body, "  store {aty} {v}, ptr %v{result}").unwrap();
                     writeln!(self.body, "  br label %bb{merge_b}").unwrap();
                     writeln!(self.body, "bb{next_b}:").unwrap();
                 }
@@ -2686,7 +2714,9 @@ impl Emit<'_> {
         // The final else (the last `next_b` block): the wildcard body, or `unreachable`.
         if let Some(arm) = wildcard {
             let v = self.lower_expr(&arm.body)?;
-            writeln!(self.body, "  store {rty} {v}, ptr %v{result}").unwrap();
+            // Register D66: at the arm's own type, as above.
+            let aty = self.lty(arm.body.ty)?;
+            writeln!(self.body, "  store {aty} {v}, ptr %v{result}").unwrap();
             writeln!(self.body, "  br label %bb{merge_b}").unwrap();
         } else {
             writeln!(self.body, "  unreachable").unwrap();

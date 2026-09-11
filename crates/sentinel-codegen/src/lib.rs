@@ -157,6 +157,17 @@ pub enum CodegenError {
         help("an effecting fn returns a continuation, so only the shapes ADR 0072 enumerates can be lowered; reshape the body, or wait for the wider seam that ADR 0072 defers")
     )]
     EffectingFnBodyNotDirect { fn_name: String, reason: String },
+
+    /// ADR 0072 A1: the runtime hands an operation's handler ONE `i64`, and `perform`
+    /// lowering evaluated only the first argument, so a second argument's calls, prints and
+    /// traps never ran and a handler that read it panicked the compiler. Refused until ADR
+    /// 0020 D8's per-operation argument struct exists.
+    #[error("effect `{effect}`'s operation `{op}` takes {arity} parameters, and `snc build` can pass an operation only one")]
+    #[diagnostic(
+        code(sentinel::codegen::operation_arity_not_supported),
+        help("declare the operation with at most one parameter; the runtime passes a handler a single `i64` until ADR 0020 D8's per-operation argument struct lands")
+    )]
+    OperationArityNotSupported { effect: String, op: String, arity: usize },
 }
 
 /// Lower an [`HirProgram`] to a native object file at `output`.
@@ -230,6 +241,35 @@ pub fn compile_to_object_for_module(
 ) -> Result<(), CodegenError> {
     let program = hir.program();
     let drop_plan = hir.drop_plan();
+
+    // ADR 0072 A1 refusals that must come before ANY fn is lowered.
+    // Register D70: a generic effecting fn's instances would be declared with the plain return
+    // type, where none of ADR 0072's shapes applies — a `perform`'s `Kont*` came back as the
+    // fn's value — and a let-bound caller compiled before the instance panicked, so refusing
+    // at the instance was too late.
+    if let Some(g) = program
+        .fns
+        .iter()
+        .find(|f| !f.type_params.is_empty() && uses_kont_abi(program.signature(f.id), program))
+    {
+        return Err(CodegenError::EffectingFnBodyNotDirect {
+            fn_name: g.name.clone(),
+            reason: "it is generic, and a generic effecting fn does not get the continuation \
+                     ABI yet"
+                .to_string(),
+        });
+    }
+    if let Some((eff, op)) = program
+        .effect_decls
+        .iter()
+        .find_map(|e| e.ops.iter().find(|o| o.params.len() > 1).map(|o| (e, o)))
+    {
+        return Err(CodegenError::OperationArityNotSupported {
+            effect: eff.name.clone(),
+            op: op.name.clone(),
+            arity: op.params.len(),
+        });
+    }
 
     let context = Context::create();
     let module = context.create_module("sentinel");
@@ -3521,6 +3561,9 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
         def: &TypedFnDef,
         program: &TypedProgram,
     ) -> Result<(), CodegenError> {
+        // An instance is declared with the PLAIN return type and ended with a plain `ret`,
+        // so an effecting one would lower wrongly; `compile_to_object_for_module` refuses
+        // every generic effecting fn before anything is lowered (register D70).
         let fn_value = *self
             .mono_fns
             .get(&(fn_id, type_args.to_vec()))
@@ -3953,6 +3996,10 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
         let saved_scope = std::mem::take(&mut self.scope_stack);
 
         self.current_fn = Some(resumer_fn);
+        // Register D60: the resumer is `fn_def`'s own continuation, so a `return` in it
+        // takes `fn_def`'s ABI (a `Kont*`). The id used to be left at whichever fn was
+        // compiled before, and `build_fn_return` read THAT fn's signature.
+        self.current_fn_id = fn_def.id;
         // Register D61: a resumer is a free-fn body, never a method's.
         self.current_method = None;
         self.scope_stack.push(ScopeFrame::default());
@@ -4163,6 +4210,10 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
         let saved_scope = std::mem::take(&mut self.scope_stack);
 
         self.current_fn = Some(resumer_fn);
+        // Register D60: the resumer is `fn_def`'s own continuation, so a `return` in it
+        // takes `fn_def`'s ABI (a `Kont*`). The id used to be left at whichever fn was
+        // compiled before, and `build_fn_return` read THAT fn's signature.
+        self.current_fn_id = fn_def.id;
         // Register D61: a resumer is a free-fn body, never a method's.
         self.current_method = None;
         self.scope_stack.push(ScopeFrame::default());
@@ -4217,9 +4268,9 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
             self.vars.insert(*cap_id, (cap_alloca, Type::I64));
         }
 
-        // Lower the substituted tail. Result is i64 by MVP
-        // restriction (only i64-returning ops are accepted, so
-        // the placeholder + surrounding context produce i64).
+        // Lower the substituted tail. Its value is an `i64` or a
+        // `secret i64`: `embedded_perform_verdict` declines any
+        // other (a cast or a widen around the perform can change it).
         let tail_val = self.lower_expr(substituted_tail, program)?.into_int_value();
 
         // Wrap in a pure-return kont.
@@ -4401,6 +4452,8 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
             let captures_in = &captures_per_resumer[level];
 
             self.current_fn = Some(resumer_fn);
+            // Register D60: see `compile_effecting_fn_with_let`.
+            self.current_fn_id = fn_def.id;
             // Register D61: a resumer is a free-fn body, never a method's.
             self.current_method = None;
             self.vars.clear();
@@ -5090,6 +5143,20 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
         val: BasicValueEnum<'ctx>,
         program: &TypedProgram,
     ) -> Result<(), CodegenError> {
+        // Register D60: a METHOD's `return` is always the plain value ABI, the one every
+        // method is emitted with — a method is never `main`, and no method has the `Kont*`
+        // ABI, not even one with an effect row (register D13, open: such a method's
+        // `perform` is miscompiled with or without a `return`). This
+        // used to read the signature of `current_fn_id`, which no method body assigns, so
+        // a method took the ABI of whichever function was compiled LAST: `ret i32 7` in an
+        // i64 method with `main` last (rejected by the LLVM verifier), a `Kont*` after an
+        // effecting fn. (An init can no longer reach here: `return` is refused in one.)
+        if self.current_method.is_some() {
+            self.builder
+                .build_return(Some(&val))
+                .map_err(|e| CodegenError::Builder(e.to_string()))?;
+            return Ok(());
+        }
         let sig = program.signature(self.current_fn_id);
         if sig.is_main {
             let i32_type = self.context.i32_type();
@@ -5532,6 +5599,7 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
         cond: &TypedExpr,
         then_branch: &TypedBlock,
         else_branch: &TypedBlock,
+        result_ty: Type,
         program: &TypedProgram,
     ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
         // ADR 0010 D9 retired at C1.3 step 5: the type checker
@@ -5545,10 +5613,14 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
         let else_bb = self.context.append_basic_block(current_fn, "else");
         let merge_bb = self.context.append_basic_block(current_fn, "ifmerge");
 
-        // Both arms produce the same type per check(); use that for
-        // the merged-result alloca. C1.4 widens this to any basic
-        // type (struct + primitives).
-        let result_ty = then_branch.ty;
+        // Register D59: the merged-result alloca has the IF's type (`result_ty`, the
+        // join the type checker puts on the node). This used to be `then_branch.ty`
+        // under a comment saying both arms have the same type — false exactly when the
+        // then arm diverges, because a `return`-tailed block keeps the `return`'s type
+        // (the fn's return type). `let s: [i64] = if b { return 5 } else { [40, 2] }`
+        // then got an 8-byte slot for a 16-byte slice; opaque pointers meant LLVM did
+        // not object, and the store overran into the neighbouring stack slots
+        // (measured: 0xC0000374, and a struct twin that returned garbage).
         let llvm_result_ty = self.llvm_basic_type(result_ty);
         // D.5 / ADR 0036 D4: hoist to the entry block inside loops.
         let result = self.binding_alloca(llvm_result_ty, "ifresult")?;
@@ -5557,20 +5629,31 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
             .build_conditional_branch(cond_i1, then_bb, else_bb)
             .map_err(|e| CodegenError::Builder(e.to_string()))?;
 
+        // Register D59: an arm whose type is not the join diverged (a live arm always has
+        // the join's type), so its value — the `return` placeholder, the dead tail of an arm
+        // that diverges by a statement, or the merge load of an inner `if` or `match` whose
+        // arms all diverged — is produced in a dead block. It is not stored: the store would
+        // be dead, and at the wrong width. The text
+        // oracle keeps that store, and scg with it byte for byte; inkwell answers to no
+        // byte-parity requirement, so it drops it.
         self.builder.position_at_end(then_bb);
         let then_val = self.lower_block(then_branch, program)?;
-        self.builder
-            .build_store(result, then_val)
-            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        if then_branch.ty == result_ty {
+            self.builder
+                .build_store(result, then_val)
+                .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        }
         self.builder
             .build_unconditional_branch(merge_bb)
             .map_err(|e| CodegenError::Builder(e.to_string()))?;
 
         self.builder.position_at_end(else_bb);
         let else_val = self.lower_block(else_branch, program)?;
-        self.builder
-            .build_store(result, else_val)
-            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        if else_branch.ty == result_ty {
+            self.builder
+                .build_store(result, else_val)
+                .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        }
         self.builder
             .build_unconditional_branch(merge_bb)
             .map_err(|e| CodegenError::Builder(e.to_string()))?;
@@ -5925,9 +6008,14 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                 self.bind_pattern_payloads(payload_ptr, enum_id, *variant_index, bindings, program)?;
             }
             let v = self.lower_expr(&arm.body, program)?;
-            self.builder
-                .build_store(result, v)
-                .map_err(|e| CodegenError::Builder(e.to_string()))?;
+            // Register D66, as `lower_if` does for D59: only an arm of the match's own type
+            // stores. The type checker makes every live arm that type, so an arm that differs
+            // diverged and its block is dead.
+            if arm.body.ty == result_ty {
+                self.builder
+                    .build_store(result, v)
+                    .map_err(|e| CodegenError::Builder(e.to_string()))?;
+            }
             self.builder
                 .build_unconditional_branch(merge_bb)
                 .map_err(|e| CodegenError::Builder(e.to_string()))?;
@@ -5937,9 +6025,12 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
         self.builder.position_at_end(default_bb);
         if let Some(arm) = wildcard_arm {
             let v = self.lower_expr(&arm.body, program)?;
-            self.builder
-                .build_store(result, v)
-                .map_err(|e| CodegenError::Builder(e.to_string()))?;
+            // Register D66: as for the variant arms above.
+            if arm.body.ty == result_ty {
+                self.builder
+                    .build_store(result, v)
+                    .map_err(|e| CodegenError::Builder(e.to_string()))?;
+            }
             self.builder
                 .build_unconditional_branch(merge_bb)
                 .map_err(|e| CodegenError::Builder(e.to_string()))?;
@@ -8411,7 +8502,7 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
             }
             TypedExprKind::Block(b) => self.lower_block(b, program),
             TypedExprKind::If { cond, then_branch, else_branch } => {
-                self.lower_if(cond, then_branch, else_branch, program)
+                self.lower_if(cond, then_branch, else_branch, expr.ty, program)
             }
             TypedExprKind::Call { id, args, type_args, .. } => {
                 // ADR 0014 D9 + ADR 0015 D4 builtins: lower inline
@@ -9199,10 +9290,11 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
     /// C3.5(a) / ADR 0020 D7: lower `perform Effect.Op(args)` to
     /// a `sentinel_perform_op(op_id, arg)` call. Returns the
     /// continuation pointer; the enclosing handle catches it.
-    /// At C3.5(a) only 0- or 1-arg ops are supported by codegen
-    /// (the runtime Kont struct's `arg: i64` field carries the
-    /// single value); multi-arg ops are flagged at type-check
-    /// already via `OperationArityMismatch` if they don't fit.
+    /// Only 0- or 1-arg ops are supported by codegen (the runtime
+    /// Kont struct's `arg: i64` field carries the single value).
+    /// The type checker accepts more; `compile_to_object_for_module`
+    /// refuses an effect with a multi-parameter op up front (ADR
+    /// 0072 A1), because this lowered only `args[0]`.
     fn lower_perform(
         &mut self,
         effect_id: EffectId,
@@ -9983,11 +10075,17 @@ fn uses_kont_abi(sig: &TypedFnSignature, program: &TypedProgram) -> bool {
 /// Perform OR Call-to-effecting-fn. False for everything else
 /// — those forms need per-eval-site frame reification.
 fn tail_produces_kont(tail: &TypedExpr, program: &TypedProgram) -> bool {
+    // ADR 0072 A1: the arguments are lowered first, as ordinary values, so one that suspends
+    // would hand back a `Kont*` as data — its effect dropped, the continuation's address
+    // passed on as the argument (or a panic or verifier failure, where no slot hid the
+    // pointer). This is conservative: a local `handle` that discharges every effect it
+    // raises counts as suspending too.
+    let args_plain = |args: &[TypedExpr]| !args.iter().any(|a| expr_suspends(a, program));
     match &tail.kind {
-        TypedExprKind::Perform { .. } => true,
-        TypedExprKind::Call { id, .. } => {
+        TypedExprKind::Perform { args, .. } => args_plain(args),
+        TypedExprKind::Call { id, args, .. } => {
             let sig = program.signature(*id);
-            uses_kont_abi(sig, program)
+            uses_kont_abi(sig, program) && args_plain(args)
         }
         // A block whose tail produces a kont is OK as long as its
         // intermediate stmts don't perform. The compile_fn
@@ -10055,11 +10153,57 @@ fn block_normalizable_to_kont(block: &TypedBlock, program: &TypedProgram) -> boo
 /// boundary is only as useful as the diagnostic that pins it, so this reconstructs the
 /// specific reason from the same predicates the gate used.
 ///
-/// Deliberately re-derived rather than threaded out of the detectors: the detectors
-/// answer a yes/no question on a hot path, and a wrong reason string here is a
-/// cosmetic bug where a wrong ANSWER there is a miscompile. Keeping them separate
-/// means this can never widen what is accepted.
+/// The let-shape reasons are re-derived rather than threaded out of that detector: it
+/// answers a yes/no question, and a wrong reason string here is a cosmetic bug where a
+/// wrong ANSWER there is a miscompile. The embedded shape's reasons are the other way
+/// round (ADR 0072 A1): `embedded_perform_verdict` decides AND explains, and this only
+/// reads its `Err`, so the reason is always the rule that declined and this still
+/// cannot widen what is accepted.
 fn unlowerable_reason(fn_def: &TypedFnDef, program: &TypedProgram) -> String {
+    // ADR 0072 A1: the let or chained shape would take this body but for a value that writes
+    // or `return`s before it suspends — they fill the continuation frame first.
+    if let_shape(fn_def, program, false).is_some()
+        || chained_lets_shape(fn_def, program, false).is_some()
+    {
+        let disturbing = fn_def.body.stmts.iter().find_map(|s| match &s.kind {
+            TypedStmtKind::Let { name, value, .. } if expr_disturbs_frame(value) => Some(name),
+            _ => None,
+        });
+        if let Some(name) = disturbing {
+            return format!(
+                "the value bound to `{name}` writes a variable or `return`s before it \
+                 suspends, and this body shape fills the continuation frame first"
+            );
+        }
+    }
+    // ADR 0072 A1: a `perform` or effecting call whose own arguments suspend, in the tail or
+    // bound by a `let` — every shape lowers those arguments as plain values.
+    fn args_suspend(e: &TypedExpr, program: &TypedProgram) -> bool {
+        match &strip_widens_for_reason(e).kind {
+            TypedExprKind::Perform { args, .. } => {
+                args.iter().any(|a| expr_suspends(a, program))
+            }
+            TypedExprKind::Call { id, args, .. } => {
+                uses_kont_abi(program.signature(*id), program)
+                    && args.iter().any(|a| expr_suspends(a, program))
+            }
+            TypedExprKind::Block(b) => args_suspend(&b.tail, program),
+            _ => false,
+        }
+    }
+    let let_values = fn_def.body.stmts.iter().filter_map(|s| match &s.kind {
+        TypedStmtKind::Let { value, .. } => Some(value),
+        _ => None,
+    });
+    if args_suspend(&fn_def.body.tail, program)
+        || let_values.into_iter().any(|v| args_suspend(v, program))
+    {
+        return "the arguments of a `perform` or of a call to an effecting fn in it suspend \
+                themselves (a `perform`, an effecting call or a `handle`), and every body \
+                shape lowers arguments as plain values; bind a suspending argument with its \
+                own `let`, or compute a locally handled one in a separate fn"
+            .to_string();
+    }
     if fn_def.body.stmts.len() == 1 {
         if let TypedStmtKind::Let { id, value, ty, .. } = &fn_def.body.stmts[0].kind {
             if tail_produces_kont(strip_widens_for_reason(value), program)
@@ -10090,6 +10234,11 @@ fn unlowerable_reason(fn_def: &TypedFnDef, program: &TypedProgram) -> String {
                 }
             }
         }
+    }
+    // Register D69: the embedded shape applied to this tail and said why it could not lower
+    // it — the same function that decided, so the reason is the rule that declined.
+    if let Err(Some(why)) = embedded_perform_verdict(fn_def, program) {
+        return why;
     }
     "a `perform` or a call to an effecting fn appears outside tail position, which \
      needs a reified frame"
@@ -10195,6 +10344,16 @@ fn detect_let_shape<'a>(
     fn_def: &'a TypedFnDef,
     program: &TypedProgram,
 ) -> Option<LetShapeInfo<'a>> {
+    let_shape(fn_def, program, true)
+}
+
+/// [`detect_let_shape`], with ADR 0072 A1's frame rule applied only when `check_frame` —
+/// `unlowerable_reason` asks with it off, to learn whether that rule alone declined.
+fn let_shape<'a>(
+    fn_def: &'a TypedFnDef,
+    program: &TypedProgram,
+    check_frame: bool,
+) -> Option<LetShapeInfo<'a>> {
     let sig = program.signature(fn_def.id);
     if !uses_kont_abi(sig, program) || sig.is_main {
         return None;
@@ -10212,6 +10371,12 @@ fn detect_let_shape<'a>(
     // which is value-level identity and so cannot change what
     // crosses the continuation.
     if !tail_produces_kont(strip_secret_widen(value), program) {
+        return None;
+    }
+    // ADR 0072 A1: the frame is filled from the captured variables BEFORE the RHS is
+    // lowered, so an RHS that writes one (in the `perform`'s argument, or in a block's
+    // statements) left the tail reading it stale, and one that `return`s leaked the frame.
+    if check_frame && expr_disturbs_frame(value) {
         return None;
     }
     // The tail must not itself suspend. `expr_suspends`, not the old
@@ -10261,6 +10426,16 @@ fn detect_chained_effecting_lets_shape<'a>(
     fn_def: &'a TypedFnDef,
     program: &TypedProgram,
 ) -> Option<ChainedLetsShapeInfo<'a>> {
+    chained_lets_shape(fn_def, program, true)
+}
+
+/// [`detect_chained_effecting_lets_shape`], with the frame rule applied only when
+/// `check_frame` (see [`let_shape`]).
+fn chained_lets_shape<'a>(
+    fn_def: &'a TypedFnDef,
+    program: &TypedProgram,
+    check_frame: bool,
+) -> Option<ChainedLetsShapeInfo<'a>> {
     let sig = program.signature(fn_def.id);
     if !uses_kont_abi(sig, program) || sig.is_main {
         return None;
@@ -10279,6 +10454,11 @@ fn detect_chained_effecting_lets_shape<'a>(
         // Call to an effecting fn — so we can push the next
         // resumer onto it, checked UNDER any `secret` widen (ADR 0072).
         if !tail_produces_kont(strip_secret_widen(value), program) {
+            return None;
+        }
+        // ADR 0072 A1: each level fills its frame before lowering the next RHS, as the let
+        // shape does, so the same rule holds at every level.
+        if check_frame && expr_disturbs_frame(value) {
             return None;
         }
         // ADR 0072: the same explicit [`fits_kont_slot`] allow-list as
@@ -10707,6 +10887,382 @@ fn find_unique_perform(expr: &TypedExpr) -> Option<&TypedExpr> {
     }
 }
 
+/// Register D69: is the unique `perform` in `expr` on its UNCONDITIONAL path — evaluated
+/// exactly once whenever `expr` is evaluated to the end, and dispatched to the fn's own
+/// handler? `Some(true)` if so; `Some(false)` if it sits in an `if` or `match` arm, the right
+/// of `&&` / `||`, a loop, a `handle` (whose arms would catch it) or a concurrency form;
+/// `None` if `expr` holds no `perform`. The embedded-perform shape runs the `perform` before
+/// the rest of the tail, so only `Some(true)` is faithful. Mirrors [`find_unique_perform`]'s
+/// traversal, and like it has no `_` arm, so a new expression kind must be placed
+/// deliberately.
+fn perform_unconditional(expr: &TypedExpr) -> Option<bool> {
+    fn seq<'a>(items: impl IntoIterator<Item = &'a TypedExpr>) -> Option<bool> {
+        items.into_iter().find_map(perform_unconditional)
+    }
+    // Whatever holds the `perform` here holds it conditionally.
+    fn guarded<'a>(items: impl IntoIterator<Item = &'a TypedExpr>) -> Option<bool> {
+        items.into_iter().any(|e| count_performs(e) > 0).then_some(false)
+    }
+    match &expr.kind {
+        TypedExprKind::Perform { .. } => Some(true),
+        TypedExprKind::IntLit(_)
+        | TypedExprKind::BoolLit(_)
+        | TypedExprKind::NullLit
+        | TypedExprKind::FloatLit(_)
+        | TypedExprKind::CharLit(_)
+        | TypedExprKind::StringLit(_)
+        | TypedExprKind::Var(_)
+        | TypedExprKind::FnRef(_) => None,
+        TypedExprKind::Unary(_, inner)
+        | TypedExprKind::WidenToNullable(inner)
+        | TypedExprKind::WidenToSecret(inner)
+        | TypedExprKind::Cast(inner)
+        | TypedExprKind::Return(inner)
+        | TypedExprKind::Declassify(inner) => perform_unconditional(inner),
+        TypedExprKind::Binary(_, l, r) | TypedExprKind::Cmp(_, l, r) => {
+            seq([l.as_ref(), r.as_ref()])
+        }
+        // The right of `&&` / `||` runs only when the left does not decide the answer.
+        TypedExprKind::Logic(_, l, r) => {
+            perform_unconditional(l).or_else(|| guarded([r.as_ref()]))
+        }
+        TypedExprKind::Block(b) => perform_unconditional_block(b),
+        TypedExprKind::If { cond, then_branch, else_branch } => perform_unconditional(cond)
+            .or_else(|| (block_performs(then_branch) > 0).then_some(false))
+            .or_else(|| (block_performs(else_branch) > 0).then_some(false)),
+        TypedExprKind::Call { args, .. }
+        | TypedExprKind::ClassInit { args, .. }
+        | TypedExprKind::QualifiedCall { args, .. }
+        | TypedExprKind::EnumConstruct { args, .. } => seq(args),
+        TypedExprKind::StructLit { fields, .. } => seq(fields),
+        TypedExprKind::FieldAccess { target, .. } => perform_unconditional(target),
+        TypedExprKind::ArrayLit { elements, .. } => seq(elements),
+        TypedExprKind::Index { target, index, .. } => seq([target.as_ref(), index.as_ref()]),
+        TypedExprKind::Handle { body, arms, return_arm, .. } => guarded(
+            std::iter::once(body.as_ref())
+                .chain(arms.iter().map(|a| &a.body))
+                .chain(return_arm.as_deref().map(|ra| &ra.body)),
+        ),
+        TypedExprKind::ResumeKont { args, .. } => guarded(args),
+        TypedExprKind::MethodCall { target, args, .. }
+        | TypedExprKind::ImplMethodCall { target, args, .. } => {
+            perform_unconditional(target).or_else(|| seq(args))
+        }
+        TypedExprKind::Scope { body, .. } => (block_performs(body) > 0).then_some(false),
+        TypedExprKind::Spawn { call, .. } => guarded([call.as_ref()]),
+        TypedExprKind::Await { task_expr, .. } => guarded([task_expr.as_ref()]),
+        TypedExprKind::Match { scrutinee, arms, .. } => perform_unconditional(scrutinee)
+            .or_else(|| guarded(arms.iter().map(|a| &a.body))),
+    }
+}
+
+fn perform_unconditional_block(b: &TypedBlock) -> Option<bool> {
+    b.stmts
+        .iter()
+        .find_map(|s| match &s.kind {
+            TypedStmtKind::Let { value, .. } => perform_unconditional(value),
+            TypedStmtKind::Assign { target, value } => {
+                perform_unconditional(target).or_else(|| perform_unconditional(value))
+            }
+            // A loop's body may run any number of times, and its condition more than once.
+            TypedStmtKind::While { cond, body } => (count_performs(cond) > 0
+                || block_performs(body) > 0)
+                .then_some(false),
+            TypedStmtKind::Break | TypedStmtKind::Continue => None,
+            TypedStmtKind::Expr(e) => perform_unconditional(e),
+        })
+        .or_else(|| perform_unconditional(&b.tail))
+}
+
+/// How many `perform`s a block holds, statements and tail.
+fn block_performs(b: &TypedBlock) -> usize {
+    b.stmts.iter().map(|s| count_performs_stmt(&s.kind)).sum::<usize>() + count_performs(&b.tail)
+}
+
+/// Register D69: can evaluating `expr` be observed? It can if it calls anything, `return`s,
+/// indexes (an out-of-bounds index aborts), divides (a zero divisor traps), dereferences
+/// (a guard's dereference can abort), borrows mutably, assigns, loops or suspends. Only an
+/// expression that can do none of those may be evaluated later than written, which is what
+/// the embedded shape does to everything before its `perform`. Total, with no `_` arm.
+fn expr_is_pure(expr: &TypedExpr) -> bool {
+    match &expr.kind {
+        TypedExprKind::IntLit(_)
+        | TypedExprKind::BoolLit(_)
+        | TypedExprKind::NullLit
+        | TypedExprKind::FloatLit(_)
+        | TypedExprKind::CharLit(_)
+        | TypedExprKind::StringLit(_)
+        | TypedExprKind::Var(_)
+        | TypedExprKind::FnRef(_) => true,
+        TypedExprKind::Unary(op, inner) => {
+            let op_pure = match op {
+                UnaryOp::Neg
+                | UnaryOp::Not
+                | UnaryOp::Ref
+                | UnaryOp::Sqrt
+                | UnaryOp::PtrOf
+                | UnaryOp::IsNull => true,
+                UnaryOp::RefMut | UnaryOp::PtrOfMut | UnaryOp::Deref => false,
+            };
+            op_pure && expr_is_pure(inner)
+        }
+        TypedExprKind::WidenToNullable(inner)
+        | TypedExprKind::WidenToSecret(inner)
+        | TypedExprKind::Cast(inner)
+        | TypedExprKind::Declassify(inner) => expr_is_pure(inner),
+        TypedExprKind::Binary(op, l, r) => {
+            let op_pure = match op {
+                BinOp::Div => false,
+                BinOp::Add
+                | BinOp::Sub
+                | BinOp::Mul
+                | BinOp::BitAnd
+                | BinOp::BitOr
+                | BinOp::BitXor
+                | BinOp::Shl
+                | BinOp::Shr => true,
+            };
+            op_pure && expr_is_pure(l) && expr_is_pure(r)
+        }
+        TypedExprKind::Cmp(_, l, r) | TypedExprKind::Logic(_, l, r) => {
+            expr_is_pure(l) && expr_is_pure(r)
+        }
+        TypedExprKind::Block(b) => block_is_pure(b),
+        TypedExprKind::If { cond, then_branch, else_branch } => {
+            expr_is_pure(cond) && block_is_pure(then_branch) && block_is_pure(else_branch)
+        }
+        TypedExprKind::EnumConstruct { args, .. } => args.iter().all(expr_is_pure),
+        TypedExprKind::StructLit { fields, .. } => fields.iter().all(expr_is_pure),
+        TypedExprKind::ArrayLit { elements, .. } => elements.iter().all(expr_is_pure),
+        TypedExprKind::FieldAccess { target, .. } => expr_is_pure(target),
+        TypedExprKind::Match { scrutinee, arms, .. } => {
+            expr_is_pure(scrutinee) && arms.iter().all(|a| expr_is_pure(&a.body))
+        }
+        TypedExprKind::Perform { .. }
+        | TypedExprKind::Return(_)
+        | TypedExprKind::Call { .. }
+        | TypedExprKind::MethodCall { .. }
+        | TypedExprKind::ImplMethodCall { .. }
+        | TypedExprKind::QualifiedCall { .. }
+        | TypedExprKind::ClassInit { .. }
+        | TypedExprKind::Index { .. }
+        | TypedExprKind::Handle { .. }
+        | TypedExprKind::ResumeKont { .. }
+        | TypedExprKind::Scope { .. }
+        | TypedExprKind::Spawn { .. }
+        | TypedExprKind::Await { .. } => false,
+    }
+}
+
+fn block_is_pure(b: &TypedBlock) -> bool {
+    b.stmts.iter().all(|s| match &s.kind {
+        TypedStmtKind::Let { value, .. } | TypedStmtKind::Expr(value) => expr_is_pure(value),
+        TypedStmtKind::Assign { .. }
+        | TypedStmtKind::While { .. }
+        | TypedStmtKind::Break
+        | TypedStmtKind::Continue => false,
+    }) && expr_is_pure(&b.tail)
+}
+
+/// Register D69: is everything `expr` evaluates BEFORE its unique `perform` pure
+/// ([`expr_is_pure`])? `Some(true)` if the `perform` is reached with only pure code before
+/// it, `Some(false)` if something impure comes first, and `None` if `expr` holds no `perform`
+/// — though for a perform-free `expr` that is impure it may also answer `Some(false)`, so a
+/// caller that meets `None` must still ask [`expr_is_pure`] of the whole of it. The embedded shape runs the `perform` first and everything before it
+/// afterwards, in the resumer, so only a pure prefix keeps the program's meaning — a
+/// `return`, a `print` or an abort before the `perform` would otherwise run after it, or
+/// never. The `perform`'s own arguments are not part of the prefix: they are evaluated
+/// where the `perform` is (see [`perform_args_fit`]). Visits operands in inkwell's order,
+/// and like the walks above has no `_` arm.
+fn pure_before_perform(expr: &TypedExpr) -> Option<bool> {
+    fn seq<'a>(items: impl IntoIterator<Item = &'a TypedExpr>) -> Option<bool> {
+        for e in items {
+            if let Some(v) = pure_before_perform(e) {
+                return Some(v);
+            }
+            if !expr_is_pure(e) {
+                return Some(false);
+            }
+        }
+        None
+    }
+    match &expr.kind {
+        TypedExprKind::Perform { .. } => Some(true),
+        TypedExprKind::IntLit(_)
+        | TypedExprKind::BoolLit(_)
+        | TypedExprKind::NullLit
+        | TypedExprKind::FloatLit(_)
+        | TypedExprKind::CharLit(_)
+        | TypedExprKind::StringLit(_)
+        | TypedExprKind::Var(_)
+        | TypedExprKind::FnRef(_) => None,
+        // The wrapper is evaluated after its operand, so only the operand can hold a prefix.
+        TypedExprKind::Unary(_, inner)
+        | TypedExprKind::WidenToNullable(inner)
+        | TypedExprKind::WidenToSecret(inner)
+        | TypedExprKind::Cast(inner)
+        | TypedExprKind::Return(inner)
+        | TypedExprKind::Declassify(inner) => pure_before_perform(inner),
+        TypedExprKind::Binary(_, l, r)
+        | TypedExprKind::Cmp(_, l, r)
+        | TypedExprKind::Logic(_, l, r) => seq([l.as_ref(), r.as_ref()]),
+        TypedExprKind::Block(b) | TypedExprKind::Scope { body: b, .. } => {
+            pure_before_perform_block(b)
+        }
+        TypedExprKind::If { cond, then_branch, else_branch } => seq([cond.as_ref()])
+            .or_else(|| pure_before_perform_block(then_branch))
+            .or_else(|| pure_before_perform_block(else_branch)),
+        TypedExprKind::Call { args, .. }
+        | TypedExprKind::ResumeKont { args, .. }
+        | TypedExprKind::ClassInit { args, .. }
+        | TypedExprKind::QualifiedCall { args, .. }
+        | TypedExprKind::EnumConstruct { args, .. } => seq(args),
+        TypedExprKind::StructLit { fields, .. } => seq(fields),
+        TypedExprKind::FieldAccess { target, .. } => pure_before_perform(target),
+        TypedExprKind::ArrayLit { elements, .. } => seq(elements),
+        TypedExprKind::Index { target, index, .. } => seq([target.as_ref(), index.as_ref()]),
+        TypedExprKind::Handle { body, arms, return_arm, .. } => seq(
+            std::iter::once(body.as_ref())
+                .chain(arms.iter().map(|a| &a.body))
+                .chain(return_arm.as_deref().map(|ra| &ra.body)),
+        ),
+        TypedExprKind::MethodCall { target, args, .. }
+        | TypedExprKind::ImplMethodCall { target, args, .. } => {
+            seq(std::iter::once(target.as_ref()).chain(args.iter()))
+        }
+        TypedExprKind::Spawn { call, .. } => pure_before_perform(call),
+        TypedExprKind::Await { task_expr, .. } => pure_before_perform(task_expr),
+        TypedExprKind::Match { scrutinee, arms, .. } => {
+            seq(std::iter::once(scrutinee.as_ref()).chain(arms.iter().map(|a| &a.body)))
+        }
+    }
+}
+
+fn pure_before_perform_block(b: &TypedBlock) -> Option<bool> {
+    for s in &b.stmts {
+        let v = match &s.kind {
+            TypedStmtKind::Let { value, .. } | TypedStmtKind::Expr(value) => {
+                pure_before_perform(value).or_else(|| (!expr_is_pure(value)).then_some(false))
+            }
+            // A `perform` in the value comes first (inkwell lowers most assignments' value
+            // before their target; a guard's `*g = v` is the exception, and a guard cannot
+            // reach here uncaptured); otherwise the assignment itself precedes the
+            // `perform`, or the `perform` is in its target — decline both.
+            TypedStmtKind::Assign { value, .. } => {
+                Some(pure_before_perform(value).unwrap_or(false))
+            }
+            // A loop before the `perform` may not terminate; one holding it is guarded.
+            TypedStmtKind::While { .. } | TypedStmtKind::Break | TypedStmtKind::Continue => {
+                Some(false)
+            }
+        };
+        if v.is_some() {
+            return v;
+        }
+    }
+    pure_before_perform(&b.tail)
+}
+
+/// Register D69 / ADR 0072 A1: can evaluating `expr` disturb a continuation frame that was
+/// filled BEFORE it? It can by writing a variable the frame copied — an assignment, or a
+/// `&mut` / `ptr_of_mut` borrow — which the rest of the body then reads stale; or by
+/// `return`ing, which abandons the frame and leaks it. The embedded, let and chained shapes each fill their frame from the captured
+/// variables before they evaluate the expression that suspends. Total, with no `_` arm.
+fn expr_disturbs_frame(expr: &TypedExpr) -> bool {
+    fn any<'a>(items: impl IntoIterator<Item = &'a TypedExpr>) -> bool {
+        items.into_iter().any(expr_disturbs_frame)
+    }
+    fn block(b: &TypedBlock) -> bool {
+        b.stmts.iter().any(|s| match &s.kind {
+            TypedStmtKind::Let { value, .. } | TypedStmtKind::Expr(value) => {
+                expr_disturbs_frame(value)
+            }
+            TypedStmtKind::Assign { .. } => true,
+            TypedStmtKind::While { cond, body } => expr_disturbs_frame(cond) || block(body),
+            TypedStmtKind::Break | TypedStmtKind::Continue => false,
+        }) || expr_disturbs_frame(&b.tail)
+    }
+    match &expr.kind {
+        TypedExprKind::IntLit(_)
+        | TypedExprKind::BoolLit(_)
+        | TypedExprKind::NullLit
+        | TypedExprKind::FloatLit(_)
+        | TypedExprKind::CharLit(_)
+        | TypedExprKind::StringLit(_)
+        | TypedExprKind::Var(_)
+        | TypedExprKind::FnRef(_) => false,
+        TypedExprKind::Return(_) => true,
+        TypedExprKind::Unary(UnaryOp::RefMut | UnaryOp::PtrOfMut, _) => true,
+        TypedExprKind::Unary(
+            UnaryOp::Neg
+            | UnaryOp::Not
+            | UnaryOp::Ref
+            | UnaryOp::Deref
+            | UnaryOp::Sqrt
+            | UnaryOp::PtrOf
+            | UnaryOp::IsNull,
+            inner,
+        )
+        | TypedExprKind::WidenToNullable(inner)
+        | TypedExprKind::WidenToSecret(inner)
+        | TypedExprKind::Cast(inner)
+        | TypedExprKind::Declassify(inner) => expr_disturbs_frame(inner),
+        TypedExprKind::Binary(_, l, r)
+        | TypedExprKind::Cmp(_, l, r)
+        | TypedExprKind::Logic(_, l, r) => expr_disturbs_frame(l) || expr_disturbs_frame(r),
+        TypedExprKind::Block(b) | TypedExprKind::Scope { body: b, .. } => block(b),
+        TypedExprKind::If { cond, then_branch, else_branch } => {
+            expr_disturbs_frame(cond) || block(then_branch) || block(else_branch)
+        }
+        // A method's receiver is a class or a struct (an impl must target one), which no
+        // frame slot can hold, so a method call reaches a captured variable only through its
+        // receiver expression or its arguments (`&mut` there is caught above).
+        TypedExprKind::MethodCall { target, args, .. }
+        | TypedExprKind::ImplMethodCall { target, args, .. } => {
+            expr_disturbs_frame(target) || any(args)
+        }
+        TypedExprKind::Perform { args, .. }
+        | TypedExprKind::Call { args, .. }
+        | TypedExprKind::ResumeKont { args, .. }
+        | TypedExprKind::ClassInit { args, .. }
+        | TypedExprKind::QualifiedCall { args, .. }
+        | TypedExprKind::EnumConstruct { args, .. } => any(args),
+        TypedExprKind::StructLit { fields, .. } => any(fields),
+        TypedExprKind::FieldAccess { target, .. } => expr_disturbs_frame(target),
+        TypedExprKind::ArrayLit { elements, .. } => any(elements),
+        TypedExprKind::Index { target, index, .. } => {
+            expr_disturbs_frame(target) || expr_disturbs_frame(index)
+        }
+        TypedExprKind::Handle { body, arms, return_arm, .. } => {
+            expr_disturbs_frame(body)
+                || any(arms.iter().map(|a| &a.body))
+                || return_arm.as_deref().is_some_and(|ra| expr_disturbs_frame(&ra.body))
+        }
+        TypedExprKind::Spawn { call, .. } => expr_disturbs_frame(call),
+        TypedExprKind::Await { task_expr, .. } => expr_disturbs_frame(task_expr),
+        TypedExprKind::Match { scrutinee, arms, .. } => {
+            expr_disturbs_frame(scrutinee) || any(arms.iter().map(|a| &a.body))
+        }
+    }
+}
+
+/// Register D69: can the parent evaluate the `perform`'s arguments where the `perform` is?
+/// Only if they do not suspend (a call to an effecting fn there would hand back a `Kont*`
+/// as a value), do not disturb the frame the parent filled first ([`expr_disturbs_frame`]),
+/// and read only the fn's params — the parent binds nothing else.
+fn perform_args_fit(perform: &TypedExpr, fn_def: &TypedFnDef, program: &TypedProgram) -> bool {
+    let TypedExprKind::Perform { args, .. } = &perform.kind else {
+        return false;
+    };
+    args.iter().all(|a| {
+        let mut reads: Vec<VarId> = Vec::new();
+        walk_collect_var_refs(a, &mut reads);
+        !expr_suspends(a, program)
+            && !expr_disturbs_frame(a)
+            && reads.iter().all(|id| fn_def.params.iter().any(|p| p.id == *id))
+    })
+}
+
 fn find_unique_perform_stmt(kind: &TypedStmtKind) -> Option<&TypedExpr> {
     match kind {
         TypedStmtKind::Let { value, .. } => find_unique_perform(value),
@@ -10850,23 +11406,17 @@ fn substitute_perform_with_var(expr: &TypedExpr, placeholder_id: VarId) -> Typed
         | TypedExprKind::ClassInit { .. }
         | TypedExprKind::ImplMethodCall { .. }
         | TypedExprKind::QualifiedCall { .. }
-        // C4.4 / ADR 0024: concurrency forms never embed a
-        // substitutable perform at C4.4 minimum (count would
-        // exceed 1) — clone them unchanged like the group above.
         | TypedExprKind::Scope { .. }
         | TypedExprKind::Spawn { .. }
         | TypedExprKind::Await { .. }
-        // Phase D.1 / ADR 0032 (3/N): an enum construction / `match`
-        // never embeds a single substitutable perform at the MVP
-        // (count would exceed 1); clone unchanged like the group.
         | TypedExprKind::EnumConstruct { .. }
         | TypedExprKind::Match { .. } => {
-            // C3.5(d) MVP: the embedded-perform shape only fires
-            // when count_performs(tail) == 1. Substituting a
-            // Handle / ResumeKont / MethodCall / ClassInit
-            // preserves them as is — they don't have a perform
-            // inside (the count would exceed 1). Conservative:
-            // clone the kind unchanged.
+            // Cloned unchanged: this substitution does not rebuild
+            // these kinds, so a `perform` under one of them stays
+            // in the result. `embedded_perform_verdict` checks the
+            // result and declines any tail whose replay still
+            // suspends (register D69, ADR 0072 A1), so no such
+            // clone reaches a resumer.
             return TypedExpr {
                 kind: clone_expr_kind(&expr.kind),
                 span: expr.span.clone(),
@@ -10930,24 +11480,25 @@ fn substitute_block(b: &TypedBlock, placeholder_id: VarId) -> TypedBlock {
     }
 }
 
-/// Conservative clone of an expression kind that doesn't need
-/// substitution because it contains no Perform.
+/// Clone an expression kind unchanged, for the kinds
+/// `substitute_perform_with_var` does not rebuild. A `perform`
+/// under one survives the clone; `embedded_perform_verdict`
+/// declines any tail whose replay still suspends.
 fn clone_expr_kind(kind: &TypedExprKind) -> TypedExprKind {
     kind.clone()
 }
 
-/// C3.5(d) / ADR 0020 D7: detect the unified "single embedded
-/// perform" body shape — `stmts.len() == 0` and the tail contains
-/// exactly one Perform anywhere in its tree. Covers binops,
-/// struct-lit fields, field-access targets, index ops, etc. (any
-/// pure surrounding context with a single perform "hole"). The
-/// resumer fn substitutes the perform with a placeholder Var and
-/// lowers the resulting expression.
+/// C3.5(d) / ADR 0020 D7: detect the "single embedded perform"
+/// body shape — `stmts.len() == 0` and the tail contains exactly
+/// one Perform, which the parent runs first and the resumer fn
+/// replaces with a placeholder Var before lowering the rest.
+/// ADR 0072 A1 (register D69) narrows it to the tails that
+/// replay faithfully — see [`embedded_perform_verdict`].
 ///
-/// Excludes shapes already handled at C3.5(a)/(b): a tail that
-/// IS a direct Perform (the trivial perform-at-tail case) and a
-/// tail that's a direct Call to an effecting fn. Both produce a
-/// Kont* directly without needing frame reification.
+/// Excludes shapes already handled at C3.5(a)/(b): a direct
+/// Perform, a direct Call to an effecting fn, or a block ending in
+/// one ([`tail_produces_kont`]). They produce a Kont* in order,
+/// without frame reification.
 ///
 /// MVP-restricted to i64-returning ops (the placeholder's type
 /// is i64). Non-i64 ops + nested performs land at a follow-on
@@ -10962,30 +11513,82 @@ fn detect_embedded_perform_shape(
     fn_def: &TypedFnDef,
     program: &TypedProgram,
 ) -> Option<EmbeddedPerformInfo> {
+    embedded_perform_verdict(fn_def, program).ok()
+}
+
+/// Register D69 / ADR 0072 A1: the embedded-perform shape's verdict on `fn_def`. `Ok` with
+/// what the resumer needs; `Err(None)` when the shape does not apply at all; `Err(Some(why))`
+/// when it applies but cannot lower the tail faithfully. One function decides and explains,
+/// so the refusal ([`unlowerable_reason`]) can never name a rule that did not decide.
+///
+/// The shape runs the tail's one `perform` FIRST, in the parent, and replays the rest of the
+/// tail in a resumer. That keeps the program's meaning only if every evaluation of the tail
+/// reaches the `perform` once and sends it to the fn's own handler, nothing before it can be
+/// observed, the parent can evaluate its arguments, the replay suspends nowhere else, and
+/// every name the replay reads fits a continuation slot. Most failures below were a silent
+/// wrong result, a garbage value or a panic before they were checked; the rules are also
+/// conservative, and refuse a few bodies that happened to lower correctly.
+fn embedded_perform_verdict(
+    fn_def: &TypedFnDef,
+    program: &TypedProgram,
+) -> Result<EmbeddedPerformInfo, Option<String>> {
     let sig = program.signature(fn_def.id);
-    if !uses_kont_abi(sig, program) || sig.is_main {
-        return None;
-    }
-    if !fn_def.body.stmts.is_empty() {
-        return None;
+    if !uses_kont_abi(sig, program) || sig.is_main || !fn_def.body.stmts.is_empty() {
+        return Err(None);
     }
     let tail = &fn_def.body.tail;
-    // Skip shapes already covered by C3.5(a)/(b).
-    if matches!(tail.kind, TypedExprKind::Perform { .. }) {
-        return None;
+    // A direct `perform`, a call to an effecting fn, or a block ending in one after
+    // statements that do not suspend: C3.5(a)/(b) lower those in order.
+    if tail_produces_kont(tail, program) || count_performs(tail) != 1 {
+        return Err(None);
     }
-    if let TypedExprKind::Call { id, .. } = &tail.kind {
-        if uses_kont_abi(program.signature(*id), program) {
-            return None;
-        }
-    }
-    // Must have exactly one perform somewhere in the tail.
-    if count_performs(tail) != 1 {
-        return None;
-    }
-    let perform = find_unique_perform(tail)?;
+    let Some(perform) = find_unique_perform(tail) else {
+        return Err(None);
+    };
     if perform.ty != Type::I64 {
-        return None;
+        return Err(Some(format!(
+            "the `perform` in its tail answers `{}`, and this body shape can only resume an \
+             `i64` `perform`",
+            type_display(perform.ty, Some(program))
+        )));
+    }
+    // Hoisted out of an `if` or `match` arm, the right of `||`, or a loop, the `perform` ran
+    // on paths that never reach it; out of a local `handle`, it went to the outer handler.
+    if perform_unconditional(tail) != Some(true) {
+        return Err(Some(
+            "the `perform` in its tail is guarded (in an `if` or `match` arm, the right of \
+             `&&` or `||`, a loop, a `handle` or a concurrency form), and this body shape can \
+             only run its one `perform` first, on every path"
+                .to_string(),
+        ));
+    }
+    // Anything before the `perform` runs after it, in the resumer: a `return` evaluated first
+    // ran after the `perform` had already reached the handler, and a `print` or an abort
+    // before it ran after the handler, or never.
+    if pure_before_perform(tail) != Some(true) {
+        return Err(Some(
+            "something its tail evaluates before the `perform` — a call, a `return`, an index, \
+             a division, a dereference, a `&mut` borrow, an assignment, a loop, a `handle` or \
+             a concurrency form — may be observable, and this body shape runs the `perform` \
+             first"
+                .to_string(),
+        ));
+    }
+    if !perform_args_fit(perform, fn_def, program) {
+        return Err(Some(
+            "the `perform`'s arguments call an effecting fn, write a variable, `return`, or \
+             read a name bound inside the tail, and this body shape evaluates them after \
+             filling the continuation frame and before the rest of the tail"
+                .to_string(),
+        ));
+    }
+    // The resumer hands the replay's value to `sentinel_kont_pure`, one `i64` slot — ADR
+    // 0072 D4's other seam. Anything else panicked the compiler or failed verification.
+    if !fits_kont_slot(tail.ty, program) {
+        return Err(Some(format!(
+            "its tail answers `{}`, and this body shape hands the continuation an `i64`",
+            type_display(tail.ty, Some(program))
+        )));
     }
     // Placeholder VarId is synthetic — codegen binds it in the
     // resumer's env and consumes it in the substituted tail. A
@@ -10993,13 +11596,44 @@ fn detect_embedded_perform_shape(
     // VarIds (which start at 0 and grow with binding count).
     let placeholder_id = VarId(u32::MAX);
     let substituted_tail = substitute_perform_with_var(tail, placeholder_id);
+    // The resumer lowers the replay as plain code, so nothing in it may suspend: a call to an
+    // effecting fn there dropped its effect (or panicked), and a `perform` left under a kind
+    // `substitute_perform_with_var` clones unchanged (a `match`, a method call, a class init,
+    // an enum construction) was never rebuilt around. Check the result, not the list.
+    if expr_suspends(&substituted_tail, program) {
+        return Err(Some(
+            "its tail has a second suspension point — a call to an effecting fn, a local \
+             `handle`, or its `perform` inside a `match`, a method call, a class init or an \
+             enum construction — and this body shape can resume only one"
+                .to_string(),
+        ));
+    }
     // Captured vars = vars referenced in the substituted tail,
     // excluding the placeholder.
     let mut captured: Vec<VarId> = Vec::new();
     walk_collect_var_refs(&substituted_tail, &mut captured);
     let captured: Vec<VarId> =
         captured.into_iter().filter(|id| *id != placeholder_id).collect();
-    Some(EmbeddedPerformInfo {
+    // ADR 0072 D4, which the let and chained shapes already apply: the parent copies each
+    // capture with an 8-byte load, so only an `i64` or `secret i64` param fits, and a name
+    // bound inside the tail is not bound in the parent at all.
+    if !captures_fit_kont_slots(fn_def, &captured, &[], program) {
+        let unfit = captured.iter().find_map(|cid| {
+            fn_def.params.iter().find(|p| p.id == *cid && !fits_kont_slot(p.ty, program))
+        });
+        return Err(Some(match unfit {
+            Some(p) => format!(
+                "`{}` is captured across the continuation, so it must be `i64` or `secret \
+                 i64`, and it is `{}`",
+                p.name,
+                type_display(p.ty, Some(program))
+            ),
+            None => "its tail binds a name (a block `let` or a `match` pattern), and this body \
+                     shape takes every name the rest of the tail reads from the fn's params"
+                .to_string(),
+        }));
+    }
+    Ok(EmbeddedPerformInfo {
         captured,
         substituted_tail,
         placeholder_id,

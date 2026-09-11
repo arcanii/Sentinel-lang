@@ -9,11 +9,13 @@
 //   - from the handle BODY before any `perform` (a pure guard): a plain early return, no
 //     continuation allocated yet.
 //
-// snc-only demonstrator (the kont-teardown lands in the runtime + the inkwell back end; the
-// text-IR oracle does not yet emit the D6 `kont_free`, and the selfhost MIR collapses a
-// `handle` to opaques where the inkwell path lowers the arm's `return` — both deferred
-// faithfulness items, invisible to the exit code. So this stays OUT of the differential, the
-// early_return / u128 / f64 pattern). Constant-time unchanged. Exit 42 = every check held.
+// The kont-teardown lands in the runtime and the inkwell back end only. The text-IR oracle
+// does not yet emit the D6 `kont_free` and neither does scg, so the codegen real-program
+// differential, which compares this file and where scg matches the oracle, does not check it
+// (a deferred faithfulness item, invisible to the exit code). Of the other stages only lex and
+// parse compare this file: `snc resolve` through `snc ctverify` do not wire `use` imports yet,
+// and `snc merge` refuses `return`, so it has no merged form. Constant-time unchanged. Exit
+// 42 = every check held.
 use std::test::check;
 
 effect Io {

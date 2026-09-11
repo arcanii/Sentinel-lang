@@ -126,8 +126,8 @@ fn dump_tpat(out: &mut Vec<u8>, p: Pattern, c: &mut TyCtx, gb: &mut Vec<u8>) -> 
 
 // (4e) match arms: snapshot the scope, dump the pattern (binding its payloads),
 // type the body (threading the match's expectation `exp`), then TRUNCATE the scope
-// back (the payloads are arm-local; VarIds stay monotonic). The match's type is the
-// FIRST arm's body type (every arm shares it on clean fixtures).
+// back (the payloads are arm-local; VarIds stay monotonic). Returns the FIRST arm's body
+// type; the match's own type is its first NON-divergent arm's (`smlive`, register D59).
 fn dump_tarms(out: &mut Vec<u8>, a: Arms, exp: i64, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
     match a {
         Arms::ArmEnd => 0 - 1,
@@ -150,6 +150,35 @@ fn dump_tarms(out: &mut Vec<u8>, a: Arms, exp: i64, src: &[u8], c: &mut TyCtx, g
             };
             push(out, ' ');
             let bt: i64 = dump_texpr(out, abody, exp, src, c, gb);
+            // (registers D59 / D66) as the oracle does, a divergent arm stores, in its dead block,
+            // the value it hands back at that value's own type, and a live arm stores at the
+            // match's type (the slot's, settled after the last arm): the first live arm fixes it
+            // (`smlive`, set just below) and every later live arm uses it. This is defence in
+            // depth: while scg types every arm as the oracle does, a later live arm's `bt` IS
+            // that type already, so no fixture can pin it. If scg ever mistypes a live arm, the
+            // mismatch is an IR type error, which is loud, rather than a store that overruns
+            // the slot or leaves part of it unwritten.
+            let cg_sty: i64 = if (*c).sdiv {
+                bt
+            } else if (*c).smlive != 0 - 1 {
+                (*c).smlive
+            } else {
+                bt
+            };
+            // (register D59) an arm that does not diverge makes the match not diverge, and the
+            // first such arm gives the match its type.
+            if (*c).sdiv {
+                0
+            } else {
+                (*c).sdiva = false;
+                if (*c).smlive == 0 - 1 {
+                    (*c).smlive = bt;
+                    0
+                } else {
+                    0
+                };
+                0
+            };
             // (8e-2) cg: store the arm body's value to the result slot, branch to merge,
             // open the next-check block (a variant arm only — `cg_arm_next >= 0`).
             let cg_bk: i64 = if cg_on(c) {
@@ -167,7 +196,7 @@ fn dump_tarms(out: &mut Vec<u8>, a: Arms, exp: i64, src: &[u8], c: &mut TyCtx, g
             if cg_on(c) {
                 if cg_arm_next >= 0 {
                     cgo_str(c, "  store ");
-                    cgo_ty(c, exp);
+                    cgo_ty(c, cg_sty);
                     cg_putc(c, ' ');
                     cgo_operand(c, cg_bk, cg_bv);
                     cgo_str(c, ", ptr %v");
@@ -186,7 +215,7 @@ fn dump_tarms(out: &mut Vec<u8>, a: Arms, exp: i64, src: &[u8], c: &mut TyCtx, g
                     // epilogue to skip `unreachable` (matches the oracle's `lower_match`,
                     // which emits the wildcard body as the last block).
                     cgo_str(c, "  store ");
-                    cgo_ty(c, exp);
+                    cgo_ty(c, cg_sty);
                     cg_putc(c, ' ');
                     cgo_operand(c, cg_bk, cg_bv);
                     cgo_str(c, ", ptr %v");
@@ -382,6 +411,19 @@ fn dump_tret(out: &mut Vec<u8>, r: Ret, bty: i64, src: &[u8], c: &mut TyCtx, gb:
     }
 }
 
+// (register D59) a statement diverges iff its value expression does — the typer's
+// `stmt_diverges`: a `let` / assignment value or an expression statement, never a `while`,
+// `break` or `continue`. Called right after that value's walk, it ORs the fact into the
+// enclosing block's `sdivs`.
+fn stmt_div(c: &mut TyCtx) -> i64 {
+    if (*c).sdiv {
+        (*c).sdivs = true;
+        0
+    } else {
+        0
+    }
+}
+
 fn dump_tstmts(out: &mut Vec<u8>, st: Stmts, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
     match st {
         Stmts::SEnd => 0,
@@ -407,6 +449,7 @@ fn dump_tstmt(out: &mut Vec<u8>, s: Stmt, src: &[u8], c: &mut TyCtx, gb: &mut Ve
             let lsvc: bool = (*c).consuming;
             (*c).consuming = true;
             let valty: i64 = dump_texpr(&mut vbuf, lval, letexp, src, c, gb);
+            stmt_div(c);
             (*c).consuming = lsvc;
             let lvid: i64 = (*c).nextvid;
             (*c).nextvid = (*c).nextvid + 1;
@@ -533,6 +576,7 @@ fn dump_tstmt(out: &mut Vec<u8>, s: Stmt, src: &[u8], c: &mut TyCtx, gb: &mut Ve
             // `store { i1, i64 } 42, ptr %v0` — an aggregate store of a bare integer,
             // which `llvm-as` rejects with "integer constant must have integer type".
             dump_texpr(out, aval, ttgt, src, c, gb);
+            stmt_div(c);
             // (7c) MIR: a plain-Var target rebinds var_defs to the RHS; a field/`*`-deref
             // store (no precise IR) funnels the value through Opaque (a store sink, typed
             // as the target).
@@ -692,6 +736,7 @@ fn dump_tstmt(out: &mut Vec<u8>, s: Stmt, src: &[u8], c: &mut TyCtx, gb: &mut Ve
             let esvc: bool = (*c).consuming;
             (*c).consuming = false;
             dump_texpr(out, sx, 0 - 1, src, c, gb);
+            stmt_div(c);
             (*c).consuming = esvc;
             push(out, ')');
             0

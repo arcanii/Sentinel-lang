@@ -1,0 +1,75 @@
+// tests/pass/c65_match_join.sentinel — a `match` whose type the context does not give
+// (register D59), self-contained.
+//
+// The type checker types a `match` by its first arm that does NOT diverge: a `return` arm
+// yields no value, so it does not constrain the join. scg typed a `match` by its FIRST arm —
+// never only a dump difference, since that type already reached scg's IR through a call
+// argument or a generic's type argument, and D59's `if` join reads an arm's type too; and it
+// sized a `match`'s own result slot from what the context expected of the `match`, which is
+// `i64` when nothing is expected. So an unannotated slice- or struct-typed `match` got an
+// `i64` slot and `i64` stores in scg's IR. And the text oracle stored every arm at the
+// match's type (register D66), so a divergent arm whose value was a register of another type
+// made invalid IR; every back end now stores each arm at its own type. The shipping back end
+// ran all of these correctly before; the differentials are what hold scg to the oracle on
+// every function below.
+//
+// Exit 42 = every check held.
+
+enum E {
+    A,
+    B(i64),
+}
+
+struct P {
+    x: i64,
+    y: i64,
+}
+
+fn mk(n: i64) -> E {
+    if n == 0 {
+        E::A
+    } else {
+        E::B(n)
+    }
+}
+
+// No annotation: the `let` takes the match's type, a slice.
+fn slice_let(n: i64) -> i64 {
+    let s = match mk(n) { E::A => [1, 2], E::B(v) => [v, 2] };
+    s[0] + s[1]
+}
+
+// The FIRST arm diverges; the match's type is the second arm's struct.
+fn first_div(n: i64) -> i64 {
+    let p = match mk(n) { E::A => return 7, E::B(v) => P { x: v, y: 2 } };
+    p.x + p.y
+}
+
+// A statement-position match whose arms are structs: its value is discarded, but still stored.
+fn stmt_match(n: i64) -> i64 {
+    match mk(n) { E::A => P { x: 0, y: 0 }, E::B(v) => P { x: v, y: v } };
+    n
+}
+
+// A first-arm-divergent match in the else arm of a divergent-then `if`: the if's type is the
+// match's, and the match's is its second arm's.
+fn in_if(b: bool, n: i64) -> i64 {
+    let x = if b { return 5 } else { match mk(n) { E::A => return 6, E::B(v) => v + 1 } };
+    x
+}
+
+fn main() -> i64 {
+    let a: i64 = slice_let(40);    // 42
+    let b: i64 = slice_let(0);     // 3
+    let c: i64 = first_div(40);    // 42
+    let d: i64 = first_div(0);     // 7 (the early return)
+    let e: i64 = stmt_match(42);   // 42
+    let f: i64 = in_if(false, 41); // 42
+    let g: i64 = in_if(true, 41);  // 5 (the early return)
+    let h: i64 = in_if(false, 0);  // 6 (the early return)
+    if a == 42 && b == 3 && c == 42 && d == 7 && e == 42 && f == 42 && g == 5 && h == 6 {
+        42
+    } else {
+        0
+    }
+}

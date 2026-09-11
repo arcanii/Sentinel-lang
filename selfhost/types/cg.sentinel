@@ -1427,7 +1427,7 @@ fn cg_alloca(c: &mut TyCtx, ty: i64) -> i64 {
 // the alloca-type pool (the hoist loop renders it as `ptr`, not via `cgo_ty`). Must be
 // distinct from `-1`: `-1` is the pre-existing, widely-used "no expectation" `exp`
 // value (e.g. `Stmt::SExpr`'s discarded expression-statements), which reaches this same
-// pool via a plain `cg_alloca(c, exp)` call (e.g. a `match` used as a statement) and
+// pool via a plain `cg_alloca` call (e.g. an unannotated `let` in the effecting emitters) and
 // must fall through to `cgo_ty`'s own `i64` fallback for unmatched handles, not collide
 // with this sentinel.
 fn cg_alloca_ptr(c: &mut TyCtx) -> i64 {
@@ -1435,6 +1435,60 @@ fn cg_alloca_ptr(c: &mut TyCtx) -> i64 {
     push(&mut (*c).cgalloca_sl, slot);
     push(&mut (*c).cgalloca_ty, 0 - 2);
     slot
+}
+
+// (register D59) reserve an alloca slot whose TYPE is not known yet: the NUMBER is taken
+// now, in reservation order, so it matches the oracle's; the type follows via
+// `cg_alloca_settle`. See `cgdefer_sl` in `types.sentinel`.
+fn cg_alloca_deferred(c: &mut TyCtx) -> i64 {
+    let slot: i64 = cg_fresh(c);
+    push(&mut (*c).cgalloca_sl, slot);
+    push(&mut (*c).cgalloca_ty, 0 - 3000000 - slot);
+    slot
+}
+
+// (register D59) supply the type of a slot reserved by `cg_alloca_deferred`.
+fn cg_alloca_settle(c: &mut TyCtx, slot: i64, ty: i64) -> i64 {
+    push(&mut (*c).cgdefer_sl, slot);
+    push(&mut (*c).cgdefer_ty, ty);
+    0
+}
+
+// Render a hoisted alloca's type: `-2` is a raw `ptr` (`cg_alloca_ptr`), `<= -3000000` a
+// deferred slot (register D59) resolved from the settle table — latest entry wins — and
+// anything else a type handle. The ONE renderer for all three `define` assemblers, which
+// each used to carry their own copy of the `-2` test; a fourth copy that forgot the new
+// case would have rendered a deferred slot through `cgo_ty` as garbage. An UNSETTLED slot
+// renders a token LLVM rejects, so a missing `cg_alloca_settle` fails loudly instead of
+// silently allocating the wrong size — the exact failure this mechanism exists to remove.
+fn cgo_alloca_ty(c: &mut TyCtx, aty: i64) -> i64 {
+    if aty == 0 - 2 {
+        cgo_str(c, "ptr")
+    } else if aty <= 0 - 3000000 {
+        let want: i64 = 0 - 3000000 - aty;
+        let mut j: i64 = len((*c).cgdefer_sl);
+        let mut hit: bool = false;
+        let mut got: i64 = 0;
+        while j > 0 {
+            j = j - 1;
+            if hit {
+                0
+            } else if (*c).cgdefer_sl[j] == want {
+                hit = true;
+                got = (*c).cgdefer_ty[j];
+                0
+            } else {
+                0
+            };
+        }
+        if hit {
+            cgo_ty(c, got)
+        } else {
+            cgo_str(c, "UNSETTLED_ALLOCA")
+        }
+    } else {
+        cgo_ty(c, aty)
+    }
 }
 
 // (8d-drops) record a scope-drop entry: (VarId, type, alloca slot). Called for each
