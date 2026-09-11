@@ -14,6 +14,44 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
+**Latest (2026-09-11) — D61: METHOD bodies are borrow-checked, closing three memory-safety
+holes that followed from their never having been. NOT PUSHED.** `borrow_check` walked
+`program.fns` and nothing else, so no class `init`, class method or impl method was ever
+checked: a double move, a move out of `self` and a use after move were accepted in a method
+while the identical free-fn body was rejected, and every back end freed memory the program
+still owned. **The shipping back end had it:** a method that moves a heap local into a
+by-value call freed it again at scope exit — 1000 calls died with 0xC0000374
+STATUS_HEAP_CORRUPTION under `snc build`. The text oracle and scg also freed a method's
+returned local before the `ret`, and an init's param after storing it into a field.
+
+The checker now walks every method and init body with `self` seeded as an INCOMING borrow;
+the `DropPlan` gains per-method sets under a new `MethodKey`; all three back ends look a
+method's drops up by it. New rejection `sentinel::borrow::move_out_of_self`: `self` is
+always a borrow (`SelfKind` is only `&Self` / `&mut Self`), so moving it, or any Move-typed
+field path rooted at it, is refused — which also closes the class-field move finding raised
+privately on 2026-09-05/06, for the shape it was reported in.
+
+⚠ **A LEAK in the same paths is filed, not fixed (D63).** inkwell's method and init paths
+pop their param frame without dropping it, so every by-value heap param of every method, and
+every heap param or local of every init, leaks — 146.6 MB for a million method calls against
+a flat 8.4 MB free-fn control, 99.0 MB for 600k inits. A drop was written and withdrawn
+before commit: the review constructed regressions it caused on the shipping back end, one of
+them through a path tracked privately, so the fix waits on a maintainer decision.
+
+**Zero** of the 363 corpus programs change borrow verdict — a bound on breakage, not on
+reach, since no corpus method or init had a heap local or param before this. The borrow-stage dump is
+unchanged (scg keys method moves as `1000000 + selfvid`, outside what `dump_moves` prints);
+the codegen differential stays byte-identical over the corpus with the new fixture in it.
+Pass `c41_method_moves_tracked` (dies with 0xC0000374 against the pre-fix binary), ui
+`c41_method_double_move` / `_move_out_of_self` / `_move_self_whole`, 8 unit tests.
+Deliberately NOT covered: MIR still lowers only `program.fns` (a documented deferral), so
+the MIR passes see no method body. Methods now inherit two known free-fn behaviours: the
+whole-body moved-set, under which a binding moved later leaks on an earlier `break` /
+`continue` (the D61 review measured 8.3 MB -> 146 MB; the same path used to free twice),
+and the lexical checker's per-binding over-rejections. **Filed D62, D63 and D64**. D62:
+a class constructed in a loop overflows the stack (0xC00000FD at 2M iterations, pre- and
+post-fix, scalar init param; cause not established). **Register: 64 items, 29 done.**
+
 **Latest (2026-09-08) — D10 is closed, and the oracle's own IR is now gated. NOT PUSHED.**
 `return` is divergent, so after the `ret` each back end parks a dead block and hands the
 enclosing expression a placeholder for the unreachable remainder. The oracle's was the bare

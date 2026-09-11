@@ -101,6 +101,11 @@ ui_snapshot!(c37_perform_outside_handle, "c37_perform_outside_handle.sentinel");
 
 // ---- C4.1 class definite-assignment rejection ----
 ui_snapshot!(c41_init_field_unassigned, "c41_init_field_unassigned.sentinel");
+// Register D61: method bodies are borrow-checked. Before D61 none of these was rejected.
+ui_snapshot!(c41_method_double_move, "c41_method_double_move.sentinel");
+ui_snapshot!(c41_method_move_out_of_self, "c41_method_move_out_of_self.sentinel");
+ui_snapshot!(c41_method_move_self_whole, "c41_method_move_self_whole.sentinel");
+ui_snapshot!(c42_impl_move_out_of_self_struct, "c42_impl_move_out_of_self_struct.sentinel");
 
 // ---- C4.2 trait / impl rejections (types + resolve) ----
 ui_snapshot!(c42_impl_missing_method, "c42_impl_missing_method.sentinel");

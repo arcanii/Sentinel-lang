@@ -124,7 +124,7 @@ reference as you work through the milestones.
 > confirming nothing pre-existing is newly refused; oracle-vs-scg byte-equality on the new
 > fixture at types, mir and llvm; and the secret-taint check in both directions.
 
-### ▶ RESUME HERE (2026-09-06 — **PUSHED**: `origin/main` and HEAD are both at `68576a2`, nothing unpushed. Four-check GREEN (1838 passed / **exactly the 18 known Windows failures**, identical failure set), all 9 differential stages and BOTH bootstrap fixed points byte-identical, tree CLEAN. Register: **60 items, 28 done**, D19 redacted.
+### ▶ RESUME HERE (2026-09-06 — **PUSHED**: `origin/main` and HEAD are both at `68576a2`, nothing unpushed. Four-check GREEN (1838 passed / **exactly the 18 known Windows failures**, identical failure set), all 9 differential stages and BOTH bootstrap fixed points byte-identical, tree CLEAN. Register: **64 items, 29 done**, D19 redacted.
 
 > **What this session did.** Closed **D4, D37, D39, D42, D43, D44, D47(option A), D51, D54,
 > D55, D56, D58** and **requests R3, R4, R8, R15**; filed **D42-D58**. Deleted **three**
@@ -171,9 +171,12 @@ reference as you work through the milestones.
 >
 > ⚠ **SECURITY-CLASS FINDINGS ARE TRACKED PRIVATELY WITH THE MAINTAINER and are
 > deliberately not described here.** D35 is blocked behind one; D19 IS another; **D59 is a
-> third.** **Two more were raised privately on 2026-09-05/06, and one on 2026-09-08.** If you find yourself in the container
-> refcount/drop path, in `clone_if_shared_var` and its twins, in **class-field move
-> tracking**, in **`std/net/ssh_cipher.sentinel`'s record-length handling**, or in the
+> third.** Two more were raised privately on 2026-09-05/06; one of them — class-field move
+> tracking — is CLOSED by **D61** (2026-09-11), together with the wider gap it was a symptom
+> of (no method body was borrow-checked at all), and both are described there. **Several more
+> were raised privately on 2026-09-11, during D61's review.** If you find yourself in the
+> container refcount/drop path, in `clone_if_shared_var` and its twins, in the partial-move
+> (ADR 0046) machinery, in **`std/net/ssh_cipher.sentinel`'s record-length handling**, or in the
 > cross-unit symbol mangling / `linkonce_odr` dedup — **ask first, and before writing
 > anything down.**
 >
@@ -225,7 +228,7 @@ reference as you work through the milestones.
 >      scalar-4 arm, which it now has. Also worth doing with it: `examples/math/quadratic.sentinel` and
 >      `sentinel_library/std/math/float.sentinel` currently reach only lex/ast, because
 >      `snc merge`'s Bar-A printer rejects both a float literal and `sqrt` (menu item 5).
->   4. **THE FILED-DEFECT REGISTER — FIFTY-EIGHT items (D1-D58); **D1, D2, D3, D4, D5, D8, D9, D15, D16, D17, D24, D25, D26, D29, D31, D34, D37, D39, D42, D43, D44, D47(option A), D51, D54, D55, D56 and D58 are DONE (27 of 58)**, the rest verified against a pre-slice binary. MOST are
+>   4. **THE FILED-DEFECT REGISTER — SIXTY-FOUR items (D1-D64); **D1, D2, D3, D4, D5, D8, D9, D10, D15, D16, D17, D24, D25, D26, D29, D31, D34, D37, D39, D42, D43, D44, D47(option A), D51, D54, D55, D56, D58 and D61 are DONE (29 of 64)**, the rest verified against a pre-slice binary. MOST are
 >      unregistered in any `DEFERRED_PROGRAMS` / `KNOWN_SCG_BUGS` list because no corpus program
 >      reaches them — but FOUR are, and the blanket "NONE" that stood here was falsified by
 >      this register's own new entries: D24/D25/D26 share the
@@ -569,6 +572,89 @@ reference as you work through the milestones.
 >      nothing catches it — and why `tests/llvm.rs`'s layer-2 comment was able to assert
 >      "never a panic (101)" as a property of `snc llvm`. It is corrected there to a
 >      claim about the corpus. D13 is the sibling in the same `dump_method`, not this.
+>
+>      **D61 — DONE (2026-09-11). ⚠ No METHOD body was ever borrow-checked.**
+>      `borrow_check` walked `program.fns` and nothing else, while class `init`s, class
+>      methods and impl methods live in `class_decls` / `impl_decls`. So inside a method a
+>      double move, a move out of `self` and a use after move were all ACCEPTED while the
+>      identical free-fn body was rejected — and every back end then looked up an EMPTY
+>      moved-set and freed memory the program still owned. Measured on the SHIPPING back
+>      end: a method that moves a heap local into a by-value call freed it a second time at
+>      its own scope exit, and a loop of 1000 such calls died with 0xC0000374
+>      STATUS_HEAP_CORRUPTION. The text oracle (and scg, which mirrors it) additionally freed
+>      a method's RETURNED local just before the `ret`, and an init's param after storing it
+>      into a field. inkwell happened to be right on those two: its block-exit drop skips a
+>      tail-returned binding by name, and it never dropped an init's frame at all.
+>
+>      Fix: the checker walks every method and init body, seeding `self` as an INCOMING
+>      borrow. The `DropPlan` gains per-method sets keyed by a new `MethodKey` (methods have
+>      no `FnId`), and all three back ends look a method's drops up by it — scg keys its move
+>      records as `1000000 + selfvid`, outside the fn-index range `dump_moves` prints, so the
+>      borrow-stage dump is unchanged. New rejection `sentinel::borrow::move_out_of_self`:
+>      `self` is ALWAYS a borrow (`SelfKind` is only `&Self` / `&mut Self`), so moving `self`,
+>      or a Move-typed field path rooted at it at any depth, is refused. That closes the
+>      class-field move finding raised privately on 2026-09-05/06, for the shape it was
+>      reported in — `pub fn take(self: &Self) -> [i64] { self.v }` — which was constructed
+>      and is now rejected.
+>
+>      ⚠ **inkwell's method and init paths still LEAK — see D63, deliberately left open.** A
+>      drop for those frames was written in this slice and WITHDRAWN before commit.
+>
+>      Blast radius: ZERO of the 363 corpus programs change borrow verdict. That bounds
+>      breakage, not reach: before D61 no corpus method or init had a heap local or a heap
+>      param at all, so the sweep could not have shown the bug either. Fixtures: pass `c41_method_moves_tracked`, which dies
+>      with 0xC0000374 against the pre-fix binary; ui `c41_method_double_move`,
+>      `c41_method_move_out_of_self`, `c41_method_move_self_whole`; 8 unit tests.
+>
+>      NOT covered, deliberately: MIR still lowers only `program.fns` (`lower_to_mir`, a
+>      documented deferral), so the MIR passes never see a method body. scg's borrow stage
+>      still reports no errors for methods; error parity is out of scope for that
+>      differential (ADR 0043 D5/D7), and the shipping compiler is `snc`.
+>
+>      ⚠ **What methods now inherit from free fns.** (1) The DropPlan's moved-set is the
+>      union over the whole body, so the Rust back ends skip a binding's free on EVERY path
+>      once any path moves it: a binding moved later in an iteration now LEAKS on an earlier
+>      `break` / `continue` in a method (the D61 review measured 8.3 MB -> 146 MB for a method
+>      whose calls all took the early exit). Before D61 that path freed correctly, but the
+>      move path freed TWICE (0xC0000374 on all three back ends); free fns have made the same
+>      trade all along. Filed as D64. (2) The lexical checker's per-binding over-rejections:
+>      borrows of two different fields of `self` conflict, and `self.n = helper(&self)` is
+>      refused (see `docs/borrow-check-limitations.md`). No corpus program hits either.
+>
+>      The D61 review also fixed, before commit: `self`-rooted INDEX paths (`self.vv[0]`,
+>      `self.items[0].data`) escaped the new rule; `self.o == null` was falsely refused (a
+>      comparison now reads a `self` operand); scg's delegate forwarder still freed a
+>      forwarded heap param the oracle no longer frees (pinned by pass
+>      `c43_delegate_forwards_move_param`); and a struct-target fixture was missing (ui
+>      `c42_impl_move_out_of_self_struct`). `tests/llvm.rs` `llvm_method_moves_are_not_freed`
+>      pins the two oracle-only shapes, which no exit code and no `llvm-as` run can see.
+>
+>      **D64 — the Rust back ends LEAK a binding on an early exit that comes before its move,
+>      and scg does not, so the two text back ends emit different IR.** The oracle and inkwell
+>      skip a binding's free on every path once the DropPlan's whole-body moved-set holds it,
+>      so a `break` / `continue` / `return` that fires before the move leaks it — unbounded in
+>      a loop, paced by the iteration count. scg records moves as its walk proceeds and frees
+>      it there, which is correct. Present in free fns at baseline; reachable in methods since
+>      D61 (which traded it for the double free on the move path). The codegen differential
+>      is green only because no corpus program has the shape. The fix is a flow-sensitive
+>      moved-set in the drop path, and is not attempted here.
+>
+>      **D63 — inkwell LEAKS every by-value heap param of a method, and every heap param or
+>      local of an init.** `compile_class` / `compile_impl` pop the param frame with a bare
+>      `pop()` where `compile_fn` drops it. Measured: a million method calls with a 16-element
+>      array param peak at 146.6 MB against a flat 8.4 MB free-fn control; 600k inits at
+>      99.0 MB. (The text oracle and scg do drop these frames.) A drop was written during D61
+>      and withdrawn before commit: the D61 review constructed regressions it caused on the
+>      shipping back end, one of them through a path that is tracked privately (see the
+>      security note). ⚠ **Do not re-add the drop without asking** — it waits on a maintainer
+>      decision.
+>
+>      **D62 — a class constructed inside a loop overflows the STACK.** With a class whose
+>      `init` takes a single SCALAR, `while i < 2000000 { let s: S = S::init(i); ... }` dies
+>      under `snc build` with 0xC00000FD STATUS_STACK_OVERFLOW, on the pre- and post-D61
+>      binaries alike; the free-fn twin is flat. Found while measuring D61's leak. The cause is
+>      NOT established — the scalar param only rules out the param path. An attacker who
+>      controls the iteration count controls the crash.
 >
 >      **D59 — REDACTED.** A security-class finding in the SHIPPING compiler's codegen
 >      typing, raised privately with the maintainer on 2026-09-08 while closing D10, and

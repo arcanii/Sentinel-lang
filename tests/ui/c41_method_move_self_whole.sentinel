@@ -1,0 +1,24 @@
+// tests/ui/c41_method_move_self_whole.sentinel — the object itself cannot be moved out of
+// `self` (register D61).
+//
+// `self` is a borrow, so returning it by value gives the object a second owner, and the
+// object is freed by both. The field-level rule (`c41_method_move_out_of_self`) and this
+// whole-object rule are the same rule; this fixture pins the half that goes through the
+// plain variable rather than a field projection.
+
+class P {
+    let v: [i64];
+    pub init(n: i64) {
+        self.v = [n, n];
+        0
+    }
+    pub fn dup(self: &Self) -> P {
+        self
+    }
+}
+
+fn main() -> i64 {
+    let p: P = P::init(3);
+    let q: P = p.dup();
+    len(q.v)
+}

@@ -1,0 +1,14 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c41_method_move_out_of_self.sentinel\")"
+---
+sentinel::borrow::move_out_of_self
+
+  × cannot move `self.v` out: `self` is only borrowed
+    ╭─[tests/ui/c41_method_move_out_of_self.sentinel:17:9]
+ 16 │     pub fn take(self: &Self) -> [i64] {
+ 17 │         self.v
+    ·         ───┬──
+    ·            ╰── 
+ 18 │     }
+    ╰────

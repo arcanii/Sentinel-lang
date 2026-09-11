@@ -1,0 +1,25 @@
+// tests/ui/c41_method_double_move.sentinel — a double move inside a METHOD is rejected
+// (register D61), exactly as it is in a free fn.
+//
+// Before D61 the borrow checker never walked method bodies, so this was ACCEPTED while
+// the identical free-fn body was rejected — and codegen then freed `a` once for each of
+// its two new owners.
+
+class P {
+    let x: i64;
+    pub init(x: i64) {
+        self.x = x;
+        0
+    }
+    pub fn g(self: &Self) -> i64 {
+        let a: [i64] = [1, 2];
+        let b: [i64] = a;
+        let c: [i64] = a;
+        len(b) + len(c)
+    }
+}
+
+fn main() -> i64 {
+    let p: P = P::init(1);
+    p.g()
+}

@@ -1,0 +1,14 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c41_method_double_move.sentinel\")"
+---
+sentinel::borrow::use_after_move
+
+  × use of moved binding `a`
+    ╭─[tests/ui/c41_method_double_move.sentinel:17:24]
+ 16 │         let b: [i64] = a;
+ 17 │         let c: [i64] = a;
+    ·                        ┬
+    ·                        ╰── 
+ 18 │         len(b) + len(c)
+    ╰────

@@ -1281,6 +1281,55 @@ fn llvm_emitted_ir_assembles_over_corpus() {
     );
 }
 
+/// Register D61: `tests/pass/c41_method_moves_tracked` has five method bodies that freed
+/// memory they had given away — a local moved into a call in a class method
+/// (`Counter::go`), an impl method (`Job::run`) and an init's inner block (`Seeded::init`);
+/// a returned local (`Counter::fresh`); and a param stored into a field (`Holder::init`).
+/// The pass fixture's exit code sees the first three but not the last two (inkwell was
+/// right about those), and `llvm-as` accepts every wrong free. So assert the oracle's IR
+/// directly: none of those bodies may call `sentinel_free`.
+#[test]
+fn llvm_method_moves_are_not_freed() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let src = root.join("tests/pass/c41_method_moves_tracked.sentinel");
+    let out = Command::new(env!("CARGO_BIN_EXE_snc"))
+        .arg("llvm")
+        .arg(&src)
+        .output()
+        .expect("run snc llvm");
+    assert!(
+        out.status.success(),
+        "snc llvm failed on the D61 fixture:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let ll = String::from_utf8(out.stdout).expect("utf-8 dump");
+    for sym in [
+        "Counter__go",
+        "Counter__fresh",
+        "Holder__init",
+        "default__Job__Runner__run",
+        "Seeded__init",
+    ] {
+        let head = format!("@{sym}(");
+        let lines: Vec<&str> = ll.lines().collect();
+        let def = lines
+            .iter()
+            .position(|l| l.starts_with("define ") && l.contains(&head))
+            .unwrap_or_else(|| panic!("no `define` for {sym} in:\n{ll}"));
+        let body: Vec<&str> = lines[def..].iter().take_while(|l| **l != "}").copied().collect();
+        assert!(
+            !body.iter().any(|l| l.contains("@sentinel_free")),
+            "{sym} frees memory it no longer owns:\n{}",
+            body.join("\n")
+        );
+    }
+}
+
 // ---- Layer 3: behavioural parity (textual .ll == inkwell) ---------------
 
 fn runtime_lib() -> PathBuf {

@@ -280,6 +280,17 @@ fn tclass_init(buf: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src:
     emit_tparams(buf, k, s, e, src, cur, c, gb, true);
     append_str(buf, ") ");
     let ibody: Expr = parse_block(k, s, e, src, cur);
+    // (register D61) key this body's move records the way the oracle's borrow checker
+    // now keys a METHOD: it has no fn index, so it gets `1000000 + selfvid` — unique
+    // (VarIds are program-global), and outside `dump_moves`' `i < nufn` range, so the
+    // `snc borrow` dump is unchanged. Before D61 `curfn` was -1 here, `record_move`
+    // recorded nothing and `cg_is_moved` found nothing, so a heap local the body moved
+    // or returned was freed at scope exit anyway, as the text oracle did. The body's
+    // tail is CONSUMING, exactly as `decl_fn` sets it for a fn.
+    let svcf_i: i64 = (*c).curfn;
+    let svcons_i: bool = (*c).consuming;
+    (*c).curfn = 1000000 + selfvid;
+    (*c).consuming = true;
     dump_texpr(buf, ibody, 0 - 1, src, c, gb);
     push(buf, ')');
     // (Bar B / classes) cg: the init DEFINE (`void @Class__init(ptr out, params)`; the
@@ -291,6 +302,8 @@ fn tclass_init(buf: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src:
     } else {
         0
     };
+    (*c).curfn = svcf_i;
+    (*c).consuming = svcons_i;
     0
 }
 
@@ -369,6 +382,17 @@ fn tmethod(buf: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u
     // (ADR 0014 D3 / ADR 0051 A5) same for a method body.
     let svmfr: i64 = (*c).fnret;
     (*c).fnret = mrth;
+    // (register D61) key this body's move records the way the oracle's borrow checker
+    // now keys a METHOD: it has no fn index, so it gets `1000000 + selfvid` — unique
+    // (VarIds are program-global), and outside `dump_moves`' `i < nufn` range, so the
+    // `snc borrow` dump is unchanged. Before D61 `curfn` was -1 here, `record_move`
+    // recorded nothing and `cg_is_moved` found nothing, so a heap local the body moved
+    // or returned was freed at scope exit anyway, as the text oracle did. The body's
+    // tail is CONSUMING, exactly as `decl_fn` sets it for a fn.
+    let svcf_m: i64 = (*c).curfn;
+    let svcons_m: bool = (*c).consuming;
+    (*c).curfn = 1000000 + selfvid;
+    (*c).consuming = true;
     dump_texpr(buf, mbody, mrth, src, c, gb);
     (*c).fnret = svmfr;
     push(buf, ')');
@@ -380,6 +404,8 @@ fn tmethod(buf: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u
     } else {
         0
     };
+    (*c).curfn = svcf_m;
+    (*c).consuming = svcons_m;
     0
 }
 

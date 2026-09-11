@@ -70,6 +70,18 @@ fn synth_forward(buf: &mut Vec<u8>, c: &mut TyCtx, gb: &mut Vec<u8>, cid: i64, s
     };
     sink_name(gb, mn_arr);
     let clty: i64 = mk_class(c, cid);
+    // (register D61) the forwarder passes every param on BY VALUE, so a Move-typed one is
+    // MOVED into the forwarded call. The oracle's borrow checker now walks the synthesized
+    // body and records exactly that; this body is emitted by hand rather than through
+    // `dump_texpr`'s consuming-Var path, so record the moves explicitly or `cg_drop_frame`
+    // frees the param after handing it on — a double free, and a byte divergence from the
+    // oracle. `record_move` keeps only Move-typed params and keys them by `curfn`, which
+    // `synth_one_method` set for this body.
+    let mut rmv: i64 = pv0;
+    while rmv < pvn {
+        record_move(c, rmv);
+        rmv = rmv + 1;
+    }
     // (Bar B / classes) cg: the synthesized forwarding body `self.field.m(params)` —
     // GEP the delegate field (self is `%arg0`), load + collect each param, then dispatch
     // to the field-type's class method (own) or default impl. Emitted into cgbody.
@@ -191,6 +203,18 @@ fn synth_one_method(buf: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>,
     };
     render_type(buf, mrth, c);
     append_str(buf, " (block ");
+    // (register D61) key this body's move records the way the oracle's borrow checker
+    // now keys a METHOD: it has no fn index, so it gets `1000000 + selfvid` — unique
+    // (VarIds are program-global), and outside `dump_moves`' `i < nufn` range, so the
+    // `snc borrow` dump is unchanged. Before D61 `curfn` was -1 here, `record_move`
+    // recorded nothing and `cg_is_moved` found nothing, so a heap local the body moved
+    // or returned was freed at scope exit anyway, as the text oracle did. The body's
+    // tail is CONSUMING, exactly as `decl_fn` sets it for a fn. A forwarder passes its Move-typed params
+    // on BY VALUE, so they are the moves recorded here.
+    let svcf_s: i64 = (*c).curfn;
+    let svcons_s: bool = (*c).consuming;
+    (*c).curfn = 1000000 + selfvid;
+    (*c).consuming = true;
     synth_forward(buf, c, gb, cid, selfvid, fld_s, fld_e, fidx, fty, mn_s, mn_e, src, pv0, pvn, mrth);
     append_str(buf, " :");
     render_type(buf, mrth, c);
@@ -204,6 +228,8 @@ fn synth_one_method(buf: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>,
     } else {
         0
     };
+    (*c).curfn = svcf_s;
+    (*c).consuming = svcons_s;
     0
 }
 

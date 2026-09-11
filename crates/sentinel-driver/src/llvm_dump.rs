@@ -37,7 +37,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::fmt::Write;
 
 use sentinel_ast::{BinOp, CmpOp, LogicOp, UnaryOp};
-use sentinel_borrow_check::DropPlan;
+use sentinel_borrow_check::{DropPlan, MethodKey};
 // Bar B / generics: reuse the inkwell backend's monomorphic-instance discovery so the
 // oracle monomorphizes the same set, in the same order, as the production codegen.
 use sentinel_codegen::collect_mono_instantiations;
@@ -841,22 +841,23 @@ pub fn dump(program: &TypedProgram, drop_plan: &DropPlan) -> Result<String, Stri
         if let Some(init) = &cd.init {
             let sym = format!("{}__init", cd.name);
             dump_method(
-                program, drop_plan, &mut fns_buf, &mut used, &sym, init.self_var_id,
-                Type::Class(cd.id), &init.params, None, &init.body,
+                program, drop_plan, &mut fns_buf, &mut used, &sym, MethodKey::ClassInit(cd.id),
+                init.self_var_id, Type::Class(cd.id), &init.params, None, &init.body,
             )?;
             fns_buf.push('\n');
         }
-        for m in &cd.methods {
+        for (mi, m) in cd.methods.iter().enumerate() {
             let sym = format!("{}__{}", cd.name, m.name);
+            let key = MethodKey::ClassMethod(cd.id, mi as u32);
             dump_method(
-                program, drop_plan, &mut fns_buf, &mut used, &sym, m.self_var_id,
+                program, drop_plan, &mut fns_buf, &mut used, &sym, key, m.self_var_id,
                 Type::Class(cd.id), &m.params, Some(m.return_type), &m.body,
             )?;
             fns_buf.push('\n');
         }
     }
     for imp in &program.impl_decls {
-        for m in &imp.methods {
+        for (mi, m) in imp.methods.iter().enumerate() {
             let sym = mangle_impl_method(imp, &m.name);
             // ADR 0023 D7 / A5: the impl method's `self` is a `ptr` to the implementing
             // type's storage, and that type is the impl's TARGET — a class or a struct.
@@ -875,9 +876,10 @@ pub fn dump(program: &TypedProgram, drop_plan: &DropPlan) -> Result<String, Stri
                 sentinel_resolve::ImplTarget::Class(cid) => Type::Class(cid),
                 sentinel_resolve::ImplTarget::Struct(sid) => Type::Struct(sid),
             };
+            let key = MethodKey::ImplMethod(imp.id, mi as u32);
             dump_method(
-                program, drop_plan, &mut fns_buf, &mut used, &sym, m.self_var_id, self_ty,
-                &m.params, Some(m.return_type), &m.body,
+                program, drop_plan, &mut fns_buf, &mut used, &sym, key, m.self_var_id,
+                self_ty, &m.params, Some(m.return_type), &m.body,
             )?;
             fns_buf.push('\n');
         }
@@ -999,6 +1001,7 @@ fn dump_fn_named(
         scopes: Vec::new(),
         drop_plan,
         current_fn: f.id,
+        current_method: None,
         allocas: String::new(),
         body: String::new(),
         loops: Vec::new(),
@@ -1114,6 +1117,7 @@ fn dump_let_shape_fn(
             scopes: Vec::new(),
             drop_plan,
             current_fn: f.id,
+            current_method: None,
             allocas: String::new(),
             body: String::new(),
             loops: Vec::new(),
@@ -1191,6 +1195,7 @@ fn dump_let_shape_fn(
             scopes: Vec::new(),
             drop_plan,
             current_fn: f.id,
+            current_method: None,
             allocas: String::new(),
             body: String::new(),
             loops: Vec::new(),
@@ -1280,6 +1285,7 @@ fn dump_embedded_shape_fn(
             scopes: Vec::new(),
             drop_plan,
             current_fn: f.id,
+            current_method: None,
             allocas: String::new(),
             body: String::new(),
             loops: Vec::new(),
@@ -1358,6 +1364,7 @@ fn dump_embedded_shape_fn(
             scopes: Vec::new(),
             drop_plan,
             current_fn: f.id,
+            current_method: None,
             allocas: String::new(),
             body: String::new(),
             loops: Vec::new(),
@@ -1468,6 +1475,7 @@ fn dump_chained_lets_fn(
             scopes: Vec::new(),
             drop_plan,
             current_fn: f.id,
+            current_method: None,
             allocas: String::new(),
             body: String::new(),
             loops: Vec::new(),
@@ -1522,6 +1530,7 @@ fn dump_chained_lets_fn(
             scopes: Vec::new(),
             drop_plan,
             current_fn: f.id,
+            current_method: None,
             allocas: String::new(),
             body: String::new(),
             loops: Vec::new(),
@@ -1605,6 +1614,7 @@ fn dump_method(
     out: &mut String,
     used: &mut RuntimeSyms,
     sym: &str,
+    key: MethodKey,
     self_var_id: VarId,
     self_ty: Type,
     params: &[TypedParam],
@@ -1623,10 +1633,14 @@ fn dump_method(
         var_ty: HashMap::new(),
         scopes: Vec::new(),
         drop_plan,
-        // No FnId — method bodies aren't in `program.fns`; a placeholder keys an empty
-        // moved-set (`moved_sources_for` returns EMPTY for an unknown fn), so scope-exit
-        // drops fire normally (and the corpus methods have no heap locals anyway).
+        // No FnId — method bodies aren't in `program.fns`. Their drops are keyed by
+        // `current_method` instead (register D61). This placeholder used to be the ONLY
+        // key, and it looked up an EMPTY moved-set, so every method dropped every heap
+        // local at scope exit — including one it had just returned, which then reached
+        // the caller already freed. The comment here said the corpus methods had no heap
+        // locals anyway; that was a fact about the corpus, not a guarantee.
         current_fn: FnId(u32::MAX),
+        current_method: Some(key),
         allocas: String::new(),
         body: String::new(),
         loops: Vec::new(),
@@ -1709,6 +1723,10 @@ struct Emit<'a> {
     drop_plan: &'a DropPlan,
     /// 8d-drops: the fn being emitted (to key `moved_sources_for`).
     current_fn: FnId,
+    /// Register D61: `Some` while emitting a METHOD body, whose moved-sets live under
+    /// a [`MethodKey`] because methods have no `FnId`. Takes precedence over
+    /// `current_fn` for every drop lookup.
+    current_method: Option<MethodKey>,
     allocas: String,
     body: String,
     /// The enclosing loops' (cond-block, after-block, scope_floor) — `break` branches
@@ -2899,10 +2917,14 @@ impl Emit<'_> {
     /// `emit_loop_exit_drops` can drain several frames at once.
     fn emit_frame_drops(&mut self, idx: usize) -> Result<(), String> {
         let dp = self.drop_plan;
-        let moved = dp.moved_sources_for(self.current_fn);
-        // ADR 0046: the partial-move set (Move-typed fields consumed by value); the drop
-        // of a partially-moved binding elides these fields (the consumer freed them).
-        let moved_fields = dp.moved_fields_for(self.current_fn);
+        // Register D61: a method body's sets are keyed by `MethodKey`, not `FnId`.
+        let (moved, moved_fields) = match self.current_method {
+            Some(k) => (dp.method_moved_sources_for(k), dp.method_moved_fields_for(k)),
+            // ADR 0046: the partial-move set (Move-typed fields consumed by value); the
+            // drop of a partially-moved binding elides these fields (the consumer freed
+            // them).
+            None => (dp.moved_sources_for(self.current_fn), dp.moved_fields_for(self.current_fn)),
+        };
         let scope = self.scopes[idx].clone();
         for &id in scope.iter().rev() {
             if moved.contains(&id) {

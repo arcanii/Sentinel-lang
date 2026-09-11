@@ -1,0 +1,56 @@
+// tests/pass/c43_delegate_forwards_move_param.sentinel — a delegate forwarder that passes a
+// heap-typed param on by value (register D61), self-contained.
+//
+// `delegate w: Inner to Sink;` synthesizes `impl Sink for Outer` whose `put` forwards its
+// param to `self.w.put(b)` BY VALUE, so `b` moves into the forwarded call. D61 made the
+// oracle's borrow checker walk synthesized forwarders like any other method, so the oracle
+// stopped freeing `b` after handing it on. scg emits the forwarding body by hand, outside
+// the walk that records moves, so it kept freeing `b` — a double free in its output, and a
+// byte divergence from the oracle that no corpus program could show, because every other
+// delegated method in the corpus takes only Copy params. This fixture puts one in the
+// corpus, so the codegen differential compares it.
+//
+// Exit 42 = the forwarded call saw the array intact on every pass.
+
+trait Sink {
+    fn put(self: &mut Self, b: [i64]) -> i64;
+}
+
+class Inner {
+    let n: i64;
+    pub init() {
+        self.n = 0;
+        0
+    }
+}
+
+impl as Sink for Inner {
+    fn put(self: &mut Self, b: [i64]) -> i64 {
+        self.n = self.n + b[0] + b[1];
+        self.n
+    }
+}
+
+class Outer {
+    delegate w: Inner to Sink;
+    init(i: Inner) {
+        self.w = i;
+        0
+    }
+}
+
+fn main() -> i64 {
+    let inner: Inner = Inner::init();
+    let mut o: Outer = Outer::init(inner);
+    let mut i: i64 = 0;
+    let mut last: i64 = 0;
+    while i < 100 {
+        last = o.put([1, 2]);
+        i = i + 1;
+    }
+    if last == 300 {
+        42
+    } else {
+        0
+    }
+}

@@ -1102,6 +1102,26 @@ fn pass_c41_class_basic() {
 }
 
 #[test]
+fn pass_c41_method_moves_tracked() {
+    // Register D61: method bodies are borrow-checked, so codegen knows what a method
+    // moved. `Counter::go` moves a heap local into a by-value call; before D61 the
+    // method freed it again at scope exit, and on `snc build` the loop died with
+    // 0xC0000374 STATUS_HEAP_CORRUPTION. The fixture's other two shapes (a returned
+    // local, an init storing its param) were wrong only in the text oracle and scg, so
+    // this exit code cannot see them; the codegen differential pins those. Exit 42.
+    assert_eq!(run_exit("c41_method_moves_tracked.sentinel"), 42);
+}
+
+#[test]
+fn pass_c43_delegate_forwards_move_param() {
+    // Register D61: a delegate forwarder passes a heap param on by value. inkwell was
+    // always right here (it never dropped a method's param frame), so this exit code is
+    // not the check: the fixture is in the corpus so the codegen differential compares
+    // scg's hand-emitted forwarder against the oracle. Exit 42.
+    assert_eq!(run_exit("c43_delegate_forwards_move_param.sentinel"), 42);
+}
+
+#[test]
 fn pass_c41_go_no_go() {
     // ADR 0022 D11 phase-go: Point with manhattan + translate.
     // p starts at (10, 20). translate(3, 9) updates to (13, 29)

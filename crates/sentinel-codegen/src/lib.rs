@@ -42,7 +42,7 @@ use inkwell::values::{
 };
 use inkwell::{FloatPredicate, IntPredicate, OptimizationLevel};
 use sentinel_ast::{BinOp, CmpOp, LogicOp, UnaryOp};
-use sentinel_borrow_check::DropPlan;
+use sentinel_borrow_check::{DropPlan, MethodKey};
 use sentinel_hir::HirProgram;
 use sentinel_resolve::{
     ClassId, EffectId, EnumId, FnId, ImplId, StructId, VarId, APPLY_FN_ID, ARG_COUNT_FN_ID, ARG_FN_ID,
@@ -1591,6 +1591,7 @@ pub fn compile_to_object_for_module(
             handle_depth: 0,
             current_fn: None,
             current_fn_id: FnId(0), // placeholder; reset in compile_fn
+            current_method: None,
             vars: HashMap::new(),
             scope_stack: Vec::new(),
             drop_plan,
@@ -1986,6 +1987,12 @@ struct CodegenCtx<'ctx, 'plan> {
     /// look up the moved-source set from `drop_plan` at scope-exit
     /// drop emission.
     current_fn_id: FnId,
+    /// Register D61: `Some` while compiling a METHOD (or init) body. Methods have no
+    /// `FnId`, and `compile_class` / `compile_impl` never assigned `current_fn_id`, so
+    /// before D61 a method's drops were looked up under whatever function had been
+    /// compiled LAST — and, since no method was borrow-checked, found nothing of its own.
+    /// Takes precedence over `current_fn_id` for every drop lookup.
+    current_method: Option<MethodKey>,
     vars: HashMap<VarId, (PointerValue<'ctx>, Type)>,
     /// C2.4 / ADR 0017 D8: stack of scopes; each scope holds the
     /// ordered list of VarIds declared in it. At scope exit
@@ -3520,6 +3527,7 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
             .expect("declared in monomorphic pre-pass");
         self.current_fn = Some(fn_value);
         self.current_fn_id = fn_id;
+        self.current_method = None;
         self.vars.clear();
         self.scope_stack.clear();
 
@@ -3579,9 +3587,10 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                 .get(&cd.id)
                 .expect("declared in pass 1");
             self.current_fn = Some(fn_value);
-            // class init bodies don't participate in DropPlan (no
-            // FnId entry); use a placeholder current_fn_id. The
-            // drop emission paths skip when no entry exists.
+            // Register D61: an init has no FnId; its DropPlan sets are keyed by
+            // `MethodKey`. (This comment used to say a placeholder `current_fn_id` was
+            // used here. None was assigned: the field kept the previous function's id.)
+            self.current_method = Some(MethodKey::ClassInit(cd.id));
             self.vars.clear();
             self.scope_stack.clear();
             let entry = self.context.append_basic_block(fn_value, "entry");
@@ -3637,6 +3646,7 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                 .get(&(cd.id, m_idx))
                 .expect("declared in pass 1");
             self.current_fn = Some(fn_value);
+            self.current_method = Some(MethodKey::ClassMethod(cd.id, m_idx as u32));
             self.vars.clear();
             self.scope_stack.clear();
             let entry = self.context.append_basic_block(fn_value, "entry");
@@ -3702,6 +3712,7 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                 .get(&(imp.id, m_idx))
                 .expect("declared in pass 1");
             self.current_fn = Some(fn_value);
+            self.current_method = Some(MethodKey::ImplMethod(imp.id, m_idx as u32));
             self.vars.clear();
             self.scope_stack.clear();
             let entry = self.context.append_basic_block(fn_value, "entry");
@@ -3819,6 +3830,7 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
             .expect("declared in pass 1");
         self.current_fn = Some(fn_value);
         self.current_fn_id = fn_def.id;
+        self.current_method = None;
         self.vars.clear();
         self.scope_stack.clear();
 
@@ -3941,6 +3953,8 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
         let saved_scope = std::mem::take(&mut self.scope_stack);
 
         self.current_fn = Some(resumer_fn);
+        // Register D61: a resumer is a free-fn body, never a method's.
+        self.current_method = None;
         self.scope_stack.push(ScopeFrame::default());
         let resumer_entry = self.context.append_basic_block(resumer_fn, "entry");
         self.builder.position_at_end(resumer_entry);
@@ -4024,6 +4038,7 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
             .expect("parent declared in pass 1");
         self.current_fn = Some(parent_fn);
         self.current_fn_id = fn_def.id;
+        self.current_method = None;
         self.vars.clear();
         self.scope_stack.clear();
         self.scope_stack.push(ScopeFrame::default());
@@ -4148,6 +4163,8 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
         let saved_scope = std::mem::take(&mut self.scope_stack);
 
         self.current_fn = Some(resumer_fn);
+        // Register D61: a resumer is a free-fn body, never a method's.
+        self.current_method = None;
         self.scope_stack.push(ScopeFrame::default());
         let resumer_entry = self.context.append_basic_block(resumer_fn, "entry");
         self.builder.position_at_end(resumer_entry);
@@ -4231,6 +4248,7 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
             .expect("parent declared in pass 1");
         self.current_fn = Some(parent_fn);
         self.current_fn_id = fn_def.id;
+        self.current_method = None;
         self.vars.clear();
         self.scope_stack.clear();
         self.scope_stack.push(ScopeFrame::default());
@@ -4383,6 +4401,8 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
             let captures_in = &captures_per_resumer[level];
 
             self.current_fn = Some(resumer_fn);
+            // Register D61: a resumer is a free-fn body, never a method's.
+            self.current_method = None;
             self.vars.clear();
             self.scope_stack.clear();
             self.scope_stack.push(ScopeFrame::default());
@@ -4495,6 +4515,7 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
             .expect("parent declared in pass 1");
         self.current_fn = Some(parent_fn);
         self.current_fn_id = fn_def.id;
+        self.current_method = None;
         self.vars.clear();
         self.scope_stack.clear();
         self.scope_stack.push(ScopeFrame::default());
@@ -4953,10 +4974,20 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
         tail_returned: Option<VarId>,
         program: &TypedProgram,
     ) -> Result<(), CodegenError> {
-        let moved = self.drop_plan.moved_sources_for(self.current_fn_id);
-        // ADR 0046: the partial-move set (Move-typed fields consumed by value); the
-        // drop of a partially-moved binding elides these fields (the consumer freed them).
-        let moved_fields = self.drop_plan.moved_fields_for(self.current_fn_id);
+        // Register D61: a method body's sets are keyed by `MethodKey`, not `FnId`.
+        let (moved, moved_fields) = match self.current_method {
+            Some(k) => (
+                self.drop_plan.method_moved_sources_for(k),
+                self.drop_plan.method_moved_fields_for(k),
+            ),
+            // ADR 0046: the partial-move set (Move-typed fields consumed by value); the
+            // drop of a partially-moved binding elides these fields (the consumer freed
+            // them).
+            None => (
+                self.drop_plan.moved_sources_for(self.current_fn_id),
+                self.drop_plan.moved_fields_for(self.current_fn_id),
+            ),
+        };
         for &id in scope.vars.iter().rev() {
             if Some(id) == tail_returned {
                 continue;

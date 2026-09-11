@@ -1,0 +1,119 @@
+// tests/pass/c41_method_moves_tracked.sentinel — method bodies are borrow-checked, so
+// their moves are known to codegen (register D61), self-contained.
+//
+// Until D61 the borrow checker walked `program.fns` and nothing else, so no class `init`,
+// class method or impl method was ever borrow-checked. Each method therefore looked up an
+// EMPTY moved-set, and codegen dropped every heap local at a method's scope exit —
+// including one the method had already given away. One shape per method below:
+//
+//   * `Counter::go` moves `a` into `consume`, which frees it; the method then freed it
+//     AGAIN at its own scope exit. On the SHIPPING back end (`snc build`) the loop in
+//     `main` died with 0xC0000374 STATUS_HEAP_CORRUPTION instead of exiting 42 —
+//     measured on Windows against the pre-fix binary.
+//   * `Counter::fresh` returns a heap local. The text oracle (`snc llvm`) freed it just
+//     before the `ret`, handing the caller a dangling buffer. inkwell happened to be right
+//     here: its block-exit drop skips a TAIL-returned binding by name, which is also why
+//     it did not help `go`, whose moved binding is not the tail.
+//   * `Holder::init` stores its heap param into a field. The text oracle freed the param
+//     at the end of the init, leaving the field dangling.
+//   * `Job::run` (an IMPL method, struct target) and `Seeded::init` (an init whose inner
+//     block moves a local into a call) are `go`'s shape through the other two kinds of
+//     method body. Codegen keys each kind separately, and each died with 0xC0000374 on
+//     `snc build` before the fix (measured standalone); with only `go` here, a wrong key
+//     for either would have gone unnoticed.
+//
+// `go`, `run` and the `Seeded` init can fail this exit code. `fresh` and the `Holder` init
+// were wrong only in the text oracle and scg, whose output this fixture never runs, and
+// `llvm-as` accepts the wrong frees; `llvm_method_moves_are_not_freed` in `tests/llvm.rs`
+// pins all five by asserting that none of these method bodies calls `sentinel_free`. The
+// codegen differential pins only that scg agrees with the oracle.
+//
+// Exit 42 = every check held.
+
+fn consume(v: [i64]) -> i64 {
+    v[0] + v[1]
+}
+
+class Counter {
+    let base: i64;
+    pub init(b: i64) {
+        self.base = b;
+        0
+    }
+    // Moves `a` into `consume`: the method must NOT free it again.
+    pub fn go(self: &Self) -> i64 {
+        let a: [i64] = [40, 2];
+        let r: i64 = consume(a);
+        r
+    }
+    // Returns a heap local: the method must NOT free it before the return.
+    pub fn fresh(self: &Self) -> [i64] {
+        let a: [i64] = [self.base, 2];
+        a
+    }
+}
+
+trait Runner {
+    fn run(self: &Self) -> i64;
+}
+
+struct Job {
+    k: i64,
+}
+
+// An IMPL method (struct target) moving a heap local into a call: the impl-method key.
+impl as Runner for Job {
+    fn run(self: &Self) -> i64 {
+        let a: [i64] = [self.k, 2];
+        let r: i64 = consume(a);
+        r
+    }
+}
+
+class Seeded {
+    let x: i64;
+    // An init whose inner block moves a heap local into a call: the init key.
+    pub init(n: i64) {
+        let r: i64 = {
+            let t: [i64] = [n, 2];
+            consume(t)
+        };
+        self.x = r;
+        0
+    }
+}
+
+class Holder {
+    let v: [i64];
+    // Stores its heap param: the init must NOT free it.
+    pub init(v: [i64]) {
+        self.v = v;
+        0
+    }
+    pub fn sum(self: &Self) -> i64 {
+        self.v[0] + self.v[1]
+    }
+}
+
+fn main() -> i64 {
+    let c: Counter = Counter::init(40);
+    let j: Job = Job { k: 40 };
+    let mut i: i64 = 0;
+    let mut ok: i64 = 0;
+    // Repeated so a double free has allocator traffic to corrupt.
+    while i < 1000 {
+        let hit: i64 = if c.go() == 42 { 1 } else { 0 };
+        let hit2: i64 = if j.run() == 42 { 1 } else { 0 };
+        let s: Seeded = Seeded::init(40);
+        let hit3: i64 = if s.x == 42 { 1 } else { 0 };
+        ok = ok + hit + hit2 + hit3;
+        i = i + 1;
+    }
+    let f: [i64] = c.fresh();
+    let h: Holder = Holder::init([30, 12]);
+    if ok == 3000 && f[0] + f[1] == 42 && h.sum() == 42 {
+        42
+    } else {
+        0
+    }
+}

@@ -138,10 +138,10 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use salsa::Accumulator;
 use sentinel_ast::{Span, UnaryOp};
 use sentinel_base::{Diagnostic, SentinelDb, Severity, SourceFile};
-use sentinel_resolve::{FnId, PUSH_FN_ID, VarId};
+use sentinel_resolve::{ClassId, FnId, ImplId, PUSH_FN_ID, VarId};
 use sentinel_types::{
-    NullableInner, Type, TypedBlock, TypedExpr, TypedExprKind, TypedFnDef, TypedProgram,
-    TypedStmt, TypedStmtKind,
+    NullableInner, Type, TypedBlock, TypedExpr, TypedExprKind, TypedFnDef, TypedParam,
+    TypedProgram, TypedStmt, TypedStmtKind,
 };
 
 // =============================================================================
@@ -322,6 +322,26 @@ pub enum BorrowError {
         #[label("moved here inside the loop")]
         move_span: miette::SourceSpan,
     },
+
+    /// Register D61: a Move-typed value is moved OUT of `self`. A method's `self` is
+    /// ALWAYS a borrow — `SelfKind` has exactly two variants, `&Self` and `&mut Self`,
+    /// and an `init`'s `self` is the caller's object under construction — so the value
+    /// still belongs to the object, and taking it by value leaves two owners of one
+    /// allocation. For a STRUCT receiver the struct's owner frees it as well: a
+    /// struct-target `take(self: &Self) -> [i64] { self.v }` called in a loop died with
+    /// 0xC0000374 before D61 (measured). For a CLASS receiver the object is left holding
+    /// a pointer to memory its new owner frees. Covers `self` itself and any field or
+    /// index path rooted at it, at any depth.
+    #[error("cannot move `{place}` out: `self` is only borrowed")]
+    #[diagnostic(
+        code(sentinel::borrow::move_out_of_self),
+        help("`self` is a borrow (`&Self` or `&mut Self`), so `{place}` still belongs to the object; taking it by value would leave two owners of one allocation. Read it in place instead")
+    )]
+    MoveOutOfSelf {
+        place: String,
+        #[label("moved out of `self` here")]
+        move_span: miette::SourceSpan,
+    },
 }
 
 // =============================================================================
@@ -456,6 +476,9 @@ struct FnCtx {
     /// skips these fields in the binding's recursive drop. Never
     /// reset by snapshot/restore.
     moved_fields_union: HashSet<(VarId, u32)>,
+    /// Register D61: the method's (or init's) `self` binding, which is always a
+    /// borrow, so nothing Move-typed may be moved out of it. `None` in a free fn.
+    self_var: Option<VarId>,
 }
 
 #[derive(Debug, Clone)]
@@ -476,6 +499,7 @@ impl FnCtx {
             moved_sources_union: HashSet::new(),
             moved_fields: HashMap::new(),
             moved_fields_union: HashSet::new(),
+            self_var: None,
         }
     }
 
@@ -601,6 +625,26 @@ pub struct DropPlan {
     /// is skipped wholesale; one with entries here is dropped but
     /// with the named fields elided.
     pub moved_fields: BTreeMap<FnId, BTreeSet<(VarId, u32)>>,
+    /// Register D61: the same two sets for METHOD bodies. Methods are not in
+    /// `program.fns` and have no `FnId`, so they are keyed by [`MethodKey`]. Before
+    /// D61 no method was borrow-checked at all, so these did not exist and every method
+    /// looked up an EMPTY moved-set: a heap local the method moved into a call was freed
+    /// again at scope exit in every back end, and one it returned was freed before the
+    /// `ret` — in the text oracle and scg always, in inkwell unless it was the bare tail
+    /// variable (which inkwell skips by name).
+    pub method_moved_sources: BTreeMap<MethodKey, BTreeSet<VarId>>,
+    pub method_moved_fields: BTreeMap<MethodKey, BTreeSet<(VarId, u32)>>,
+}
+
+/// Register D61: identifies a method body in the [`DropPlan`] — a class `init`, the
+/// `n`th method of a class, or the `n`th method of an impl, in declaration order
+/// (the index is the method's position in `ClassData::methods` /
+/// `ImplData::methods`, the same order every back end walks them in).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum MethodKey {
+    ClassInit(ClassId),
+    ClassMethod(ClassId, u32),
+    ImplMethod(ImplId, u32),
 }
 
 impl DropPlan {
@@ -622,6 +666,22 @@ impl DropPlan {
             .get(&fn_id)
             .unwrap_or_else(|| EMPTY.get_or_init(BTreeSet::new))
     }
+
+    /// Register D61: the moved-source set of a METHOD body (empty if none).
+    pub fn method_moved_sources_for(&self, key: MethodKey) -> &BTreeSet<VarId> {
+        static EMPTY: std::sync::OnceLock<BTreeSet<VarId>> = std::sync::OnceLock::new();
+        self.method_moved_sources
+            .get(&key)
+            .unwrap_or_else(|| EMPTY.get_or_init(BTreeSet::new))
+    }
+
+    /// Register D61: the partial-move set of a METHOD body (empty if none).
+    pub fn method_moved_fields_for(&self, key: MethodKey) -> &BTreeSet<(VarId, u32)> {
+        static EMPTY: std::sync::OnceLock<BTreeSet<(VarId, u32)>> = std::sync::OnceLock::new();
+        self.method_moved_fields
+            .get(&key)
+            .unwrap_or_else(|| EMPTY.get_or_init(BTreeSet::new))
+    }
 }
 
 // =============================================================================
@@ -638,13 +698,70 @@ impl DropPlan {
 /// lifetime extends from creation to the end of its enclosing
 /// block. At C2.4 the check is **per-fn** with branch-aware move-
 /// state merging at if/else (per D9).
+///
+/// Register D61: METHOD bodies are checked too — every class `init`, every class
+/// method and every impl method. They live in `class_decls` / `impl_decls`, not in
+/// `program.fns`, and until D61 this loop was the only entry point, so no method was
+/// ever borrow-checked: a double move or a move out of `self` was accepted in a method
+/// where the identical free-fn body is rejected, and no method's moves reached codegen,
+/// which then freed memory the method had already given away.
 pub fn borrow_check(program: &TypedProgram) -> (DropPlan, Vec<BorrowError>) {
     let mut errors = Vec::new();
     let mut drop_plan = DropPlan::default();
     for fn_def in &program.fns {
         borrow_check_fn(fn_def, program, &mut errors, &mut drop_plan);
     }
+    for cd in &program.class_decls {
+        if let Some(init) = &cd.init {
+            let body = MethodBody {
+                name: "init",
+                self_var: init.self_var_id,
+                self_span: &init.span,
+                params: &init.params,
+                return_type: None,
+                body: &init.body,
+            };
+            borrow_check_method(MethodKey::ClassInit(cd.id), body, program, &mut errors, &mut drop_plan);
+        }
+        for (i, m) in cd.methods.iter().enumerate() {
+            let body = MethodBody {
+                name: &m.name,
+                self_var: m.self_var_id,
+                self_span: &m.name_span,
+                params: &m.params,
+                return_type: Some(m.return_type),
+                body: &m.body,
+            };
+            let key = MethodKey::ClassMethod(cd.id, i as u32);
+            borrow_check_method(key, body, program, &mut errors, &mut drop_plan);
+        }
+    }
+    for imp in &program.impl_decls {
+        for (i, m) in imp.methods.iter().enumerate() {
+            let body = MethodBody {
+                name: &m.name,
+                self_var: m.self_var_id,
+                self_span: &m.name_span,
+                params: &m.params,
+                return_type: Some(m.return_type),
+                body: &m.body,
+            };
+            let key = MethodKey::ImplMethod(imp.id, i as u32);
+            borrow_check_method(key, body, program, &mut errors, &mut drop_plan);
+        }
+    }
     (drop_plan, errors)
+}
+
+/// Register D61: the parts of a method (or init) body the walk needs.
+struct MethodBody<'p> {
+    name: &'p str,
+    self_var: VarId,
+    self_span: &'p Span,
+    params: &'p [TypedParam],
+    /// `None` for an `init`, which returns nothing.
+    return_type: Option<Type>,
+    body: &'p TypedBlock,
 }
 
 fn borrow_check_fn(
@@ -653,12 +770,66 @@ fn borrow_check_fn(
     errors: &mut Vec<BorrowError>,
     drop_plan: &mut DropPlan,
 ) {
+    let (moved, moved_fields) = check_body(
+        &fn_def.name,
+        None,
+        &fn_def.params,
+        Some(fn_def.return_type),
+        &fn_def.body,
+        program,
+        errors,
+    );
+    drop_plan.moved_sources.insert(fn_def.id, moved);
+    drop_plan.moved_fields.insert(fn_def.id, moved_fields);
+}
+
+/// Register D61: borrow-check one method body and record its move sets under `key`.
+fn borrow_check_method(
+    key: MethodKey,
+    m: MethodBody<'_>,
+    program: &TypedProgram,
+    errors: &mut Vec<BorrowError>,
+    drop_plan: &mut DropPlan,
+) {
+    let (moved, moved_fields) = check_body(
+        m.name,
+        Some((m.self_var, m.self_span)),
+        m.params,
+        m.return_type,
+        m.body,
+        program,
+        errors,
+    );
+    drop_plan.method_moved_sources.insert(key, moved);
+    drop_plan.method_moved_fields.insert(key, moved_fields);
+}
+
+/// Walk one body — a free fn's, or (register D61) a method's with its `self` — and
+/// return its moved-source and partial-move sets for the [`DropPlan`].
+#[allow(clippy::type_complexity)]
+fn check_body(
+    fn_name: &str,
+    self_var: Option<(VarId, &Span)>,
+    params: &[TypedParam],
+    return_type: Option<Type>,
+    body: &TypedBlock,
+    program: &TypedProgram,
+    errors: &mut Vec<BorrowError>,
+) -> (BTreeSet<VarId>, BTreeSet<(VarId, u32)>) {
     let mut ctx = FnCtx::new();
+    // Register D61: `self` is an INCOMING borrow — the caller owns the object — so it
+    // is alive for the whole body, may be returned through, and nothing Move-typed may
+    // be moved out of it (`ctx.self_var`).
+    if let Some((id, span)) = self_var {
+        ctx.declare(id, "self".to_string(), span.clone());
+        ctx.ref_source.insert(id, BorrowSource::Incoming(id));
+        ctx.self_var = Some(id);
+    }
     // Register params at "depth 0" — they're alive for the whole
     // fn body. By-value params die at return (Local source for
     // any `&x` taken on them); incoming ref params have Incoming
     // source (the caller owns the underlying place).
-    for param in &fn_def.params {
+    for param in params {
         ctx.declare(param.id, param.name.clone(), param.span.clone());
         if param.ty.is_ref() {
             ctx.ref_source
@@ -668,29 +839,25 @@ fn borrow_check_fn(
 
     // Walk the body. Inner Block expressions push/pop their own
     // scopes via [`walk_expr`]'s [`TypedExprKind::Block`] arm.
-    walk_block_contents(&fn_def.body, &mut ctx, errors, program);
+    walk_block_contents(body, &mut ctx, errors, program);
 
-    // C2.4: record the per-fn move-sources union into the
-    // DropPlan before the return-source check (which may move
-    // the tail's source, e.g. `fn f() -> Pair { p }`).
+    // C2.4: capture the move-sources union for the DropPlan before
+    // the return-source check (which may move the tail's source,
+    // e.g. `fn f() -> Pair { p }`).
     let mut moved_btree = BTreeSet::new();
     moved_btree.extend(ctx.moved_sources_union.iter().copied());
-    drop_plan.moved_sources.insert(fn_def.id, moved_btree);
-    // ADR 0046: the per-fn partial-move set (Move-typed fields consumed by value), so
+    // ADR 0046: the partial-move set (Move-typed fields consumed by value), so
     // codegen elides them from the binding's recursive drop.
     let mut moved_fields_btree = BTreeSet::new();
     moved_fields_btree.extend(ctx.moved_fields_union.iter().copied());
-    drop_plan
-        .moved_fields
-        .insert(fn_def.id, moved_fields_btree);
 
     // ADR 0017 D7's "second-class refs everywhere" check: if the
     // fn returns a ref, the tail's source must be Incoming. We
     // compute source_of_expr on the (still-walked) tail; var_info
     // persists across scope pops so we can name the offending
     // source binding in the diagnostic.
-    if fn_def.return_type.is_ref() {
-        let tail_source = source_of_expr(&fn_def.body.tail, &ctx, program);
+    if return_type.is_some_and(|t| t.is_ref()) {
+        let tail_source = source_of_expr(&body.tail, &ctx, program);
         match tail_source {
             Some(BorrowSource::Incoming(_)) | None => {}
             Some(BorrowSource::Local(src_id)) => {
@@ -700,22 +867,23 @@ fn borrow_check_fn(
                     .cloned()
                     .unwrap_or(VarInfo { name: "<unknown>".into(), span: 0..0 });
                 errors.push(BorrowError::ReturnsLocalRef {
-                    fn_name: fn_def.name.clone(),
+                    fn_name: fn_name.to_string(),
                     source_name: info.name,
                     source_span: to_source_span(&info.span),
-                    return_span: to_source_span(&fn_def.body.tail.span),
+                    return_span: to_source_span(&body.tail.span),
                 });
             }
             Some(BorrowSource::LocalAnonymous) => {
                 errors.push(BorrowError::ReturnsLocalRef {
-                    fn_name: fn_def.name.clone(),
+                    fn_name: fn_name.to_string(),
                     source_name: "<anonymous>".to_string(),
-                    source_span: to_source_span(&fn_def.body.tail.span),
-                    return_span: to_source_span(&fn_def.body.tail.span),
+                    source_span: to_source_span(&body.tail.span),
+                    return_span: to_source_span(&body.tail.span),
                 });
             }
         }
     }
+    (moved_btree, moved_fields_btree)
 }
 
 /// Walk a block's statements + tail in the **current** scope
@@ -1007,11 +1175,22 @@ fn walk_expr(
             walk_expr(inner, ctx, errors, program);
         }
 
-        TypedExprKind::Binary(_, l, r)
-        | TypedExprKind::Cmp(_, l, r)
-        | TypedExprKind::Logic(_, l, r) => {
+        TypedExprKind::Binary(_, l, r) | TypedExprKind::Logic(_, l, r) => {
             walk_expr(l, ctx, errors, program);
             walk_expr(r, ctx, errors, program);
+        }
+        TypedExprKind::Cmp(_, l, r) => {
+            // Register D61: a comparison READS its operands; nothing changes owner. For an
+            // operand rooted at `self` that matters, because the consuming walk would
+            // report `self.next == null` as a move out of `self`. Every other operand
+            // keeps the consuming walk it always had.
+            for side in [l, r] {
+                if ctx.self_var.is_some() && projection_root(side) == ctx.self_var {
+                    walk_expr_lvalue(side, ctx, errors, program);
+                } else {
+                    walk_expr(side, ctx, errors, program);
+                }
+            }
         }
 
         TypedExprKind::Block(b) => {
@@ -1125,8 +1304,18 @@ fn walk_expr(
             // is the C2.3 non-consuming receiver read. A nested projection (target not
             // a direct Var) falls back to the conservative non-consuming walk (deep
             // paths deferred — ADR 0046 D5).
+            //
+            // Register D61: a Move-typed projection ROOTED AT `self` is refused at any
+            // depth — `self` is always a borrow, so the object keeps the value and would
+            // free it too. Checked before the depth split so that it applies at every
+            // depth.
             if is_copy_type(expr.ty, program) {
                 walk_expr_lvalue(target, ctx, errors, program);
+            } else if ctx.self_var.is_some() && projection_root(target) == ctx.self_var {
+                errors.push(BorrowError::MoveOutOfSelf {
+                    place: render_projection(expr, ctx),
+                    move_span: to_source_span(&expr.span),
+                });
             } else if let TypedExprKind::Var(base) = &target.kind {
                 check_and_record_field_move(
                     *base,
@@ -1147,6 +1336,18 @@ fn walk_expr(
         }
 
         TypedExprKind::Index { target, index, .. } => {
+            // Register D61: a Move-typed ELEMENT taken out of an array rooted at `self`
+            // (`self.vv[0]` with `vv: [[i64]]`) is a move out of `self` just as a field
+            // is — the array keeps the element — so refuse it.
+            if !is_copy_type(expr.ty, program)
+                && ctx.self_var.is_some()
+                && projection_root(target) == ctx.self_var
+            {
+                errors.push(BorrowError::MoveOutOfSelf {
+                    place: render_projection(expr, ctx),
+                    move_span: to_source_span(&expr.span),
+                });
+            }
             // C2.3: same as FieldAccess — postfix receiver is
             // non-consuming. The index is a regular expression
             // (consuming read).
@@ -1597,6 +1798,16 @@ fn check_and_record_move(
     errors: &mut Vec<BorrowError>,
     program: &TypedProgram,
 ) {
+    // Register D61: `self` is always a borrow; moving the whole object out of it (a
+    // `self` tail in a method returning the class, `let o: P = self;`) gives the
+    // object a second owner.
+    if ctx.self_var == Some(id) && !is_copy_type(ty, program) {
+        errors.push(BorrowError::MoveOutOfSelf {
+            place: "self".to_string(),
+            move_span: to_source_span(use_span),
+        });
+        return;
+    }
     if let Some(move_span) = ctx.moved.get(&id).cloned() {
         emit_use_after_move(ctx, errors, id, &move_span, use_span);
         return;
@@ -1615,6 +1826,36 @@ fn check_and_record_move(
     if !is_copy_type(ty, program) {
         ctx.moved.insert(id, use_span.clone());
         ctx.moved_sources_union.insert(id);
+    }
+}
+
+/// Register D61: the binding a field or index path is rooted at (`self` for
+/// `self.a[i].b`), or `None` when the chain starts anywhere other than a variable.
+/// It follows INDEX steps as well as field steps: the first cut stopped at an index,
+/// so `self.items[0].data` escaped the `self` rule entirely.
+fn projection_root(e: &TypedExpr) -> Option<VarId> {
+    match &e.kind {
+        TypedExprKind::Var(id) => Some(*id),
+        TypedExprKind::FieldAccess { target, .. } | TypedExprKind::Index { target, .. } => {
+            projection_root(target)
+        }
+        _ => None,
+    }
+}
+
+/// Register D61: `self.a.b` spelled for a diagnostic.
+fn render_projection(e: &TypedExpr, ctx: &FnCtx) -> String {
+    match &e.kind {
+        TypedExprKind::Var(id) => ctx
+            .var_info
+            .get(id)
+            .map(|v| v.name.clone())
+            .unwrap_or_else(|| "<unknown>".to_string()),
+        TypedExprKind::FieldAccess { target, field, .. } => {
+            format!("{}.{}", render_projection(target, ctx), field)
+        }
+        TypedExprKind::Index { target, .. } => format!("{}[..]", render_projection(target, ctx)),
+        _ => "<expression>".to_string(),
     }
 }
 
@@ -1911,6 +2152,11 @@ fn borrow_error_to_diagnostic(err: &BorrowError) -> Diagnostic {
         BorrowError::MovedInLoopBody { binding_name, move_span, .. } => (
             "sentinel::borrow::moved_in_loop_body",
             format!("cannot move out of `{binding_name}` inside a `while` loop"),
+            move_span.offset()..(move_span.offset() + move_span.len()),
+        ),
+        BorrowError::MoveOutOfSelf { place, move_span } => (
+            "sentinel::borrow::move_out_of_self",
+            format!("cannot move `{place}` out: `self` is only borrowed"),
             move_span.offset()..(move_span.offset() + move_span.len()),
         ),
     };
@@ -2278,6 +2524,214 @@ mod tests {
         );
         assert!(
             errs.iter().any(|e| matches!(e, BorrowError::UseAfterMove { .. })),
+            "got {errs:?}"
+        );
+    }
+
+    // ----- Register D61: METHOD bodies are borrow-checked -----
+    //
+    // Until D61 `borrow_check` walked `program.fns` only, so none of these was checked.
+
+    fn plan_of(src: &str) -> DropPlan {
+        let prog = parse(src).expect("parse");
+        let resolved = resolve(&prog).expect("resolve");
+        let typed = check(&resolved).expect("check");
+        let (plan, errors) = borrow_check(&typed);
+        assert!(errors.is_empty(), "expected no borrow errors, got {errors:?}");
+        plan
+    }
+
+    const CLASS_P: &str = "class P { let x: i64; pub init(x: i64) { self.x = x; 0 } ";
+
+    #[test]
+    fn method_double_move_rejected() {
+        // The identical free-fn body was always rejected; in a method it was accepted.
+        let errs = borrow_check_err(&format!(
+            "{CLASS_P} pub fn g(self: &Self) -> i64 {{ let a: [i64] = [1, 2]; \
+             let b: [i64] = a; let c: [i64] = a; len(b) + len(c) }} }} \
+             fn main() -> i64 {{ let p: P = P::init(1); p.g() }}"
+        ));
+        assert!(
+            errs.iter().any(|e| matches!(e, BorrowError::UseAfterMove { .. })),
+            "got {errs:?}"
+        );
+    }
+
+    #[test]
+    fn impl_method_double_move_rejected() {
+        // Impl methods (here on a STRUCT target) are walked too, not just class methods.
+        let errs = borrow_check_err(
+            "trait T { fn g(self: &Self) -> i64; } struct S { x: i64 } \
+             impl as T for S { fn g(self: &Self) -> i64 { let a: [i64] = [1]; \
+             let b: [i64] = a; let c: [i64] = a; len(b) + len(c) } } \
+             fn main() -> i64 { let s: S = S { x: 1 }; s.g() }",
+        );
+        assert!(
+            errs.iter().any(|e| matches!(e, BorrowError::UseAfterMove { .. })),
+            "got {errs:?}"
+        );
+    }
+
+    #[test]
+    fn move_field_out_of_self_rejected() {
+        let errs = borrow_check_err(
+            "class Q { let v: [i64]; pub init(n: i64) { self.v = [n, n]; 0 } \
+             pub fn take(self: &Self) -> [i64] { self.v } } \
+             fn main() -> i64 { let q: Q = Q::init(3); let t: [i64] = q.take(); len(t) }",
+        );
+        assert!(
+            errs.iter()
+                .any(|e| matches!(e, BorrowError::MoveOutOfSelf { place, .. } if place == "self.v")),
+            "got {errs:?}"
+        );
+    }
+
+    #[test]
+    fn move_whole_self_rejected() {
+        let errs = borrow_check_err(
+            "class P { let v: [i64]; pub init(n: i64) { self.v = [n, n]; 0 } \
+             pub fn dup(self: &Self) -> P { self } } \
+             fn main() -> i64 { let p: P = P::init(3); let q: P = p.dup(); len(q.v) }",
+        );
+        assert!(
+            errs.iter()
+                .any(|e| matches!(e, BorrowError::MoveOutOfSelf { place, .. } if place == "self")),
+            "got {errs:?}"
+        );
+    }
+
+    #[test]
+    fn move_out_of_self_through_exclusive_self_rejected() {
+        // `&mut Self` is still a borrow — exclusivity does not confer ownership.
+        let errs = borrow_check_err(
+            "class Q { let v: [i64]; pub init(n: i64) { self.v = [n, n]; 0 } \
+             pub fn take(self: &mut Self) -> [i64] { self.v } } \
+             fn main() -> i64 { let mut q: Q = Q::init(3); let t: [i64] = q.take(); len(t) }",
+        );
+        assert!(
+            errs.iter().any(|e| matches!(e, BorrowError::MoveOutOfSelf { .. })),
+            "got {errs:?}"
+        );
+    }
+
+    #[test]
+    fn reading_self_fields_in_place_ok() {
+        // The negative control: `len(self.v)` and `self.v[0]` READ the field, they do not
+        // take it, so the new rule must leave them alone.
+        borrow_check_ok(
+            "class Q { let v: [i64]; pub init(n: i64) { self.v = [n, n]; 0 } \
+             pub fn size(self: &Self) -> i64 { len(self.v) + self.v[0] } } \
+             fn main() -> i64 { let q: Q = Q::init(3); q.size() }",
+        );
+    }
+
+    #[test]
+    fn method_returned_local_is_in_its_moved_set() {
+        // The use-after-free: the returned local must be in the METHOD's moved-set, or
+        // codegen frees it before the `ret`.
+        let plan = plan_of(&format!(
+            "{CLASS_P} pub fn mk(self: &Self) -> [i64] {{ let a: [i64] = [40, 2]; a }} }} \
+             fn main() -> i64 {{ let p: P = P::init(1); let s: [i64] = p.mk(); s[0] }}"
+        ));
+        assert!(
+            !plan.method_moved_sources_for(MethodKey::ClassMethod(ClassId(0), 0)).is_empty(),
+            "the returned local is missing from the method's moved-set: {plan:?}"
+        );
+        // The init moved nothing.
+        assert!(plan.method_moved_sources_for(MethodKey::ClassInit(ClassId(0))).is_empty());
+    }
+
+    #[test]
+    fn init_param_stored_into_field_is_in_its_moved_set() {
+        // The dangling field: a param stored into `self.v` must count as moved, or the
+        // init's param-frame drop frees what the object now owns.
+        let plan = plan_of(
+            "class Holder { let v: [i64]; pub init(v: [i64]) { self.v = v; 0 } } \
+             fn main() -> i64 { let h: Holder = Holder::init([40, 2]); len(h.v) }",
+        );
+        assert!(
+            !plan.method_moved_sources_for(MethodKey::ClassInit(ClassId(0))).is_empty(),
+            "the stored param is missing from the init's moved-set: {plan:?}"
+        );
+    }
+
+    #[test]
+    fn move_indexed_element_out_of_self_rejected() {
+        // The first cut followed field steps only; an INDEX rooted at `self` escaped.
+        let errs = borrow_check_err(
+            "class Q { let vv: [[i64]]; pub init(n: i64) { self.vv = [[n, n], [n]]; 0 } \
+             pub fn first(self: &Self) -> [i64] { self.vv[0] } } \
+             fn main() -> i64 { let q: Q = Q::init(3); let t: [i64] = q.first(); len(t) }",
+        );
+        assert!(
+            errs.iter().any(
+                |e| matches!(e, BorrowError::MoveOutOfSelf { place, .. } if place == "self.vv[..]")
+            ),
+            "got {errs:?}"
+        );
+    }
+
+    #[test]
+    fn move_field_through_index_out_of_self_rejected() {
+        let errs = borrow_check_err(
+            "struct Item { data: [i64] } \
+             class Q { let items: [Item]; pub init(n: i64) { self.items = [Item { data: [n, n] }]; 0 } \
+             pub fn grab(self: &Self) -> [i64] { self.items[0].data } } \
+             fn main() -> i64 { let q: Q = Q::init(3); let t: [i64] = q.grab(); len(t) }",
+        );
+        assert!(
+            errs.iter().any(|e| matches!(
+                e,
+                BorrowError::MoveOutOfSelf { place, .. } if place == "self.items[..].data"
+            )),
+            "got {errs:?}"
+        );
+    }
+
+    #[test]
+    fn comparing_self_field_with_null_ok() {
+        // The false positive the first cut introduced: a comparison READS `self.o`.
+        borrow_check_ok(
+            "struct P { v: [i64] } \
+             class Q { let o: ?P; pub init() { self.o = null; 0 } \
+             pub fn empty(self: &Self) -> bool { self.o == null } } \
+             fn main() -> i64 { let q: Q = Q::init(); if q.empty() { 42 } else { 0 } }",
+        );
+    }
+
+    #[test]
+    fn struct_target_move_out_of_self_rejected() {
+        // The receiver kind where the stated double free is real: a struct's owner frees
+        // the field too. Before D61 this ran and died with 0xC0000374 in a loop.
+        let errs = borrow_check_err(
+            "trait Take { fn take(self: &Self) -> [i64]; } struct S { v: [i64] } \
+             impl as Take for S { fn take(self: &Self) -> [i64] { self.v } } \
+             fn main() -> i64 { let s: S = S { v: [40, 2] }; let t: [i64] = s.take(); len(t) }",
+        );
+        assert!(
+            errs.iter().any(|e| matches!(e, BorrowError::MoveOutOfSelf { place, .. } if place == "self.v")),
+            "got {errs:?}"
+        );
+    }
+
+    #[test]
+    fn method_returning_a_ref_into_self_ok() {
+        // Pins the INCOMING seeding of `self`. Without it, `&self.x` looks like a borrow of a
+        // local and is refused as ReturnsLocalRef; the only other test that would notice
+        // does so through a diagnostic's wording (`<unknown>.v` instead of `self.v`).
+        borrow_check_ok(
+            "class P { let x: i64; pub init(x: i64) { self.x = x; 0 }              pub fn at(self: &Self) -> &i64 { &self.x } }              fn main() -> i64 { let p: P = P::init(42); *p.at() }",
+        );
+    }
+
+    #[test]
+    fn conflicting_borrows_of_self_in_a_method_rejected() {
+        // Method bodies get the borrow-conflict rules too, not only the move rules.
+        let errs = borrow_check_err(
+            "class Q { let v: [i64]; pub init(n: i64) { self.v = [n]; 0 }              pub fn clash(self: &mut Self) -> i64 { let a: &mut [i64] = &mut self.v;              let b: &[i64] = &self.v; 0 } }              fn main() -> i64 { let mut q: Q = Q::init(3); q.clash() }",
+        );
+        assert!(
+            errs.iter().any(|e| matches!(e, BorrowError::SharedBorrowOfMutable { .. })),
             "got {errs:?}"
         );
     }

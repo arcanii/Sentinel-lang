@@ -58,8 +58,9 @@ fn is_move_type(c: &mut TyCtx, h: i64) -> bool {
 }
 
 // Record a moved source: a `Var #vid` used in a CONSUMING position (`c.consuming`)
-// whose type is non-Copy, inside a top-level fn body (`curfn >= 0`; methods aren't
-// in `program.fns`, so their moves aren't dumped). Pushes `(curfn, vid)` into the
+// whose type is non-Copy, inside a body (`curfn >= 0` — a fn's index, or, since
+// register D61, `1000000 + selfvid` for a method/init body, which `dump_moves` never
+// prints because it only walks `i < nufn`). Pushes `(curfn, vid)` into the
 // `mvf`/`mvv` side-table (dedup happens at dump time via ascending-VarId membership).
 fn record_move(c: &mut TyCtx, vid: i64) -> i64 {
     if (*c).curfn < 0 {

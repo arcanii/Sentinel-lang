@@ -1,0 +1,14 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c41_method_move_self_whole.sentinel\")"
+---
+sentinel::borrow::move_out_of_self
+
+  × cannot move `self` out: `self` is only borrowed
+    ╭─[tests/ui/c41_method_move_self_whole.sentinel:16:9]
+ 15 │     pub fn dup(self: &Self) -> P {
+ 16 │         self
+    ·         ──┬─
+    ·           ╰── 
+ 17 │     }
+    ╰────

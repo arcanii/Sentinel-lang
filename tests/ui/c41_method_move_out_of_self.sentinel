@@ -1,0 +1,25 @@
+// tests/ui/c41_method_move_out_of_self.sentinel — a Move-typed FIELD cannot be moved out
+// of `self` (register D61).
+//
+// A method's `self` is always a borrow (`&Self` or `&mut Self` — there is no by-value
+// `self`), so `self.v` still belongs to the object, which frees it when the object is
+// dropped. Returning it by value gave it a second owner: the caller freed it, then the
+// object freed it again. Before D61 this was accepted, because no method body was ever
+// borrow-checked.
+
+class Q {
+    let v: [i64];
+    pub init(n: i64) {
+        self.v = [n, n];
+        0
+    }
+    pub fn take(self: &Self) -> [i64] {
+        self.v
+    }
+}
+
+fn main() -> i64 {
+    let q: Q = Q::init(3);
+    let t: [i64] = q.take();
+    len(t)
+}

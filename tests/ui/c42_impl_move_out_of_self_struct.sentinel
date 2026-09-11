@@ -1,0 +1,32 @@
+// tests/ui/c42_impl_move_out_of_self_struct.sentinel — a heap field cannot be moved out of
+// a STRUCT receiver's `self` (register D61).
+//
+// `self` is always a borrow (`&Self` or `&mut Self`), so `self.v` still belongs to the
+// struct, and the struct's owner frees it when the struct is dropped. Returning it by value
+// gave the same buffer a second owner. Before D61 no method body was borrow-checked and
+// this was accepted; called in a loop — build a struct, take its field, drop both — the
+// shipping back end died with 0xC0000374 STATUS_HEAP_CORRUPTION (measured against the
+// pre-fix binary).
+//
+// This is the receiver kind where the second free is real. For a CLASS receiver see
+// `c41_method_move_out_of_self`.
+
+trait Take {
+    fn take(self: &Self) -> [i64];
+}
+
+struct S {
+    v: [i64],
+}
+
+impl as Take for S {
+    fn take(self: &Self) -> [i64] {
+        self.v
+    }
+}
+
+fn main() -> i64 {
+    let s: S = S { v: [40, 2] };
+    let t: [i64] = s.take();
+    t[0] + t[1]
+}
