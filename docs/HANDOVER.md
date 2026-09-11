@@ -124,7 +124,7 @@ reference as you work through the milestones.
 > confirming nothing pre-existing is newly refused; oracle-vs-scg byte-equality on the new
 > fixture at types, mir and llvm; and the secret-taint check in both directions.
 
-### ▶ RESUME HERE (2026-09-12 — **NOT PUSHED**: `origin/main` is at `3c7aa71` (D61); the D59+D60 commit (with D66, D69 closed in `snc build`, and D70's refusal) is local. The notes directly below are from the 2026-09-06 session; STATE.md's entries from 2026-09-08 on record what has happened since. Register: **73 items, 32 done**, D19 redacted.
+### ▶ RESUME HERE (2026-09-12 — **NOT PUSHED**: `origin/main` is at `3c7aa71` (D61); `77e04cc` — D59+D60+D66, D69 closed in `snc build`, D70's refusal (ADR 0072 A1) — is local. The notes directly below are from the 2026-09-06 session; STATE.md's entries from 2026-09-08 on record what has happened since. Register: **73 items, 32 done**, D19 redacted.
 
 > **What this session did.** Closed **D4, D37, D39, D42, D43, D44, D47(option A), D51, D54,
 > D55, D56, D58** and **requests R3, R4, R8, R15**; filed **D42-D58**. Deleted **three**
