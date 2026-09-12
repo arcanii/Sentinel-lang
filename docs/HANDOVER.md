@@ -124,9 +124,50 @@ reference as you work through the milestones.
 > confirming nothing pre-existing is newly refused; oracle-vs-scg byte-equality on the new
 > fixture at types, mir and llvm; and the secret-taint check in both directions.
 
-### ▶ RESUME HERE (2026-09-12 — **NOT PUSHED**: `origin/main` is at `3c7aa71` (D61); `77e04cc` — D59+D60+D66, D69 closed in `snc build`, D70's refusal (ADR 0072 A1) — is local. The notes directly below are from the 2026-09-06 session; STATE.md's entries from 2026-09-08 on record what has happened since. Register: **73 items, 32 done**, D19 redacted.
+### ▶ RESUME HERE (2026-09-12 — **NOT PUSHED**: `origin/main` is at `3c7aa71` (D61); `77e04cc` — D59+D60+D66, D69 closed in `snc build`, D70's refusal (ADR 0072 A1) — is local. The first block below is this session's; the ones after it are the 2026-09-06 session's, kept for their lessons. STATE.md's entries from 2026-09-08 on record what has happened since. Register: **73 items, 32 done**, D19 redacted.
 
-> **What this session did.** Closed **D4, D37, D39, D42, D43, D44, D47(option A), D51, D54,
+> **What the 2026-09-11/12 session did — `77e04cc` (+ docs `e2d5664`), NOT PUSHED.** Closed
+> **D59** (an `if`/`match` result slot sized from the DIVERGENT arm — a memory-safety
+> miscompile in the shipping back end, raised privately and described in the register now that
+> it is fixed), **D66**, **D60**, **D68(a)**, and **D69 + D70 in `snc build`** through **ADR
+> 0072 A1**; filed **D65-D73**. Seven adversarial review rounds shaped it, every finding
+> verified by construction. Four-check on the commit: 1,876 passed with exactly the 18 known
+> Windows failures, doctests and clippy clean, both bootstrap fixed points green; sweeps at
+> every cut: no build changed over the 65 repo programs that declare or perform an effect, or
+> 2,888 generated ones.
+>
+> ⚠ **A FIX THAT REMOVES AN ACCIDENTAL REFUSAL MUST ASK WHAT THE ACCIDENT WAS HIDING.** D60
+> gave each effect resumer its own fn id. That was right, and it un-refused a whole class: the
+> LLVM verifier had been rejecting any embedded-perform tail holding a `return`, by accident of
+> file order, and several of those tails lower WRONG. The first gate I wrote for it closed only
+> the shape I had constructed; reviews four to seven then found the same unfaithfulness in the
+> `perform`'s arguments, in the let and chained shapes, in generic instances and in
+> multi-parameter operations — all pre-existing, all silent at HEAD. **When a change makes
+> previously-refused programs compile, enumerate that class before shipping it.**
+>
+> ⚠ **EACH REVIEW ROUND FOUND PRE-EXISTING DEFECTS IN THE SAME NEIGHBOURHOOD, so bound the
+> loop.** Rounds four through seven each returned blockers; none was a regression from this
+> change, and every round's fixes opened the next round's surface. Review seven ran with an
+> explicit scope rule — regressions, wrong new checks, false claims and disclosures block;
+> anything else pre-existing gets REGISTERED (D68(c), D71(d), D73) — which is what let the
+> commit close.
+>
+> ⚠ **ADR 0072 A1 IS CONSERVATIVE, AND SAYS SO.** It refuses a few bodies HEAD lowered
+> correctly (a division, `&mut` borrow or local `handle` before the `perform`, a local `handle`
+> in an argument, a loop condition that runs once, a generic effecting fn that happened to
+> work). The ADR lists them, because its own Consequences section promises the opposite. **The
+> corpus cannot vouch for this area**: outside the change's own fixtures only three repo
+> programs and one generated one reach the embedded shape's rules at all.
+>
+> **NEXT, roughly by value.** **The privately tracked items raised during these reviews need a
+> maintainer call before anything else in the effects path** (see the security note below).
+> Then: the **ref-escape family** (31 routes reproduced, plan in the scratch `refesc/`
+> design note); **D69's remainder** — the text oracle and scg do not apply A1, so they still
+> lower refused shapes; **D68(c)** (an effecting fn whose value is not `i64`-shaped panics or
+> fails verification in the direct, pure-tail, let and chained shapes); **D13** fail-closed;
+> **D62**; **D73** (a `--separate` rebuild reuses objects an older `snc` built).
+>
+> **What the 2026-09-06 session did.** Closed **D4, D37, D39, D42, D43, D44, D47(option A), D51, D54,
 > D55, D56, D58** and **requests R3, R4, R8, R15**; filed **D42-D58**. Deleted **three**
 > `DEFERRED_PROGRAMS` entries (the `sealed_*` trio, all from one missing `SealedChannel`
 > arm) — three remain: `delegation`, `fn_value`, `fn_value_generic`. Opened two docs:
@@ -169,16 +210,17 @@ reference as you work through the milestones.
 > borrowing). **Budget for the review on anything an attacker calls repeatedly, and
 > re-measure every literal against the program beside it.**
 >
-> ⚠ **SECURITY-CLASS FINDINGS ARE TRACKED PRIVATELY WITH THE MAINTAINER and are
-> deliberately not described here.** D35 is blocked behind one; D19 IS another. D59 was a
-> third, and is now CLOSED and described in the register. Two more were raised privately on 2026-09-05/06; one of them — class-field move
-> tracking — is CLOSED by **D61** (2026-09-11), together with the wider gap it was a symptom
-> of (no method body was borrow-checked at all), and both are described there. **Several more
-> were raised privately on 2026-09-11, during D61's review.** If you find yourself in the
-> container refcount/drop path, in `clone_if_shared_var` and its twins, in the partial-move
-> (ADR 0046) machinery, in **`std/net/ssh_cipher.sentinel`'s record-length handling**, or in the
-> cross-unit symbol mangling / `linkonce_odr` dedup — **ask first, and before writing
-> anything down.**
+> ⚠ **SECURITY-CLASS FINDINGS ARE TRACKED PRIVATELY WITH THE MAINTAINER and are deliberately
+> not described here.** D35 is blocked behind one; D19 IS another. D59 was a third, and is now
+> CLOSED and described in the register. Two more were raised privately on 2026-09-05/06; one of
+> them — class-field move tracking — is CLOSED by **D61** (2026-09-11), together with the wider
+> gap it was a symptom of (no method body was borrow-checked at all), and both are described
+> there. **Several more were raised privately on 2026-09-11, during D61's review, and MORE on
+> 2026-09-12 during D59/D60's.** If you find yourself in the container refcount/drop path, in
+> `clone_if_shared_var` and its twins, in the partial-move (ADR 0046) machinery, in
+> **`std/net/ssh_cipher.sentinel`'s record-length handling**, or in the cross-unit symbol
+> mangling / `linkonce_odr` dedup, or in **the runtime's continuation-frame replay order** —
+> **ask first, and before writing anything down.**
 >
 > **NEXT, roughly by value.** **D45's null-FIRST residue** — the design is fully worked
 > out and reviewed, but it needs the first index-assignment into a `TyCtx` `Vec` field
