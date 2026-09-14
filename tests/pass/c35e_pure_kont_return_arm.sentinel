@@ -1,0 +1,29 @@
+// C3.6(a) + C3.5(c) / ADR 0020 D4 + D7: a let frame on a pure kont, under a
+// handle with a RETURN arm.
+//
+// `outer`'s tail must run first (5 + 37 = 42), and the return arm then applies
+// to what the computation produced: 42 * 2. Stranded on the pure kont, the
+// frame was skipped, the return arm applied to the callee's 5, and the program
+// answered 10.
+//
+// Expected: exit code 84.
+
+effect Io {
+    read() -> i64;
+}
+
+fn pure_inner() -> i64 ! { Io } {
+    5
+}
+
+fn outer() -> i64 ! { Io } {
+    let b: i64 = pure_inner();
+    b + 37
+}
+
+fn main() -> i64 {
+    handle outer() with {
+        Io.read(k) => k(0),
+        return v => v * 2
+    }
+}

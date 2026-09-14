@@ -1,0 +1,32 @@
+// C3.5(c) / ADR 0020 D7: TWO let-sites push onto the same pure kont.
+//
+// `pure5` returns a pure kont; `f1` pushes `a + 1` onto it, and `f2` pushes its
+// own `a + 1` onto the kont `f1` hands back. Each frame must run as it is
+// pushed: 5 -> 6 -> 7. Stranded on the pure kont, both were skipped and the
+// program answered 5.
+//
+// Expected: exit code 7.
+
+effect Io {
+    read() -> i64;
+}
+
+fn pure5() -> i64 ! { Io } {
+    5
+}
+
+fn f1() -> i64 ! { Io } {
+    let a: i64 = pure5();
+    a + 1
+}
+
+fn f2() -> i64 ! { Io } {
+    let a: i64 = f1();
+    a + 1
+}
+
+fn main() -> i64 {
+    handle f2() with {
+        Io.read(k) => k(0)
+    }
+}

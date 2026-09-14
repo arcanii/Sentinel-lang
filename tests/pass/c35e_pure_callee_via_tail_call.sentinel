@@ -1,0 +1,32 @@
+// C3.5(b)+(c) / ADR 0020 D7: the pure kont reaches the let-site through a TAIL
+// call.
+//
+// `mid`'s body is a direct call to `pure5`, so it returns `pure5`'s own pure
+// kont unchanged, and `outer`'s let-site pushes `b + 37` onto it. The frame
+// must run on 5 at once. Stranded on the pure kont, it was skipped and the
+// program answered 5.
+//
+// Expected: exit code 42.
+
+effect Io {
+    read() -> i64;
+}
+
+fn pure5() -> i64 ! { Io } {
+    5
+}
+
+fn mid() -> i64 ! { Io } {
+    pure5()
+}
+
+fn outer() -> i64 ! { Io } {
+    let b: i64 = mid();
+    b + 37
+}
+
+fn main() -> i64 {
+    handle outer() with {
+        Io.read(k) => k(0)
+    }
+}

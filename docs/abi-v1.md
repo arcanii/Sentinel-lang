@@ -108,9 +108,14 @@ offset 8. ADR 0020 D7.
 `next` chains OUTWARDS, from the perform site towards the `handle`:
 `sentinel_kont_push` appends, so a kont's head frame is the first
 pushed (the innermost captured context) and `sentinel_kont_resume`
-replays head -> tail. Ordering is runtime-internal — the back ends
-only sequence the `sentinel_kont_push` calls — but it is part of the
-contract a resumer is written against. ADR 0020 D7 (clarified).
+replays head -> tail. A push onto a PURE-RETURN kont (`op_id` =
+`u32::MAX`) does not append: nothing is suspended, so the push calls
+the resumer at once and writes its result into the kont in place. A
+pure kont therefore never carries frames, and
+`sentinel_kont_consume_pure` frees only the kont. Both are
+runtime-internal — the back ends only sequence the
+`sentinel_kont_push` calls — but they are part of the contract a
+resumer is written against. ADR 0020 D7 (clarified, twice).
 
 ### `SentinelTask` — size **32**, align **8**
 

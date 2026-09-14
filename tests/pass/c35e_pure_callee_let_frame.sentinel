@@ -1,0 +1,30 @@
+// C3.5(c) / ADR 0020 D7: a let-bound call to an effecting fn whose body never
+// performs.
+//
+// `pure_inner` hands back `sentinel_kont_pure(5)`, and `outer`'s let-site then
+// pushes its captured tail (`b + 37`) onto that PURE kont. Nothing is
+// suspended, so the tail must run on 5 at once. Appending the frame to the
+// pure kont instead stranded it: the handle's dispatch unwrapped the 5 without
+// walking the chain, so the program answered 5, skipping the tail and leaking
+// its frame.
+//
+// Expected: exit code 42.
+
+effect Io {
+    read() -> i64;
+}
+
+fn pure_inner() -> i64 ! { Io } {
+    5
+}
+
+fn outer() -> i64 ! { Io } {
+    let b: i64 = pure_inner();
+    b + 37
+}
+
+fn main() -> i64 {
+    handle outer() with {
+        Io.read(k) => k(0)
+    }
+}

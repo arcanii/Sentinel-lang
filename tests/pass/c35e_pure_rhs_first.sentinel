@@ -1,0 +1,29 @@
+// C3.5(e) / ADR 0020 D7: chained lets whose FIRST call never performs.
+//
+// The parent calls `pure5()` — a pure kont — and pushes resumer-0 onto it.
+// That frame must run on 5 at once; it then performs `Io.read()` itself,
+// resumed with 3, and the tail answers 5 * 10 + 3. Stranded on the pure kont,
+// the frame was skipped, the `perform` never happened, and the program
+// answered 5.
+//
+// Expected: exit code 53.
+
+effect Io {
+    read() -> i64;
+}
+
+fn pure5() -> i64 ! { Io } {
+    5
+}
+
+fn chained() -> i64 ! { Io } {
+    let a: i64 = pure5();
+    let b: i64 = perform Io.read();
+    a * 10 + b
+}
+
+fn main() -> i64 {
+    handle chained() with {
+        Io.read(k) => k(3)
+    }
+}

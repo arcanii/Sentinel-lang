@@ -14,9 +14,37 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
+**Latest (2026-09-14) — D76: a captured frame pushed onto a pure-return kont was never run,
+and leaked. Runtime-only. NOT PUSHED.** An effecting fn whose body never performs returns
+`sentinel_kont_pure(v)`, and a let-site above it pushed its frame onto that pure kont, where
+nothing reads frames: a `handle`'s dispatch (through `sentinel_kont_consume_pure`) and
+`sentinel_kont_resume`'s own pure path both take the value and free the kont without walking
+`frames_head`. So the caller's tail was skipped and its frame leaked: `let b = pure_inner();
+b + 37` answered 5 for 42, chained lets whose second call never performs answered 5 for 35
+inside a resume, and a `handle` with a return arm answered 10 for 84. `sentinel_kont_push` now
+binds on a pure kont — it runs the frame at once and writes the result into the kont in place —
+so a pure kont never carries frames, which every consumer already assumed; no emitted byte
+changes, and `selfhost/` needs no mirror. With each `handle` in a helper fn, the leak shape peaked
+at 93.0 MB after 1,800,000 calls and 148.3 MB after 3,000,000 before the fix, and at 9.7 MB after
+it (kernel peak working set, read after exit). New: pass `c35e_pure_callee_let_frame`, `c35e_pure_callee_via_tail_call`,
+`c35e_pure_rhs_in_resumer`, `c35e_pure_rhs_first`, `c35e_pure_kont_two_frames` and
+`c35e_pure_kont_return_arm`, and three runtime unit tests (exactly the three that fail with the
+bind disabled). ADR 0020 D7 clarified again; `docs/abi-v1.md` §3 updated. **D77's scope widened:**
+a `handle` directly in a loop body overflows the stack whether or not its computation performs —
+never-performing shapes that complete 600,000 iterations die at 1,800,000 — and the same shapes
+run flat at 9.8 MB through 3,000,000 iterations once the `handle` is in a helper fn, so the growth
+is tied to the loop body's frame; its cause is still not established. D76's review also filed **D79**
+(a handler arm that never resumes leaks the abandoned continuation — 37.5 MB to 148 MB over 600k to
+3M calls), **D80** (the bind nests the native stack on consecutive never-performing let-bound calls; a
+straight-line chain of ~50,000 such calls runtime-overflows where the performing twin completes,
+constructed — a crash the fix uniquely introduces on inputs that previously miscompiled) and **D81** (a `handle` inside another handle's arm yields
+a continuation pointer). A double resume `k(1) + k(2)` was raised privately. Four-check: 1,891 passed
+with exactly the 18 known Windows failures, doctests and clippy clean, every `selfhost_*`
+differential green. **Register: 81 items, 34 done.**
+
 **Latest (2026-09-12b) — D74: a continuation carrying MORE THAN ONE captured frame replayed
-them OUTERMOST-FIRST and answered a wrong value with no diagnostic. Runtime-only. NOT
-PUSHED.** `sentinel_kont_push` PREPENDED, so the head of a kont's frame chain was the LAST
+them OUTERMOST-FIRST and answered a wrong value with no diagnostic. Runtime-only. Pushed
+(`85d22ee`).** `sentinel_kont_push` PREPENDED, so the head of a kont's frame chain was the LAST
 push. The pushes for one kont run from the perform site outwards — an effecting callee pushes
 its frame onto the kont before its caller pushes one onto that same kont, and inkwell, the
 text oracle and scg all emit them in that order — while `sentinel_kont_resume` walks the chain

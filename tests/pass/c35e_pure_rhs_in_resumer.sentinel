@@ -1,0 +1,30 @@
+// C3.5(e) / ADR 0020 D7: chained lets whose SECOND call never performs, so the
+// push onto a pure kont happens INSIDE a resumer.
+//
+// The parent performs `Io.read()` and pushes resumer-0. Resumed with 3,
+// resumer-0 binds `a = 3`, calls `pure5()` — a pure kont — and pushes
+// resumer-1 (`a * 10 + b`) onto it. That frame must run on 5 at once. Stranded
+// on the pure kont, it was dropped by `sentinel_kont_resume`'s own pure path
+// rather than by the handle, and the program answered 5.
+//
+// Expected: exit code 35.
+
+effect Io {
+    read() -> i64;
+}
+
+fn pure5() -> i64 ! { Io } {
+    5
+}
+
+fn chained() -> i64 ! { Io } {
+    let a: i64 = perform Io.read();
+    let b: i64 = pure5();
+    a * 10 + b
+}
+
+fn main() -> i64 {
+    handle chained() with {
+        Io.read(k) => k(3)
+    }
+}

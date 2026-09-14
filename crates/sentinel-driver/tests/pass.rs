@@ -1039,6 +1039,67 @@ fn pass_c35e_nested_frames_bubble_splice() {
 }
 
 // ============================================================================
+// C3.5(c)+(e) / ADR 0020 D7: a captured frame pushed onto a PURE-RETURN kont.
+// An effecting fn whose body never performs returns `sentinel_kont_pure(v)`,
+// and a let-site above it pushes its tail onto that kont. Nothing is
+// suspended, so the tail must run at once. Stranded on the pure kont, it was
+// dropped by whichever consumer took the value — the handle's dispatch, or
+// resume's own pure path — and the callee's value came back in the tail's place.
+// ============================================================================
+
+#[test]
+fn pass_c35e_pure_callee_let_frame() {
+    // outer: `let b = pure_inner(); b + 37` with pure_inner = 5 -> 42.
+    // Stranded, the tail was skipped: 5.
+    let r = build_and_run("c35e_pure_callee_let_frame.sentinel");
+    assert_eq!(r.exit, 42);
+    assert_eq!(r.stdout, "");
+}
+
+#[test]
+fn pass_c35e_pure_callee_via_tail_call() {
+    // The pure kont reaches the let-site through `mid() { pure5() }` -> 42.
+    let r = build_and_run("c35e_pure_callee_via_tail_call.sentinel");
+    assert_eq!(r.exit, 42);
+    assert_eq!(r.stdout, "");
+}
+
+#[test]
+fn pass_c35e_pure_rhs_in_resumer() {
+    // Chained lets; the second call never performs, so the push onto the pure
+    // kont happens inside resumer-0: a = 3, b = 5 -> 35. Stranded: 5.
+    let r = build_and_run("c35e_pure_rhs_in_resumer.sentinel");
+    assert_eq!(r.exit, 35);
+    assert_eq!(r.stdout, "");
+}
+
+#[test]
+fn pass_c35e_pure_rhs_first() {
+    // Chained lets; the first call never performs: a = 5, then the perform,
+    // b = 3 -> 53. Stranded, the perform never happened: 5.
+    let r = build_and_run("c35e_pure_rhs_first.sentinel");
+    assert_eq!(r.exit, 53);
+    assert_eq!(r.stdout, "");
+}
+
+#[test]
+fn pass_c35e_pure_kont_two_frames() {
+    // Two let-sites push onto one pure kont: 5 -> 6 -> 7. Stranded: 5.
+    let r = build_and_run("c35e_pure_kont_two_frames.sentinel");
+    assert_eq!(r.exit, 7);
+    assert_eq!(r.stdout, "");
+}
+
+#[test]
+fn pass_c35e_pure_kont_return_arm() {
+    // The tail runs first (42), then the return arm: 84. Stranded, the return
+    // arm applied to the callee's 5: 10.
+    let r = build_and_run("c35e_pure_kont_return_arm.sentinel");
+    assert_eq!(r.exit, 84);
+    assert_eq!(r.stdout, "");
+}
+
+// ============================================================================
 // C3.6(a) / ADR 0020 D4: return arm with non-identity transform.
 // lower_handle binds the return arm's value VarId to the unwrapped i64 +
 // lowers the body in pure_block; lower_resume_kont mirrors this on the

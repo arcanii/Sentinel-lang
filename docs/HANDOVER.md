@@ -124,9 +124,38 @@ reference as you work through the milestones.
 > confirming nothing pre-existing is newly refused; oracle-vs-scg byte-equality on the new
 > fixture at types, mir and llvm; and the secret-taint check in both directions.
 
-### ▶ RESUME HERE (2026-09-14 — `origin/main` is at `238d292`, so `77e04cc` — D59+D60+D66, D69 closed in `snc build`, D70's refusal (ADR 0072 A1) — is PUSHED; `85d22ee` (D74) on top of it is local and **NOT PUSHED**. The first block below is this session's; the next is the 2026-09-11/12 session's, and the ones after it the 2026-09-06 session's, all kept for their lessons. STATE.md's entries from 2026-09-08 on record what has happened since. Register: **78 items, 33 done**, D19 redacted.
+### ▶ RESUME HERE (2026-09-14 — `origin/main` is at `e686853`, so `77e04cc` — D59+D60+D66, D69 closed in `snc build`, D70's refusal (ADR 0072 A1) — with `85d22ee` (D74) and `e686853` (docs) on top are ALL PUSHED; the D76 commit is not yet made and will be the only local commit. The first two blocks below are this session's; the next is the 2026-09-11/12 session's, and the ones after it the 2026-09-06 session's, all kept for their lessons. STATE.md's entries from 2026-09-08 on record what has happened since. Register: **81 items, 34 done**, D19 redacted.
 
-> **What the 2026-09-12b session did (finished 2026-09-14) — `85d22ee`, NOT PUSHED.**
+> **What the 2026-09-14 D76 slice did — the D76 commit, NOT PUSHED (`85d22ee` and `e686853`
+> are already on `origin/main`).** Closed **D76**: a frame pushed onto a pure-return kont was never
+> run — the caller's tail skipped, the callee's value returned in its place, the frame leaked —
+> through every consumer of a pure kont — `sentinel_kont_consume_pure` (called by a `handle`'s
+> dispatch and by a `k(v)`'s pure unwrap) and resume's own pure path.
+> Runtime-only: `sentinel_kont_push` binds on a pure kont instead of appending, so a pure kont
+> never carries frames. Leak measured before and after with the `handle` in a helper fn (kernel
+> peak working set, read after exit): 148.3 MB after 3,000,000 calls before, 9.7 MB flat after. D77's scope widened: a `handle` directly in a
+> loop body overflows whether or not the computation performs (the threshold differs), and the
+> same shapes run flat once the `handle` moves into a helper fn. Four-check: 1,891 passed with
+> exactly the 18 known Windows failures, doctests and clippy clean, every `selfhost_*`
+> differential green with the six new fixtures.
+>
+> ⚠ **A BEFORE/AFTER SWEEP MUST PIN ONE COMPILER BUILD.** The post-fix behaviour sweep reported
+> a BUILD_FAIL that was `snc` itself overflowing its stack: a `cargo build` between the two halves
+> had swapped the opt-level-1 test-profile `snc.exe` for the opt-level-0 dev one. And running
+> `target/debug/snc.exe` while `cargo test` wants to replace it fails that test run outright
+> ("Access is denied"). Copy `snc.exe` aside for probes and sweeps.
+>
+> ⚠ **SEPARATE THE LEAK FROM THE LOOP BEFORE MEASURING EITHER.** A `handle` in a loop body grows
+> the stack (D77), so the first leak measurements mixed two growths, and about 17 bytes a call
+> seemed to survive the fix. Moving the `handle` into a helper fn took the stack growth out and
+> made the before and after unambiguous.
+>
+> **NEXT:** the **ref-escape family** (31 routes reproduced; plan in the scratch `refesc/`
+> design note — memory has the verified path). Then D69's remainder, D68(c), D13 fail-closed,
+> D77 and D62 (try the helper-fn construction on D62's shape first), D73, D78; D75 needs a
+> maintainer call.
+
+> **What the 2026-09-12b session did (finished 2026-09-14) — `85d22ee`, pushed.**
 > Closed **D74**: a kont carrying MORE THAN ONE captured frame replayed them outermost-first
 > and answered a wrong value with no diagnostic, in the shipping runtime. `sentinel_kont_push`
 > prepended where the chain it builds is walked head -> tail; it now appends. Runtime-only and
@@ -332,7 +361,7 @@ reference as you work through the milestones.
 >      scalar-4 arm, which it now has. Also worth doing with it: `examples/math/quadratic.sentinel` and
 >      `sentinel_library/std/math/float.sentinel` currently reach only lex/ast, because
 >      `snc merge`'s Bar-A printer rejects both a float literal and `sqrt` (menu item 5).
->   4. **THE FILED-DEFECT REGISTER — SEVENTY-EIGHT items (D1-D78); **D1, D2, D3, D4, D5, D8, D9, D10, D15, D16, D17, D24, D25, D26, D29, D31, D34, D37, D39, D42, D43, D44, D47(option A), D51, D54, D55, D56, D58, D59, D60, D61, D66 and D74 are DONE (33 of 78)**, the rest verified against a pre-slice binary. MOST are
+>   4. **THE FILED-DEFECT REGISTER — EIGHTY-ONE items (D1-D81); **D1, D2, D3, D4, D5, D8, D9, D10, D15, D16, D17, D24, D25, D26, D29, D31, D34, D37, D39, D42, D43, D44, D47(option A), D51, D54, D55, D56, D58, D59, D60, D61, D66, D74 and D76 are DONE (34 of 81)**, the rest verified against a pre-slice binary. MOST are
 >      unregistered in any `DEFERRED_PROGRAMS` / `KNOWN_SCG_BUGS` list because no corpus program
 >      reaches them — but FOUR are, and the blanket "NONE" that stood here was falsified by
 >      this register's own new entries: D24/D25/D26 share the
@@ -769,6 +798,48 @@ reference as you work through the milestones.
 >      `c42_impl_move_out_of_self_struct`). `tests/llvm.rs` `llvm_method_moves_are_not_freed`
 >      pins the two oracle-only shapes, which no exit code and no `llvm-as` run can see.
 >
+>      **D79 — a handler arm that never resumes `k` LEAKS the abandoned continuation on every
+>      `handle`.** Found 2026-09-14 by D76's review; pre-existing, and a memory leak. Only a
+>      `Return` arm frees an abandoned kont (codegen; ADR 0065 D6 covers early `return` only), so
+>      an arm like `Io.read(k) => 5` that yields a value without resuming or `return`ing drops
+>      the kont, its frame nodes and their captured blocks each call. Measured (kernel peak
+>      working set) with the `handle` in a helper fn looping: a direct `perform`, arm `=> 5`, from
+>      37.5 MB at 600,000 calls to 148 MB at 3,000,000 (~48 B/call = one 32-byte SentinelKont plus
+>      malloc overhead); a framed perform's arm from 56 MB to 240 MB (~80 B/call, +1 captured
+>      block). Attacker-paced if the arm can decline to resume on some input. Not caused by D76:
+>      the pre-fix binary leaks the same. Fix direction: free the kont on the arm's non-resuming
+>      exits as the `Return` arm does — a codegen change in all three back ends.
+>
+>      **D80 — the pure-kont bind (D76) runs the resumer IN-FRAME, so consecutive never-performing
+>      let-bound calls nest the native stack.** Filed with D76's fix. `sentinel_kont_push`'s bind
+>      calls the resumer inside its own frame; a chained-lets resumer pushes onto the next pure
+>      kont and only then returns, so N consecutive let-bound calls to never-performing effecting
+>      fns hold N push+resumer frame pairs, where a performing chain returns to the resume loop
+>      between them. This is a runtime stack overflow the bind UNIQUELY causes, constructed with
+>      the pinned `snc`: a straight-line chain of never-performing let-bound calls (light tail
+>      `a{N-1} + 1`) completes at N = 45,000 and OVERFLOWS at N = 50,000 / 60,000 / 100,000
+>      (0xC00000FD), while the performing twin completes through 100,000 — and both compile to
+>      the byte-identical executable at each N, so it is the bind's recursion depth, not code
+>      size. (A first pass stopped the light tail at 16,000 and wrongly concluded no overflow was
+>      constructible; the D76 review pushed it to the ~50,000 ceiling. A heavy all-bindings tail
+>      overflows the COMPILER at ~300 — the unrelated dev-`snc` overflow — which masked the
+>      runtime ceiling behind it.) It is a crash/DoS class defect (a clean stack overflow), not a
+>      memory-safety one; the count is a static source property (tens of thousands of let-bound
+>      calls in one fn) and no corpus program is near it. Pre-fix these chains silently answered
+>      the WRONG VALUE (the stranded-frame bug), so D76 is a strict improvement even here —
+>      correct through ~45,000, a clean crash beyond, versus wrong always. The flat-stack fix is
+>      codegen unwrapping a pure kont at the capture site across all three back ends — a
+>      separate slice, deferred; the runtime bind cannot trampoline compiler-emitted resumers.
+>
+>      **D81 — a `handle` written inside another handle's arm evaluates to a CONTINUATION POINTER,
+>      not its value.** Found 2026-09-14 by D76's review; pre-existing, not caused by D76.
+>      `lower_handle` raises `handle_depth` around the arm bodies too, so a `handle` lexically
+>      inside an arm takes the nested path, whose merge is `Kont*`-typed; `let v: i64 = handle …`
+>      then binds the pointer, with no diagnostic. `handle perform Io.read() with { Io.read(k) =>
+>      { let v = handle perform Io.get() with { Io.get(k2) => k2(40) }; k(v + 2) } }` answered a
+>      different garbage value on each run where its source says 42. All three back ends; no
+>      corpus program nests a `handle` in an arm.
+>
 >      **D78 — stale corpus fixture counts in `llvm.rs` and `README.md`, at six sites, stale
 >      before this change.** Found by D74's reviews. `crates/sentinel-driver/tests/llvm.rs`
 >      carries them three times: a comment at line 1214 saying a `tests/pass` substring filter
@@ -786,33 +857,44 @@ reference as you work through the milestones.
 >      sites together. Filed rather than fixed here: D74 touches neither file, and correcting a
 >      count by measuring it belongs with whoever next moves it.
 >
->      **D76 — a captured frame pushed onto a PURE-RETURN kont never runs, and leaks.** Found
->      2026-09-12 while probing D74; pre-existing and independent of it (one frame, no ordering
->      involved). An effecting fn whose body never performs returns `sentinel_kont_pure(v)`, and
->      a caller that let-binds such a call pushes its own frame onto that pure kont and returns
->      it — the let shape lowers "RHS then push" without knowing whether the RHS suspended. The
->      handle dispatch sees `PURE_RETURN_OP_ID` and unwraps with `sentinel_kont_consume_pure`,
->      which reads `arg` and frees the kont WITHOUT walking `frames_head`. So the caller's tail
->      is silently skipped and its frame node + captured block leak.
->      `fn pure_inner() -> i64 ! { Io } { 5 }` let-bound by
->      `fn outer(n) -> i64 ! { Io } { let b: i64 = pure_inner(); b + n }`, handled, answers
->      **5** where its source says 42 — no diagnostic. The leak follows from the code:
->      `sentinel_kont_consume_pure` reads `arg` and frees the kont, and never walks
->      `frames_head`. Measured against the same loop handling `pure_inner()` DIRECTLY (no
->      caller, so no frame is pushed), peak working set: 20.5 MB vs 11.2 MB at 400,000 handled
->      calls, 44.5 MB vs 13.4 MB at 600,000. ⚠ The control is NOT flat — it grows too, for
->      D77's reason — so only the widening GAP is this defect, and peak working set is too
->      coarse to pin a per-call rate; none is claimed here. (An earlier draft of this entry
->      cited a flat 6.1 MB baseline and "about 62 bytes per call". Both were wrong: the
->      baseline was a sampling artifact of a poll that was too slow for a short run.)
->      All three back ends emit the same shape. Fix directions, neither free: teach
->      the dispatch to drain a pure kont that carries frames (`sentinel_kont_consume_pure` would
->      have to do what `sentinel_kont_resume` does, which is a runtime-only change but alters
->      what a symbol all three back ends call means), or refuse the shape as ADR 0072 A1 refuses
->      its neighbours. No corpus program has it.
+>      **D76 — DONE (2026-09-14). A captured frame pushed onto a PURE-RETURN kont was never
+>      run: the caller's tail was skipped, the callee's value came back in its place, and the
+>      frame leaked.** Found 2026-09-12 while probing D74; pre-existing. An effecting fn whose
+>      body never performs returns `sentinel_kont_pure(v)`, and a let-site above it lowers "RHS,
+>      then push" without knowing whether the RHS suspended, so it pushed its frame onto that
+>      pure kont. Nothing reads frames there: a `handle`'s dispatch unwraps a pure kont through
+>      `sentinel_kont_consume_pure`, and `sentinel_kont_resume`'s own pure path does the same
+>      inside a resume — both take `arg` and free the kont without walking `frames_head`. The
+>      scope was wider than first filed, which named only the dispatch. On the pre-fix binary,
+>      `let b = pure_inner(); b + 37` answered 5 for 42 (and the same through a tail call,
+>      `mid() { pure5() }`); chained lets whose SECOND call never performs — the push happens
+>      inside resumer-0, so resume's own pure path dropped the frame — answered 5 for 35;
+>      chained lets whose FIRST call never performs answered 5 for 53; two let-sites on one
+>      pure kont answered 5 for 7; and a `handle` with a return arm answered 10 for 84. A
+>      `perform`, or a call that performs, on only one arm of an `if` is refused by `snc build`
+>      in both spellings tried: the `perform` by ADR 0072 A1's unconditional-path rule, the call
+>      by ADR 0072's original suspends gate.
 >
->      **D77 — a `handle` of a computation that PERFORMS grows the STACK per iteration, and a
->      loop of ~600k exhausts it.** Found 2026-09-12 while probing D74; pre-existing and
+>      Fix, runtime-only: `sentinel_kont_push` BINDS on a pure kont. Nothing is suspended there,
+>      so the push calls the resumer at once on the value and writes its result into the kont
+>      in place, because the capture site returns the kont's own pointer after the push; if the
+>      tail performs, the kont becomes that perform. A pure kont therefore never carries frames,
+>      which every consumer already assumed, and no emitted byte changes. Leak, measured with
+>      each `handle` in a helper fn called from the loop, so the loop body's own stack growth
+>      (D77) stays out of it: the let-bound shape peaked at 93.0 MB after 1,800,000 calls and
+>      148.3 MB after 3,000,000 before the fix, and at 9.7 MB for both after it, flat like its
+>      no-caller control (9.7 MB before and after; kernel peak working set read after exit).
+>      Pinned by pass
+>      `c35e_pure_callee_let_frame` (42), `c35e_pure_callee_via_tail_call` (42),
+>      `c35e_pure_rhs_in_resumer` (35), `c35e_pure_rhs_first` (53), `c35e_pure_kont_two_frames`
+>      (7) and `c35e_pure_kont_return_arm` (84) — token-identical to programs that answered 5,
+>      5, 5, 5, 5 and 10 on the pre-fix binary — and three runtime unit tests, which are exactly
+>      the three that fail when the bind is disabled. ADR 0020 D7 clarified again;
+>      `docs/abi-v1.md` §3 states the push's two cases.
+>
+>      **D77 — a `handle` written DIRECTLY in a loop body grows the STACK per iteration, and
+>      the loop exhausts it — at ~600k iterations when the handled computation performs, by
+>      1.8M when it does not.** Found 2026-09-12 while probing D74; pre-existing and
 >      independent of it. In `while i < N { acc = acc + handle <computation> with { ... } }`,
 >      five shapes were built and run at N = 500,000 and N = 600,000. All THREE whose
 >      computation performs survive 500,000 and die at 600,000 with 0xC00000FD
@@ -823,7 +905,18 @@ reference as you work through the milestones.
 >      (`Io.read(k) => 5`). Both shapes whose body never performs — so the arm never runs at
 >      all — COMPLETE at 600,000: `pure_inner()` (13.4 MB) and D76's `outer()` (44.5 MB).
 >      So neither frame reification nor resumption is the discriminator; all three shapes that
->      perform died and both that never perform completed, and nothing here says why. Like
+>      perform died and both that never perform completed, and nothing here says why.
+>      ⚠ **Widened 2026-09-14:** the never-performing shapes die too, just later —
+>      `handle pure_inner()`, D76's `outer(i)` (both after D76's fix) and a capture-free
+>      let-bound call all die at 1,800,000 with the same 0xC00000FD — so performing is not the
+>      discriminator either; the threshold differs. And moving the `handle` into a helper fn
+>      called from the loop removes it: the framed perform, `pure_inner()` and `outer(i)` each
+>      run flat at 9.8 MB through 3,000,000 iterations (kernel peak working set). An arm that
+>      never resumes stops overflowing in a helper fn too but still grows — it leaks, register
+>      D79 — so it is not a flatness witness. The handled computation and the runtime are the
+>      same in both versions, so the growth is tied to the frame the `handle` is lowered in —
+>      the loop body's; which allocation in that frame grows is not established. D62's shape is
+>      the obvious one to try the same helper-fn construction on. Like
 >      **D62** (a class constructed in a loop), it is a stack overflow inside a `while` loop, but
 >      neither that resemblance nor the shared 0xC00000FD (Windows' generic
 >      STATUS_STACK_OVERFLOW) shows a common cause. An attacker who controls the iteration count

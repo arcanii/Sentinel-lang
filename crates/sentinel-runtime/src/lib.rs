@@ -681,7 +681,8 @@ pub struct SentinelKont {
     /// Padding so `frames_head` lands at a stable 8-byte offset.
     pub _pad2: [u8; 7],
     /// C3.5(c) / ADR 0020 D7: linked-list head of captured
-    /// evaluation frames. NULL when no frames have been pushed
+    /// evaluation frames. Always NULL on a pure-return kont (a
+    /// push onto one runs the frame at once). NULL when no frames have been pushed
     /// (the C3.5(a)/(b) cases where `perform` is at tail
     /// position with no surrounding context to reify). The list
     /// is ordered innermost-first (head = FIRST-pushed = closest
@@ -761,11 +762,14 @@ pub extern "C" fn sentinel_perform_op(op_id: u32, arg: i64) -> *mut SentinelKont
 /// captured state through the pointer it expects. Memory
 /// management: this fn takes ownership of `captured`. The
 /// matching `sentinel_kont_resume` frees the captured pointer
-/// after the resumer returns.
+/// after the resumer returns — or, when `kont` is a pure return,
+/// this fn runs the resumer and frees `captured` itself.
 ///
 /// The frame is APPENDED at the chain's tail, so the head stays
 /// the innermost (first-pushed) frame that `sentinel_kont_resume`
-/// must replay first.
+/// must replay first — unless `kont` is a pure return, in which
+/// case nothing is suspended and the frame runs at once (see the
+/// body): a pure kont never carries frames.
 #[no_mangle]
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub extern "C" fn sentinel_kont_push(
@@ -773,6 +777,64 @@ pub extern "C" fn sentinel_kont_push(
     resumer: unsafe extern "C" fn(value: i64, captured: *mut u8) -> *mut SentinelKont,
     captured: *mut u8,
 ) {
+    // SAFETY: caller guarantees `kont` is a live SentinelKont.
+    if unsafe { (*kont).op_id } == PURE_RETURN_OP_ID {
+        // BIND ON A PURE RETURN. The computation under this capture
+        // site finished without performing — an effecting fn whose body
+        // never reaches a `perform` hands back `sentinel_kont_pure(v)` —
+        // so there is nothing to suspend, and the captured tail runs NOW,
+        // on `v`, exactly where direct-style code would have continued.
+        // Appending the frame instead stranded it: every consumer of a
+        // pure kont — `sentinel_kont_consume_pure`, which both a
+        // `handle`'s dispatch and a `k(v)`'s pure unwrap call, and the
+        // pure path inside `sentinel_kont_resume` — takes the value and
+        // frees the kont without walking `frames_head`. The tail was skipped, the
+        // callee's value came back in its place, and the frame node and
+        // captured block leaked. Running it here keeps the invariant
+        // those consumers rely on: a pure kont never carries frames.
+        //
+        // The tail may itself perform. Whatever it returns replaces this
+        // kont's contents IN PLACE, because the capture site returns
+        // `kont`'s own pointer after the push; a later, outer push then
+        // appends to that result's chain as usual.
+        //
+        // Cost (register D80): the bind runs the resumer inside this
+        // frame, so consecutive let-bound calls to never-performing
+        // effecting fns nest one push+resumer frame pair each on the
+        // native stack, where a performing chain returns to the resume
+        // loop between frames. A straight-line chain of ~50,000 such
+        // let-bound calls OVERFLOWS the stack at runtime (0xC00000FD)
+        // where the performing twin completes past 100,000 -- a crash
+        // the bind uniquely causes (register D80). Pre-fix these chains
+        // silently answered the wrong value, and the count is a static
+        // source property no corpus program is near, so it is filed,
+        // not blocking. The flat-stack fix is codegen unwrapping a pure
+        // kont at the capture site across all three back ends; the
+        // runtime bind cannot trampoline compiler-emitted resumers.
+        let value = unsafe { (*kont).arg };
+        // SAFETY: codegen contract — the resumer reads its captured
+        // state through `captured` and returns a live SentinelKont, as
+        // on the resume path.
+        let result = unsafe { resumer(value, captured) };
+        sentinel_free(captured);
+        if result != kont {
+            // SAFETY: `result` is the live kont the resumer returned and
+            // `kont` is live; a pure kont carries no frames, so nothing
+            // is lost by overwriting its chain head.
+            unsafe {
+                debug_assert!(
+                    (*kont).frames_head.is_null(),
+                    "a pure kont never carries frames"
+                );
+                (*kont).op_id = (*result).op_id;
+                (*kont).arg = (*result).arg;
+                (*kont).consumed = (*result).consumed;
+                (*kont).frames_head = (*result).frames_head;
+            }
+            sentinel_free(result as *mut u8);
+        }
+        return;
+    }
     let frame_size = core::mem::size_of::<SentinelFrame>() as i64;
     let frame = sentinel_alloc(frame_size) as *mut SentinelFrame;
     // SAFETY: sentinel_alloc returns valid uninit memory of the
@@ -929,7 +991,9 @@ pub extern "C" fn sentinel_kont_resume(
             sentinel_free(kont as *mut u8);
             return result_kont;
         }
-        // Pure return — unwrap and continue.
+        // Pure return — unwrap and continue. A pure kont never carries
+        // frames (`sentinel_kont_push` binds instead of appending), so
+        // freeing it here drops nothing.
         // SAFETY: result_kont is a live pure-return kont.
         let unwrapped = unsafe { (*result_kont).arg };
         sentinel_free(result_kont as *mut u8);
@@ -975,6 +1039,9 @@ pub extern "C" fn sentinel_kont_pure(value: i64) -> *mut SentinelKont {
 /// return" kont and free the kont. Symmetric to
 /// [`sentinel_kont_pure`]; called from handle codegen's switch
 /// when the body's tail produced a value rather than a perform.
+/// A pure kont never carries frames — [`sentinel_kont_push`] runs a
+/// frame pushed onto one at once — so the kont is all there is to
+/// free.
 ///
 /// # Safety
 ///
@@ -2909,6 +2976,87 @@ mod tests {
             sentinel_kont_consume_pure(out),
             16,
             "the remainder becomes the empty bubble's chain, in order: 3 -> 8 -> 16 (an answer of 11 means it was reversed)"
+        );
+    }
+
+    #[test]
+    fn kont_push_onto_a_pure_kont_runs_the_frame_now() {
+        // A computation that finished without performing hands back a pure
+        // kont, and a capture site above it pushes its tail onto that kont.
+        // The tail must run on the value at once and leave a pure kont with
+        // no frames — the only shape `sentinel_kont_consume_pure` and
+        // resume's pure path consume correctly.
+        unsafe extern "C" fn plus_thirty_seven(v: i64, _c: *mut u8) -> *mut SentinelKont {
+            sentinel_kont_pure(v + 37)
+        }
+        let k = sentinel_kont_pure(5);
+        sentinel_kont_push(k, plus_thirty_seven, sentinel_alloc(8));
+        // SAFETY: k is live.
+        unsafe {
+            assert_eq!((*k).op_id, PURE_RETURN_OP_ID, "still a pure kont");
+            assert!((*k).frames_head.is_null(), "a pure kont carries no frames");
+        }
+        assert_eq!(
+            sentinel_kont_consume_pure(k),
+            42,
+            "the tail ran on 5 (an answer of 5 means the frame was stranded)"
+        );
+    }
+
+    #[test]
+    fn kont_push_onto_a_pure_kont_whose_frame_performs_becomes_that_perform() {
+        // The tail run at the push may itself perform. The kont must then BE
+        // that perform — op id, argument and the frames the tail pushed — so a
+        // later, outer push appends after them and one resume replays all of
+        // it in order: 3 -> 30 (the tail's own frame) -> 31 (the outer one).
+        unsafe extern "C" fn times_ten(v: i64, _c: *mut u8) -> *mut SentinelKont {
+            sentinel_kont_pure(v * 10)
+        }
+        unsafe extern "C" fn plus_one(v: i64, _c: *mut u8) -> *mut SentinelKont {
+            sentinel_kont_pure(v + 1)
+        }
+        unsafe extern "C" fn perform_with_frame(v: i64, _c: *mut u8) -> *mut SentinelKont {
+            let op = sentinel_perform_op(7, v + 1);
+            sentinel_kont_push(op, times_ten, core::ptr::null_mut());
+            op
+        }
+        let k = sentinel_kont_pure(4);
+        sentinel_kont_push(k, perform_with_frame, core::ptr::null_mut());
+        // SAFETY: k is live.
+        unsafe {
+            assert_eq!((*k).op_id, 7, "the kont is now the tail's perform");
+            assert_eq!(
+                (*k).arg, 5,
+                "carrying the argument the tail performed with (v + 1 = 5), not the pure value 4"
+            );
+            assert!(!(*k).frames_head.is_null(), "and the frame the tail pushed");
+        }
+        sentinel_kont_push(k, plus_one, core::ptr::null_mut());
+        let out = sentinel_kont_resume(k, 3);
+        assert_eq!(sentinel_kont_consume_pure(out), 31, "3 -> 30 -> 31");
+    }
+
+    #[test]
+    fn kont_resume_runs_a_frame_pushed_onto_a_pure_kont_inside_a_resumer() {
+        // The chained-lets case: during a resume, a resumer's own call returns
+        // a pure kont and the resumer pushes the next tail onto it. Resume's
+        // pure path takes the value without walking frames, so that tail must
+        // already have run: 3 -> 30 -> 35.
+        unsafe extern "C" fn plus_five(v: i64, _c: *mut u8) -> *mut SentinelKont {
+            sentinel_kont_pure(v + 5)
+        }
+        unsafe extern "C" fn pure_call_then_push(v: i64, _c: *mut u8) -> *mut SentinelKont {
+            let callee = sentinel_kont_pure(v * 10);
+            sentinel_kont_push(callee, plus_five, core::ptr::null_mut());
+            callee
+        }
+        let k = sentinel_perform_op(0, 0);
+        sentinel_kont_push(k, pure_call_then_push, core::ptr::null_mut());
+        let out = sentinel_kont_resume(k, 3);
+        assert_eq!(
+            sentinel_kont_consume_pure(out),
+            35,
+            "an answer of 30 means the tail pushed inside the resumer was dropped"
         );
     }
 

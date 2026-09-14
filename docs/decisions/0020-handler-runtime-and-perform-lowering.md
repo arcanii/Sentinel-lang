@@ -36,6 +36,25 @@ unit tests (push order, and each arm of the splice). Codegen is
 unaffected — the back ends only sequence the
 push calls, which they already did innermost-first.
 
+**D7 clarified again (2026-09-14): a push onto a PURE kont
+binds.** An effecting fn whose body never performs returns
+`sentinel_kont_pure(v)`, and a capture site above it pushes its
+frame onto that pure kont. `sentinel_kont_push` used to append
+the frame there, where nothing reads it: every consumer of a
+pure kont — `sentinel_kont_consume_pure`, which both a `handle`'s
+dispatch and a `k(v)`'s pure unwrap call, and the pure path
+inside `sentinel_kont_resume` — takes the value and frees the
+kont without walking `frames_head`. The tail was skipped, the
+callee's value came back in its place, and the frame leaked.
+Nothing is suspended at such a push, so it now runs the frame at
+once on the value — D1's free monad binding on `Pure` — and the
+result replaces the kont's contents in place, because the
+capture site returns the kont's own pointer; if the tail
+performs, the kont becomes that perform. A pure kont therefore
+never carries frames, which is what those consumers already
+assumed. Codegen is unaffected. Pinned by
+`tests/pass/c35e_pure_*` and three runtime unit tests.
+
 The substantive design call landed as drafted: which lowering
 strategy for `handle e with { ... }` — free-monad reification
 (Phase B's approach), CPS transform, or stack-saved
