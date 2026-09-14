@@ -124,10 +124,10 @@ reference as you work through the milestones.
 > confirming nothing pre-existing is newly refused; oracle-vs-scg byte-equality on the new
 > fixture at types, mir and llvm; and the secret-taint check in both directions.
 
-### ▶ RESUME HERE (2026-09-14 — `origin/main` is at `e686853`, so `77e04cc` — D59+D60+D66, D69 closed in `snc build`, D70's refusal (ADR 0072 A1) — with `85d22ee` (D74) and `e686853` (docs) on top are ALL PUSHED; the D76 commit is not yet made and will be the only local commit. The first two blocks below are this session's; the next is the 2026-09-11/12 session's, and the ones after it the 2026-09-06 session's, all kept for their lessons. STATE.md's entries from 2026-09-08 on record what has happened since. Register: **81 items, 34 done**, D19 redacted.
+### ▶ RESUME HERE (2026-09-14 — `origin/main` is at `e686853`, so `77e04cc` — D59+D60+D66, D69 closed in `snc build`, D70's refusal (ADR 0072 A1) — with `85d22ee` (D74) and `e686853` (docs) on top are ALL PUSHED; `5b69bce` (D76) on top of them is local and **NOT PUSHED**. The first two blocks below are this session's; the next is the 2026-09-11/12 session's, and the ones after it the 2026-09-06 session's, all kept for their lessons. STATE.md's entries from 2026-09-08 on record what has happened since. Register: **81 items, 34 done**, D19 redacted.
 
-> **What the 2026-09-14 D76 slice did — the D76 commit, NOT PUSHED (`85d22ee` and `e686853`
-> are already on `origin/main`).** Closed **D76**: a frame pushed onto a pure-return kont was never
+> **What the 2026-09-14 D76 slice did — `5b69bce`, NOT PUSHED (`85d22ee` and `e686853` are
+> already on `origin/main`).** Closed **D76**: a frame pushed onto a pure-return kont was never
 > run — the caller's tail skipped, the callee's value returned in its place, the frame leaked —
 > through every consumer of a pure kont — `sentinel_kont_consume_pure` (called by a `handle`'s
 > dispatch and by a `k(v)`'s pure unwrap) and resume's own pure path.
