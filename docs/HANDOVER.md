@@ -124,9 +124,9 @@ reference as you work through the milestones.
 > confirming nothing pre-existing is newly refused; oracle-vs-scg byte-equality on the new
 > fixture at types, mir and llvm; and the secret-taint check in both directions.
 
-### ▶ RESUME HERE (2026-09-14 — `origin/main` is at `238d292`, so `77e04cc` — D59+D60+D66, D69 closed in `snc build`, D70's refusal (ADR 0072 A1) — is PUSHED; the D74 commit on top of it is local and **NOT PUSHED**. The first block below is this session's; the next is the 2026-09-11/12 session's, and the ones after it the 2026-09-06 session's, all kept for their lessons. STATE.md's entries from 2026-09-08 on record what has happened since. Register: **78 items, 33 done**, D19 redacted.
+### ▶ RESUME HERE (2026-09-14 — `origin/main` is at `238d292`, so `77e04cc` — D59+D60+D66, D69 closed in `snc build`, D70's refusal (ADR 0072 A1) — is PUSHED; `85d22ee` (D74) on top of it is local and **NOT PUSHED**. The first block below is this session's; the next is the 2026-09-11/12 session's, and the ones after it the 2026-09-06 session's, all kept for their lessons. STATE.md's entries from 2026-09-08 on record what has happened since. Register: **78 items, 33 done**, D19 redacted.
 
-> **What the 2026-09-12b session did (finished 2026-09-14) — the D74 commit, NOT PUSHED.**
+> **What the 2026-09-12b session did (finished 2026-09-14) — `85d22ee`, NOT PUSHED.**
 > Closed **D74**: a kont carrying MORE THAN ONE captured frame replayed them outermost-first
 > and answered a wrong value with no diagnostic, in the shipping runtime. `sentinel_kont_push`
 > prepended where the chain it builds is walked head -> tail; it now appends. Runtime-only and
