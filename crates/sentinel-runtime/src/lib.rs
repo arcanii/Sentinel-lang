@@ -659,8 +659,9 @@ pub extern "C" fn sentinel_arena_exit(arena: *mut core::ffi::c_void) {
 
 /// Layout matches what codegen emits in
 /// [`crate::SentinelKont`]-named LLVM struct. Field order is
-/// load-bearing — codegen reads `op_id` via `getelementptr` at
-/// offset 0 inside `sentinel_kont_resume`.
+/// load-bearing — codegen reads `op_id` with a bare load at
+/// offset 0 (no `getelementptr` is needed there) and `arg` via a
+/// `getelementptr` at byte offset 8.
 #[repr(C)]
 pub struct SentinelKont {
     /// Tag identifying which operation this kont was raised from.
@@ -683,8 +684,9 @@ pub struct SentinelKont {
     /// evaluation frames. NULL when no frames have been pushed
     /// (the C3.5(a)/(b) cases where `perform` is at tail
     /// position with no surrounding context to reify). The list
-    /// is ordered innermost-first (head = most-recently-pushed
-    /// = closest to the perform site); replay walks head → tail
+    /// is ordered innermost-first (head = FIRST-pushed = closest
+    /// to the perform site, because the pushes for one kont run
+    /// from the perform site outwards); replay walks head → tail
     /// to evaluate frames in the order their original
     /// computation would have run.
     pub frames_head: *mut SentinelFrame,
@@ -760,6 +762,10 @@ pub extern "C" fn sentinel_perform_op(op_id: u32, arg: i64) -> *mut SentinelKont
 /// management: this fn takes ownership of `captured`. The
 /// matching `sentinel_kont_resume` frees the captured pointer
 /// after the resumer returns.
+///
+/// The frame is APPENDED at the chain's tail, so the head stays
+/// the innermost (first-pushed) frame that `sentinel_kont_resume`
+/// must replay first.
 #[no_mangle]
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub extern "C" fn sentinel_kont_push(
@@ -774,15 +780,50 @@ pub extern "C" fn sentinel_kont_push(
     unsafe {
         (*frame).resumer = resumer;
         (*frame).captured = captured;
-        (*frame).next = (*kont).frames_head;
-        (*kont).frames_head = frame;
+        (*frame).next = core::ptr::null_mut();
+        // APPEND, at the chain's tail. The pushes for one kont run
+        // from the perform site OUTWARDS — the innermost enclosing
+        // context pushes first and the outermost last — while
+        // `sentinel_kont_resume` walks head -> tail, so the head
+        // must be the FIRST push for the replay to re-run the
+        // captured tails in the order the original computation
+        // would have. Prepending here inverted that: a kont with
+        // two frames (a `perform` inside an effecting fn whose own
+        // call is in a capturing position) replayed the outer tail
+        // first and answered with the wrong value.
+        //
+        // Cost: this walk makes BUILDING an N-frame chain O(N^2)
+        // where prepending was O(N); the head -> tail replay is
+        // unchanged and stays linear. N is the source's nesting of
+        // capture sites — an effecting fn let-binding a call to
+        // another — so a deep chain needs a program with that many
+        // nested fns. Measured by pushing directly, release build:
+        // 0.40 ms to build 1,000 frames, 14.3 ms for 5,000, 57.1 ms
+        // for 10,000, 1.52 s for 50,000 (resume over the same
+        // chains: 0.03 ms to 3.0 ms). A generated 1,000-deep
+        // Sentinel program (5,005 lines) runs in 33.2 ms against
+        // 32.7 ms before this change — no measurable difference —
+        // so the quadratic term needs on the order of 10^4 nested
+        // fns before it costs anything. A tail pointer would make
+        // the push O(1) again, but `SentinelKont`'s 32-byte layout
+        // is abi-v1 (docs/abi-v1.md §3) and cannot take a field.
+        let head = (*kont).frames_head;
+        if head.is_null() {
+            (*kont).frames_head = frame;
+        } else {
+            let mut tail = head;
+            while !(*tail).next.is_null() {
+                tail = (*tail).next;
+            }
+            (*tail).next = frame;
+        }
     }
 }
 
 /// Resume a captured continuation with `value`. Walks the kont's
-/// frame chain in head→tail order — head is the most-recently-
-/// pushed (innermost) frame, which is what would have run first
-/// in the original execution. Each frame's resumer is called
+/// frame chain in head→tail order — head is the first-pushed
+/// (innermost) frame, which is what would have run first in the
+/// original execution. Each frame's resumer is called
 /// with the current value + its captured state; the resumer
 /// returns a *mut SentinelKont (either a pure-return wrap or an
 /// op-perform kont for nested handlers).
@@ -2778,12 +2819,107 @@ mod tests {
     }
 
     #[test]
+    fn kont_frames_replay_in_push_order() {
+        // The pushes for one kont run from the perform site OUTWARDS — the
+        // innermost enclosing context pushes first — and
+        // `sentinel_kont_resume` walks the chain head -> tail, so the FIRST
+        // push must be replayed first. Three non-commuting resumers tell
+        // every order apart: push order (x10, +5, x2) on 2 answers 50, and
+        // the reverse answers 90.
+        unsafe extern "C" fn times_ten(v: i64, _c: *mut u8) -> *mut SentinelKont {
+            sentinel_kont_pure(v * 10)
+        }
+        unsafe extern "C" fn plus_five(v: i64, _c: *mut u8) -> *mut SentinelKont {
+            sentinel_kont_pure(v + 5)
+        }
+        unsafe extern "C" fn times_two(v: i64, _c: *mut u8) -> *mut SentinelKont {
+            sentinel_kont_pure(v * 2)
+        }
+        let k = sentinel_perform_op(0, 0);
+        sentinel_kont_push(k, times_ten, core::ptr::null_mut());
+        sentinel_kont_push(k, plus_five, core::ptr::null_mut());
+        sentinel_kont_push(k, times_two, core::ptr::null_mut());
+        let out = sentinel_kont_resume(k, 2);
+        assert_eq!(
+            sentinel_kont_consume_pure(out),
+            50,
+            "frames must replay in push order: 2 -> 20 -> 25 -> 50 (90 means the chain replayed backwards)"
+        );
+    }
+
+    #[test]
+    fn kont_resume_splices_remaining_frames_behind_the_bubble_s_own() {
+        // A resumer that itself performs returns a bubble kont; the frames
+        // still to run migrate onto the TAIL of the bubble's chain, so the
+        // frames the bubble pushed for itself run first. Push order here is
+        // (perform_and_push, plus_five); the bubble pushes times_ten, so
+        // resuming the bubble with 3 must answer 3 * 10 + 5 = 35.
+        unsafe extern "C" fn times_ten(v: i64, _c: *mut u8) -> *mut SentinelKont {
+            sentinel_kont_pure(v * 10)
+        }
+        unsafe extern "C" fn plus_five(v: i64, _c: *mut u8) -> *mut SentinelKont {
+            sentinel_kont_pure(v + 5)
+        }
+        unsafe extern "C" fn perform_and_push(v: i64, _c: *mut u8) -> *mut SentinelKont {
+            let bubble = sentinel_perform_op(7, v);
+            sentinel_kont_push(bubble, times_ten, core::ptr::null_mut());
+            bubble
+        }
+        let k = sentinel_perform_op(0, 0);
+        sentinel_kont_push(k, perform_and_push, core::ptr::null_mut());
+        sentinel_kont_push(k, plus_five, core::ptr::null_mut());
+        let bubble = sentinel_kont_resume(k, 2);
+        // SAFETY: `bubble` is the live kont perform_and_push returned.
+        let (op_id, arg) = unsafe { ((*bubble).op_id, (*bubble).arg) };
+        assert_eq!(op_id, 7, "the resumer's perform bubbled out");
+        assert_eq!(arg, 2, "the bubble carries the value the first frame saw");
+        let out = sentinel_kont_resume(bubble, 3);
+        assert_eq!(
+            sentinel_kont_consume_pure(out),
+            35,
+            "the spliced frame must run AFTER the bubble's own: 3 -> 30 -> 35 (an answer of 80 means it ran first)"
+        );
+    }
+
+    #[test]
+    fn kont_resume_splices_remaining_frames_onto_an_empty_bubble_chain() {
+        // The splice's OTHER arm: the resumer performs but pushes NOTHING onto
+        // the bubble, so the remaining frames become the bubble's chain head
+        // rather than being appended after one. Push order (perform_only,
+        // plus_five, times_two); resuming the bubble with 3 must answer
+        // (3 + 5) * 2 = 16, which also pins that the remainder keeps ITS order.
+        unsafe extern "C" fn plus_five(v: i64, _c: *mut u8) -> *mut SentinelKont {
+            sentinel_kont_pure(v + 5)
+        }
+        unsafe extern "C" fn times_two(v: i64, _c: *mut u8) -> *mut SentinelKont {
+            sentinel_kont_pure(v * 2)
+        }
+        unsafe extern "C" fn perform_only(v: i64, _c: *mut u8) -> *mut SentinelKont {
+            sentinel_perform_op(9, v)
+        }
+        let k = sentinel_perform_op(0, 0);
+        sentinel_kont_push(k, perform_only, core::ptr::null_mut());
+        sentinel_kont_push(k, plus_five, core::ptr::null_mut());
+        sentinel_kont_push(k, times_two, core::ptr::null_mut());
+        let bubble = sentinel_kont_resume(k, 1);
+        // SAFETY: `bubble` is the live kont perform_only returned.
+        assert_eq!(unsafe { (*bubble).op_id }, 9, "the resumer's perform bubbled out");
+        let out = sentinel_kont_resume(bubble, 3);
+        assert_eq!(
+            sentinel_kont_consume_pure(out),
+            16,
+            "the remainder becomes the empty bubble's chain, in order: 3 -> 8 -> 16 (an answer of 11 means it was reversed)"
+        );
+    }
+
+    #[test]
     fn sentinel_kont_struct_layout_is_stable() {
-        // Layout invariant: codegen reads `op_id` via GEP at
-        // offset 0 + `arg` at offset 8 (after the 4-byte op_id +
-        // 4-byte pad). `frames_head` follows after `consumed: u8
-        // + _pad2: [u8; 7]` at offset 24, but codegen accesses
-        // it through sentinel_kont_push so the offset is opaque.
+        // Layout invariant: codegen reads `op_id` at offset 0 (a
+        // bare load, no GEP) + `arg` via a GEP at offset 8 (after
+        // the 4-byte op_id + 4-byte pad). `frames_head` follows
+        // after `consumed: u8 + _pad2: [u8; 7]` at offset 24, but
+        // codegen only ever reaches it through sentinel_kont_push,
+        // so that offset is opaque to codegen.
         assert_eq!(core::mem::size_of::<SentinelKont>(), 32);
         assert_eq!(core::mem::align_of::<SentinelKont>(), 8);
     }
@@ -2801,7 +2937,7 @@ mod tests {
     fn abi_v1_struct_layouts_are_stable() {
         use core::mem::{align_of, offset_of, size_of};
 
-        // SentinelKont (abi-v1 §3): 32 / 8; codegen GEPs op_id@0, arg@8.
+        // SentinelKont (abi-v1 §3): 32 / 8; codegen loads op_id@0 (no GEP), GEPs arg@8.
         assert_eq!(size_of::<SentinelKont>(), 32);
         assert_eq!(align_of::<SentinelKont>(), 8);
         assert_eq!(offset_of!(SentinelKont, op_id), 0);

@@ -105,6 +105,13 @@ offset 8. ADR 0020 D7.
 | `captured` | `*mut u8` | 8 |
 | `next` | `*mut SentinelFrame` | 16 |
 
+`next` chains OUTWARDS, from the perform site towards the `handle`:
+`sentinel_kont_push` appends, so a kont's head frame is the first
+pushed (the innermost captured context) and `sentinel_kont_resume`
+replays head -> tail. Ordering is runtime-internal — the back ends
+only sequence the `sentinel_kont_push` calls — but it is part of the
+contract a resumer is written against. ADR 0020 D7 (clarified).
+
 ### `SentinelTask` — size **32**, align **8**
 
 | field | type | offset |

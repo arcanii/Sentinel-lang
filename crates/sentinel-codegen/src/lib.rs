@@ -952,9 +952,9 @@ pub fn compile_to_object_for_module(
     };
     // C3.5(a) / ADR 0020 D7: declare the handler-runtime symbols.
     // The Kont struct layout (op_id: u32, _pad: u32, arg: i64,
-    // consumed: u8, total 24 bytes / 8-byte aligned) matches
-    // sentinel_runtime::SentinelKont and is asserted by a
-    // round-trip layout test there.
+    // consumed: u8, _pad2: [u8; 7], frames_head: ptr — total 32
+    // bytes / 8-byte aligned) matches sentinel_runtime::SentinelKont
+    // and is asserted by a layout test there + docs/abi-v1.md §3.
     let perform_op_fn = {
         let ptr_ty = context.ptr_type(inkwell::AddressSpace::default());
         let i64_ty = context.i64_type();
@@ -1928,9 +1928,10 @@ struct CodegenCtx<'ctx, 'plan> {
     /// op id + its arg, returning the pointer to the caller.
     perform_op_fn: FunctionValue<'ctx>,
     /// C3.5(a) / ADR 0020 D7: `sentinel_kont_resume(kont: ptr,
-    /// value: i64) -> i64` resumes a captured continuation. At
-    /// C3.5(a) the restricted case means no captured frames —
-    /// resume frees the kont and returns `value`.
+    /// value: i64) -> ptr` resumes a captured continuation,
+    /// replaying its frame chain head -> tail. It answers either a
+    /// pure-return wrap or a fresh op-perform kont — see the
+    /// declaration site's comment for the dispatch.
     kont_resume_fn: FunctionValue<'ctx>,
     /// C3.5(b) / ADR 0020 D7: `sentinel_kont_pure(value: i64)
     /// -> ptr` wraps a pure value in a kont with op_id =
@@ -9383,8 +9384,8 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
             })?
             .into_pointer_value();
 
-        // Read result's op_id (i32 at offset 0) — same byte-offset
-        // GEP scheme as lower_handle.
+        // Read result's op_id (i32 at offset 0) — the same bare
+        // load lower_handle uses; offset 0 needs no GEP.
         let op_id_val = self
             .builder
             .build_load(i32_ty, result_kont, "kv_op_id")

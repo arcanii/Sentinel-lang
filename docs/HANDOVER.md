@@ -124,9 +124,69 @@ reference as you work through the milestones.
 > confirming nothing pre-existing is newly refused; oracle-vs-scg byte-equality on the new
 > fixture at types, mir and llvm; and the secret-taint check in both directions.
 
-### ▶ RESUME HERE (2026-09-12 — **NOT PUSHED**: `origin/main` is at `3c7aa71` (D61); `77e04cc` — D59+D60+D66, D69 closed in `snc build`, D70's refusal (ADR 0072 A1) — is local. The first block below is this session's; the ones after it are the 2026-09-06 session's, kept for their lessons. STATE.md's entries from 2026-09-08 on record what has happened since. Register: **73 items, 32 done**, D19 redacted.
+### ▶ RESUME HERE (2026-09-14 — `origin/main` is at `238d292`, so `77e04cc` — D59+D60+D66, D69 closed in `snc build`, D70's refusal (ADR 0072 A1) — is PUSHED; the D74 commit on top of it is local and **NOT PUSHED**. The first block below is this session's; the next is the 2026-09-11/12 session's, and the ones after it the 2026-09-06 session's, all kept for their lessons. STATE.md's entries from 2026-09-08 on record what has happened since. Register: **78 items, 33 done**, D19 redacted.
 
-> **What the 2026-09-11/12 session did — `77e04cc` (+ docs `e2d5664`), NOT PUSHED.** Closed
+> **What the 2026-09-12b session did (finished 2026-09-14) — the D74 commit, NOT PUSHED.**
+> Closed **D74**: a kont carrying MORE THAN ONE captured frame replayed them outermost-first
+> and answered a wrong value with no diagnostic, in the shipping runtime. `sentinel_kont_push`
+> prepended where the chain it builds is walked head -> tail; it now appends. Runtime-only and
+> not oracle-moving — no stage dump and no emitted byte changes, so `selfhost/` needed no
+> mirror. Filed **D75-D78**. Four-check: 1,882 passed with exactly the 18 known Windows
+> failures, doctests and clippy clean, every `selfhost_*` differential green with the three
+> new fixtures. The maintainer cleared the privately tracked replay-order item for a fix; it
+> has left the ask-first list below.
+>
+> ⚠ **THE FIX WAS ONE BRANCH; EVERY BLOCKING FINDING IN THREE REVIEW ROUNDS WAS IN THE PROSE
+> AROUND IT, AND MOST OF THE LATER ONES WERE IN TEXT WRITTEN TO FIX THE EARLIER ONES.** Round one
+> blocked on false statements in the change as first written. Round two blocked on a claim that a
+> count "was already nine short when it was written down", added while acting on a round-one
+> note; a unit-test count made stale by a test added for another; a round-one finding fixed in
+> the ADR but left standing in its STATE.md twin; and a D62 inference that had been in D77 since
+> its first draft, which round one did not flag. Round three blocked on sentences written while
+> fixing the earlier rounds — among them the first draft of this paragraph. No round found a
+> correctness defect in the code (one noted the push's quadratic build cost, now measured in its
+> comment). On a small, well-understood change the review's whole value was the writing: budget
+> for it, review a correction as new text, and do not read a clean round as a clean text.
+>
+> ⚠ **A MEASUREMENT IS A CLAIM, AND A SLOW POLL IS A LIE.** D76 and D77 were first written from
+> a peak-working-set poll sampling every 30-40 ms; on runs of a few hundred milliseconds it read a
+> "flat 6.1 MB" baseline that was not flat, and a per-call rate was derived by subtracting it.
+> Poll at 5 ms or faster, and never publish a rate got by subtracting a baseline you have not
+> shown to be flat. Run the control AT the point the claim is about: D77's frameless control had
+> only ever run at 400k when the entry compared it at 800k.
+>
+> ⚠ **FOUR POINTS THAT AGREE ARE NOT A CAUSE, AND A SHARED STATUS CODE IS NOT A SHARED CAUSE.**
+> D77's second draft named resumption as the discriminator; a fifth shape — an arm that runs but
+> never resumes — died at the same threshold. And every draft, from the first, inferred from
+> 0xC00000FD (Windows' generic STATUS_STACK_OVERFLOW) that D62 was not class-specific; a status
+> code cannot carry that inference, and the first review round let it through. The entry now
+> names no cause and no link to D62, and says that only its five-shape table is measured.
+>
+> ⚠ **STALE IS NOT WRONG-ON-ARRIVAL.** D78 first said a fixture count "was already nine short
+> when it was written down"; `git log -S` shows it was exact that day and went stale after.
+> Check a number's provenance before characterising its history.
+>
+> ⚠ **"GREP FOR THE SET" MEANS EVERY FILE AND EVERY SPELLING.** A stale "codegen reads `op_id`
+> via GEP" claim was corrected in `sentinel-codegen` while the same claim survived three times in
+> `sentinel-runtime`. Two were fixed after round one; the third, spelled "codegen GEPs op_id@0",
+> slipped past a grep for "via GEP" and "GEP at" — and past the first draft of this sentence,
+> which said "twice". Grep for the idea (`-i gep` near `op_id`), not for the phrase remembered.
+>
+> ⚠ **THE CORPUS CANNOT VOUCH FOR THIS AREA.** One program in the tree put two frames on one
+> chain, and both of its frames compute the same function, so it answers the same either way;
+> reverting the fix left every test green. Before trusting a differential here, ask whether any
+> program DISTINGUISHES the behaviour, not whether one REACHES it.
+>
+> **NEXT, roughly by value.** The **ref-escape family** (31 routes reproduced; plan in the
+> scratch `refesc/` design note) — the item this session was meant to start. **D76** (a frame on
+> a pure-return kont never runs and leaks; a runtime-only fix is conceivable but changes what
+> `sentinel_kont_consume_pure` means to all three back ends, so decide first). **D77** and
+> **D62** (per-iteration stack growth in each; causes unestablished, and nothing shows they share
+> one). **D69's remainder** (the text oracle and scg do not apply ADR 0072 A1), **D68(c)**,
+> **D13** fail-closed, **D73**, **D78**. **D75** needs a maintainer call: whether the frozen
+> Phase-B interpreter should be corrected at all.
+
+> **What the 2026-09-11/12 session did — `77e04cc` (+ docs `e2d5664`, `238d292`), pushed.** Closed
 > **D59** (an `if`/`match` result slot sized from the DIVERGENT arm — a memory-safety
 > miscompile in the shipping back end, raised privately and described in the register now that
 > it is fixed), **D66**, **D60**, **D68(a)**, and **D69 + D70 in `snc build`** through **ADR
@@ -219,8 +279,10 @@ reference as you work through the milestones.
 > 2026-09-12 during D59/D60's.** If you find yourself in the container refcount/drop path, in
 > `clone_if_shared_var` and its twins, in the partial-move (ADR 0046) machinery, in
 > **`std/net/ssh_cipher.sentinel`'s record-length handling**, or in the cross-unit symbol
-> mangling / `linkonce_odr` dedup, or in **the runtime's continuation-frame replay order** —
-> **ask first, and before writing anything down.**
+> mangling / `linkonce_odr` dedup — **ask first, and before writing anything down.**
+> (**The runtime's continuation-frame replay order has left this list**: it was on it until
+> 2026-09-12, when the maintainer cleared the fix, and it is now CLOSED and described openly
+> in the register as **D74**. Everything else on the list still stands.)
 >
 > **NEXT, roughly by value.** **D45's null-FIRST residue** — the design is fully worked
 > out and reviewed, but it needs the first index-assignment into a `TyCtx` `Vec` field
@@ -270,7 +332,7 @@ reference as you work through the milestones.
 >      scalar-4 arm, which it now has. Also worth doing with it: `examples/math/quadratic.sentinel` and
 >      `sentinel_library/std/math/float.sentinel` currently reach only lex/ast, because
 >      `snc merge`'s Bar-A printer rejects both a float literal and `sqrt` (menu item 5).
->   4. **THE FILED-DEFECT REGISTER — SEVENTY-THREE items (D1-D73); **D1, D2, D3, D4, D5, D8, D9, D10, D15, D16, D17, D24, D25, D26, D29, D31, D34, D37, D39, D42, D43, D44, D47(option A), D51, D54, D55, D56, D58, D59, D60, D61 and D66 are DONE (32 of 73)**, the rest verified against a pre-slice binary. MOST are
+>   4. **THE FILED-DEFECT REGISTER — SEVENTY-EIGHT items (D1-D78); **D1, D2, D3, D4, D5, D8, D9, D10, D15, D16, D17, D24, D25, D26, D29, D31, D34, D37, D39, D42, D43, D44, D47(option A), D51, D54, D55, D56, D58, D59, D60, D61, D66 and D74 are DONE (33 of 78)**, the rest verified against a pre-slice binary. MOST are
 >      unregistered in any `DEFERRED_PROGRAMS` / `KNOWN_SCG_BUGS` list because no corpus program
 >      reaches them — but FOUR are, and the blanket "NONE" that stood here was falsified by
 >      this register's own new entries: D24/D25/D26 share the
@@ -706,6 +768,124 @@ reference as you work through the milestones.
 >      `c43_delegate_forwards_move_param`); and a struct-target fixture was missing (ui
 >      `c42_impl_move_out_of_self_struct`). `tests/llvm.rs` `llvm_method_moves_are_not_freed`
 >      pins the two oracle-only shapes, which no exit code and no `llvm-as` run can see.
+>
+>      **D78 — stale corpus fixture counts in `llvm.rs` and `README.md`, at six sites, stale
+>      before this change.** Found by D74's reviews. `crates/sentinel-driver/tests/llvm.rs`
+>      carries them three times: a comment at line 1214 saying a `tests/pass` substring filter
+>      matches all 182; the comment at 1265, "179 of the 182 `tests/pass` fixtures emitted on
+>      2026-09-08", beside an assertion whose floor is `checked >= 170`; and the assert message
+>      at 1270, "(~179)". `README.md` carries them three times: line 25 gives the emitted 177
+>      alone, and lines 47 and 123 give 177 of 227. The tree holds **194** `tests/pass` +
+>      **65** `tests/ui` = **259** `.sentinel` fixtures (191 + 65 = 256 before D74 added three).
+>      The FIXTURE counts were exact on the day they were written — `tests/pass` held 182 at
+>      `dbc7342` (2026-09-08) and the two corpora 227 at `57f1374` (2026-09-04), per `git log -S`
+>      and `git ls-tree` — and went stale as fixtures landed: llvm.rs's 182 is now 12 short and
+>      README's 227 is 32 short. The emitted-subset figures beside them (179, 177) were not
+>      re-derived. None is asserted — the floor is — so nothing fails; they are text a reader
+>      would take for a census. Fix is to re-measure the emitted subset once and restate all six
+>      sites together. Filed rather than fixed here: D74 touches neither file, and correcting a
+>      count by measuring it belongs with whoever next moves it.
+>
+>      **D76 — a captured frame pushed onto a PURE-RETURN kont never runs, and leaks.** Found
+>      2026-09-12 while probing D74; pre-existing and independent of it (one frame, no ordering
+>      involved). An effecting fn whose body never performs returns `sentinel_kont_pure(v)`, and
+>      a caller that let-binds such a call pushes its own frame onto that pure kont and returns
+>      it — the let shape lowers "RHS then push" without knowing whether the RHS suspended. The
+>      handle dispatch sees `PURE_RETURN_OP_ID` and unwraps with `sentinel_kont_consume_pure`,
+>      which reads `arg` and frees the kont WITHOUT walking `frames_head`. So the caller's tail
+>      is silently skipped and its frame node + captured block leak.
+>      `fn pure_inner() -> i64 ! { Io } { 5 }` let-bound by
+>      `fn outer(n) -> i64 ! { Io } { let b: i64 = pure_inner(); b + n }`, handled, answers
+>      **5** where its source says 42 — no diagnostic. The leak follows from the code:
+>      `sentinel_kont_consume_pure` reads `arg` and frees the kont, and never walks
+>      `frames_head`. Measured against the same loop handling `pure_inner()` DIRECTLY (no
+>      caller, so no frame is pushed), peak working set: 20.5 MB vs 11.2 MB at 400,000 handled
+>      calls, 44.5 MB vs 13.4 MB at 600,000. ⚠ The control is NOT flat — it grows too, for
+>      D77's reason — so only the widening GAP is this defect, and peak working set is too
+>      coarse to pin a per-call rate; none is claimed here. (An earlier draft of this entry
+>      cited a flat 6.1 MB baseline and "about 62 bytes per call". Both were wrong: the
+>      baseline was a sampling artifact of a poll that was too slow for a short run.)
+>      All three back ends emit the same shape. Fix directions, neither free: teach
+>      the dispatch to drain a pure kont that carries frames (`sentinel_kont_consume_pure` would
+>      have to do what `sentinel_kont_resume` does, which is a runtime-only change but alters
+>      what a symbol all three back ends call means), or refuse the shape as ADR 0072 A1 refuses
+>      its neighbours. No corpus program has it.
+>
+>      **D77 — a `handle` of a computation that PERFORMS grows the STACK per iteration, and a
+>      loop of ~600k exhausts it.** Found 2026-09-12 while probing D74; pre-existing and
+>      independent of it. In `while i < N { acc = acc + handle <computation> with { ... } }`,
+>      five shapes were built and run at N = 500,000 and N = 600,000. All THREE whose
+>      computation performs survive 500,000 and die at 600,000 with 0xC00000FD
+>      STATUS_STACK_OVERFLOW against the linker's `/STACK:16777216`: a FRAMED one (`perf_inner()`
+>      over `fn perf_inner() -> i64 ! { Io } { let z: i64 = perform Io.read(); z + 5 }`,
+>      20.1 MB at 400,000), a FRAMELESS one (`handle perform Io.read() with { ... }`, no
+>      captured frame, 11.9 MB at 400,000), and one whose arm never resumes
+>      (`Io.read(k) => 5`). Both shapes whose body never performs — so the arm never runs at
+>      all — COMPLETE at 600,000: `pure_inner()` (13.4 MB) and D76's `outer()` (44.5 MB).
+>      So neither frame reification nor resumption is the discriminator; all three shapes that
+>      perform died and both that never perform completed, and nothing here says why. Like
+>      **D62** (a class constructed in a loop), it is a stack overflow inside a `while` loop, but
+>      neither that resemblance nor the shared 0xC00000FD (Windows' generic
+>      STATUS_STACK_OVERFLOW) shows a common cause. An attacker who controls the iteration count
+>      controls the crash (D62 records the same). Cause not established; no corpus program loops
+>      a `handle` far enough.
+>      (Earlier drafts of this entry made three wrong claims: the first reported a flat
+>      frameless control — a poll too slow for a short run, and a control never run at the
+>      crash threshold — and concluded the growth tracked frame reification; the second
+>      concluded it tracked resumption, which the non-resuming arm falsifies; and every draft
+>      until the second review round inferred from the shared status code that D62 is not
+>      class-specific. Only the five-shape table above is measured.)
+>
+>      **D74 — DONE (2026-09-12). A kont carrying MORE THAN ONE captured frame replayed
+>      them OUTERMOST-FIRST, and answered a wrong value with no diagnostic.** Raised privately
+>      on 2026-09-12 during D59/D60's fifth review; described here now that it is fixed.
+>      `sentinel_kont_push` PREPENDED, so the head of a kont's frame chain was the LAST push.
+>      The pushes for one kont run from the perform site OUTWARDS — an effecting callee pushes
+>      its frame before its caller pushes one onto that same kont, the same order in inkwell
+>      (`crates/sentinel-codegen/src/lib.rs:4163-4175`), in the text oracle and in scg — and
+>      `sentinel_kont_resume` walks head -> tail, so the replay ran the outermost captured tail
+>      first. `fn outer() { let b: i64 = inner(); b + 5 }` over
+>      `fn inner() { let a: i64 = perform Io.read(); a * 10 }`, resumed with 2, answered **70**
+>      where its source says 25; three deep answered 27 for 25; and a bubble whose remainder
+>      still held a frame answered 1055 for 155. Everything else in the runtime already assumed
+>      inner-first: both doc comments said so, and the splice — when a resumer itself performs,
+>      the frames still to run are appended at the TAIL of the bubble's chain — is only right
+>      that way round. Only the push was inverted, and it now APPENDS.
+>
+>      Runtime-only: no stage dump and no emitted byte changes, both fixed points unaffected,
+>      `SentinelKont`'s layout untouched (`docs/abi-v1.md` §3 pins it, so no field was added —
+>      `push` walks to the tail, over a chain as deep as the program's nesting of capture
+>      sites). ⚠ **The corpus could not catch this, by construction.**
+>      `tests/pass/c35_effecting_let_secret.sentinel` was the ONLY program in the tree that put
+>      two frames on one chain, and both of its frames compute `v |-> v + base` — the same
+>      function — so the two orders AGREE for every `base`, not merely for the 0 it passes (its
+>      `exact` handle answers 22 + 2*`base`; the fixture's asserted 42 is 20 from its other
+>      handle plus that 22). Reverting the push left the whole corpus green. New fixtures:
+>      pass `c35e_nested_frames_replay_innermost_first` (25), `c35e_nested_frames_three_deep`
+>      (25) and `c35e_nested_frames_bubble_splice` (155) — the last is also the first program in
+>      the tree to reach the splice branch with a non-empty remainder — plus THREE runtime unit
+>      tests (`kont_frames_replay_in_push_order`,
+>      `kont_resume_splices_remaining_frames_behind_the_bubble_s_own`, and
+>      `kont_resume_splices_remaining_frames_onto_an_empty_bubble_chain`, which covers the
+>      splice's other arm — the bubble pushed nothing of its own, so the remainder becomes its
+>      chain). All six fail when the push is reverted. A chain spliced TWICE (three chained
+>      lets inside a let-bound caller) was also checked by construction and answers correctly;
+>      no fixture pins it. ADR 0020 D7's "walks the kont's frames
+>      in reverse" was a sketch sentence whose API differs from what shipped in three of its
+>      four symbols; it is clarified in the ADR's Status block, and `docs/abi-v1.md` §3 now
+>      states which way `next` points.
+>
+>      **D75 — the FROZEN Phase-B interpreter has the same inversion.** NOT FIXED: the crate is
+>      frozen and nothing in the production pipeline reads it. `sentinel-effects-proto`'s
+>      `Continuation::push` appends to a `Vec` (`crates/sentinel-effects-proto/src/eval.rs:165`)
+>      while `resume` pops from the BACK (`:184`), and the pushes run innermost-first as a
+>      `Step::Op` unwinds through `eval`, so its frames replay last-pushed — outermost — first.
+>      Verified out of tree against the crate's public `run()`:
+>      `handle (let y = (let z = do Get(1) in z * 10) in y + 5) with { Get(x, k) => k(x) }`
+>      answers **60** where its source says 15, and the three-deep spelling answers 27 for 25;
+>      the single-frame case is correct. Its own ADR is wrong about it independently: ADR 0007
+>      says each evaluation frame "prepends itself to `kont`", and the code appends. Whether a
+>      frozen research artifact should be corrected at all is a maintainer call.
 >
 >      **D73 — `snc build --separate` reuses per-unit objects an OLDER `snc` compiled.** Found
 >      by D59/D60's seventh review; pre-existing (ADR 0037 (3/N)). `unit_fingerprint` hashes the

@@ -1,0 +1,40 @@
+// C3.5(c)+(e) / ADR 0020 D7: TWO captured frames on ONE kont chain,
+// and the order the runtime replays them in.
+//
+// `inner` is the let-bound-perform shape: its let-site pushes a frame
+// holding the tail `a * 10`. `outer` is the let-bound-effecting-CALL
+// shape: the kont `inner()` hands back already carries inner's frame,
+// and outer's let-site pushes a second one holding `b + 5`.
+//
+// The pushes for one kont therefore run from the perform site
+// OUTWARDS — inner's frame first, outer's second — while
+// `sentinel_kont_resume` walks the chain head -> tail. The head must
+// stay the FIRST push, so the replay finishes `inner` before it
+// finishes `outer`, exactly as the original computation would have:
+//
+//     a = 2 -> a * 10 = 20 -> b = 20 -> b + 5 = 25
+//
+// Replaying the outer tail first instead answers 25's neighbour 70
+// (b = 2 -> 7 -> a = 7 -> 70), with no diagnostic anywhere.
+//
+// Expected: exit code 25.
+
+effect Io {
+    read() -> i64;
+}
+
+fn inner() -> i64 ! { Io } {
+    let a: i64 = perform Io.read();
+    a * 10
+}
+
+fn outer() -> i64 ! { Io } {
+    let b: i64 = inner();
+    b + 5
+}
+
+fn main() -> i64 {
+    handle outer() with {
+        Io.read(k) => k(2)
+    }
+}

@@ -13,6 +13,29 @@ upgrade remains mechanical (deep-clone the kont chain +
 captured-state on resume entry) so promoting D2 to multi-shot
 is a follow-on perf ADR rather than a C3 deliverable.
 
+**D7 clarified (2026-09-12).** D7's sketch says
+`sentinel_kont_resume` "walks the kont's frames in reverse",
+which the sketch itself leaves ambiguous — and three of the four
+symbols it lists shipped with a different signature than it
+gives (only `sentinel_kont_panic_resumed` is unchanged). The
+normative rule is the one D3's deep-handler semantics forces,
+and the one the shipped resume's splice already assumed: a
+kont's frame chain is ordered
+**innermost-first, head = the FIRST push**, because the pushes
+for one kont run from the perform site outwards — an effecting
+callee pushes its frame before its caller pushes one onto that
+same kont, in all three back ends. Resume replays head -> tail,
+and the frames still to run when a resumer itself performs are
+appended at the TAIL of the bubble's chain. `sentinel_kont_push`
+PREPENDED until 2026-09-12, so a chain carrying more than one
+frame replayed outermost-first and answered a wrong value with
+no diagnostic; it now appends. The corpus could not see it: its
+one two-frame program computed the same function in both frames.
+Pinned by `tests/pass/c35e_nested_frames_*` and three runtime
+unit tests (push order, and each arm of the splice). Codegen is
+unaffected — the back ends only sequence the
+push calls, which they already did innermost-first.
+
 The substantive design call landed as drafted: which lowering
 strategy for `handle e with { ... }` — free-monad reification
 (Phase B's approach), CPS transform, or stack-saved

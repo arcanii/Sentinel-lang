@@ -1,0 +1,36 @@
+// C3.5(c)+(e) / ADR 0020 D7: THREE captured frames on one kont chain.
+// The two-frame case (c35e_nested_frames_replay_innermost_first) pins
+// that the head of the chain is the first push; this pins that the
+// whole chain is walked in push order rather than merely head-swapped.
+//
+//     x = 10 -> x + 1 = 11 -> y = 11 -> y * 2 = 22 -> z = 22 -> z + 3 = 25
+//
+// Replaying the chain outermost-first answers 27
+// (10 + 3 = 13 -> 13 * 2 = 26 -> 26 + 1 = 27).
+//
+// Expected: exit code 25.
+
+effect Io {
+    read() -> i64;
+}
+
+fn a3() -> i64 ! { Io } {
+    let x: i64 = perform Io.read();
+    x + 1
+}
+
+fn a2() -> i64 ! { Io } {
+    let y: i64 = a3();
+    y * 2
+}
+
+fn a1() -> i64 ! { Io } {
+    let z: i64 = a2();
+    z + 3
+}
+
+fn main() -> i64 {
+    handle a1() with {
+        Io.read(k) => k(10)
+    }
+}

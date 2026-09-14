@@ -1002,6 +1002,43 @@ fn pass_c35e_chained_dependent_perform() {
 }
 
 // ============================================================================
+// C3.5(c)+(e) / ADR 0020 D7: MORE THAN ONE captured frame on ONE kont chain,
+// and the order `sentinel_kont_resume` replays them in. The pushes for one
+// kont run from the perform site OUTWARDS (the innermost enclosing context
+// pushes first, the outermost last) and resume walks the chain head -> tail,
+// so the head must be the FIRST push. Replaying a multi-frame chain the other
+// way round answers with the wrong value and reports nothing.
+// ============================================================================
+
+#[test]
+fn pass_c35e_nested_frames_replay_innermost_first() {
+    // inner(): `let a = perform Io.read(); a * 10` pushes frame 1.
+    // outer(): `let b = inner(); b + 5` pushes frame 2 onto the SAME kont.
+    // Innermost-first: 2 -> 20 -> 25. Outermost-first: 2 -> 7 -> 70.
+    let r = build_and_run("c35e_nested_frames_replay_innermost_first.sentinel");
+    assert_eq!(r.exit, 25);
+    assert_eq!(r.stdout, "");
+}
+
+#[test]
+fn pass_c35e_nested_frames_three_deep() {
+    // Three frames: 10 -> 11 -> 22 -> 25. Outermost-first answers 27.
+    let r = build_and_run("c35e_nested_frames_three_deep.sentinel");
+    assert_eq!(r.exit, 25);
+    assert_eq!(r.stdout, "");
+}
+
+#[test]
+fn pass_c35e_nested_frames_bubble_splice() {
+    // inner() is the chained shape, so resumer-0 bubbles while outer's frame
+    // is still on the chain: resume splices the remainder onto the bubble's
+    // chain TAIL. 5, 5 -> 55 -> 155. Outermost-first answers 1055.
+    let r = build_and_run("c35e_nested_frames_bubble_splice.sentinel");
+    assert_eq!(r.exit, 155);
+    assert_eq!(r.stdout, "");
+}
+
+// ============================================================================
 // C3.6(a) / ADR 0020 D4: return arm with non-identity transform.
 // lower_handle binds the return arm's value VarId to the unwrapped i64 +
 // lowers the body in pure_block; lower_resume_kont mirrors this on the

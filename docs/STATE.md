@@ -14,11 +14,75 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
+**Latest (2026-09-12b) — D74: a continuation carrying MORE THAN ONE captured frame replayed
+them OUTERMOST-FIRST and answered a wrong value with no diagnostic. Runtime-only. NOT
+PUSHED.** `sentinel_kont_push` PREPENDED, so the head of a kont's frame chain was the LAST
+push. The pushes for one kont run from the perform site outwards — an effecting callee pushes
+its frame onto the kont before its caller pushes one onto that same kont, and inkwell, the
+text oracle and scg all emit them in that order — while `sentinel_kont_resume` walks the chain
+head to tail. So `fn outer() { let b: i64 = inner(); b + 5 }` over
+`fn inner() { let a: i64 = perform Io.read(); a * 10 }`, resumed with 2, answered **70** where
+its source says 25; three deep answered 27 for 25; and a bubble whose remainder still carried a
+frame answered 1055 for 155. Everything else in the runtime already assumed innermost-first —
+both doc comments said so, and the splice (when a resumer itself performs, the frames still to
+run go on the TAIL of the bubble's chain) is only right that way round — so only the push was
+inverted. It now APPENDS, walking to the tail rather than growing `SentinelKont`, whose layout
+`docs/abi-v1.md` §3 and a runtime test pin at 32 bytes.
+
+⚠ **The corpus could not see it, by construction.** `tests/pass/c35_effecting_let_secret.sentinel`
+was the ONLY program in the tree putting two frames on one chain, and both of its frames compute
+`v |-> v + base` — the same function — so the two orders AGREE for every `base`, not merely for
+the 0 it passes (its `exact` handle answers 22 + 2*`base`; the asserted 42 adds 20 from its
+other handle); reverting the push left the whole corpus green. New: pass
+`c35e_nested_frames_replay_innermost_first` (25), `c35e_nested_frames_three_deep` (25) and
+`c35e_nested_frames_bubble_splice` (155, also the first program in the tree to reach the splice
+branch with a non-empty remainder), plus runtime unit tests `kont_frames_replay_in_push_order`,
+`kont_resume_splices_remaining_frames_behind_the_bubble_s_own` and
+`kont_resume_splices_remaining_frames_onto_an_empty_bubble_chain` (the splice's other arm, where
+the bubble pushed nothing of its own); all six fail when the push is reverted. ADR 0020 D7's
+"walks the kont's frames in reverse" was a sketch sentence, and three of the four symbols that
+sketch lists shipped with a different signature — clarified in that ADR's Status block;
+`docs/abi-v1.md` §3 now
+states which way `next` points. Three stale comments in `sentinel-codegen` were corrected in
+passing: one gave the kont's size as 24 bytes (it is 32), one gave `sentinel_kont_resume`'s
+return type as `i64` (it is `ptr`), and one named a "byte-offset GEP scheme" for reading
+`op_id` where both sites use a bare load. The runtime carried the same GEP claim three
+times, and now does not.
+
+**NOT oracle-moving:** no stage dump and no emitted byte changes, so `selfhost/` needed no mirror
+and nothing in it states or depends on the chain's order. Four-check on the tree as committed:
+**1,882 passed** with exactly the 18 known Windows failures (1,876 + the 3 fixtures + the 3 unit
+tests), doctests and clippy clean, and every `selfhost_*` differential green — both bootstrap
+fixed points hold with the new fixtures.
+
+Three more filed, none fixed. **D75** — the FROZEN Phase-B interpreter `sentinel-effects-proto`
+has the same inversion (`Continuation::push` appends, `resume` pops from the back): verified out
+of tree against its public `run()`, `handle (let y = (let z = do Get(1) in z * 10) in y + 5)`
+answers 60 where its source says 15, and ADR 0007's "prepends itself to `kont`" is wrong about
+the code independently. **D76** — a frame pushed onto a PURE-RETURN kont never runs and leaks:
+an effecting fn whose body never performs, let-bound by a caller, answers 5 where its source says
+42, because `sentinel_kont_consume_pure` frees the kont without walking `frames_head`; the gap
+against the same loop with no caller frame widens from 20.5 vs 11.2 MB at 400,000 handled calls
+to 44.5 vs 13.4 MB at 600,000 (that control is not flat, so no per-call rate is claimed).
+**D77** — a `handle` of a computation that PERFORMS grows the stack per iteration: of five
+shapes measured, all three that perform (framed, frameless, and an arm that never resumes)
+survive 500,000 and die at 600,000 with 0xC00000FD, while both whose body never performs
+complete — so neither frame reification nor resumption is the discriminator. ⚠ Both entries
+were re-measured after this change's review refuted their first drafts by construction: a poll
+too slow for a short run had read a "flat" baseline that was not flat, the frameless control had
+never been run at the crash threshold, the replacement conclusion (that resumption was the
+discriminator) was itself falsified by the non-resuming arm, and an inference that **D62** is
+therefore not class-specific — drawn from nothing but the shared STATUS_STACK_OVERFLOW code, and
+present since D77's first draft — was withdrawn.
+**D78** — six stale corpus-count sites (`llvm.rs` three times, `README.md` three times): the
+fixture counts among them were exact on the day they were written and had gone stale before this
+change; the tree now holds 194 + 65 = 259 fixtures. **Register: 78 items, 33 done.**
+
 **Latest (2026-09-11b, finished 2026-09-12) — D59, D60 and D66 are closed: an `if`'s result
 slot is sized from the `if`, a `match` arm stores at its own type, and `return` works inside
 methods and effect resumers (and is refused inside inits). ADR 0072 A1 makes `snc build` refuse
 the effecting-fn bodies the reviews found it lowering wrongly: D69 is closed there, every generic
-effecting fn is refused (D70), and so is a multi-parameter operation. NOT PUSHED.**
+effecting fn is refused (D70), and so is a multi-parameter operation. Pushed.**
 **D59** was a memory-safety miscompile in
 the shipping back end: an `if` whose THEN arm diverges got its result slot from the divergent
 branch (a divergent block keeps its own type), so `let s: [i64] = if b { return 5 } else

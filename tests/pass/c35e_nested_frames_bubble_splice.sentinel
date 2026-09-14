@@ -1,0 +1,39 @@
+// C3.5(e) / ADR 0020 D7: the SPLICE path, with a frame still to run.
+//
+// `inner` is the chained-lets shape, so resumer-0 itself performs and
+// returns a bubble kont; `outer` wraps inner's call in a let, so when
+// resumer-0 bubbles there is still one frame (outer's `c + 100`) left
+// on the original chain. `sentinel_kont_resume` splices those
+// remaining frames onto the TAIL of the bubble's own chain, which is
+// only the right place if the chain runs innermost-first: the bubble's
+// own frame (inner's resumer-1) must finish inner before outer's frame
+// finishes outer.
+//
+//     a = 5, b = 5 -> a * 10 + b = 55 -> c = 55 -> c + 100 = 155
+//
+// Replaying outermost-first answers 1055 (c = 5 -> 105 -> a = 105,
+// b = 5 -> 1055). Windows exit codes are 32-bit, so the harness sees
+// 1055 there; a POSIX exit code would truncate it to 31.
+//
+// Expected: exit code 155.
+
+effect Io {
+    read() -> i64;
+}
+
+fn inner() -> i64 ! { Io } {
+    let a: i64 = perform Io.read();
+    let b: i64 = perform Io.read();
+    a * 10 + b
+}
+
+fn outer() -> i64 ! { Io } {
+    let c: i64 = inner();
+    c + 100
+}
+
+fn main() -> i64 {
+    handle outer() with {
+        Io.read(k) => k(5)
+    }
+}
