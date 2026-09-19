@@ -124,7 +124,7 @@ reference as you work through the milestones.
 > confirming nothing pre-existing is newly refused; oracle-vs-scg byte-equality on the new
 > fixture at types, mir and llvm; and the secret-taint check in both directions.
 
-### ▶ RESUME HERE (2026-09-19 — `origin/main` is still `e686853`. Local and NOT PUSHED, oldest first: `5b69bce` (D76) + `39e7eff` (docs), then the ref-escape trio `309047c` + `66818a2` (type layer) and `d52bc88` (borrow layer + fixtures + docs), then `ff96c9e` (ADR 0073: the effect-op signature reference fence, closing D85) and `6a9b646` (D86: the `&T`-receiver address in both Rust emitters) and `aae7823` (D86's `scg` mirror + the corpus fixture — D86 COMPLETE). Register: **86 items, 35 done**, D19 redacted; D82-D86 filed, **D85 and D86 closed** this session. The block below is this session's; the ones after it are kept for their lessons.
+### ▶ RESUME HERE (2026-09-19 — `origin/main` is still `e686853`; **TWELVE local commits sit on top of it and NONE are pushed.** Oldest first: `5b69bce` + `39e7eff` (D76, from the previous session), then this session's ten — `309047c` + `66818a2` (ref-escape type layer), `d52bc88` + `a91c27d` (ref-escape borrow layer), `ff96c9e` + `92eef1c` (ADR 0073, closing D85), `6a9b646` + `a4c7ec3` (D86 in the Rust emitters), `aae7823` + `076941a` (D86's `scg` mirror — D86 COMPLETE in both compilers). Register: **86 items, 36 done**, D19 redacted; D82-D86 filed this session, **D85 and D86 closed**. Four-check at HEAD: 1,976 passed with exactly the 18 known Windows failures, doctests and clippy clean, every `selfhost_*` differential green, both bootstrap fixed points byte-identical. The block below is this session's; the ones after it are kept for their lessons.
 
 > **What the 2026-09-19 ref-escape slice did — `309047c`, `66818a2` and `d52bc88`, all local
 > and NOT PUSHED (on top of the still-unpushed `5b69bce`/`39e7eff`).** Closed the
@@ -202,6 +202,37 @@ reference as you work through the milestones.
 > receiver stays borrowed for the statement so it cannot also be moved by it. Narrowing
 > either needs the per-borrow provenance ADR 0018 step .a builds — resolving the yielded
 > value to its single source would drop a place an if-merged reference still points at.
+>
+> **Then `ff96c9e` — [ADR 0073](decisions/0073-effect-op-signature-reference-fence.md), closing D85.** A reference in an effect-op signature reached codegen and ABORTED
+> inkwell ("Found PointerValue … but expected the IntValue variant") on a perfectly LIVE
+> reference — so never a lifetime question — and a `panic!` on ordinary source besides.
+> An op's parameters are reified into the continuation and its result comes back through
+> the same seam, one `i64` wide. D1 refuses a reference in the parameters AND the return,
+> keyed on `carries_ref`, with the diagnostic on the DECLARATION. ⚠ D3 REJECTS the broader
+> `handle`-value fence — it over-rejects `n5g_handle_ref_retarm`, which the ref-escape
+> slice deliberately keeps accepted. Positional, not global: `secret &T` stays a legal
+> type and a `secret i64` op param stays legal (it is in `FITS`). Corpus reach ZERO.
+>
+> **Then `6a9b646` + `aae7823` — D86, in BOTH compilers.** A method call on a
+> REFERENCE-typed receiver passed the address of the reference's own SLOT, not the
+> object: `fn read(c: &K) { c.peek() }` answered a frame pointer instead of 42, and a
+> `&mut Self` method's `self.v = 99` stored somewhere other than `k.v`. No diagnostic,
+> ordinary source. Same predicate mismatch as ADR 0072 A1's: the type layer auto-derefs
+> the receiver (`Type::Ref(rid)` → `refs[rid].inner`) and codegen did not. Both Rust
+> emitters now load behind a `lower_receiver_ptr` seam; `scg` mirrors it with `cg_load`
+> when `cg_is_ref(c, tty)`, keyed on the ref test its own method lookup uses. `self` is
+> unaffected — bound to the object pointer under the CLASS type, not a reference.
+> Corpus reach was ZERO (measured: the codegen differential was byte-identical with the
+> fix in, before any fixture existed), which also settles the measurement the ref-escape
+> design plan left open. Now pinned by `tests/pass/c22_ref_receiver_method_call.sentinel`
+> — IN the differential corpus, so both emitters are compared byte-for-byte on the shape
+> — plus three per-shape tests in `crates/sentinel-driver/tests/ref_receiver.rs`.
+>
+> ⚠ **BOTH fixes were verified by MUTATION, and that is the habit to keep.** Reverting
+> the Rust receiver fix fails all three `ref_receiver.rs` tests (frame pointer, 49
+> instead of 106, garbage control); reverting the `scg` mirror fails the codegen
+> differential on the new fixture (oracle 1966 bytes vs sentinel 1862). A test that
+> passes proves nothing until you have watched it fail.
 
 ### ▶ Earlier RESUME (2026-09-14 — `origin/main` is at `e686853`, so `77e04cc` — D59+D60+D66, D69 closed in `snc build`, D70's refusal (ADR 0072 A1) — with `85d22ee` (D74) and `e686853` (docs) on top are ALL PUSHED; `5b69bce` (D76) on top of them is local and **NOT PUSHED**. The first two blocks below are this session's; the next is the 2026-09-11/12 session's, and the ones after it the 2026-09-06 session's, all kept for their lessons. STATE.md's entries from 2026-09-08 on record what has happened since. Register: **81 items, 34 done**, D19 redacted.
 
