@@ -124,7 +124,7 @@ reference as you work through the milestones.
 > confirming nothing pre-existing is newly refused; oracle-vs-scg byte-equality on the new
 > fixture at types, mir and llvm; and the secret-taint check in both directions.
 
-### ▶ RESUME HERE (2026-09-19 — `origin/main` is still `e686853`. Local and NOT PUSHED, oldest first: `5b69bce` (D76) + `39e7eff` (docs), then the ref-escape trio `309047c` + `66818a2` (type layer) and `d52bc88` (borrow layer + fixtures + docs). Register: **85 items, 34 done**, D19 redacted; D82-D85 filed this session. The block below is this session's; the ones after it are kept for their lessons.
+### ▶ RESUME HERE (2026-09-19 — `origin/main` is still `e686853`. Local and NOT PUSHED, oldest first: `5b69bce` (D76) + `39e7eff` (docs), then the ref-escape trio `309047c` + `66818a2` (type layer) and `d52bc88` (borrow layer + fixtures + docs), then `ff96c9e` (ADR 0073: the effect-op signature reference fence, closing D85). Register: **85 items, 35 done**, D19 redacted; D82-D85 filed, **D85 closed** this session. The block below is this session's; the ones after it are kept for their lessons.
 
 > **What the 2026-09-19 ref-escape slice did — `309047c`, `66818a2` and `d52bc88`, all local
 > and NOT PUSHED (on top of the still-unpushed `5b69bce`/`39e7eff`).** Closed the
