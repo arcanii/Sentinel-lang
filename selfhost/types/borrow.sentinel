@@ -1262,7 +1262,8 @@ fn dump_texpr_arm(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyC
         //   CG (the byte-identical twin of `snc llvm`'s `llvm_dump` Return arm):
         //   evaluate the inner, drop EVERY live binding down to the fn floor
         //   (`cg_drop_range` floor 0 = "break all the way out"; the moved set skips a
-        //   returned binding), then `ret` with the epilogue ABI (`main` i64→i32;
+        //   returned binding), release the kont of every handler arm it leaves (ADR 0074
+        //   D2), then `ret` with the epilogue ABI (`main` i64→i32;
         //   effecting → `sentinel_kont_pure`; ordinary → the value), then park a dead
         //   block for the now-unreachable remainder. The produced operand is a
         //   `zeroinitializer` placeholder (only ever consumed in the dead block).
@@ -1291,6 +1292,10 @@ fn dump_texpr_arm(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyC
                 let rk: i64 = (*c).cglk;
                 let rv: i64 = (*c).cglv;
                 cg_drop_range(c, 0);
+                // (ADR 0065 D6 / ADR 0074 D2) a `return` leaves every handler arm being
+                // lowered: release the kont each still owns, innermost first (none outside
+                // an arm, the common case). Mirrors the oracle's Return arm.
+                cg_release_arm_konts(c, 0);
                 if (*c).cgmain {
                     let td: i64 = cg_dst(c);
                     cgo_str(c, "trunc i64 ");

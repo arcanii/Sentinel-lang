@@ -55,6 +55,19 @@ never carries frames, which is what those consumers already
 assumed. Codegen is unaffected. Pinned by
 `tests/pass/c35e_pure_*` and three runtime unit tests.
 
+**D2 amended (2026-09-19, [ADR 0074](0074-handler-arm-owns-its-continuation.md)
+D3).** D2's runtime enforcement — a `consumed` flag in the kont,
+checked and set on resume — cannot be what decides a second
+resume: `sentinel_kont_resume` frees the kont it consumes, so no
+later resume has a kont to read the flag in. The check is now
+made on the handler arm's continuation slot, which a `k(v)`
+clears before it resumes; a second `k(v)` passes `null`, and
+`sentinel_kont_resume` aborts with the same diagnostic. The flag
+stays in the layout (`abi-v1` §3) and is still written. The same
+ADR frees the kont on every exit that leaves an arm without
+resuming it — D4's "return without calling `k` to abort" used to
+drop it (register D79).
+
 The substantive design call landed as drafted: which lowering
 strategy for `handle e with { ... }` — free-monad reification
 (Phase B's approach), CPS transform, or stack-saved
@@ -365,7 +378,10 @@ patterns. But they need:
 
 Runtime enforcement: each `kont*` has a `consumed: bool` flag
 checked + set on `resume`. Second resume panics with a clear
-diagnostic (`sentinel_panic_kont_resumed`).
+diagnostic (`sentinel_kont_panic_resumed`). *(Amended by
+[ADR 0074](0074-handler-arm-owns-its-continuation.md) D3: the check
+is made on the arm's continuation slot, which `k(v)` clears; see the
+Status block.)*
 
 ### D3. Handler depth: deep handlers.
 

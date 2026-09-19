@@ -35,7 +35,9 @@
 //!     unwrap to the final i64, anything else means re-dispatch.
 //!   - `sentinel_kont_panic_resumed() -> never` aborts cleanly
 //!     when a second resume happens (one-shot enforcement per
-//!     ADR 0020 D2).
+//!     ADR 0020 D2). A second `k(v)` in one arm reaches it as
+//!     `sentinel_kont_resume(null, _)`: the first cleared the arm's
+//!     continuation slot (ADR 0074 D3).
 //!
 //! None of these are exposed at the language level — they're
 //! called internally by codegen.
@@ -675,8 +677,12 @@ pub struct SentinelKont {
     /// only single-arg ops are supported in codegen; multi-arg
     /// ops land at C3.5(b) via a packed-struct extension.
     pub arg: i64,
-    /// One-shot enforcement per ADR 0020 D2. `0` = not yet
-    /// resumed; `1` = consumed (second resume aborts).
+    /// ADR 0020 D2's one-shot flag: `0` = not yet resumed; `1` =
+    /// consumed. [`sentinel_kont_resume`] still writes it, but it no
+    /// longer decides anything — resume frees the kont it consumes, so
+    /// no second resume can read it. ADR 0074 D3 makes the check on the
+    /// handler arm's continuation slot instead, which `k(v)` clears.
+    /// Kept for the `abi-v1` §3 layout.
     pub consumed: u8,
     /// Padding so `frames_head` lands at a stable 8-byte offset.
     pub _pad2: [u8; 7],
@@ -726,9 +732,9 @@ pub struct SentinelFrame {
 /// # Safety
 ///
 /// The returned pointer must be consumed by exactly one
-/// `sentinel_kont_resume` (or freed externally if the handler
-/// arm body aborts without resuming). Multi-shot resume aborts
-/// via [`sentinel_kont_panic_resumed`].
+/// `sentinel_kont_resume`, or freed by [`sentinel_kont_free`] when
+/// the handler arm that caught it is left without resuming (ADR 0074
+/// D2). Multi-shot resume aborts via [`sentinel_kont_panic_resumed`].
 #[no_mangle]
 pub extern "C" fn sentinel_perform_op(op_id: u32, arg: i64) -> *mut SentinelKont {
     let size = core::mem::size_of::<SentinelKont>() as i64;
@@ -907,13 +913,19 @@ pub extern "C" fn sentinel_kont_push(
 /// effecting lets (a `let v = perform Op()` inside a resumer
 /// body) work end-to-end.
 ///
-/// Second resume on the same kont aborts via
-/// [`sentinel_kont_panic_resumed`].
+/// A second `k(v)` in one arm aborts via
+/// [`sentinel_kont_panic_resumed`]. ADR 0074 D3: the check that
+/// decides it is `kont == null`. A `k(v)` clears its arm's
+/// continuation slot before it calls this, so a second `k(v)` in
+/// the same arm arrives here with `null` — the kont the first
+/// resume consumed is freed below, so the `consumed` flag inside it
+/// is not somewhere a later resume can look. The flag is still
+/// written (it is `abi-v1` §3 layout) but no longer decides anything.
 ///
 /// # Safety
 ///
-/// `kont` must point to a live `SentinelKont` returned by an
-/// earlier `sentinel_perform_op` invocation. After this call
+/// `kont` must be null or point to a live `SentinelKont` returned
+/// by an earlier `sentinel_perform_op` invocation. After this call
 /// returns the original `kont` is freed; the caller must not
 /// access it. The returned pointer is a *different* live kont
 /// that the caller now owns.
@@ -923,7 +935,11 @@ pub extern "C" fn sentinel_kont_resume(
     kont: *mut SentinelKont,
     value: i64,
 ) -> *mut SentinelKont {
-    // SAFETY: caller guarantees `kont` is a live SentinelKont.
+    if kont.is_null() {
+        sentinel_kont_panic_resumed();
+    }
+    // SAFETY: caller guarantees `kont` is a live SentinelKont (null
+    // was refused above).
     let consumed = unsafe { (*kont).consumed };
     if consumed != 0 {
         sentinel_kont_panic_resumed();
@@ -1058,30 +1074,40 @@ pub extern "C" fn sentinel_kont_consume_pure(kont: *mut SentinelKont) -> i64 {
     value
 }
 
-/// ADR 0065 D6: free an ABANDONED continuation — one allocated by a
-/// `perform` (or augmented by `sentinel_kont_push`) but never resumed,
-/// because an early `return` crossed its `handle` boundary (a handler arm
-/// body, or the handled computation, `return`s instead of resuming `k`).
-/// Walks `frames_head` freeing each captured-state block + frame node (the
-/// inverse of [`sentinel_kont_push`]), then frees the kont itself.
+/// ADR 0065 D6 / ADR 0074 D2: free an ABANDONED continuation — one
+/// allocated by a `perform` (or augmented by `sentinel_kont_push`) and never
+/// resumed, because its handler arm was left without calling `k`: it fell
+/// through with a value, or `return`ed, or `break`/`continue`d to a loop
+/// outside the `handle`. Walks `frames_head` freeing each captured-state
+/// block + frame node (the inverse of [`sentinel_kont_push`]), then frees the
+/// kont itself.
 ///
-/// The **one-free invariant** (ADR 0020 D2 / ADR 0065 D6): a kont is freed
-/// exactly once — by [`sentinel_kont_resume`] on the normal path, or by this
-/// on the early-return path, which are mutually exclusive (codegen emits this
-/// only on a `return` path that did not resume the kont). `sentinel_free` of
-/// a null pointer is a safe no-op, so a frameless kont (the direct-`perform`
-/// case, `frames_head == null`) frees cleanly with no guard.
+/// A `null` kont is a no-op (ADR 0074 D4), as defence in depth. Emitted code
+/// never passes one: on every exit it loads the arm's continuation slot and
+/// calls this only when the slot is not `null` — a `k(v)` clears the slot
+/// before it resumes, and [`sentinel_kont_resume`] frees the kont it resumes.
+/// That test is in the emitted code, not here, so code compiled from ADR 0074
+/// on relies on nothing that ADR added to this function.
+///
+/// The **one-free invariant** (ADR 0065 D6, extended by ADR 0074 D2 to every
+/// arm exit): a kont is freed exactly once — by [`sentinel_kont_resume`] if
+/// the arm resumed it, or by this on the arm's exit otherwise. The arm's slot
+/// is what tells the two apart. `sentinel_free` of a null pointer is a safe
+/// no-op, so a frameless kont (the direct-`perform` case,
+/// `frames_head == null`) frees cleanly with no guard.
 ///
 /// # Safety
 ///
-/// `kont` must be a live `SentinelKont` that has NOT been resumed — calling
-/// this on a resumed (already-freed) kont would double-free. The codegen
-/// contract guarantees the mutual exclusion.
+/// `kont` must be null or a live `SentinelKont` that has NOT been resumed —
+/// the codegen contract above guarantees it.
 #[no_mangle]
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub extern "C" fn sentinel_kont_free(kont: *mut SentinelKont) {
-    // SAFETY: caller guarantees `kont` is a live, un-resumed SentinelKont;
-    // read its frame-chain head.
+    if kont.is_null() {
+        return;
+    }
+    // SAFETY: caller guarantees `kont` is a live, un-resumed SentinelKont
+    // (null returned above); read its frame-chain head.
     let mut current_frame = unsafe { (*kont).frames_head };
     while !current_frame.is_null() {
         // SAFETY: current_frame is non-null and was allocated by
@@ -2883,6 +2909,46 @@ mod tests {
         // Frees the kont + both frame nodes + both captured blocks; no leak or
         // double-free (a sanitizer build would flag either).
         sentinel_kont_free(k);
+    }
+
+    #[test]
+    fn sentinel_kont_free_of_null_is_a_no_op() {
+        // ADR 0074 D4: emitted code tests the arm's continuation slot and calls
+        // this only on a kont, but the runtime accepts `null` anyway, as defence in
+        // depth — `null` is what a `k(v)` leaves in the slot it resumed from.
+        sentinel_kont_free(core::ptr::null_mut());
+    }
+
+    /// ADR 0074 D3: a second `k(v)` finds its arm's slot clear and passes `null`,
+    /// which must abort with the one-shot diagnostic rather than dereference it.
+    /// Aborting ends the process, so the test re-runs itself as a child with
+    /// `SENTINEL_RT_TEST_CHILD` set and checks the child's exit and stderr.
+    #[test]
+    fn sentinel_kont_resume_of_null_aborts_with_the_one_shot_diagnostic() {
+        const CHILD: &str = "SENTINEL_RT_TEST_CHILD";
+        if std::env::var(CHILD).as_deref() == Ok("kont_resume_null") {
+            let _ = sentinel_kont_resume(core::ptr::null_mut(), 0);
+            // Unreachable when the guard holds: the resume aborts first.
+            std::process::exit(0);
+        }
+        let exe = std::env::current_exe().expect("current_exe");
+        let out = std::process::Command::new(exe)
+            .args([
+                "--exact",
+                "tests::sentinel_kont_resume_of_null_aborts_with_the_one_shot_diagnostic",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(CHILD, "kont_resume_null")
+            .output()
+            .expect("re-run the test binary as a child");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success(), "a resume of null must not succeed: {stderr}");
+        assert!(
+            stderr.contains("continuation already resumed"),
+            "the child must abort with the one-shot diagnostic, got status {:?} and:\n{stderr}",
+            out.status
+        );
     }
 
     #[test]

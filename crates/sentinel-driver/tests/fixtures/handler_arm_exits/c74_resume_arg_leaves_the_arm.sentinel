@@ -1,0 +1,35 @@
+// ADR 0074 D1: `k(v)` evaluates its argument BEFORE it reads and clears the arm's
+// continuation slot. An argument that leaves the arm — a `return`, or a `break` to a
+// loop around the `handle` — therefore leaves the slot still owning the kont, and that
+// exit's release frees it. Read first and cleared, the slot would have told the exit
+// there was nothing to release, and the kont would never have been freed.
+//
+// Built and run by `tests/handler_arm_exits.rs`, and a SEED of the codegen
+// differential (`tests/selfhost_codegen.rs`), which compares `snc llvm` and `scg`
+// byte-for-byte on it. Not in `tests/pass`: every file there is also swept by the
+// MIR differential, and an `if` inside a handler arm makes the two MIR lowerers
+// diverge (register D83, pre-existing).
+//
+// early(1) = k(1) = 1; early(5) = 9 (the argument returns);
+// in_loop(5): i = 1, 2 resume -> 1 + 2 = 3; i = 3 breaks inside the argument.
+// 1 + 9 + 3 = 13.
+effect Io { read() -> i64; }
+
+fn early(i: i64) -> i64 {
+    handle perform Io.read() with { Io.read(k) => k(if i > 2 { return 9 } else { i }) }
+}
+
+fn in_loop(n: i64) -> i64 {
+    let mut i: i64 = 0;
+    let mut acc: i64 = 0;
+    while i < n {
+        i = i + 1;
+        let v: i64 = handle perform Io.read() with { Io.read(k) => k(if i > 2 { break; 0 } else { i }) };
+        acc = acc + v;
+    }
+    acc
+}
+
+fn main() -> i64 {
+    early(1) + early(5) + in_loop(5)
+}

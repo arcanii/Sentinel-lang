@@ -382,6 +382,10 @@ struct TyCtx {
     cg_loop_after: Vec<i64>,// enclosing loops' after-block labels (break target)
     cg_loop_floor: Vec<i64>,// (8d-drops-3) enclosing loops' scope-drop floor (the cgdv
                             // length at loop-body entry; break/continue drain cgdv[floor..])
+    cg_loop_akf: Vec<i64>,  // (ADR 0074 D2) enclosing loops' arm floor (the cg_arm_ks length at
+                            // loop entry; break/continue release the arms above it)
+    cg_arm_ks: Vec<i64>,    // (ADR 0074 D1) the continuation slot of each handler arm being
+                            // lowered, innermost last — the arm's ownership record for its kont
     // (8e-2) match state: SET in the `Expr::Match` arm (the per-match cg_m_tag/payload/
     // result/merge are SAVED+RESTORED around `dump_tarms` for nested matches); cg_m_pj /
     // cg_m_armnext are transient (set in `dump_tpat`, used immediately / captured into a
@@ -447,6 +451,7 @@ struct TyCtx {
     cg_used_consume: bool,   // declare sentinel_kont_consume_pure
     cg_used_kontpure: bool,  // (c35b) declare sentinel_kont_pure (wrap a pure value)
     cg_used_kontpush: bool,  // (c35c) declare sentinel_kont_push (push a captured frame)
+    cg_used_kontfree: bool,  // (ADR 0074) declare sentinel_kont_free (an arm exit's release)
     // (concurrency / ADR 0024) the structured-concurrency runtime declares + state.
     cg_used_taskspawn: bool,
     cg_used_taskawait: bool,
@@ -1499,6 +1504,13 @@ pub fn run(src: [u8], mode: i64, result: &mut Vec<u8>) -> i64 {
         } else {
             0
         };
+        // (ADR 0074) sentinel_kont_free — an arm exit's release, last in the kont group.
+        if ctx.cg_used_kontfree {
+            append_str(result, "declare void @sentinel_kont_free(ptr)\n");
+            0
+        } else {
+            0
+        };
         // (concurrency) the structured-concurrency runtime group (after the kont group).
         if ctx.cg_used_taskspawn {
             append_str(result, "declare ptr @sentinel_task_spawn(ptr, ptr, i64)\n");
@@ -1719,7 +1731,7 @@ pub fn run(src: [u8], mode: i64, result: &mut Vec<u8>) -> i64 {
         // without also setting `procspawn`. That accident is one grammar change away
         // from ending, with no test that would catch it; hence the mirror is restored
         // rather than left to luck.
-        let cg_anydecl: bool = ctx.cg_used_alloc || ctx.cg_used_realloc || ctx.cg_used_free || ctx.cg_used_panic || ctx.cg_used_streq || ctx.cg_used_rdfile || ctx.cg_used_wrfile || ctx.cg_used_print || ctx.cg_used_prbytes || ctx.cg_used_perform || ctx.cg_used_resume || ctx.cg_used_consume || ctx.cg_used_kontpure || ctx.cg_used_kontpush || ctx.cg_used_taskspawn || ctx.cg_used_taskawait || ctx.cg_used_scopeenter || ctx.cg_used_scoperegister || ctx.cg_used_scopeexit || ctx.cg_used_channelnew || ctx.cg_used_channelsend || ctx.cg_used_channelrecv || ctx.cg_used_channelclose || ctx.cg_used_sharednew || ctx.cg_used_sharednewsecret || ctx.cg_used_sharedget || ctx.cg_used_sharedclone || ctx.cg_used_sharedrelease || ctx.cg_used_mutexnew || ctx.cg_used_mutexnewsecret || ctx.cg_used_mutexlock || ctx.cg_used_mutexclone || ctx.cg_used_mutexrelease || ctx.cg_used_mutexunlock || ctx.cg_used_mutexdata || ctx.cg_used_procspawn || ctx.cg_used_procwait || ctx.cg_used_procwrite || ctx.cg_used_procread || ctx.cg_used_procsend || ctx.cg_used_procrecv || ctx.cg_used_stdinrecv || ctx.cg_used_stdoutsend || ctx.cg_used_argcount || ctx.cg_used_arg || ctx.cg_used_memcpy;
+        let cg_anydecl: bool = ctx.cg_used_alloc || ctx.cg_used_realloc || ctx.cg_used_free || ctx.cg_used_panic || ctx.cg_used_streq || ctx.cg_used_rdfile || ctx.cg_used_wrfile || ctx.cg_used_print || ctx.cg_used_prbytes || ctx.cg_used_perform || ctx.cg_used_resume || ctx.cg_used_consume || ctx.cg_used_kontpure || ctx.cg_used_kontpush || ctx.cg_used_kontfree || ctx.cg_used_taskspawn || ctx.cg_used_taskawait || ctx.cg_used_scopeenter || ctx.cg_used_scoperegister || ctx.cg_used_scopeexit || ctx.cg_used_channelnew || ctx.cg_used_channelsend || ctx.cg_used_channelrecv || ctx.cg_used_channelclose || ctx.cg_used_sharednew || ctx.cg_used_sharednewsecret || ctx.cg_used_sharedget || ctx.cg_used_sharedclone || ctx.cg_used_sharedrelease || ctx.cg_used_mutexnew || ctx.cg_used_mutexnewsecret || ctx.cg_used_mutexlock || ctx.cg_used_mutexclone || ctx.cg_used_mutexrelease || ctx.cg_used_mutexunlock || ctx.cg_used_mutexdata || ctx.cg_used_procspawn || ctx.cg_used_procwait || ctx.cg_used_procwrite || ctx.cg_used_procread || ctx.cg_used_procsend || ctx.cg_used_procrecv || ctx.cg_used_stdinrecv || ctx.cg_used_stdoutsend || ctx.cg_used_argcount || ctx.cg_used_arg || ctx.cg_used_memcpy;
         if cg_anydecl {
             push(result, '\n');
             0
@@ -1964,6 +1976,8 @@ fn cg_reset(c: &mut TyCtx) -> i64 {
     clear_i64(&mut (*c).cg_loop_cond);
     clear_i64(&mut (*c).cg_loop_after);
     clear_i64(&mut (*c).cg_loop_floor);
+    clear_i64(&mut (*c).cg_loop_akf);
+    clear_i64(&mut (*c).cg_arm_ks);
     clear_i64(&mut (*c).cgdv);
     clear_i64(&mut (*c).cgdt);
     clear_i64(&mut (*c).cgds);

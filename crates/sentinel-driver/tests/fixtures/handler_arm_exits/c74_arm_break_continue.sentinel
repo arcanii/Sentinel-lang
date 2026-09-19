@@ -1,0 +1,49 @@
+// ADR 0074 D2: a `break` or `continue` inside a handler arm, to a loop AROUND the
+// `handle`, leaves the arm — so it releases the continuation the arm still owns, after
+// the loop body's scope drops (ADR 0036 D9) and before the branch. A loop INSIDE the
+// arm is the control: its `break` stays in the arm, so the arm floor it recorded on
+// entry already counts the arm and nothing is released there.
+//
+// Built and run by `tests/handler_arm_exits.rs`, and a SEED of the codegen
+// differential (`tests/selfhost_codegen.rs`), which compares `snc llvm` and `scg`
+// byte-for-byte on it. Not in `tests/pass`: every file there is also swept by the
+// MIR differential, and an `if` inside a handler arm makes the two MIR lowerers
+// diverge (register D83, pre-existing).
+//
+// sum(10): i = 1, 2, 3 resume -> 1 + 2 + 3 = 6; i = 4..6 `continue`; i = 7 `break`.
+// inner_loop(9): j climbs to 5, breaks, then k(5) = 5. 6 + 5 = 11.
+effect Io { read() -> i64; }
+
+fn sum(n: i64) -> i64 {
+    let mut i: i64 = 0;
+    let mut acc: i64 = 0;
+    while i < n {
+        i = i + 1;
+        let v: i64 = handle perform Io.read() with {
+            Io.read(k) => {
+                if i > 6 { break; 0 } else { 0 };
+                if i > 3 { continue; 0 } else { 0 };
+                k(i)
+            }
+        };
+        acc = acc + v;
+    }
+    acc
+}
+
+fn inner_loop(n: i64) -> i64 {
+    handle perform Io.read() with {
+        Io.read(k) => {
+            let mut j: i64 = 0;
+            while j < n {
+                j = j + 1;
+                if j > 4 { break; 0 } else { 0 };
+            }
+            k(j)
+        }
+    }
+}
+
+fn main() -> i64 {
+    sum(10) + inner_loop(9)
+}

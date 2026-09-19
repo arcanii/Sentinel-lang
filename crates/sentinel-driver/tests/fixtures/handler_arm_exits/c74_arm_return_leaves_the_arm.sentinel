@@ -1,0 +1,29 @@
+// ADR 0074 D2: a `return` inside a handler arm releases what the arm's continuation
+// slot still holds — the kont itself if the arm has not resumed it, nothing if it has.
+//
+// ADR 0065 D6 gave `return` a teardown, but read it from the `handle`'s dispatch slot,
+// which keeps holding the kont after `k(v)` consumes it. The arm's own slot is the
+// record that can tell the two cases apart, because `k(v)` clears it (D1); `before`
+// and `after` are one of each.
+//
+// Built and run by `tests/handler_arm_exits.rs`, and a SEED of the codegen
+// differential (`tests/selfhost_codegen.rs`), which compares `snc llvm` and `scg`
+// byte-for-byte on it. Not in `tests/pass`: every file there is also swept by the
+// MIR differential, and an `if` inside a handler arm makes the two MIR lowerers
+// diverge (register D83, pre-existing).
+//
+// before(1) = k(1) = 1; before(3) = 7 (returns, never resumes);
+// after(4) = k(4) + 1 = 5; after(20) = 21. 1 + 7 + 5 + 21 = 34.
+effect Io { read() -> i64; }
+
+fn before(i: i64) -> i64 {
+    handle perform Io.read() with { Io.read(k) => { if i > 2 { return 7 } else { 0 }; k(i) } }
+}
+
+fn after(i: i64) -> i64 {
+    handle perform Io.read() with { Io.read(k) => { let a: i64 = k(i); return a + 1 } }
+}
+
+fn main() -> i64 {
+    before(1) + before(3) + after(4) + after(20)
+}

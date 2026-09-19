@@ -1,0 +1,67 @@
+// ADR 0074 D2: a `return`, `break` or `continue` releases EVERY handler arm it leaves,
+// innermost first — not only the innermost one. Two arms are open at once in one function
+// only when a `handle` is written inside another handle's arm (register D81's shape). Where
+// the inner `handle`'s value is USED, or its `return` arm resumes the outer `k`, D81 gets
+// there first; here the value is discarded and there is no `return` arm, so the program
+// compiles and answers correctly, and each `return`, `break` or `continue` here leaves both
+// the inner arm and the outer one (the inner arm's fall-through leaves the inner arm only). A
+// walk that released only the innermost arm would leave the outer arm's kont behind on every
+// call.
+//
+// (When the inner `handle` completes, its discarded result is D81's own leak, before and
+// after ADR 0074; the exits pinned here never let it complete.)
+//
+// Built and run by `tests/handler_arm_exits.rs`, and a SEED of the codegen differential
+// (`tests/selfhost_codegen.rs`), which compares `snc llvm` and `scg` byte-for-byte on it.
+// Not in `tests/pass`, for register D83's reason (an `if` inside a handler arm).
+//
+// ret_inner(1) = k(1) = 1; ret_inner(5) = 9 (returns from the inner arm);
+// brk_both(10): i = 1, 2 resume -> 1 + 2 = 3, then i = 3 breaks out of both arms;
+// cont_both(6): i = 1, 2 -> 3, then i = 3..6 continue out of both arms. 1 + 9 + 3 + 3 = 16.
+effect Io { read() -> i64; }
+effect Log { get() -> i64; }
+
+fn ret_inner(c: i64) -> i64 {
+    handle perform Io.read() with {
+        Io.read(k) => {
+            handle perform Log.get() with { Log.get(k2) => { if c > 2 { return 9 } else { 0 }; k2(3) } };
+            k(1)
+        }
+    }
+}
+
+fn brk_both(n: i64) -> i64 {
+    let mut i: i64 = 0;
+    let mut acc: i64 = 0;
+    while i < n {
+        i = i + 1;
+        let v: i64 = handle perform Io.read() with {
+            Io.read(k) => {
+                handle perform Log.get() with { Log.get(k2) => { if i > 2 { break; 0 } else { 0 }; k2(3) } };
+                k(i)
+            }
+        };
+        acc = acc + v;
+    }
+    acc
+}
+
+fn cont_both(n: i64) -> i64 {
+    let mut i: i64 = 0;
+    let mut acc: i64 = 0;
+    while i < n {
+        i = i + 1;
+        let v: i64 = handle perform Io.read() with {
+            Io.read(k) => {
+                handle perform Log.get() with { Log.get(k2) => { if i > 2 { continue; 0 } else { 0 }; k2(3) } };
+                k(i)
+            }
+        };
+        acc = acc + v;
+    }
+    acc
+}
+
+fn main() -> i64 {
+    ret_inner(1) + ret_inner(5) + brk_both(10) + cont_both(6)
+}

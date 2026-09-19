@@ -95,7 +95,10 @@ layout is load-bearing ABI. Source of truth: `sentinel-runtime/src/lib.rs`.
 | `frames_head` | `*mut SentinelFrame` | 24 |
 
 Codegen reads `op_id` at offset 0 inside the handler dispatch; `arg` at
-offset 8. ADR 0020 D7.
+offset 8. ADR 0020 D7. `consumed` is still written by
+`sentinel_kont_resume` but no longer decides the one-shot check: resume
+frees the kont it consumes, so ADR 0074 D3 makes the check on the handler
+arm's continuation slot instead (see `sentinel_kont_resume` in §5).
 
 ### `SentinelFrame` — size **24**, align **8**
 
@@ -372,11 +375,11 @@ Codegen declares these as external; `sentinel-runtime` defines them
 | `sentinel_arena_alloc` | `(ptr arena, i64 size) -> ptr` | scope arena |
 | `sentinel_arena_exit` | `(ptr arena) -> void` | scope arena |
 | `sentinel_perform_op` | `(i32 op_id, i64 arg) -> ptr` | handlers (ADR 0020) |
-| `sentinel_kont_resume` | `(ptr kont, i64 value) -> ptr` | handlers |
+| `sentinel_kont_resume` | `(ptr kont, i64 value) -> ptr` | handlers — `kont` = `null` aborts with the one-shot diagnostic: a `k(v)` clears its arm's continuation slot before resuming, so a second one passes `null` (ADR 0074 D3) |
 | `sentinel_kont_pure` | `(i64 value) -> ptr` | handlers |
 | `sentinel_kont_consume_pure` | `(ptr kont) -> i64` | handlers |
 | `sentinel_kont_push` | `(ptr kont, ptr resumer, ptr captured) -> void` | handlers |
-| `sentinel_kont_free` | `(ptr kont) -> void` | handlers — free an abandoned kont (+ its captured frame chain) when an early `return` crosses a `handle` (ADR 0065 D6) |
+| `sentinel_kont_free` | `(ptr kont) -> void` | handlers — free an abandoned kont (+ its captured frame chain) on every exit that leaves a handler arm without resuming `k`: the fall-through, `return`, `break` / `continue` (ADR 0074 D2; `return` since ADR 0065 D6). Emitted code loads the kont from the arm's continuation slot and calls this only when it is not `null` (a `k(v)` clears the slot); the runtime accepts `null` anyway, as a no-op (ADR 0074 D4) |
 | `sentinel_task_spawn` | `(ptr wrapper, ptr args, i64 args_size) -> ptr` | concurrency (ADR 0024) |
 | `sentinel_task_await` | `(ptr task) -> i64` | concurrency |
 | `sentinel_scope_enter` | `() -> ptr` | concurrency |
@@ -405,9 +408,10 @@ Codegen declares these as external; `sentinel-runtime` defines them
 | `sentinel_mutex_data` | `(ptr m, i64 valid) -> ptr` | mutex — the protected slot for `*g` reads/writes (`valid` = the `?Guard`'s valid bit). ABORTS on a timed-out/null guard (`valid == 0`) — a deref without the lock would be a data race; the `sentinel_panic_oob` posture. Only sound while the guard's lock is held |
 
 **Runtime-internal (not codegen-declared):** `sentinel_kont_panic_resumed`
-— the runtime's `sentinel_kont_resume` calls it on the consumed-twice
-(multi-shot) path; resolved at the runtime crate's own link time, so it
-is part of the runtime contract but never an emitted external reference.
+— the runtime's `sentinel_kont_resume` calls it when handed `null`, which is
+how a second `k(v)` in one arm arrives (ADR 0074 D3); resolved at the
+runtime crate's own link time, so it is part of the runtime contract but
+never an emitted external reference.
 
 The **resumer ABI** (the function pointer stored in `SentinelFrame.resumer`
 and passed to `sentinel_kont_push`) is

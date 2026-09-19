@@ -1330,6 +1330,271 @@ fn llvm_method_moves_are_not_freed() {
     }
 }
 
+/// ADR 0074 (register D79): a handler arm owns its continuation until it resumes it.
+/// The golden pins both halves on one program: `k(10)` loads the kont from the arm's
+/// slot (`%v7`), CLEARS the slot, then resumes (D1 — the argument is a constant, so the
+/// golden cannot show that it is evaluated first; `llvm_every_handler_arm_exit_releases_the_kont`
+/// pins that order on `early`); and the arm's fall-through (`bb6`) tests what the slot
+/// holds and frees it only when it is not `null` (`bb9`) — the kont on the `else` path,
+/// which declines to resume, and nothing after `k(10)` (D2). The test is in the emitted
+/// code, so the program never depends on the runtime's own `null` check (D4).
+#[test]
+fn llvm_handler_arm_owns_its_continuation() {
+    assert_eq!(
+        llvm_dump(
+            "armkont",
+            "effect Io { read() -> i64; }\n\
+             fn one(i: i64) -> i64 {\n\
+             \x20   handle perform Io.read() with { Io.read(k) => if i > 2 { k(10) } else { 5 } }\n\
+             }\n\
+             fn main() -> i64 { one(1) + one(3) }\n"
+        ),
+        concat!(
+            "target triple = \"arm64-apple-darwin\"\n",
+            "\n",
+            "declare ptr @sentinel_perform_op(i32, i64)\n",
+            "declare ptr @sentinel_kont_resume(ptr, i64)\n",
+            "declare i64 @sentinel_kont_consume_pure(ptr)\n",
+            "declare void @sentinel_kont_free(ptr)\n",
+            "\n",
+            "define i64 @one(i64 %arg0) {\n",
+            "entry:\n",
+            "  %v0 = alloca i64\n",
+            "  %v2 = alloca ptr\n",
+            "  %v3 = alloca i64\n",
+            "  %v7 = alloca ptr\n",
+            "  %v15 = alloca i64\n",
+            "  store i64 %arg0, ptr %v0\n",
+            "  %v1 = call ptr @sentinel_perform_op(i32 0, i64 0)\n",
+            "  store ptr %v1, ptr %v2\n",
+            "  br label %bb0\n",
+            "bb0:\n",
+            "  %v4 = load ptr, ptr %v2\n",
+            "  %v5 = load i32, ptr %v4\n",
+            "  %v6 = icmp eq i32 %v5, 0\n",
+            "  br i1 %v6, label %bb2, label %bb3\n",
+            "bb2:\n",
+            "  store ptr %v4, ptr %v7\n",
+            "  %v8 = load i64, ptr %v0\n",
+            "  %v9 = icmp sgt i64 %v8, 2\n",
+            "  br i1 %v9, label %bb4, label %bb5\n",
+            "bb4:\n",
+            "  %v10 = load ptr, ptr %v7\n",
+            "  store ptr null, ptr %v7\n",
+            "  %v11 = call ptr @sentinel_kont_resume(ptr %v10, i64 10)\n",
+            "  %v12 = load i32, ptr %v11\n",
+            "  %v13 = icmp eq i32 %v12, 4294967295\n",
+            "  br i1 %v13, label %bb7, label %bb8\n",
+            "bb8:\n",
+            "  store ptr %v11, ptr %v2\n",
+            "  br label %bb0\n",
+            "bb7:\n",
+            "  %v14 = call i64 @sentinel_kont_consume_pure(ptr %v11)\n",
+            "  store i64 %v14, ptr %v15\n",
+            "  br label %bb6\n",
+            "bb5:\n",
+            "  store i64 5, ptr %v15\n",
+            "  br label %bb6\n",
+            "bb6:\n",
+            "  %v16 = load i64, ptr %v15\n",
+            "  %v17 = load ptr, ptr %v7\n",
+            "  %v18 = icmp ne ptr %v17, null\n",
+            "  br i1 %v18, label %bb9, label %bb10\n",
+            "bb9:\n",
+            "  call void @sentinel_kont_free(ptr %v17)\n",
+            "  br label %bb10\n",
+            "bb10:\n",
+            "  store i64 %v16, ptr %v3\n",
+            "  br label %bb1\n",
+            "bb3:\n",
+            "  %v19 = icmp eq i32 %v5, 4294967295\n",
+            "  br i1 %v19, label %bb11, label %bb12\n",
+            "bb11:\n",
+            "  %v20 = call i64 @sentinel_kont_consume_pure(ptr %v4)\n",
+            "  store i64 %v20, ptr %v3\n",
+            "  br label %bb1\n",
+            "bb12:\n",
+            "  unreachable\n",
+            "bb1:\n",
+            "  %v21 = load i64, ptr %v3\n",
+            "  ret i64 %v21\n",
+            "}\n",
+            "\n",
+            "define i32 @main() {\n",
+            "entry:\n",
+            "  %v0 = call i64 @one(i64 1)\n",
+            "  %v1 = call i64 @one(i64 3)\n",
+            "  %v2 = add i64 %v0, %v1\n",
+            "  %v3 = trunc i64 %v2 to i32\n",
+            "  ret i32 %v3\n",
+            "}\n",
+            "\n",
+        )
+    );
+}
+
+/// The labels of the blocks in `body` (a `define`'s lines) reachable from `entry:`.
+/// A block's successors are the `label %…` operands of its terminator — `br` is the
+/// only instruction the oracle emits that names a block.
+fn reachable_labels<'a>(body: &[&'a str]) -> Vec<&'a str> {
+    let mut succ: Vec<(&str, Vec<&str>)> = Vec::new();
+    for l in body.iter().skip(1) {
+        if !l.starts_with(' ') {
+            succ.push((l.trim_end_matches(':'), Vec::new()));
+        } else if let Some((_, to)) = succ.last_mut() {
+            for target in l.split("label %").skip(1) {
+                to.push(target.split([',', ' ']).next().expect("a label name"));
+            }
+        }
+    }
+    let mut seen: Vec<&str> = Vec::new();
+    let mut stack = vec!["entry"];
+    while let Some(b) = stack.pop() {
+        if !seen.contains(&b) {
+            seen.push(b);
+            let (_, to) = succ.iter().find(|(l, _)| *l == b).expect("a branch target is a block");
+            stack.extend(to.iter().copied());
+        }
+    }
+    seen
+}
+
+/// ADR 0074 D2 over `tests/fixtures/handler_arm_exits/`: each fn's count of
+/// `sentinel_kont_free` calls that can run — in a block reachable from `entry:` — is
+/// its number of (exit, open arm) pairs: the fall-through, a `return`, a `break` /
+/// `continue` to a loop around the `handle`, including one taken inside a `k(v)`
+/// argument (D1), and TWO for a `return`, `break` or `continue` that leaves an inner
+/// arm and the outer arm around it (`c74_two_open_arms`; the inner arm's fall-through
+/// counts one). A loop INSIDE the arm (`inner_loop`) adds none, and `after`'s arm ends
+/// in a `return`, so the fall-through release emitted after it is dead and does not
+/// count — nor would a `return`, `break` or `continue` release moved past its exit's
+/// terminator into the dead block the oracle opens there. (A fall-through release moved
+/// past its branch into the next dispatch check would still count, as that block is
+/// live; the golden above pins where that release goes.) Every release is guarded — the
+/// call sits in a block reached only when `icmp ne ptr %vK, null` holds (D4) — and reads
+/// its kont from an arm's continuation slot, never from a dispatch slot. (The check
+/// recognises an arm slot as any slot a dispatched kont is stored into, so in
+/// `c74_two_open_arms` it would also accept the inner `handle`'s result slot, which that
+/// handle's pure and propagate paths write; no release reads it.) Every
+/// `sentinel_kont_resume` is preceded by the load of the arm's slot and the store that
+/// clears it (D1). `scg` matches these byte-for-byte because the same files are seeds
+/// of the codegen differential; this is what makes the oracle's side of that
+/// comparison mean something. (Not `tests/pass` files: see `tests/handler_arm_exits.rs`
+/// for why.)
+#[test]
+fn llvm_every_handler_arm_exit_releases_the_kont() {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/handler_arm_exits");
+    let cases: &[(&str, &[(&str, usize)])] = &[
+        (
+            "c74_arm_declines_to_resume",
+            &[("fixed", 1), ("maybe", 1), ("skip_frame", 1), ("framed", 0), ("main", 0)],
+        ),
+        ("c74_arm_return_leaves_the_arm", &[("before", 2), ("after", 1)]),
+        ("c74_arm_break_continue", &[("sum", 3), ("inner_loop", 1)]),
+        ("c74_resume_arg_leaves_the_arm", &[("early", 2), ("in_loop", 2)]),
+        ("c74_two_open_arms", &[("ret_inner", 4), ("brk_both", 4), ("cont_both", 4)]),
+    ];
+    for (fixture, fns) in cases {
+        let src = dir.join(format!("{fixture}.sentinel"));
+        let out = Command::new(env!("CARGO_BIN_EXE_snc"))
+            .arg("llvm")
+            .arg(&src)
+            .output()
+            .expect("run snc llvm");
+        assert!(
+            out.status.success(),
+            "snc llvm failed on {fixture}:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let ll = String::from_utf8(out.stdout).expect("utf-8 dump");
+        let lines: Vec<&str> = ll.lines().collect();
+        for (name, want) in *fns {
+            let head = format!("@{name}(");
+            let def = lines
+                .iter()
+                .position(|l| l.starts_with("define ") && l.contains(&head))
+                .unwrap_or_else(|| panic!("{fixture}: no `define` for {name} in:\n{ll}"));
+            let body: Vec<&str> = lines[def..].iter().take_while(|l| **l != "}").copied().collect();
+            let live = reachable_labels(&body);
+            // A dispatch loop reads its slot and then the kont's op id; an arm head
+            // stores that dispatched kont into the arm's own continuation slot.
+            let dispatch: Vec<(&str, &str)> = body
+                .windows(2)
+                .filter_map(|w| {
+                    let (kont, slot) = w[0].trim().split_once(" = load ptr, ptr ")?;
+                    w[1].ends_with(&format!(" = load i32, ptr {kont}")).then_some((kont, slot))
+                })
+                .collect();
+            let arm_slots: Vec<&str> = body
+                .iter()
+                .filter_map(|l| {
+                    let (v, slot) = l.trim().strip_prefix("store ptr ")?.split_once(", ptr ")?;
+                    dispatch.iter().any(|(kont, _)| *kont == v).then_some(slot)
+                })
+                .collect();
+            let got = body
+                .iter()
+                .enumerate()
+                .filter(|(i, l)| {
+                    l.contains("call void @sentinel_kont_free(")
+                        && live.contains(&body[i - 1].trim_end_matches(':'))
+                })
+                .count();
+            assert_eq!(got, *want, "{fixture}: @{name} releases on {got} exits:\n{}", body.join("\n"));
+            // D4: each release is `%vK = load ptr, ptr %vS` / `%vN = icmp ne ptr %vK,
+            // null` / `br i1 %vN, label %bbF, …` / `bbF:` / the call, and `%vS` is an arm
+            // slot, not a dispatch slot (ADR 0065 D6's old record).
+            for (i, l) in body.iter().enumerate() {
+                if let Some(rest) = l.strip_prefix("  call void @sentinel_kont_free(ptr ") {
+                    let kont = rest.trim_end_matches(')');
+                    let label = body[i - 1].trim_end_matches(':');
+                    let test = body[i - 3];
+                    let owned = test.split(" = ").next().unwrap().trim();
+                    assert_eq!(
+                        test,
+                        format!("  {owned} = icmp ne ptr {kont}, null"),
+                        "{fixture}: @{name}: an unguarded release"
+                    );
+                    assert!(
+                        body[i - 2].starts_with(&format!("  br i1 {owned}, label %{label},")),
+                        "{fixture}: @{name}: the release is not the guard's taken branch"
+                    );
+                    let slot = body[i - 4]
+                        .strip_prefix(&format!("  {kont} = load ptr, ptr "))
+                        .unwrap_or_else(|| panic!("{fixture}: @{name}: the released kont is not a slot load"));
+                    assert!(
+                        arm_slots.contains(&slot) && !dispatch.iter().any(|(_, s)| *s == slot),
+                        "{fixture}: @{name}: a release reads {slot}, which is not an arm's continuation slot"
+                    );
+                }
+            }
+            if *name == "early" {
+                // D1's ORDER: the argument `if i > 2 { return 9 } else { i }` is
+                // evaluated before the slot is read and cleared, so the `return` inside
+                // it still finds the kont owned. Reading first would put the clear
+                // above the argument's compare, and the release on that `return` would
+                // free `null`.
+                let cmp = body.iter().position(|l| l.contains("icmp sgt")).expect("the argument's compare");
+                let clear = body.iter().position(|l| l.starts_with("  store ptr null")).expect("the slot clear");
+                assert!(cmp < clear, "{fixture}: @early clears the slot before its argument:\n{}", body.join("\n"));
+            }
+            for (i, l) in body.iter().enumerate() {
+                if let Some(rest) = l.split("@sentinel_kont_resume(ptr ").nth(1) {
+                    let kont = rest.split(',').next().unwrap();
+                    let slot = body[i - 1]
+                        .strip_prefix("  store ptr null, ptr ")
+                        .unwrap_or_else(|| panic!("{fixture}: @{name}: no slot clear before `{l}`"));
+                    assert_eq!(
+                        body[i - 2],
+                        format!("  {kont} = load ptr, ptr {slot}"),
+                        "{fixture}: @{name}: the resumed kont is not the one loaded from the cleared slot"
+                    );
+                }
+            }
+        }
+    }
+}
+
 // ---- Layer 3: behavioural parity (textual .ll == inkwell) ---------------
 
 fn runtime_lib() -> PathBuf {

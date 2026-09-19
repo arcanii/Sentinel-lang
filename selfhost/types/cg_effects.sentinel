@@ -94,16 +94,71 @@ fn cg_bind_harm_params(c: &mut TyCtx, pv0: i64, pvn: i64, ck: i64) -> i64 {
     cgo_int(c, kslot);
     cg_putc(c, '\n');
     cg_slot_set(c, pvn - 1, kslot);
+    // (ADR 0074 D1) the slot is now the arm's ownership record for the kont; `dump_tharms`
+    // pops it after the arm body, releasing what it still holds.
+    push(&mut (*c).cg_arm_ks, kslot);
     0
 }
 
-// (Bar B / effects) `k(arg)` part 1: load the kont pointer from `kid`'s slot — emitted
-// BEFORE the arg is lowered (the oracle's `lower_resume_kont` loads the kont first, then
-// the arg). Returns the loaded-kont register.
+// (ADR 0074 D2) release the kont each handler arm at index >= `floor` of `cg_arm_ks` still
+// owns, innermost first: load the arm's slot and, if it is not the null a `k(v)` leaves
+// there, `sentinel_kont_free` it — the test is in the emitted code, so the code never
+// depends on the runtime's own null check (ADR 0074 D4). Emitted on every exit that leaves
+// an arm without resuming its `k`: the fall-through (the top arm only), `return` (floor 0:
+// every arm) and `break` / `continue` (the loop's arm floor). Mirrors the oracle's
+// `emit_arm_kont_releases`, block for block.
+fn cg_release_arm_konts(c: &mut TyCtx, floor: i64) -> i64 {
+    let mut i: i64 = len((*c).cg_arm_ks) - 1;
+    while i >= floor {
+        let slot: i64 = (*c).cg_arm_ks[i];
+        let r: i64 = cg_dst(c);
+        cgo_str(c, "load ptr, ptr %v");
+        cgo_int(c, slot);
+        cg_putc(c, '\n');
+        let owned: i64 = cg_dst(c);
+        cgo_str(c, "icmp ne ptr %v");
+        cgo_int(c, r);
+        cgo_str(c, ", null\n");
+        let free_b: i64 = cg_fresh_block(c);
+        let done_b: i64 = cg_fresh_block(c);
+        cgo_str(c, "  br i1 %v");
+        cgo_int(c, owned);
+        cgo_str(c, ", label %bb");
+        cgo_int(c, free_b);
+        cgo_str(c, ", label %bb");
+        cgo_int(c, done_b);
+        cg_putc(c, '\n');
+        cgo_str(c, "bb");
+        cgo_int(c, free_b);
+        cgo_str(c, ":\n");
+        cgo_str(c, "  call void @sentinel_kont_free(ptr %v");
+        cgo_int(c, r);
+        cgo_str(c, ")\n");
+        cgo_str(c, "  br label %bb");
+        cgo_int(c, done_b);
+        cg_putc(c, '\n');
+        cgo_str(c, "bb");
+        cgo_int(c, done_b);
+        cgo_str(c, ":\n");
+        (*c).cg_used_kontfree = true;
+        i = i - 1;
+    }
+    0
+}
+
+// (Bar B / effects) `k(arg)` part 1: load the kont pointer from `kid`'s slot, then CLEAR the
+// slot (ADR 0074 D1) — emitted AFTER the arg is collected, as the oracle's
+// `lower_resume_kont` does: an argument that leaves the arm (`k(return 5)`) must leave the
+// slot owned so that exit releases the kont, and a `k(v)` nested in the argument clears the
+// slot first, so this one's one-shot check (D3) sees it. The resume that follows consumes
+// and frees the kont, so the arm no longer owns it. Returns the loaded-kont register.
 fn cg_emit_resume_load(c: &mut TyCtx, kid: i64) -> i64 {
     let kslot: i64 = cg_slot_get(c, kid);
     let kreg: i64 = cg_dst(c);
     cgo_str(c, "load ptr, ptr %v");
+    cgo_int(c, kslot);
+    cg_putc(c, '\n');
+    cgo_str(c, "  store ptr null, ptr %v");
     cgo_int(c, kslot);
     cg_putc(c, '\n');
     kreg

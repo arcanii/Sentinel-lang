@@ -124,7 +124,70 @@ reference as you work through the milestones.
 > confirming nothing pre-existing is newly refused; oracle-vs-scg byte-equality on the new
 > fixture at types, mir and llvm; and the secret-taint check in both directions.
 
-### ▶ RESUME HERE (2026-09-19 — `origin/main` is still `e686853`; **every commit below is LOCAL and NONE are pushed** (a count is deliberately not given — the commit that states it changes it; run `git log --oneline e686853..HEAD` for the live list). Oldest first: `5b69bce` + `39e7eff` (D76, from the previous session), then this session's — `309047c` + `66818a2` (ref-escape type layer), `d52bc88` + `a91c27d` (ref-escape borrow layer), `ff96c9e` + `92eef1c` (ADR 0073, closing D85), `6a9b646` + `a4c7ec3` (D86 in the Rust emitters), `aae7823` + `076941a` (D86's `scg` mirror — D86 COMPLETE in both compilers), plus the docs commits that maintain this block. Register: **86 items, 36 done**, D19 redacted; D82-D86 filed this session, **D85 and D86 closed**. Four-check at HEAD: 1,976 passed with exactly the 18 known Windows failures, doctests and clippy clean, every `selfhost_*` differential green, both bootstrap fixed points byte-identical. The block below is this session's; the ones after it are kept for their lessons.
+### ▶ RESUME HERE (2026-09-19b — `origin/main` is `e68837a`, pushed 2026-09-19 23:55; its reflog also shows `39e7eff` (09-14) and `076941a` (09-19 21:42), so the block below, which says `e686853`, is stale. The ADR 0074 commit on top of it is LOCAL and NOT PUSHED — run `git log --oneline origin/main..HEAD` for the live list; a count is deliberately not given. This session: **ADR 0074 closes D79** in all three back ends (oracle-moving, `scg` mirrored, both bootstrap fixed points green); D81 widened, D83's scope corrected; **D87, D88 and D89 filed**. Register: **89 items, 37 done**, D19 redacted. Four-check at HEAD: 1,996 passed with exactly the 18 known Windows failures, doctests and clippy clean, every `selfhost_*` differential green, both bootstrap fixed points byte-identical.
+
+> **What the 2026-09-19b slice did — [ADR 0074](decisions/0074-handler-arm-owns-its-continuation.md).**
+> A handler arm now owns its continuation until it resumes it: the arm's `k` slot is the
+> ownership record, `k(v)` clears it (after evaluating its argument) before resuming, and every
+> exit — fall-through, `return`, `break` / `continue` to a loop around the `handle` — frees what
+> it still holds, behind a `null` test in the emitted code. Before, only `return` freed
+> anything, only in inkwell, and from the wrong slot. The one-shot check moved onto the slot.
+> Measured leaks of 48–97 B per declined call (24–97 B/call averaged over each measured
+> program) are gone; the MB figures are in STATE.md.
+>
+> ⚠ **"EVERY ARTIFACT BUNDLES ITS RUNTIME" DID NOT MAKE A RUNTIME CONTRACT CHANGE SAFE.** The
+> first version relied on the runtime's new `null` tolerance: every resumed arm's exit called
+> `sentinel_kont_free(null)`. The ADR claimed that code could never meet an older runtime. The
+> review broke the claim three ways by construction — two `--lib` archives from different
+> compilers in one host (the linker resolves every `sentinel_*` symbol from whichever archive
+> it meets first), a stale runtime staticlib beside a newer `snc`, and D73's `--separate`
+> object reuse — and in each the first arm that resumed crashed on its way out. The `null`
+> test now lives in the emitted code (ADR 0074 D4), and the five programs give the same exit
+> codes on the pre-change runtime. **A runtime symbol's contract is only as new as the oldest
+> runtime an artifact can meet.** And the correction over-reached in its turn: it said the
+> code "runs on any `abi-v1` runtime", but every handler arm now calls `sentinel_kont_free`,
+> which runtimes from before ADR 0065 D6 do not define, so the second review linked against a
+> stand-in without that symbol and watched the link fail. "Relies on nothing this ADR added" is
+> the claim that was true.
+>
+> ⚠ **PIN A BINARY ONLY AFTER THE LAST MUTATION RUN, AND CHECK IT.** The mutation harness
+> restores sources byte-for-byte but leaves `target/` holding whatever the LAST mutation built.
+> I rebuilt, then ran one more mutation (M2b), then copied `snc.exe` as the "post" binary — so
+> the first post-fix measurement was taken with that mutant and had to be redone: its RESUMING
+> shapes failed, because it had no slot clear. Rebuild after the last mutation, then run a known
+> shape through the pinned binary before measuring anything with it.
+>
+> ⚠ **A TEST THAT SURVIVES THE MUTATION IT SHOULD CATCH DOES NOT PIN THAT PIECE.** With the slot
+> clear removed, the three one-shot abort tests still passed. They are kept — they pin the abort a
+> user sees, and the runtime's `null` refusal behind it — and their file says in so many words
+> that they do not pin the clear; the IR unit test and the exit-value tests do. The first
+> harness's sixteen mutations also missed three pieces a reviewer listed (the oracle's clear,
+> `scg`'s argument order, the per-loop arm floor); a second round mutated those and the new
+> guard. The second review then found three more one-line mistakes that every test passed:
+> inkwell's guard inverted (the unit tests checked that a branch existed, not which way it
+> went) and a release moved past its exit's terminator into the dead block after it — each
+> measured bringing the whole leak back — and a text back end's release reading the dispatch
+> slot, mirrored into the other (the codegen differential compares the two), which no test
+> could see because none read that slot or ran that IR. The pins now check each, and a third
+> round mutated them; the third review found one more gap — no inkwell pin checked a `break` /
+> `continue` that leaves two arms — which a seventh unit test closes. **Count what the pin can
+> see, not what it names: a check on the guard's SHAPE says nothing about its DIRECTION.**
+>
+> ⚠ **NEW FIXTURES HIT D83.** All four first programs failed the MIR differential on their
+> `if`s, a pre-existing divergence (identical output before and after this change). They live
+> in `crates/sentinel-driver/tests/fixtures/handler_arm_exits/` instead, seeded into the codegen
+> differential through `include_str!`, and move into `tests/pass` when D83 is fixed. D83 itself
+> was filed with the wrong trigger — a `return` — which one probe per construct disproved.
+>
+> **NEXT:** **D88** (small and inkwell-only; a long `recv`, `lock`, `match` or class loop
+> overflows the stack of `snc build`'s binary today, and the fix closes D62 and D77 with it)
+> and **D87** (the bubble
+> abandons the arm: a leak plus a wrong value — top priority by the leak directive, but a
+> lowering design, so it wants an ADR). Then the list below: D69's remainder, D68(c), D13
+> fail-closed, D73, D78, D80, D81, D89; D75 needs the maintainer's call; lower: D82, D83, D84
+> and the two `borrow-check-limitations.md` over-rejections that wait on ADR 0018's provenance.
+
+### ▶ Earlier RESUME (2026-09-19 — `origin/main` is still `e686853`; **every commit below is LOCAL and NONE are pushed** (a count is deliberately not given — the commit that states it changes it; run `git log --oneline e686853..HEAD` for the live list). Oldest first: `5b69bce` + `39e7eff` (D76, from the previous session), then this session's — `309047c` + `66818a2` (ref-escape type layer), `d52bc88` + `a91c27d` (ref-escape borrow layer), `ff96c9e` + `92eef1c` (ADR 0073, closing D85), `6a9b646` + `a4c7ec3` (D86 in the Rust emitters), `aae7823` + `076941a` (D86's `scg` mirror — D86 COMPLETE in both compilers), plus the docs commits that maintain this block. Register: **86 items, 36 done**, D19 redacted; D82-D86 filed this session, **D85 and D86 closed**. Four-check at HEAD: 1,976 passed with exactly the 18 known Windows failures, doctests and clippy clean, every `selfhost_*` differential green, both bootstrap fixed points byte-identical. The block below is this session's; the ones after it are kept for their lessons.
 
 > **What the 2026-09-19 ref-escape slice did — `309047c`, `66818a2` and `d52bc88`, all local
 > and NOT PUSHED (on top of the still-unpushed `5b69bce`/`39e7eff`).** Closed the
@@ -471,7 +534,7 @@ reference as you work through the milestones.
 >      scalar-4 arm, which it now has. Also worth doing with it: `examples/math/quadratic.sentinel` and
 >      `sentinel_library/std/math/float.sentinel` currently reach only lex/ast, because
 >      `snc merge`'s Bar-A printer rejects both a float literal and `sqrt` (menu item 5).
->   4. **THE FILED-DEFECT REGISTER — EIGHTY-SIX items (D1-D86); **D1, D2, D3, D4, D5, D8, D9, D10, D15, D16, D17, D24, D25, D26, D29, D31, D34, D37, D39, D42, D43, D44, D47(option A), D51, D54, D55, D56, D58, D59, D60, D61, D66, D74, D76, D85 and D86 are DONE (36 of 86)**, the rest verified against a pre-slice binary. MOST are
+>   4. **THE FILED-DEFECT REGISTER — EIGHTY-NINE items (D1-D89); **D1, D2, D3, D4, D5, D8, D9, D10, D15, D16, D17, D24, D25, D26, D29, D31, D34, D37, D39, D42, D43, D44, D47(option A), D51, D54, D55, D56, D58, D59, D60, D61, D66, D74, D76, D79, D85 and D86 are DONE (37 of 89)**, the rest verified against a pre-slice binary. MOST are
 >      unregistered in any `DEFERRED_PROGRAMS` / `KNOWN_SCG_BUGS` list because no corpus program
 >      reaches them — but FOUR are, and the blanket "NONE" that stood here was falsified by
 >      this register's own new entries: D24/D25/D26 share the
@@ -908,17 +971,60 @@ reference as you work through the milestones.
 >      `c42_impl_move_out_of_self_struct`). `tests/llvm.rs` `llvm_method_moves_are_not_freed`
 >      pins the two oracle-only shapes, which no exit code and no `llvm-as` run can see.
 >
->      **D79 — a handler arm that never resumes `k` LEAKS the abandoned continuation on every
->      `handle`.** Found 2026-09-14 by D76's review; pre-existing, and a memory leak. Only a
->      `Return` arm frees an abandoned kont (codegen; ADR 0065 D6 covers early `return` only), so
->      an arm like `Io.read(k) => 5` that yields a value without resuming or `return`ing drops
->      the kont, its frame nodes and their captured blocks each call. Measured (kernel peak
->      working set) with the `handle` in a helper fn looping: a direct `perform`, arm `=> 5`, from
->      37.5 MB at 600,000 calls to 148 MB at 3,000,000 (~48 B/call = one 32-byte SentinelKont plus
->      malloc overhead); a framed perform's arm from 56 MB to 240 MB (~80 B/call, +1 captured
->      block). Attacker-paced if the arm can decline to resume on some input. Not caused by D76:
->      the pre-fix binary leaks the same. Fix direction: free the kont on the arm's non-resuming
->      exits as the `Return` arm does — a codegen change in all three back ends.
+>      **D79 — DONE (2026-09-19, [ADR 0074](decisions/0074-handler-arm-owns-its-continuation.md)),
+>      all three back ends. A handler arm that left without resuming `k` LEAKED the abandoned
+>      continuation.** Found 2026-09-14 by D76's review. Only a `return` freed an abandoned kont,
+>      and only in inkwell (ADR 0065 D6; the oracle and `scg` had deferred it), so an arm that
+>      yields a value without resuming — `Io.read(k) => 5`, or a conditional resume's other
+>      branch — dropped the kont, its frame nodes and their captured blocks on every call.
+>      **The entry's scope was one exit short:** a `break` or `continue` out of an arm, to a loop
+>      around the `handle`, is legal (the type checker's loop depth is not reset at a `handle`)
+>      and dropped it the same way. Measured before (kernel peak working set after exit, a helper
+>      fn called 600,000 → 3,000,000 times): direct 36.5 → 147.1 MB (~48 B/call), framed with no
+>      captures 55.0 → 239.2 (~80), half-the-time decline 22.7 → 78.0, `continue` out of the arm
+>      36.6 → 147.1, a nested-handle body whose outer arm declines 64.3 → 285.7 (~97), and a
+>      `break` out of two open arms 64.2 → 285.1 (~97); after, every shape is flat, level with the
+>      resuming control measured in the same batch.
+>
+>      The fix makes the arm's own continuation slot the ownership record: `k(v)` evaluates its
+>      argument, then loads the kont and CLEARS the slot, then resumes (D1); every exit — for
+>      every arm it leaves — loads the slot and frees the kont only when it is not `null` (D2); a
+>      second `k(v)` passes `null`, which `sentinel_kont_resume` refuses with ADR 0020 D2's
+>      diagnostic (D3). `return`'s teardown reads the arm's slot instead of the dispatch slot,
+>      which keeps holding the kont after `k(v)` consumes it. The `null` test is in the emitted
+>      code, so code built after ADR 0074 relies on nothing that ADR added to the runtime, and
+>      the five programs below give the same exit codes on the runtime from just before it (D4).
+>      It does now reference `sentinel_kont_free` from every handler arm, so a program with one
+>      no longer links against a runtime from before ADR 0065 D6 (2026-06-29). Pinned by seven
+>      `adr0074_*` inkwell-IR unit tests (a new `#[cfg(test)]` capture), two oracle tests in
+>      `llvm.rs`, five programs in `crates/sentinel-driver/tests/fixtures/handler_arm_exits/`
+>      (built and run through `snc build` by `tests/handler_arm_exits.rs`, and through the
+>      oracle's IR by `tests/selfhost_codegen.rs`, whose codegen differential also seeds them),
+>      three one-shot abort tests and two runtime unit tests.
+>      **Thirty-three mutations, each reverting or displacing one piece in one back end or the
+>      runtime, were each caught by a pin**: sixteen in a first round, run again on the final
+>      code; nine in a second, on what that round missed — the oracle's slot clear, `scg`'s
+>      argument order, the per-loop arm floor, the `null` guard in each back end, and the
+>      runtime's `null` refusal end to end; and eight in a third, on the pins the second and
+>      third reviews prompted — inkwell's guard inverted, its branch targets swapped, or testing
+>      the slot's address instead of the kont; a `return` release in inkwell and a `break` /
+>      `continue` release in the oracle moved past the exit's terminator; a `return` release
+>      reading the dispatch slot, in each (in the oracle caught both by `tests/llvm.rs` and by
+>      running its IR; in inkwell by the unit tests and by `tests/handler_arm_exits.rs`, which
+>      could already see it); and inkwell's `break` / `continue` out of two arms releasing only
+>      the inner one, which no pin saw until the seventh unit test. Inkwell's guard pin was too
+>      weak twice over: it first counted the guard's `icmp`, which a mutant with an
+>      unconditional branch still emits, then only that a conditional branch existed; it now
+>      checks the branch's taken edge, its `icmp ne` of the freed kont, the arm slot that kont
+>      was loaded from, and that the release is reachable. With the slot clear removed the three
+>      one-shot tests still passed (the `snc build` of 2026-09-19, on Windows), so they pin the
+>      abort and the runtime's `null` refusal behind it, not the clear. A sweep of all 464
+>      `.sentinel` files in the tree, before and after, moved no program's acceptance, changed
+>      the IR in 40 files, each of which contains a `handle`, and changed one run:
+>      `c74_arm_return_leaves_the_arm`'s, ADR 0074 Context's `return` after a resume.
+>      The five programs stay out of `tests/pass` because of D83. What the fix does not cover
+>      is ADR 0074 D6: D81's shapes — an inner `handle` whose value is used, or inside which the
+>      outer `k` is resumed — and the rest of an arm after a bubbling `k(v)` (D87).
 >
 >      **D80 — the pure-kont bind (D76) runs the resumer IN-FRAME, so consecutive never-performing
 >      let-bound calls nest the native stack.** Filed with D76's fix. `sentinel_kont_push`'s bind
@@ -950,6 +1056,45 @@ reference as you work through the milestones.
 >      different garbage value on each run where its source says 42. All three back ends; no
 >      corpus program nests a `handle` in an arm.
 >
+>      **Scope widened 2026-09-19 (the ADR 0074 slice), each shape identical before and after
+>      ADR 0074.** (1) A `handle` that IS an arm's value — `Io.read(k) => handle perform Log.get()
+>      with { Log.get(k2) => k(40) + 2 }` — does not answer garbage: it does not compile.
+>      Returned or let-bound, inkwell's IR fails LLVM verification (`sentinel::codegen::verify_failed`:
+>      `%handle_result… = phi ptr` where an `i64` is expected); used directly as an integer
+>      operand — `main`'s tail, which is truncated to `i32`, or `1 + handle …` — it PANICS inkwell
+>      ("Found PointerValue … but expected the IntValue variant"), a compiler panic on ordinary
+>      source. (2) So does a `handle` as a `k(v)` ARGUMENT: `Io.read(k) => k(handle perform
+>      Log.get() with { Log.get(k2) => k2(6) })` panics inkwell at the argument's integer
+>      conversion. (3) A `handle` inside a `return v =>` arm misbehaves too: as that arm's value
+>      in `main` it panics inkwell; let-bound there (`{ let w: i64 = handle …; w }`, in `main`)
+>      it compiled and answered garbage; and for a `handle` as a `return` arm's value in an
+>      ordinary fn the oracle and `scg` emit the same llvm-as-invalid `store i64` of the nested
+>      `Kont*` while `snc build` fails verification. An OUTER `k` resumed inside an inner
+>      handle's `return v =>` arm makes the COMPILER recurse until its own stack overflows —
+>      a compiler crash on source the type checker accepts, identical before and after ADR
+>      0074. `scg` always does, because it applies the INNER handle's return arm on that
+>      `k(v)`'s pure path. `snc build` and `snc llvm` do too as soon as any inner op arm
+>      contains a `k2(v)`, whether or not the inner value is used and even under a pure inner
+>      body: while that op arm is lowered, `handle_stack.last()` is the inner frame, so
+>      `k2(v)`'s pure path applies the inner `return` arm, and its `k(w)` applies the same arm
+>      again. Only where no inner op arm resumes is that `return` arm lowered solely on the
+>      inner handle's own pure path, where `handle_stack.last()` is the outer frame; there the
+>      oracle and inkwell do not recurse — with the inner value discarded the program runs, and
+>      as the arm's value it meets (1). (4) **It
+>      also LEAKS:** a discarded inner `handle` that completes leaves its result kont — a
+>      `sentinel_kont_pure` nothing consumes — behind: ~48 B/call, 36.5 → 147.1 MB over 600,000 →
+>      3,000,000 calls of `Io.read(k) => { handle perform Log.get() with { Log.get(k2) =>
+>      k2(3) }; k(c) }`. A memory leak — top priority under the standing directive. (5) Where
+>      the inner value is discarded and no inner `return` arm resumes the outer `k`, (1)-(3) do
+>      not arise. With the inner `handle` in an op arm, ADR 0074's teardown then runs with two
+>      arms open in one function: a `return` from the inner arm, or a `break` / `continue` to a
+>      loop outside both arms, walks both arms, inner then outer (pinned by
+>      `c74_two_open_arms`); the inner arm's fall-through, and a `break` / `continue` to a loop
+>      inside the outer arm, release the inner arm only. (With the inner `handle` in a `return`
+>      arm, the copy lowered on the outer `handle`'s own pure path has none of the outer
+>      `handle`'s arms open.) It is also where a resumed OUTER `k` inside an inner op arm
+>      bubbles to the INNER handle's dispatch loop (ADR 0074 D6).
+>
 >      **D82 — `snc llvm` emits an invalid null pointer constant for `return null`
 >      of a `?&T`.** Found 2026-09-19 while adding the ref-escape corpus fixtures;
 >      pre-existing, and not reachable through any fixture before them. The text
@@ -966,10 +1111,11 @@ reference as you work through the milestones.
 >      pinned meanwhile by the `return_null_nullable_ref_ok` unit test in
 >      `sentinel-borrow-check`, which no differential sweeps.
 >
->      **D83 — the Rust and self-hosted MIR lowerers diverge on a `return` inside a
->      handler arm.** Found 2026-09-19 the same way; pre-existing. The self-hosted
->      lowerer emits 127 bytes MORE than `snc mir` for the construct, on every
->      program containing it. **Constructed on a reference-free program** — `fn
+>      **D83 — the Rust and self-hosted MIR lowerers diverge on an `if`, `&&` or `||`
+>      inside a handler arm** (filed as "a `return` inside a handler arm"; scope
+>      corrected below). Found 2026-09-19 the same way; pre-existing. The self-hosted
+>      lowerer emits more than `snc mir` — about 127–129 bytes per such construct (127,
+>      254, 257 and 384 over ADR 0074's first four programs). **Constructed on a reference-free program** — `fn
 >      by_handler(x: i64) -> i64 { let h: i64 = handle 1 with { return v => if v ==
 >      1 { return x } else { 0 } }; h }` diverges 205 vs 332 bytes — so it is not
 >      about references, and `run_mir` (`crates/sentinel-driver/src/main.rs:431`)
@@ -977,9 +1123,31 @@ reference as you work through the milestones.
 >      `sentinel_mir_matches_oracle_on_corpus` has no deferred/known-bug list (that
 >      mechanism belongs to the per-construct test), so the construct cannot appear
 >      in any `tests/` fixture until one lowerer is brought to the other. Which one
->      is right is undetermined — that is the first thing to settle. The borrow
+>      is right was undetermined when filed; the correction below settles it for this
+>      construct. The borrow
 >      rule at that position is pinned meanwhile by the
 >      `return_in_handler_arm_rejected` unit test.
+>
+>      **Scope corrected 2026-09-19 (the ADR 0074 slice), by construction:** the trigger is
+>      not the `return`. It is an `if`, `&&` or `||` inside a handler arm — an op arm or a
+>      `return` arm — and the example above has its `return` inside an `if`. Probed with the
+>      pre-slice binaries (`snc mir` against a self-hosted `smir` built from HEAD's
+>      `selfhost/`): an `if` in an op arm (181 vs 308 bytes), an `if` in a `return` arm (186
+>      vs 314), `&&` in an op arm (181 vs 309) and `||` in a `return` arm (186 vs 314) all
+>      diverge; a bare `return`, a `while`, a `match`, a `let` block and a `k(v)` in an arm,
+>      and an `if` in the `handle`'s BODY, all match. Mechanism, read from the source: the
+>      self-hosted lowerer walks a `handle`'s arms under `mir_suppress`, which `mir_emit` and
+>      `mir_emit_va` honour, but the `if` and short-circuit lowerings call `mir_new_block`,
+>      `mir_term_branch`, `mir_term_jump` and `mir_add_param` gated only on `mir_on` — so a
+>      suppressed arm still builds blocks, branches on the placeholder `v`, and leaves
+>      `mir_cur` on its merge block, where the `handle`'s own opaque then lands. The oracle's
+>      collapse (a `handle` lowers as `Opaque([body])`, its arms unlowered) is the specified
+>      shape, so for this construct the self-hosted side is the one to change. ⚠ This
+>      lowering feeds the self-hosted constant-time verifier; treat a fix with the care of
+>      any `ctverify` change. ADR 0074's four programs are kept OUT of `tests/pass` because of
+>      this entry (they live in `crates/sentinel-driver/tests/fixtures/handler_arm_exits/`,
+>      seeded into the codegen differential), and move in once it is fixed; so does the fifth,
+>      `c74_two_open_arms`.
 >
 >      **D84 — ADR 0017's own text attributes the second-class-reference rule to
 >      the wrong decision.** Cosmetic but load-bearing for anyone following the
@@ -1058,6 +1226,72 @@ reference as you work through the milestones.
 >      `c22_ref_receiver_method_call` (oracle 1966 bytes vs sentinel 1862), so the fixture
 >      is load-bearing rather than decorative. Both bootstrap fixed points green.
 >
+>      **D87 — a `k(v)` whose resume BUBBLES abandons the rest of its arm: the remainder never
+>      runs, and the arm's scope bindings are never dropped.** Found 2026-09-19 while closing
+>      D79; pre-existing — the same values and the same memory before and after ADR 0074.
+>      When the resumed computation performs again, `k(v)` stores the new kont into the
+>      dispatch slot and branches back to the dispatch loop (C3.5(e)'s bubble). That is ADR
+>      0020 D3's deep re-wrap only when `k(v)` IS the arm's value. Anywhere else the arm's
+>      remainder is silently dropped: over `fn two() -> i64 ! { Io } { let a: i64 = perform
+>      Io.read(); let b: i64 = perform Io.read(); a + b }`, `handle two() with { Io.read(k)
+>      => k(1) + 10 }` answers 12 where D3 gives 22, and `{ let r: i64 = k(1); r * 3 }`
+>      answers 6 for 18. No diagnostic. The same branch skips the arm's scope drops, so a
+>      heap binding in the arm LEAKS once per bubble: `{ let v: [i64] = [1, 2, 3, 4]; k(1) +
+>      v[0] }` in a helper fn called from a loop measured 36.5 MB at 600,000 calls and 147.2
+>      MB at 3,000,000 (kernel peak working set, read after exit), where the same shape with
+>      an `i64` binding stays at 8.9 MB; its value is 3 where D3 gives 4. Measured on
+>      inkwell; the oracle and `scg` emit the same store-and-branch (read, not run). A fix is
+>      a lowering change — the resume site has to dispatch the bubbled kont itself and hand
+>      its value back to the arm — so it is filed rather than folded into D79. **A memory
+>      leak, so top priority under the standing directive.**
+>
+>      **D88 — inkwell builds allocas at the insertion point, so every one inside a loop body is
+>      a DYNAMIC alloca and the stack grows per iteration: a `match` with a payload binding, a
+>      channel `recv`, a `lock`, a class construction or a `handle` in a long loop overflows the
+>      stack of `snc build`'s binary. The cause of D62 and D77.** Found 2026-09-19 (the ADR 0074 slice) while
+>      re-reading D77; pre-existing. ADR 0036 D4 hoists a `let` binding's slot to the entry block
+>      when the `let` is inside a loop (`binding_alloca`), but fifteen other allocas in
+>      `sentinel-codegen` call `builder.build_alloca` at the current insertion point. An alloca
+>      outside the entry block runs each time control reaches it, and nothing reclaims its slot
+>      until the function returns, so a loop body that reaches one grows the stack by its size
+>      every iteration. **Established by construction, with the back end as the only variable:**
+>      the same source compiled from the `snc llvm` text oracle's IR — which hoists every alloca
+>      to `entry:` — with `llc` and the same runtime completes, where `snc build`'s binary
+>      overflows the 16 MB stack: a `handle` in a loop at 2,000,000 iterations, a class
+>      constructed in a loop at 2,000,000 (D62's shape), and at 3,000,000 a `recv` loop over a
+>      channel, a `lock` loop over a mutex, and a `let v: i64 = match e { E::A => 0, E::B(x) =>
+>      x }` loop; all five also complete under `snc build` at 400,000. The thresholds fit the
+>      slot sizes once alignment is counted: each dynamic alloca costs 16 bytes of stack (8,
+>      rounded up to x86-64's 16-byte stack alignment). A performing `handle` over a
+>      zero-parameter op runs two per iteration — `current_kont_slot` and `kont_var`; `arm_param`
+>      exists only for an op with a parameter — and overflows between 520,000 and 530,000
+>      iterations (16 MiB / 32 = 524,288); over a one-parameter op, between 340,000 and 360,000
+>      (16 MiB / 48). A `handle` whose body never performs runs `current_kont_slot` alone and
+>      overflows between 1,040,000 and 1,060,000 (16 MiB / 16), as do the `recv`, `lock` and
+>      `match` loops. D77's 600,000 and 1,800,000 were its first failing probes, not
+>      thresholds. The fifteen, from the
+>      source: the handle lowering's five (`current_kont_slot`, `kont_var`, `arm_param` and both
+>      return-arm slots), `classinit`, the `match` payload binding (`enum_field`), and the
+>      out-slots of `recv`, `lock`, `read_file`, TCP read, process read, process recv, stdin recv
+>      and `arg`. The `handle`, `classinit`, `match`, `recv` and `lock` sites are verified by
+>      construction, the rest by reading. (The `slice` alloca in the `export "C"` wrapper sits in
+>      a prologue and is not a member.) The fix is inkwell-only: route those sites through
+>      `binding_alloca`. The oracle and `scg` already hoist, so no stage dump or differential
+>      moves, and `selfhost/` needs nothing.
+>
+>      **D89 — a `handle` whose value is not an `i64` passes the type checker, then produces IR
+>      no back end can use.** Found 2026-09-19 by ADR 0074's review; pre-existing, identical
+>      before and after it. `fn f(i: i64) -> bool { handle i > 2 with { Io.read(k) => false } }`
+>      type-checks; the oracle and `scg` then pass the `i1` to `sentinel_kont_pure(i64 …)`,
+>      byte-identical and rejected by `llvm-as` ("defined with type 'i1' but expected 'i64'"),
+>      and `snc build` fails LLVM verification ("Call parameter type does not match function
+>      signature"). It fails closed — no binary — but with an internal verification error rather
+>      than a diagnostic. The codegen differential's `llvm_rejects` gate is silent on it, because
+>      that gate fires only when `scg`'s IR is rejected and the oracle's verifies, and here both
+>      emit the same invalid IR. Same seam as D68(c) (an effecting fn's non-`i64` value). Either
+>      the type checker refuses a non-`i64` `handle` result, or all three back ends widen and
+>      narrow around `sentinel_kont_pure` / `sentinel_kont_consume_pure`.
+>
 >      **D78 — stale corpus fixture counts in `llvm.rs` and `README.md`, at six sites, stale
 >      before this change.** Found by D74's reviews. `crates/sentinel-driver/tests/llvm.rs`
 >      carries them three times: a comment at line 1214 saying a `tests/pass` substring filter
@@ -1111,8 +1345,8 @@ reference as you work through the milestones.
 >      `docs/abi-v1.md` §3 states the push's two cases.
 >
 >      **D77 — a `handle` written DIRECTLY in a loop body grows the STACK per iteration, and
->      the loop exhausts it — at ~600k iterations when the handled computation performs, by
->      1.8M when it does not.** Found 2026-09-12 while probing D74; pre-existing and
+>      the loop exhausts it — by 600k iterations when the handled computation performs, by
+>      1.8M when it does not (D88 has the thresholds).** Found 2026-09-12 while probing D74; pre-existing and
 >      independent of it. In `while i < N { acc = acc + handle <computation> with { ... } }`,
 >      five shapes were built and run at N = 500,000 and N = 600,000. All THREE whose
 >      computation performs survive 500,000 and die at 600,000 with 0xC00000FD
@@ -1130,22 +1364,24 @@ reference as you work through the milestones.
 >      discriminator either; the threshold differs. And moving the `handle` into a helper fn
 >      called from the loop removes it: the framed perform, `pure_inner()` and `outer(i)` each
 >      run flat at 9.8 MB through 3,000,000 iterations (kernel peak working set). An arm that
->      never resumes stops overflowing in a helper fn too but still grows — it leaks, register
->      D79 — so it is not a flatness witness. The handled computation and the runtime are the
->      same in both versions, so the growth is tied to the frame the `handle` is lowered in —
->      the loop body's; which allocation in that frame grows is not established. D62's shape is
->      the obvious one to try the same helper-fn construction on. Like
->      **D62** (a class constructed in a loop), it is a stack overflow inside a `while` loop, but
->      neither that resemblance nor the shared 0xC00000FD (Windows' generic
->      STATUS_STACK_OVERFLOW) shows a common cause. An attacker who controls the iteration count
->      controls the crash (D62 records the same). Cause not established; no corpus program loops
->      a `handle` far enough.
+>      never resumes stops overflowing in a helper fn too but still grew — it leaked, register
+>      D79 — so it was not a flatness witness. (D79 is closed by ADR 0074: that shape now runs
+>      flat too, level with the resuming control at 3,000,000 calls, measured 2026-09-19.) The
+>      handled computation and the runtime are the same in both versions, so the growth is tied
+>      to the frame the `handle` is lowered in — the loop body's. **Cause established 2026-09-19
+>      — see D88:** in that frame `current_kont_slot` (once per iteration) and `kont_var` (once
+>      per op dispatched to the arm) are dynamic allocas of 16 bytes of stack each, and the same
+>      defect is D62's cause. An attacker who
+>      controls the iteration count controls the crash (D62 records the same). No corpus program
+>      loops a `handle` far enough.
 >      (Earlier drafts of this entry made three wrong claims: the first reported a flat
 >      frameless control — a poll too slow for a short run, and a control never run at the
 >      crash threshold — and concluded the growth tracked frame reification; the second
 >      concluded it tracked resumption, which the non-resuming arm falsifies; and every draft
 >      until the second review round inferred from the shared status code that D62 is not
->      class-specific. Only the five-shape table above is measured.)
+>      class-specific. Until 2026-09-19 it also recorded the cause, and any common cause with
+>      D62, as not established. Only the five-shape table above is measured; the thresholds
+>      are D88's.)
 >
 >      **D74 — DONE (2026-09-12). A kont carrying MORE THAN ONE captured frame replayed
 >      them OUTERMOST-FIRST, and answered a wrong value with no diagnostic.** Raised privately
@@ -1385,9 +1621,10 @@ reference as you work through the milestones.
 >      **D62 — a class constructed inside a loop overflows the STACK.** With a class whose
 >      `init` takes a single SCALAR, `while i < 2000000 { let s: S = S::init(i); ... }` dies
 >      under `snc build` with 0xC00000FD STATUS_STACK_OVERFLOW, on the pre- and post-D61
->      binaries alike; the free-fn twin is flat. Found while measuring D61's leak. The cause is
->      NOT established — the scalar param only rules out the param path. An attacker who
->      controls the iteration count controls the crash.
+>      binaries alike; the free-fn twin is flat. Found while measuring D61's leak. The cause was
+>      not established then — the scalar param only rules out the param path. An attacker who
+>      controls the iteration count controls the crash. **Cause established 2026-09-19 — see
+>      D88:** `classinit` is a dynamic alloca in the loop body.
 >
 >      **D59 — DONE (2026-09-11). ⚠ An `if` whose THEN arm diverges had its result slot sized
 >      from the DIVERGENT branch — a memory-safety miscompile in the SHIPPING back end.**

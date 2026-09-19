@@ -247,6 +247,18 @@ const SEEDS: &[&str] = &[
     // `(*c).f = x`: address-of / assign-to a struct field through a &mut pointer. GEP
     // into the target's pointer; the enclosing &mut/assign uses the field address.
     "struct Box { items: Vec<i64>, n: i64 }\nfn add(b: &mut Box, x: i64) -> i64 { push(&mut (*b).items, x); (*b).n = (*b).n + 1; 0 }\nfn main() -> i64 { let mut bx: Box = Box { items: vec_new(), n: 0 }; add(&mut bx, 10); add(&mut bx, 20); bx.n + len(bx.items) }\n",
+    // ADR 0074 (register D79): every exit of a handler arm releases the continuation
+    // the arm's slot still holds, and `k(v)` clears the slot after its argument. Seeds
+    // rather than `tests/pass` fixtures because an `if` inside a handler arm makes the
+    // two MIR lowerers diverge (register D83), and the MIR differential sweeps every
+    // `tests/pass` file. `tests/handler_arm_exits.rs` runs them through `snc build`,
+    // `oracle_ir_of_the_handler_arm_exit_programs_runs` below through the oracle's IR,
+    // and `tests/llvm.rs` pins the oracle's side of each.
+    include_str!("fixtures/handler_arm_exits/c74_arm_declines_to_resume.sentinel"),
+    include_str!("fixtures/handler_arm_exits/c74_arm_return_leaves_the_arm.sentinel"),
+    include_str!("fixtures/handler_arm_exits/c74_arm_break_continue.sentinel"),
+    include_str!("fixtures/handler_arm_exits/c74_resume_arg_leaves_the_arm.sentinel"),
+    include_str!("fixtures/handler_arm_exits/c74_two_open_arms.sentinel"),
 ];
 
 #[test]
@@ -292,6 +304,53 @@ fn sentinel_codegen_matches_oracle_on_seeds() {
         SEEDS.len(),
         mismatches.join("\n")
     );
+}
+
+/// ADR 0074 (register D79): the five `handler_arm_exits` programs, built from the
+/// `snc llvm` oracle's IR and run. `scg` emits that IR byte-for-byte (they are seeds
+/// above), so this runs the text back ends' releases; `tests/handler_arm_exits.rs`
+/// runs the same programs through `snc build`. Besides the exit values, it sees which
+/// slot a release reads once its arm has resumed: had `after`'s `return` release read
+/// the `handle`'s dispatch slot instead of the arm's, `c74_arm_return_leaves_the_arm`
+/// would exit differently. Until an arm resumes the two slots hold the same kont, so it
+/// cannot tell them apart there (every `break` / `continue` release here, for one);
+/// `tests/llvm.rs` checks every release's slot.
+#[test]
+fn oracle_ir_of_the_handler_arm_exit_programs_runs() {
+    let tmp = std::env::temp_dir().join(format!("snc_arm_exits_oracle_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).expect("create temp dir");
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/handler_arm_exits");
+    for (stem, want) in [
+        ("c74_arm_declines_to_resume", 143),
+        ("c74_arm_return_leaves_the_arm", 34),
+        ("c74_arm_break_continue", 11),
+        ("c74_resume_arg_leaves_the_arm", 13),
+        ("c74_two_open_arms", 16),
+    ] {
+        let oracle = Command::new(env!("CARGO_BIN_EXE_snc"))
+            .arg("llvm")
+            .arg(dir.join(format!("{stem}.sentinel")))
+            .output()
+            .expect("run snc llvm");
+        assert!(
+            oracle.status.success(),
+            "snc llvm failed on {stem}:\n{}",
+            String::from_utf8_lossy(&oracle.stderr)
+        );
+        let ll = tmp.join(format!("{stem}.ll"));
+        std::fs::write(&ll, &oracle.stdout).expect("write the oracle's IR");
+        let exe = compile_ll_to_exe(&ll, &tmp.join(stem));
+        let run = Command::new(&exe).output().expect("run the program built from the oracle's IR");
+        assert_eq!(
+            run.status.code(),
+            Some(want),
+            "{stem}: built from the oracle's IR it exits {:?}; stderr:\n{}",
+            run.status,
+            String::from_utf8_lossy(&run.stderr)
+        );
+    }
+    let _ = std::fs::remove_dir_all(&tmp);
 }
 
 /// Every `.sentinel` fixture under tests/pass + tests/ui, sorted.

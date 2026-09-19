@@ -453,7 +453,9 @@ const EXAMPLES: &[(&str, i32)] = &[
     // `return` crossing a `handle` (ADR 0065 D6): a handler arm early-returns instead of
     // resuming `k` (abandoning the in-flight kont — the runtime `sentinel_kont_free` frees
     // it on the return path), and a handle body early-returns before any `perform`. Both
-    // resume + early-return paths run leak-free with no double-free. 42 = held. snc-only.
+    // resume + early-return paths run leak-free, each kont freed exactly once. 42 = held.
+    // All three back ends emit the teardown (ADR 0074), and the codegen real-program
+    // differential compares this file.
     ("examples/lang/early_return_handle.sentinel", 42),
     // A handle body that performs through CONTROL FLOW (ADR 0065 stage 3a): a `perform`
     // in an `if`/`else` branch is normalized to a continuation the handler dispatches,

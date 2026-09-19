@@ -130,6 +130,11 @@ struct RuntimeSyms {
     /// -> void` — push a captured evaluation frame (a let-body resumer + its captured
     /// state) onto a kont's chain, so `sentinel_kont_resume` replays the let's tail.
     kont_push: bool,
+    /// ADR 0074 D2: `sentinel_kont_free(ptr kont) -> void` — release the kont a
+    /// handler arm still owns when it is left without resuming `k`. Emitted behind a
+    /// `null` test of the arm's slot, so it is never called on the `null` a `k(v)`
+    /// leaves there (D4). Declared last in the kont group.
+    kont_free: bool,
     /// Bar B / concurrency (ADR 0024): the structured-concurrency runtime.
     /// `sentinel_task_spawn(wrapper, args, args_size) -> *Task`.
     task_spawn: bool,
@@ -214,6 +219,7 @@ impl RuntimeSyms {
         self.kont_consume_pure |= other.kont_consume_pure;
         self.kont_pure |= other.kont_pure;
         self.kont_push |= other.kont_push;
+        self.kont_free |= other.kont_free;
         self.task_spawn |= other.task_spawn;
         self.task_await |= other.task_await;
         self.scope_enter |= other.scope_enter;
@@ -294,6 +300,9 @@ impl RuntimeSyms {
         }
         if self.kont_push {
             writeln!(out, "declare void @sentinel_kont_push(ptr, ptr, ptr)").unwrap();
+        }
+        if self.kont_free {
+            writeln!(out, "declare void @sentinel_kont_free(ptr)").unwrap();
         }
         // Bar B / concurrency: the structured-concurrency runtime group.
         if self.task_spawn {
@@ -415,6 +424,7 @@ impl RuntimeSyms {
             || self.kont_consume_pure
             || self.kont_pure
             || self.kont_push
+            || self.kont_free
             || self.task_spawn
             || self.task_await
             || self.scope_enter
@@ -1008,6 +1018,7 @@ fn dump_fn_named(
         used: RuntimeSyms::default(),
         self_var: None,
         handle_stack: Vec::new(),
+        arm_kslots: Vec::new(),
         embed_ph: None,
         handle_depth: 0,
         current_scope: None,
@@ -1124,6 +1135,7 @@ fn dump_let_shape_fn(
             used: RuntimeSyms::default(),
             self_var: None,
             handle_stack: Vec::new(),
+            arm_kslots: Vec::new(),
             embed_ph: None,
         handle_depth: 0,
         current_scope: None,
@@ -1202,6 +1214,7 @@ fn dump_let_shape_fn(
             used: RuntimeSyms::default(),
             self_var: None,
             handle_stack: Vec::new(),
+            arm_kslots: Vec::new(),
             embed_ph: None,
         handle_depth: 0,
         current_scope: None,
@@ -1292,6 +1305,7 @@ fn dump_embedded_shape_fn(
             used: RuntimeSyms::default(),
             self_var: None,
             handle_stack: Vec::new(),
+            arm_kslots: Vec::new(),
             embed_ph: None,
         handle_depth: 0,
         current_scope: None,
@@ -1371,6 +1385,7 @@ fn dump_embedded_shape_fn(
             used: RuntimeSyms::default(),
             self_var: None,
             handle_stack: Vec::new(),
+            arm_kslots: Vec::new(),
             embed_ph: None,
         handle_depth: 0,
         current_scope: None,
@@ -1482,6 +1497,7 @@ fn dump_chained_lets_fn(
             used: RuntimeSyms::default(),
             self_var: None,
             handle_stack: Vec::new(),
+            arm_kslots: Vec::new(),
             embed_ph: None,
         handle_depth: 0,
         current_scope: None,
@@ -1537,6 +1553,7 @@ fn dump_chained_lets_fn(
             used: RuntimeSyms::default(),
             self_var: None,
             handle_stack: Vec::new(),
+            arm_kslots: Vec::new(),
             embed_ph: None,
         handle_depth: 0,
         current_scope: None,
@@ -1647,6 +1664,7 @@ fn dump_method(
         used: RuntimeSyms::default(),
         self_var: Some(self_var_id),
         handle_stack: Vec::new(),
+        arm_kslots: Vec::new(),
         embed_ph: None,
         handle_depth: 0,
         current_scope: None,
@@ -1729,11 +1747,13 @@ struct Emit<'a> {
     current_method: Option<MethodKey>,
     allocas: String,
     body: String,
-    /// The enclosing loops' (cond-block, after-block, scope_floor) — `break` branches
-    /// to the innermost after-block, `continue` to its cond-block, and both drain the
-    /// open scope frames down to `scope_floor` (the loop-body frame index) first, so
-    /// per-iteration heap bindings are freed on the early-exit path (8d-drops-3).
-    loops: Vec<(u32, u32, usize)>,
+    /// The enclosing loops' (cond-block, after-block, scope_floor, arm_floor) — `break`
+    /// branches to the innermost after-block, `continue` to its cond-block, and both
+    /// drain the open scope frames down to `scope_floor` (the loop-body frame index)
+    /// first, so per-iteration heap bindings are freed on the early-exit path
+    /// (8d-drops-3); then release the continuation of every handler arm entered since
+    /// the loop began — `arm_kslots[arm_floor..]` (ADR 0074 D2).
+    loops: Vec<(u32, u32, usize, usize)>,
     /// The `sentinel_*` runtime symbols this fn's body uses (merged module-wide
     /// into the `declare`s — 8c-2+).
     used: RuntimeSyms,
@@ -1750,6 +1770,12 @@ struct Emit<'a> {
     /// re-dispatch. c36a: the optional `return v => body` arm is carried (owned clone) so
     /// `k(v)`'s pure-drain path applies it per Phase B's deep-handler re-wrap.
     handle_stack: Vec<(u32, u32, Option<TypedReturnArm>)>,
+    /// ADR 0074 D1/D2: the continuation slot of every handler arm whose body is being
+    /// lowered, innermost last — the arm's ownership record for its kont. `k(v)` clears
+    /// it before resuming, so on any exit a non-null slot is a kont the arm still owns:
+    /// the arm's fall-through releases its own, a `return` every one, and a `break` /
+    /// `continue` those above its loop's `arm_floor`. Mirrors inkwell's `arm_kont_slots`.
+    arm_kslots: Vec<u32>,
     /// Bar B / effects (c35d): inside an embedded-perform RESUMER, the placeholder
     /// slot holding the resumed value. When set, the unique `Perform` in the tail
     /// lowers as a `load` from this slot (the parent already lowered the real
@@ -1891,7 +1917,7 @@ impl Emit<'_> {
                 writeln!(self.body, "bb{body_b}:").unwrap();
                 // 8d-drops-3: scope_floor = the body frame's index, captured NOW (before
                 // lower_block_expr pushes it) so break/continue drain frames >= it.
-                self.loops.push((cond_b, after_b, self.scopes.len()));
+                self.loops.push((cond_b, after_b, self.scopes.len(), self.arm_kslots.len()));
                 let _ = self.lower_block_expr(body)?; // a while body's value is discarded
                 self.loops.pop();
                 writeln!(self.body, "  br label %bb{cond_b}").unwrap();
@@ -1899,7 +1925,7 @@ impl Emit<'_> {
                 Ok(())
             }
             TypedStmtKind::Break | TypedStmtKind::Continue => {
-                let (cond_b, after_b, scope_floor) =
+                let (cond_b, after_b, scope_floor, arm_floor) =
                     *self.loops.last().ok_or("break/continue outside a loop")?;
                 // 8d-drops-3: the per-iteration drops for every open frame from the top
                 // down to the loop body — branching to loop_after/loop_cond skips
@@ -1907,6 +1933,10 @@ impl Emit<'_> {
                 // live here would leak. (Each runtime path frees once: this early-exit
                 // drop, or the fall-through body-end drop — mutually exclusive blocks.)
                 self.emit_loop_exit_drops(scope_floor)?;
+                // ADR 0074 D2: a `break` / `continue` inside a handler arm, to a loop
+                // around the `handle`, leaves every arm entered since the loop began;
+                // release the continuations they still own.
+                self.emit_arm_kont_releases(arm_floor);
                 let dest = if matches!(stmt.kind, TypedStmtKind::Break) {
                     after_b
                 } else {
@@ -1949,7 +1979,8 @@ impl Emit<'_> {
             }
             // ADR 0065 stage 4: `return e` — evaluate `e`, drop EVERY live scope
             // frame down to the FUNCTION floor (the ADR 0036 break/continue
-            // machinery with floor 0 = "break all the way out"), then `ret` with the
+            // machinery with floor 0 = "break all the way out"), release the kont of
+            // every handler arm it leaves (ADR 0074 D2), then `ret` with the
             // SAME ABI as the epilogue (`main` truncates i64→i32; an effecting fn
             // wraps a pure value via `sentinel_kont_pure`; an ordinary fn rets its
             // value). The current block is now terminated, so park the builder on a
@@ -1965,6 +1996,10 @@ impl Emit<'_> {
                 let val = self.lower_expr(inner)?;
                 // Floor 0: drain ALL open scope frames (params + body + any nested).
                 self.emit_loop_exit_drops(0)?;
+                // ADR 0065 D6 / ADR 0074 D2: a `return` leaves every handler arm being
+                // lowered; release the continuation each still owns, innermost first
+                // (none outside an arm, the common case).
+                self.emit_arm_kont_releases(0);
                 // Register D60: a METHOD body has no `FnId` — `current_fn` is a
                 // `FnId(u32::MAX)` placeholder there, and looking it up indexed the
                 // signature table at 4294967295 and panicked. A method's `return` is always
@@ -3334,6 +3369,13 @@ impl Emit<'_> {
             self.handle_stack.push((loop_b, cks, return_arm.cloned()));
             let av = self.lower_expr(&arm.body)?;
             self.handle_stack.pop();
+            // ADR 0074 D2: the fall-through leaves the arm with its value. Release the
+            // kont if the arm still owns it — it declined to resume (ADR 0020 D4's
+            // abort) — before the value goes to the result cell; after a `k(v)` the
+            // slot is null and the release is a no-op.
+            let top = self.arm_kslots.len() - 1;
+            self.emit_arm_kont_releases(top);
+            self.arm_kslots.pop();
             // Nested: the merge type is Kont*, so wrap the arm's i64 via `kont_pure`.
             self.store_handle_result(is_nested, &av, rslot);
             writeln!(self.body, "  br label %bb{merge_b}").unwrap();
@@ -3438,7 +3480,36 @@ impl Emit<'_> {
         let kslot = self.alloca("ptr");
         writeln!(self.body, "  store ptr %v{kont_reg}, ptr %v{kslot}").unwrap();
         self.slots.insert(kont_vid, kslot);
+        // ADR 0074 D1: the slot is now the arm's ownership record for the kont; the
+        // arm loop pops it after the body, releasing what it still holds.
+        self.arm_kslots.push(kslot);
         Ok(())
+    }
+
+    /// ADR 0074 D2: release the continuation that each handler arm at index `>= floor`
+    /// of `arm_kslots` still owns, innermost first: load the arm's slot and, if it is not
+    /// the `null` a `k(v)` leaves there, `sentinel_kont_free` it. The test is in the
+    /// emitted code rather than left to the runtime's own `null` check (ADR 0074 D4), so
+    /// the code never depends on that check. Emitted on every exit that leaves an arm
+    /// without resuming its `k`: the fall-through (the top arm only), `return` (floor 0:
+    /// every arm) and `break` / `continue` (the loop's arm floor). Mirrors inkwell's
+    /// `emit_arm_kont_releases`; `scg`'s is `cg_release_arm_konts`.
+    fn emit_arm_kont_releases(&mut self, floor: usize) {
+        let slots: Vec<u32> = self.arm_kslots[floor..].iter().rev().copied().collect();
+        for slot in slots {
+            let k = self.fresh();
+            writeln!(self.body, "  %v{k} = load ptr, ptr %v{slot}").unwrap();
+            let owned = self.fresh();
+            writeln!(self.body, "  %v{owned} = icmp ne ptr %v{k}, null").unwrap();
+            let free_b = self.fresh_block();
+            let done_b = self.fresh_block();
+            writeln!(self.body, "  br i1 %v{owned}, label %bb{free_b}, label %bb{done_b}").unwrap();
+            writeln!(self.body, "bb{free_b}:").unwrap();
+            writeln!(self.body, "  call void @sentinel_kont_free(ptr %v{k})").unwrap();
+            writeln!(self.body, "  br label %bb{done_b}").unwrap();
+            writeln!(self.body, "bb{done_b}:").unwrap();
+            self.used.kont_free = true;
+        }
     }
 
     /// Bar B / effects — `k(v)` resumes the continuation `kont` with `v`:
@@ -3448,9 +3519,16 @@ impl Emit<'_> {
     /// Returns the i64 value (the builder ends on the pure path).
     fn lower_resume_kont(&mut self, kont: VarId, args: &[TypedExpr]) -> Result<String, String> {
         let kslot = *self.slots.get(&kont).ok_or("resume of an unbound kont")?;
+        // ADR 0074 D1: the argument BEFORE the slot is read — an argument that leaves
+        // the arm (`k(return 5)`) must leave the slot owned so that exit releases the
+        // kont, and a `k(v)` nested in the argument clears the slot first, so this
+        // one's one-shot check (D3) sees it. Then load and CLEAR the slot: the resume
+        // consumes and frees the kont, so the arm no longer owns it, and a second
+        // `k(v)` passes `null`, which `sentinel_kont_resume` refuses.
+        let arg = self.lower_expr(&args[0])?;
         let kreg = self.fresh();
         writeln!(self.body, "  %v{kreg} = load ptr, ptr %v{kslot}").unwrap();
-        let arg = self.lower_expr(&args[0])?;
+        writeln!(self.body, "  store ptr null, ptr %v{kslot}").unwrap();
         let kr = self.fresh();
         writeln!(self.body, "  %v{kr} = call ptr @sentinel_kont_resume(ptr %v{kreg}, i64 {arg})").unwrap();
         self.used.kont_resume = true;

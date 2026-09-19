@@ -1,0 +1,41 @@
+// ADR 0074 / register D79: a handler arm that yields a value without calling `k`
+// (ADR 0020 D4's abort) releases the continuation on its fall-through exit.
+//
+// The value is the cheap half: every shape below answered correctly before the fix
+// too. What changed is memory — the arm now frees the kont it declined to resume, and
+// with it the frame node an effecting fn pushed onto it (`skip_frame`; `framed` captures
+// nothing across its `perform`, so there is no captured block). The release on the
+// fall-through is visible only in the emitted IR. (The slot cleared at each `k(v)` is
+// pinned end to end as well: without it this program no longer exits 143.)
+//
+// Built and run by `tests/handler_arm_exits.rs`, and a SEED of the codegen
+// differential (`tests/selfhost_codegen.rs`), which compares `snc llvm` and `scg`
+// byte-for-byte on it. Not in `tests/pass`: every file there is also swept by the
+// MIR differential, and an `if` inside a handler arm makes the two MIR lowerers
+// diverge (register D83, pre-existing).
+//
+// fixed(0) = 5; maybe(1) = 7 (declines); maybe(3) = k(30) = 30;
+// skip_frame(1) = 1 (declines, dropping `framed`'s pending `z + 100`);
+// skip_frame(0) = k(0) -> 0 + 100 = 100. 5 + 7 + 30 + 1 + 100 = 143.
+effect Io { read() -> i64; }
+
+fn fixed(i: i64) -> i64 {
+    handle perform Io.read() with { Io.read(k) => 5 }
+}
+
+fn maybe(i: i64) -> i64 {
+    handle perform Io.read() with { Io.read(k) => if i > 2 { k(i * 10) } else { 7 } }
+}
+
+fn framed() -> i64 ! { Io } {
+    let z: i64 = perform Io.read();
+    z + 100
+}
+
+fn skip_frame(i: i64) -> i64 {
+    handle framed() with { Io.read(k) => if i > 0 { 1 } else { k(i) } }
+}
+
+fn main() -> i64 {
+    fixed(0) + maybe(1) + maybe(3) + skip_frame(1) + skip_frame(0)
+}

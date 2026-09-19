@@ -14,7 +14,11 @@ remaining **kont LEAK is now FIXED** in the runtime (`sentinel_kont_free`) + the
 text-IR + selfhost-MIR mirror) and an orthogonal, separately-tracked gap (a handle body whose
 control flow reaches a `perform` silently miscompiles) — see Phasing stage 3. Add an explicit
 `return expr` so a function can return early from any point, instead of only by its tail
-expression. Owner-directed (2026-06-28): "the function return in Sentinel is not clear; we should
+expression. **Amended 2026-09-19 by [ADR 0074](0074-handler-arm-owns-its-continuation.md):**
+D6's teardown now reads each handler ARM's continuation slot rather than the `handle`'s
+dispatch slot, which keeps holding the kont after `k(v)` consumes it; the one-free invariant D6
+states covers every arm exit (fall-through, `return`, `break` / `continue`), not only `return`;
+and all three back ends emit it, which retires stage 3's deferral of the text-IR teardown. Owner-directed (2026-06-28): "the function return in Sentinel is not clear; we should
 have a `return x;` C-style." Scope confirmed: **full early return** (return from anywhere),
 coexisting with the existing tail-expression return.
 
@@ -128,7 +132,8 @@ aborts without resuming." So:
   bookkeeping pop.
 - **The one-free invariant** (D4) extends to handler state: a kont is freed exactly once — by its
   `resume` on the normal path, or by `sentinel_kont_free` on the early-return path (mutually
-  exclusive).
+  exclusive). *(ADR 0074 D2 keys this on the arm's own continuation slot, which a `k(v)`
+  clears, and extends it to every exit of an arm.)*
 
 This is the most intricate part (the effect runtime is the youngest, most-staged subsystem — its
 own header calls it "the minimum-viable runtime"), so it is implemented **after** the effect-free
@@ -180,14 +185,16 @@ selfhost compiler sources need not *use* `return` (they keep tail returns), but 
    `frames_head` freeing each captured block/frame, the inverse of `kont_push`; 2 runtime unit tests),
    and the inkwell `Return` arm frees each active handle region's in-flight kont (innermost first,
    `handle_stack`) before the `ret` — the one-free invariant (resume frees on the normal path, this on
-   the early-return path, mutually exclusive). Demonstrator `examples/lang/early_return_handle.sentinel`
+   the early-return path, mutually exclusive — *ADR 0074 D2 re-keys this on the arm's own slot*). Demonstrator `examples/lang/early_return_handle.sentinel`
    (arm-return + body-return; exit 42, both paths leak-free, no double-free; the 23 effecting pass
    tests unaffected). **Deferred (snc-only, the demonstrator stays OUT of the differential — the
    early_return / u128 / f64 pattern):** the **text-IR mirror** of `kont_free` (the `snc llvm` oracle +
    selfhost `cg` mode still omit it — invisible to the exit code; the self-hosted `scg` compiles
-   handle-free sources so its bootstrap is unaffected) and the **selfhost MIR collapse** (snc MIR
+   handle-free sources so its bootstrap is unaffected — *done by ADR 0074 D5, 2026-09-19*) and the **selfhost MIR collapse** (snc MIR
    collapses a `handle` to opaques without lowering the arm's `return`; the selfhost MIR lowers it, so
-   they diverge — a separate selfhost-MIR faithfulness item). **The orthogonal gap is being LIFTED (stage 3a,
+   they diverge — a separate selfhost-MIR faithfulness item). *(Corrected 2026-09-19, register D83:
+   by construction, a bare `return` in an arm lowers identically in both; what diverges is an `if`,
+   `&&` or `||` inside an op arm or a `return` arm — the constructs that build MIR blocks.)* **The orthogonal gap is being LIFTED (stage 3a,
    2026-06-29):** a handle body that performs through control flow used to silently miscompile (the
    perform's `Kont*` stored into the `i64`-typed merge slot and `kont_pure`-wrapped). First it was
    made a clean rejection; now the **common case is SUPPORTED** in the inkwell back end — a `perform`

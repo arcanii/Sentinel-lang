@@ -1010,13 +1010,9 @@ fn dump_te_call(out: &mut Vec<u8>, cn: [u8], ca: Args, exp: i64, src: &[u8], c: 
             if kid >= 0 {
                 sink_name(gb, cn);
                 let kty: i64 = env_get(c, kid);
-                // (Bar B / effects) cg: load the kont FIRST (the oracle's order), then
-                // collect the resume arg, then emit kont_resume + the pure/bubble split.
-                let cg_kreg: i64 = if cg_on(c) {
-                    cg_emit_resume_load(c, kid)
-                } else {
-                    0 - 1
-                };
+                // (Bar B / effects) cg: collect the resume arg FIRST, then load + clear the
+                // kont slot (ADR 0074 D1, the oracle's order), then emit kont_resume + the
+                // pure/bubble split.
                 let cg_rk_col: bool = (*c).cg_collecting;
                 let cg_rk_csnap: i64 = if cg_on(c) {
                     len((*c).cgak)
@@ -1066,6 +1062,7 @@ fn dump_te_call(out: &mut Vec<u8>, cn: [u8], ca: Args, exp: i64, src: &[u8], c: 
                 };
                 if cg_on(c) {
                     (*c).cg_collecting = cg_rk_col;
+                    let cg_kreg: i64 = cg_emit_resume_load(c, kid);
                     cg_emit_resume_tail(c, cg_kreg, cg_rk_csnap, src, gb);
                     0
                 } else {

@@ -1005,12 +1005,14 @@ pub fn compile_to_object_for_module(
             None,
         )
     };
-    // ADR 0065 D6: sentinel_kont_free(kont) frees an ABANDONED
-    // continuation — one allocated by a `perform` but never resumed,
-    // because an early `return` crossed its `handle` boundary. Emitted on
-    // the return path for each active handle region's in-flight kont (the
-    // one-free invariant: resume frees on the normal path, this on the
-    // early-return path, mutually exclusive).
+    // ADR 0065 D6 / ADR 0074 D2: sentinel_kont_free(kont) frees an
+    // ABANDONED continuation — one allocated by a `perform` and never
+    // resumed, because its handler arm was left without calling `k`.
+    // Emitted on every arm exit (fall-through, `return`, `break` /
+    // `continue`) behind a `null` test of the arm's continuation slot,
+    // which a `k(v)` clears before resuming: it is called only on a kont
+    // the arm still owns (the one-free invariant), so emitted code never
+    // relies on the runtime's own `null` check (ADR 0074 D4).
     let kont_free_fn = {
         let ptr_ty = context.ptr_type(inkwell::AddressSpace::default());
         let void_ty = context.void_type();
@@ -1036,7 +1038,8 @@ pub fn compile_to_object_for_module(
     // C3.5(a) note: we do NOT declare sentinel_kont_panic_resumed
     // at the module level — codegen never calls it directly. The
     // runtime's `sentinel_kont_resume` dispatches to it internally
-    // on the consumed-twice path; that call is resolved at the
+    // when handed `null` — a second `k(v)` in one arm, whose slot the
+    // first cleared (ADR 0074 D3); that call is resolved at the
     // runtime crate's own link time.
 
     // C4.4 / ADR 0024 D7: declare the structured-concurrency runtime
@@ -1628,6 +1631,7 @@ pub fn compile_to_object_for_module(
             embedded_perform_resumers,
             chained_lets_resumers,
             handle_stack: Vec::new(),
+            arm_kont_slots: Vec::new(),
             handle_depth: 0,
             current_fn: None,
             current_fn_id: FnId(0), // placeholder; reset in compile_fn
@@ -1672,6 +1676,8 @@ pub fn compile_to_object_for_module(
     module
         .verify()
         .map_err(|e| CodegenError::VerifyFailed(e.to_string()))?;
+    #[cfg(test)]
+    LAST_VERIFIED_IR.with(|ir| *ir.borrow_mut() = Some(module.print_to_string().to_string()));
 
     Target::initialize_native(&InitializationConfig::default())
         .map_err(CodegenError::TargetInit)?;
@@ -1700,6 +1706,18 @@ pub fn compile_to_object_for_module(
         })?;
 
     Ok(())
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only: the textual IR of the last module this thread's
+    /// [`compile_to_object_for_module`] verified. inkwell's IR is otherwise
+    /// never printed — `snc llvm` is the separate text oracle — so a unit test
+    /// that must see what the SHIPPING back end emits (ADR 0074's arm exits,
+    /// whose only runtime effect is memory no exit code can observe) reads it
+    /// here.
+    static LAST_VERIFIED_IR: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 /// C3.5(e) / ADR 0020 D7: per-handle dispatch context recorded on
@@ -1767,6 +1785,11 @@ struct LoopTarget<'ctx> {
     /// path. Without this a body-scope heap binding live at the `break`
     /// leaks (the load-bearing (2/N) correctness property).
     scope_floor: usize,
+    /// ADR 0074 D2: `arm_kont_slots.len()` when the loop began. A `break` /
+    /// `continue` inside a handler arm leaves every arm entered since then,
+    /// so it releases those arms' continuations (innermost first) before
+    /// branching — the arm-shaped twin of `scope_floor`.
+    arm_floor: usize,
 }
 
 /// Per-function codegen state. See C1.1.2 docs in commit 9374edf
@@ -1944,11 +1967,13 @@ struct CodegenCtx<'ctx, 'plan> {
     /// invoked from handle codegen's runtime switch's "pure
     /// return" case.
     kont_consume_pure_fn: FunctionValue<'ctx>,
-    /// ADR 0065 D6: `sentinel_kont_free(kont)` frees an abandoned
-    /// continuation (allocated by a `perform`, never resumed because an
-    /// early `return` crossed its `handle`). Emitted on the return path
-    /// for each active handle region's in-flight kont; the one-free
-    /// invariant keeps it mutually exclusive with `kont_resume`.
+    /// ADR 0065 D6 / ADR 0074 D2: `sentinel_kont_free(kont)` frees an
+    /// abandoned continuation (allocated by a `perform`, never resumed
+    /// because its handler arm was left without calling `k`). Emitted by
+    /// [`Self::emit_arm_kont_releases`] on every arm exit, behind a `null`
+    /// test of the arm's continuation slot; a `k(v)` clears that slot, so
+    /// after a resume the call is skipped (the one-free invariant; ADR 0074
+    /// D4).
     kont_free_fn: FunctionValue<'ctx>,
     /// C3.5(c) / ADR 0020 D7: `sentinel_kont_push(kont, resumer,
     /// captured)` adds a captured evaluation frame to the kont's
@@ -2013,6 +2038,13 @@ struct CodegenCtx<'ctx, 'plan> {
     /// block; `current_kont_slot` is an alloca holding the kont
     /// the switch reads next iteration.
     handle_stack: Vec<HandleContext<'ctx>>,
+    /// ADR 0074 D1/D2: the continuation slot (`kont_var`) of every handler
+    /// arm whose body is being lowered, innermost last. The slot is the
+    /// ownership record: `k(v)` clears it before resuming, so on any exit a
+    /// non-null slot is a kont this arm still owns. The arm's fall-through
+    /// releases its own; a `return` releases every one; a `break` /
+    /// `continue` releases those above its loop's `arm_floor`.
+    arm_kont_slots: Vec<PointerValue<'ctx>>,
     /// C3.6(b) / ADR 0020 D7: per-fn nesting depth of `handle`
     /// expressions currently being lowered. Incremented at
     /// [`Self::lower_handle`] entry, decremented at exit.
@@ -4845,6 +4877,7 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                     cond_bb,
                     after_bb,
                     scope_floor: self.scope_stack.len(),
+                    arm_floor: self.arm_kont_slots.len(),
                 });
                 self.loop_depth += 1;
                 let body_result = self.lower_block(body, program);
@@ -4881,6 +4914,10 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                 // drop, just emitted early — the fn-return early-exit shape,
                 // ADR 0017.)
                 self.emit_loop_exit_drops(target.scope_floor, program)?;
+                // ADR 0074 D2: a `break` / `continue` inside a handler arm, to a
+                // loop around the `handle`, leaves every arm entered since the
+                // loop began; release the continuations they still own.
+                self.emit_arm_kont_releases(target.arm_floor)?;
                 let current_fn = self.current_fn.expect("current_fn set by compile_fn");
                 self.builder
                     .build_unconditional_branch(dest_bb)
@@ -8780,34 +8817,16 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                 let val = self.lower_expr(inner, program)?;
                 let tail_returned = tail_returned_var(inner);
                 self.emit_return_drops(tail_returned, program)?;
-                // ADR 0065 D6: this `return` may cross one or more `handle`
-                // regions (a handler arm body — or the handled computation —
-                // that `return`s instead of resuming `k`). Each such region has
-                // an in-flight kont (the one being dispatched, allocated by a
-                // `perform`) that is now ABANDONED — never resumed on this path —
-                // so free it + its captured frames, innermost handle first. The
-                // one-free invariant holds: `sentinel_kont_resume` frees on the
-                // normal path, this on the early-return path (mutually
-                // exclusive). `handle_stack` is empty for a `return` outside any
-                // handle (the common case) — no kont teardown, just the ret.
-                let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
-                // Snapshot the slots (Copy) so the loop doesn't hold a borrow of
-                // `self.handle_stack` while it mutably borrows `self.builder`.
-                let kont_slots: Vec<PointerValue<'ctx>> = self
-                    .handle_stack
-                    .iter()
-                    .rev()
-                    .map(|c| c.current_kont_slot)
-                    .collect();
-                for slot in kont_slots {
-                    let kont = self
-                        .builder
-                        .build_load(ptr_ty, slot, "abandoned_kont")
-                        .map_err(|e| CodegenError::Builder(e.to_string()))?;
-                    self.builder
-                        .build_call(self.kont_free_fn, &[kont.into()], "")
-                        .map_err(|e| CodegenError::Builder(e.to_string()))?;
-                }
+                // ADR 0065 D6 / ADR 0074 D2: this `return` may leave one or
+                // more handler arms (a `return` in an arm body, or in a nested
+                // handle's computation inside one). Each arm is left without
+                // resuming its `k` from here on, so release whatever its
+                // continuation slot still holds — innermost arm first. The slot,
+                // not the handle's dispatch slot, is the record to read: a
+                // `k(v)` clears it before resuming, while the dispatch slot keeps
+                // holding the kont the resume consumed. `arm_kont_slots` is
+                // empty for a `return` outside any arm (the common case).
+                self.emit_arm_kont_releases(0)?;
                 // Convert + `ret` exactly as the epilogue does (main i64→i32,
                 // effecting → kont) so the early-return ABI matches.
                 self.build_fn_return(val, program)?;
@@ -9381,16 +9400,26 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
             .vars
             .get(&kont)
             .expect("ResumeKont's VarId is bound by the surrounding Handle codegen");
-        // Load the kont pointer (it was stored as a ptr-typed value).
         let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
         let i32_ty = self.context.i32_type();
+        // Lower the resume arg (must be i64 per the op's return type
+        // at C3.5(a)) BEFORE reading the slot (ADR 0074 D1): an argument
+        // that leaves the arm (`k(return 5)`) must leave the slot owned, so
+        // that exit releases the kont; and a `k(v)` nested in the argument
+        // clears the slot first, so this one's D3 check sees it.
+        let arg_v = self.lower_expr(&args[0], program)?.into_int_value();
+        // Load the kont pointer (it was stored as a ptr-typed value), then
+        // clear the slot (ADR 0074 D1): the resume below consumes and frees
+        // the kont, so from here the arm no longer owns it — its exits
+        // release nothing, and a second `k(v)` passes `null`, which
+        // `sentinel_kont_resume` refuses with the one-shot diagnostic (D3).
         let kont_val = self
             .builder
             .build_load(ptr_ty, kont_ptr, "kont_load")
             .map_err(|e| CodegenError::Builder(e.to_string()))?;
-        // Lower the resume arg (must be i64 per the op's return type
-        // at C3.5(a)).
-        let arg_v = self.lower_expr(&args[0], program)?.into_int_value();
+        self.builder
+            .build_store(kont_ptr, ptr_ty.const_null())
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
         let call = self
             .builder
             .build_call(
@@ -9759,6 +9788,13 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
             self.builder.position_at_end(*arm_bb);
             self.bind_handler_arm_params(arm, current_kont)?;
             let arm_val = self.lower_expr(&arm.body, program)?;
+            // ADR 0074 D2: the fall-through leaves the arm with its value.
+            // Release the kont if the arm still owns it — it declined to
+            // resume (ADR 0020 D4's abort) — before the value goes to the
+            // merge. If it resumed, the slot is null and this is a no-op.
+            let top = self.arm_kont_slots.len() - 1;
+            self.emit_arm_kont_releases(top)?;
+            self.arm_kont_slots.pop();
             let final_arm_val: BasicValueEnum<'ctx> = if is_nested {
                 let wrap_call = self
                     .builder
@@ -9895,6 +9931,53 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
             .map_err(|e| CodegenError::Builder(e.to_string()))?;
         self.vars
             .insert(kont_var_id, (kont_alloca, Type::Kont(arm.kont_id)));
+        // ADR 0074 D1: this slot is now the arm's ownership record for the
+        // kont. `lower_handle_inner` pops it after the arm's body, releasing
+        // what it still holds; a `return` / `break` / `continue` in between
+        // releases it on its own path.
+        self.arm_kont_slots.push(kont_alloca);
+        Ok(())
+    }
+
+    /// ADR 0074 D2: release the continuation that each handler arm at index
+    /// `>= floor` of [`Self::arm_kont_slots`] still owns, innermost first: load
+    /// the arm's slot and, if it is not the `null` a `k(v)` leaves there,
+    /// `sentinel_kont_free` it. The test is in the emitted code rather than left
+    /// to the runtime's own `null` check (ADR 0074 D4), so the code never depends
+    /// on that check. Called on every exit that leaves an arm without resuming
+    /// its `k`: the fall-through (the top arm only), `return` (floor 0: every
+    /// arm) and `break` / `continue` (the loop's `arm_floor`).
+    fn emit_arm_kont_releases(&mut self, floor: usize) -> Result<(), CodegenError> {
+        let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+        let current_fn = self.current_fn.expect("current_fn set by compile_fn");
+        // Snapshot the slots (Copy) so the loop doesn't hold a borrow of
+        // `self.arm_kont_slots` while it mutably borrows `self.builder`.
+        let slots: Vec<PointerValue<'ctx>> =
+            self.arm_kont_slots[floor..].iter().rev().copied().collect();
+        for slot in slots {
+            let kont = self
+                .builder
+                .build_load(ptr_ty, slot, "arm_kont")
+                .map_err(|e| CodegenError::Builder(e.to_string()))?
+                .into_pointer_value();
+            let owned = self
+                .builder
+                .build_is_not_null(kont, "arm_kont_owned")
+                .map_err(|e| CodegenError::Builder(e.to_string()))?;
+            let free_bb = self.context.append_basic_block(current_fn, "arm_kont_free");
+            let done_bb = self.context.append_basic_block(current_fn, "arm_kont_done");
+            self.builder
+                .build_conditional_branch(owned, free_bb, done_bb)
+                .map_err(|e| CodegenError::Builder(e.to_string()))?;
+            self.builder.position_at_end(free_bb);
+            self.builder
+                .build_call(self.kont_free_fn, &[kont.into()], "")
+                .map_err(|e| CodegenError::Builder(e.to_string()))?;
+            self.builder
+                .build_unconditional_branch(done_bb)
+                .map_err(|e| CodegenError::Builder(e.to_string()))?;
+            self.builder.position_at_end(done_bb);
+        }
         Ok(())
     }
 }
@@ -11963,6 +12046,262 @@ mod tests {
 
     fn out_path() -> std::path::PathBuf {
         std::env::temp_dir().join(format!("sentinel-codegen-test-{}.o", std::process::id()))
+    }
+
+    /// Compile `src` and return the textual IR inkwell verified for it (the
+    /// shipping back end's own output, captured by `LAST_VERIFIED_IR`).
+    fn compile_src_ir(src: &str) -> String {
+        LAST_VERIFIED_IR.with(|ir| *ir.borrow_mut() = None);
+        compile_src(src).expect("compile");
+        LAST_VERIFIED_IR
+            .with(|ir| ir.borrow_mut().take())
+            .expect("a verified module was captured")
+    }
+
+    /// The body of `define … @name(…) { … }` in `ir`.
+    fn ir_fn_body<'a>(ir: &'a str, name: &str) -> &'a str {
+        let head = ir
+            .find(&format!(" @{name}("))
+            .unwrap_or_else(|| panic!("no fn @{name} in:\n{ir}"));
+        let start = head + ir[head..].find('{').expect("fn body opens");
+        let end = start + ir[start..].find("\n}").expect("fn body closes");
+        &ir[start..end]
+    }
+
+    // ===== ADR 0074: a handler arm owns its continuation until it resumes it =====
+    //
+    // Each exit of an arm must release the kont the arm still owns (D2), and a
+    // `k(v)` must clear the arm's slot, after evaluating its argument, before it
+    // resumes (D1). D2's releases and D1's argument-first order are not visible in
+    // an exit code — their only runtime effect is memory — so these read the IR the
+    // shipping back end emits. (D1's clear is also caught end to end, by
+    // `tests/handler_arm_exits.rs`.) Every count below is the number of (exit, open
+    // arm) pairs in the program, counting only releases that can run, and every
+    // release must be guarded by its own `null` test (D4); dropping the release, or
+    // its guard, from any one exit — or moving it past the exit's terminator —
+    // changes it.
+
+    const IO_EFFECT: &str = "effect Io { read() -> i64; }\n";
+
+    /// The blocks of a fn `body` (from `ir_fn_body`) in order, each label with its
+    /// trimmed instruction lines. inkwell names every block, so each opens with an
+    /// unindented `label:` line (LLVM may append `; preds = …`).
+    fn ir_blocks(body: &str) -> Vec<(&str, Vec<&str>)> {
+        let mut blocks: Vec<(&str, Vec<&str>)> = Vec::new();
+        for line in body.lines().skip(1) {
+            if line.trim().is_empty() {
+                continue;
+            }
+            if !line.starts_with(' ') {
+                blocks.push((line.split(':').next().expect("a label"), Vec::new()));
+            } else if let Some((_, lines)) = blocks.last_mut() {
+                lines.push(line.trim());
+            }
+        }
+        blocks
+    }
+
+    /// The labels of `blocks` reachable from the first one (`entry`). A block's
+    /// successors are the `label %…` operands of its terminator — `br` and `switch` are
+    /// the only instructions here with `label` operands (a merge's `phi` names its
+    /// incoming blocks, its predecessors, without `label`).
+    fn reachable_blocks<'a>(blocks: &[(&'a str, Vec<&'a str>)]) -> Vec<&'a str> {
+        let mut seen: Vec<&str> = Vec::new();
+        let mut stack = vec![blocks[0].0];
+        while let Some(b) = stack.pop() {
+            if seen.contains(&b) {
+                continue;
+            }
+            seen.push(b);
+            let (_, lines) = blocks
+                .iter()
+                .find(|(l, _)| *l == b)
+                .unwrap_or_else(|| panic!("a branch to a block that does not exist: {b}"));
+            for l in lines {
+                for target in l.split("label %").skip(1) {
+                    stack.push(target.split([',', ' ', ']']).next().expect("a label name"));
+                }
+            }
+        }
+        seen
+    }
+
+    /// The number of `sentinel_kont_free` calls in `body` that can run, after
+    /// checking every call's guard (ADR 0074 D4: the emitted code frees only a kont
+    /// that is not `null`, so it never depends on the runtime's own check). Each call
+    /// must open its own `arm_kont_free` block; that block must be the TAKEN edge of a
+    /// conditional branch on `icmp ne ptr` of the very kont the call frees; and that
+    /// kont must be loaded from an arm's continuation slot (`kont_var`), not the
+    /// dispatch slot. Only calls in blocks reachable from `entry` count, so a release
+    /// placed after its exit's terminator — in the dead block that follows it — does
+    /// not.
+    fn guarded_releases(body: &str) -> usize {
+        let blocks = ir_blocks(body);
+        let live = reachable_blocks(&blocks);
+        let all: Vec<&str> = blocks.iter().flat_map(|(_, ls)| ls.iter().copied()).collect();
+        let def = |name: &str| -> &str {
+            let head = format!("{name} = ");
+            all.iter()
+                .copied()
+                .find(|l| l.starts_with(&head))
+                .unwrap_or_else(|| panic!("nothing defines {name}:\n{body}"))
+        };
+        let mut calls = 0;
+        for (label, lines) in &blocks {
+            for (j, l) in lines.iter().enumerate() {
+                if !l.contains("@sentinel_kont_free(") {
+                    continue;
+                }
+                assert!(
+                    j == 0 && label.starts_with("arm_kont_free"),
+                    "a release outside its guarded block:\n{body}"
+                );
+                let kont = l
+                    .split("@sentinel_kont_free(ptr ")
+                    .nth(1)
+                    .and_then(|r| r.split(')').next())
+                    .unwrap_or_else(|| panic!("an unexpected release `{l}`:\n{body}"));
+                let taken = format!(", label %{label}, label %");
+                let br = all
+                    .iter()
+                    .find(|b| b.starts_with("br i1 ") && b.contains(&taken))
+                    .unwrap_or_else(|| panic!("no branch takes {label} on true:\n{body}"));
+                let flag = br["br i1 ".len()..].split(',').next().expect("a branch condition");
+                assert_eq!(
+                    def(flag),
+                    format!("{flag} = icmp ne ptr {kont}, null"),
+                    "the guard must test the kont it frees against `null`:\n{body}"
+                );
+                assert!(
+                    def(kont).starts_with(&format!("{kont} = load ptr, ptr %kont_var")),
+                    "the freed kont must be loaded from an arm's continuation slot:\n{body}"
+                );
+                if live.contains(label) {
+                    calls += 1;
+                }
+            }
+        }
+        calls
+    }
+
+    #[test]
+    fn adr0074_arm_fall_through_releases_the_kont() {
+        // `=> 5` never resumes `k` (ADR 0020 D4's abort): the fall-through is the
+        // arm's only exit, so it is the one release.
+        let ir = compile_src_ir(&format!(
+            "{IO_EFFECT}fn main() -> i64 {{ handle perform Io.read() with {{ Io.read(k) => 5 }} }}"
+        ));
+        let main = ir_fn_body(&ir, "main");
+        assert_eq!(guarded_releases(main), 1, "{main}");
+    }
+
+    #[test]
+    fn adr0074_resume_clears_the_arm_slot_after_its_argument() {
+        // D1: the argument is evaluated first, then the kont is loaded and the
+        // slot cleared, then `sentinel_kont_resume` runs; the fall-through still
+        // releases (a no-op at run time, since the slot is then null).
+        let ir = compile_src_ir(&format!(
+            "{IO_EFFECT}fn f(x: i64) -> i64 {{ handle perform Io.read() with {{ Io.read(k) => k(x * 3) }} }}\n\
+             fn main() -> i64 {{ f(2) }}"
+        ));
+        let f = ir_fn_body(&ir, "f");
+        let arg = f.find(" mul ").expect("the argument's `mul`");
+        let load = f.find("= load ptr, ptr %kont_var").expect("the slot load");
+        let clear = f.find("store ptr null, ptr %kont_var").expect("the slot clear");
+        let resume = f.find("@sentinel_kont_resume(").expect("the resume");
+        assert!(arg < load && load < clear && clear < resume, "{f}");
+        assert_eq!(guarded_releases(f), 1, "{f}");
+    }
+
+    #[test]
+    fn adr0074_return_from_an_arm_releases_the_kont() {
+        // Two exits: the `return` and the fall-through.
+        let ir = compile_src_ir(&format!(
+            "{IO_EFFECT}fn f(i: i64) -> i64 {{ handle perform Io.read() with {{ \
+             Io.read(k) => {{ if i > 2 {{ return 7 }} else {{ 0 }}; 5 }} }} }}\n\
+             fn main() -> i64 {{ f(1) + f(3) }}"
+        ));
+        let f = ir_fn_body(&ir, "f");
+        assert_eq!(guarded_releases(f), 2, "{f}");
+    }
+
+    #[test]
+    fn adr0074_break_and_continue_out_of_an_arm_release_the_kont() {
+        // Three exits from the arm: `break`, `continue`, and the fall-through. The
+        // loop is OUTSIDE the `handle`, so both branches leave the arm.
+        let ir = compile_src_ir(&format!(
+            "{IO_EFFECT}fn f(n: i64) -> i64 {{\n\
+             let mut i: i64 = 0; let mut acc: i64 = 0;\n\
+             while i < n {{ i = i + 1;\n\
+             let v: i64 = handle perform Io.read() with {{ Io.read(k) => {{ \
+             if i > 7 {{ break; 0 }} else {{ 0 }}; if i > 2 {{ continue; 0 }} else {{ 0 }}; 5 }} }};\n\
+             acc = acc + v; }}\n\
+             acc }}\n\
+             fn main() -> i64 {{ f(10) }}"
+        ));
+        let f = ir_fn_body(&ir, "f");
+        assert_eq!(guarded_releases(f), 3, "{f}");
+    }
+
+    #[test]
+    fn adr0074_a_loop_inside_the_arm_releases_nothing_on_break() {
+        // The control: a `break` whose loop is INSIDE the arm does not leave the
+        // arm, so it must not release the kont — the loop's `arm_floor` already
+        // counts this arm. Only the fall-through releases.
+        let ir = compile_src_ir(&format!(
+            "{IO_EFFECT}fn f(n: i64) -> i64 {{ handle perform Io.read() with {{ Io.read(k) => {{\n\
+             let mut i: i64 = 0; while i < n {{ i = i + 1; if i > 3 {{ break; 0 }} else {{ 0 }}; }} k(i) }} }} }}\n\
+             fn main() -> i64 {{ f(10) }}"
+        ));
+        let f = ir_fn_body(&ir, "f");
+        assert_eq!(guarded_releases(f), 1, "{f}");
+    }
+
+    #[test]
+    fn adr0074_a_return_from_an_inner_arm_releases_both_open_arms() {
+        // A `handle` inside another handle's arm, its value discarded (register D81
+        // breaks the shapes that USE it): the inner arm's `return` leaves BOTH arms,
+        // so it releases both — two calls — and each arm's fall-through adds one. A
+        // walk that released only the innermost arm would count three.
+        let ir = compile_src_ir(&format!(
+            "{IO_EFFECT}effect Log {{ get() -> i64; }}\n\
+             fn f(c: i64) -> i64 {{ handle perform Io.read() with {{ Io.read(k) => {{ \
+             handle perform Log.get() with {{ Log.get(k2) => {{ if c > 2 {{ return 9 }} else {{ 0 }}; k2(3) }} }}; \
+             k(1) }} }} }}\n\
+             fn main() -> i64 {{ f(1) + f(5) }}"
+        ));
+        let f = ir_fn_body(&ir, "f");
+        assert_eq!(guarded_releases(f), 4, "{f}");
+    }
+
+    #[test]
+    fn adr0074_a_break_or_continue_out_of_two_arms_releases_both() {
+        // The same two open arms, left by a `break` (`brk`) or a `continue` (`cont`)
+        // from the inner arm to a loop OUTSIDE both, whose `arm_floor` is 0: each
+        // releases both arms — two calls — and each arm's fall-through adds one. A
+        // walk that released only the innermost arm would count three.
+        let ir = compile_src_ir(&format!(
+            "{IO_EFFECT}effect Log {{ get() -> i64; }}\n\
+             fn brk(n: i64) -> i64 {{ let mut i: i64 = 0; let mut acc: i64 = 0;\n\
+             while i < n {{ i = i + 1;\n\
+             let v: i64 = handle perform Io.read() with {{ Io.read(k) => {{ \
+             handle perform Log.get() with {{ Log.get(k2) => {{ if i > 2 {{ break; 0 }} else {{ 0 }}; k2(3) }} }}; \
+             k(i) }} }};\n\
+             acc = acc + v; }}\n\
+             acc }}\n\
+             fn cont(n: i64) -> i64 {{ let mut i: i64 = 0; let mut acc: i64 = 0;\n\
+             while i < n {{ i = i + 1;\n\
+             let v: i64 = handle perform Io.read() with {{ Io.read(k) => {{ \
+             handle perform Log.get() with {{ Log.get(k2) => {{ if i > 2 {{ continue; 0 }} else {{ 0 }}; k2(3) }} }}; \
+             k(i) }} }};\n\
+             acc = acc + v; }}\n\
+             acc }}\n\
+             fn main() -> i64 {{ brk(10) + cont(6) }}"
+        ));
+        for name in ["brk", "cont"] {
+            let body = ir_fn_body(&ir, name);
+            assert_eq!(guarded_releases(body), 4, "@{name}:\n{body}");
+        }
     }
 
     #[test]

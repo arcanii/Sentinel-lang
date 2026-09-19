@@ -357,6 +357,12 @@ fn dump_tharms(out: &mut Vec<u8>, a: HArms, src: &[u8], c: &mut TyCtx, gb: &mut 
                 let bv: i64 = (*c).cglv;
                 let rslot: i64 = (*c).cg_h_rslot;
                 let merge_b: i64 = (*c).cg_h_merge;
+                // (ADR 0074 D2) the fall-through leaves the arm with its value: release the
+                // kont if the arm still owns it (it declined to resume — ADR 0020 D4's abort)
+                // before the value goes to the result cell; after a `k(v)` the slot is null
+                // and the release is a no-op. Mirrors the oracle's arm loop.
+                cg_release_arm_konts(c, len((*c).cg_arm_ks) - 1);
+                let _pk: i64 = pop(&mut (*c).cg_arm_ks);
                 // (c36b) nested: wrap the arm's i64 → kont_pure → ptr (the merge is Kont*).
                 cg_store_hresult(c, is_nested, bk, bv, rslot);
                 cgo_str(c, "  br label %bb");
@@ -660,6 +666,9 @@ fn dump_tstmt(out: &mut Vec<u8>, s: Stmt, src: &[u8], c: &mut TyCtx, gb: &mut Ve
                 // (8d-drops-3) the body frame's drop floor = cgdv length NOW, before the
                 // body Block arm pushes its frame; break/continue drain cgdv[floor..].
                 push(&mut (*c).cg_loop_floor, len((*c).cgdv));
+                // (ADR 0074 D2) the arm floor = cg_arm_ks length NOW; break/continue release
+                // the arms entered since (cg_arm_ks[floor..]).
+                push(&mut (*c).cg_loop_akf, len((*c).cg_arm_ks));
                 0
             } else {
                 0
@@ -671,6 +680,7 @@ fn dump_tstmt(out: &mut Vec<u8>, s: Stmt, src: &[u8], c: &mut TyCtx, gb: &mut Ve
                 let _pc: i64 = pop(&mut (*c).cg_loop_cond);
                 let _pa: i64 = pop(&mut (*c).cg_loop_after);
                 let _pf: i64 = pop(&mut (*c).cg_loop_floor);
+                let _pk: i64 = pop(&mut (*c).cg_loop_akf);
                 cgo_str(c, "  br label %bb");
                 cgo_int(c, cg_wc);
                 cg_putc(c, '\n');
@@ -694,6 +704,10 @@ fn dump_tstmt(out: &mut Vec<u8>, s: Stmt, src: &[u8], c: &mut TyCtx, gb: &mut Ve
                 // (8d-drops-3) drain the body frame(s) before branching out of the loop.
                 let bfloor: i64 = (*c).cg_loop_floor[bn - 1];
                 cg_drop_range(c, bfloor);
+                // (ADR 0074 D2) a `break` inside a handler arm, to a loop around the
+                // `handle`, leaves every arm entered since the loop began: release them.
+                let bakf: i64 = (*c).cg_loop_akf[bn - 1];
+                cg_release_arm_konts(c, bakf);
                 cgo_str(c, "  br label %bb");
                 cgo_int(c, bafter);
                 cg_putc(c, '\n');
@@ -716,6 +730,10 @@ fn dump_tstmt(out: &mut Vec<u8>, s: Stmt, src: &[u8], c: &mut TyCtx, gb: &mut Ve
                 // (8d-drops-3) drain the body frame(s) before branching to the cond.
                 let kfloor: i64 = (*c).cg_loop_floor[kn - 1];
                 cg_drop_range(c, kfloor);
+                // (ADR 0074 D2) a `continue` inside a handler arm leaves the arms entered
+                // since the loop began, as `break` does: release them.
+                let kakf: i64 = (*c).cg_loop_akf[kn - 1];
+                cg_release_arm_konts(c, kakf);
                 cgo_str(c, "  br label %bb");
                 cgo_int(c, kcond);
                 cg_putc(c, '\n');
