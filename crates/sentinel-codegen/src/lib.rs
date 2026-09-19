@@ -4909,6 +4909,31 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
     /// directly), `*r` (load r's value as the pointer), and
     /// `target.field` (GEP into the struct's field by index, with
     /// recursion into the target).
+    /// The pointer passed as `self` for a postfix method call (ADR 0022 D7).
+    ///
+    /// The type layer resolves `c.m()` on a `c: &K` by AUTO-DEREFERENCING the
+    /// receiver — `check_method_call_expr`'s `recv_concrete` maps `Type::Ref(rid)`
+    /// to `refs[rid].inner` — so the address passed as `self` must be the
+    /// REFERENT's. [`Self::lower_lvalue_ptr`] returns the receiver's own storage,
+    /// which for a ref-typed place is the slot HOLDING the pointer: one
+    /// indirection too many. Key the load on the same `Type::Ref` the type layer
+    /// dereferenced, so the two stages cannot drift apart again.
+    ///
+    /// `self` inside a method is bound to the object pointer under the CLASS type
+    /// (`env.insert(m.self_var_id, (Type::Class(cd.id), ..))`), not a reference,
+    /// so it takes the lvalue path unchanged.
+    fn lower_receiver_ptr(
+        &mut self,
+        target: &TypedExpr,
+        program: &TypedProgram,
+    ) -> Result<PointerValue<'ctx>, CodegenError> {
+        if matches!(target.ty, Type::Ref(_)) {
+            let v = self.lower_expr(target, program)?;
+            return Ok(v.into_pointer_value());
+        }
+        self.lower_lvalue_ptr(target, program)
+    }
+
     fn lower_lvalue_ptr(
         &mut self,
         expr: &TypedExpr,
@@ -8993,7 +9018,7 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
             // class-typed; non-lvalue receivers are deferred).
             // Emit a direct call to ClassName__method.
             TypedExprKind::MethodCall { target, class_id, method_index, args, .. } => {
-                let self_ptr = self.lower_lvalue_ptr(target, program)?;
+                let self_ptr = self.lower_receiver_ptr(target, program)?;
                 let method_fn = *self
                     .class_method_fns
                     .get(&(*class_id, *method_index))
@@ -9048,7 +9073,7 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
             // MethodCall) + direct call into the impl method's
             // mangled fn.
             TypedExprKind::ImplMethodCall { target, impl_id, method_index, args, .. } => {
-                let self_ptr = self.lower_lvalue_ptr(target, program)?;
+                let self_ptr = self.lower_receiver_ptr(target, program)?;
                 let method_fn = *self
                     .impl_method_fns
                     .get(&(*impl_id, *method_index))

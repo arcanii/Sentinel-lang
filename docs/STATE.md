@@ -133,7 +133,47 @@ stays a legal type (ADR 0019 D5) and a `secret i64` op param stays legal (it is 
 both pinned by controls. **Corpus reach ZERO**: no `effect` block in the repo contains a
 `&`, measured by extracting every block. Rejection-only, so no `selfhost/` mirror; the two
 new ui fixtures are TYPE rejections, so the mir/codegen differentials skip them.
-**Register: 85 items, 35 done.**
+
+**Also (2026-09-19) — D86: a method call on a REFERENCE-typed receiver passed the address
+of the reference's own slot, not the object. `snc` fixed; the `scg` mirror is
+OUTSTANDING.** ADR 0022 D7's auto-deref resolves `c.m()` on a `c: &K` by dereferencing the
+receiver to find the method — `check_method_call_expr` maps `Type::Ref(rid)` to
+`refs[rid].inner` and dispatches on that. Both Rust emitters computed `self` with
+`lower_lvalue_ptr`, which returns the receiver's own STORAGE: for an owned `k: K` that slot
+holds the object and the address is right, but for `c: &K` it holds a POINTER, so the
+callee received one indirection too many. `fn read(c: &K) -> i64 { c.peek() }` answered a
+frame pointer instead of 42, and `fn poke(c: &mut K) { c.bump() }` left `k.v` unchanged —
+`self.v = 99` stored somewhere else. No diagnostic on either, on ordinary source. The IR
+shows it plainly: `%v0 = alloca ptr` / `store ptr %arg0, ptr %v0` /
+`call @K__peek(ptr %v0)`.
+
+The root cause is the predicate mismatch this register has recorded before: the type layer
+dereferenced the receiver and codegen did not. Both emitters now key the load on the same
+`Type::Ref` the type layer matched, behind a `lower_receiver_ptr` seam, so they cannot
+drift apart again. `self` is untouched — it is bound to the object pointer under the CLASS
+type (`env.insert(m.self_var_id, (Type::Class(cd.id), ..))`), not a reference, so it keeps
+the lvalue path and its `%arg0` special case.
+
+**Corpus reach ZERO, measured**: with the fix in, the codegen differential is
+byte-identical over `tests/pass` + `tests/ui`, so no existing program calls a method on a
+reference-typed receiver — which also settles the measurement the ref-escape design plan
+left open (its `refrecv_hits.txt` was empty, but that run was never confirmed). Pinned by
+three tests in `crates/sentinel-driver/tests/ref_receiver.rs`, deliberately NOT under
+`tests/pass`: everything there is swept by the differentials, and a fixture of this shape
+would fail the codegen differential until the mirror lands. All three fail without the fix
+(a frame pointer, 49 instead of 106, and a garbage control); the third pins the two shapes
+that must NOT change — an owned receiver and `self`.
+
+⚠ **Remaining: the `scg` mirror.** `selfhost/types/borrow_arms.sentinel` computes
+`cg_m_selfv` as `cg_slot_get(c, cg_m_lvid)` — the var's slot — under a comment carrying the
+same false premise ("the alloca slot IS the address"), true only for an owned receiver. The
+mirror is to emit `cg_load` for the pointer when `strip_ref(c, tty) != tty` (scg's own
+auto-deref predicate, which the same function already
+calls a little further down for the method lookup) and pass that
+register as the operand, with the emission order matching the oracle: load, then args, then
+the call. Until it lands both bootstrap fixed points hold only because the corpus contains
+no program of this shape — the divergence is latent, and the first corpus fixture with a
+reference-typed receiver will expose it. **Register: 86 items, 35 done.**
 
 **Previously (2026-09-14) — D76: a captured frame pushed onto a pure-return kont was never run,
 and leaked. Runtime-only. NOT PUSHED.** An effecting fn whose body never performs returns

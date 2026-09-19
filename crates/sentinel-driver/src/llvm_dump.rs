@@ -2486,7 +2486,7 @@ impl Emit<'_> {
             // receiver is an lvalue; pass its pointer as `self`, then the args. Symbol
             // `Class__method` (class NAME, like the inkwell backend).
             TypedExprKind::MethodCall { target, class_id, method, args, .. } => {
-                let self_ptr = self.lower_lvalue_ptr(target)?;
+                let self_ptr = self.lower_receiver_ptr(target)?;
                 let arg_ops = self.lower_args(args)?;
                 let ret = self.lty(expr.ty)?;
                 let cls = self.program.class_decl(*class_id).name.clone();
@@ -2502,7 +2502,7 @@ impl Emit<'_> {
             // Path 1). Same self-ptr ABI as a class MethodCall, but the symbol is the
             // impl-method mangle. Also the shape the delegate-synthesized impl bodies use.
             TypedExprKind::ImplMethodCall { target, impl_id, method, args, .. } => {
-                let self_ptr = self.lower_lvalue_ptr(target)?;
+                let self_ptr = self.lower_receiver_ptr(target)?;
                 let arg_ops = self.lower_args(args)?;
                 let ret = self.lty(expr.ty)?;
                 let sym = mangle_impl_method(self.program.impl_decl(*impl_id), method);
@@ -2822,6 +2822,24 @@ impl Emit<'_> {
     /// a deref's inner ref (`&*r` / the `*r = …` target), or a struct field's address
     /// (`&mut (*c).f` — the selfhost sources' pervasive `&mut`-into-a-`ctx`-field form).
     /// Element-ref lvalues (`&a[i]`) are a later slice (the selfhost sources don't use them).
+    /// The pointer passed as `self` for a postfix method call (ADR 0022 D7) —
+    /// the text-oracle twin of inkwell's `lower_receiver_ptr`.
+    ///
+    /// The type layer resolves `c.m()` on a `c: &K` by AUTO-DEREFERENCING the
+    /// receiver (`check_method_call_expr`'s `recv_concrete`), so `self` must be
+    /// the REFERENT's address. `lower_lvalue_ptr` returns the receiver's own
+    /// storage, which for a ref-typed place is the slot HOLDING the pointer.
+    /// Keyed on the same `Type::Ref` the type layer dereferenced.
+    ///
+    /// `self` is typed as the CLASS, not a reference, so it keeps the lvalue path
+    /// (and its `%arg0` special case) unchanged.
+    fn lower_receiver_ptr(&mut self, target: &TypedExpr) -> Result<String, String> {
+        if matches!(target.ty, Type::Ref(_)) {
+            return self.lower_expr(target);
+        }
+        self.lower_lvalue_ptr(target)
+    }
+
     fn lower_lvalue_ptr(&mut self, expr: &TypedExpr) -> Result<String, String> {
         match &expr.kind {
             TypedExprKind::Var(id) => {
