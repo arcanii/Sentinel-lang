@@ -148,9 +148,12 @@ reference as you work through the milestones.
 > multi-file-module parts compiled standalone, zero borrow or reference rejections. 21 ui +
 > 7 pass fixtures; borrow-check unit tests 65 → 94, types 282 → 293.
 >
-> ⚠ **A NEW FIXTURE IS SWEPT BY EVERY STAGE DIFFERENTIAL, `tests/ui` INCLUDED.**
-> `collect_fixtures` sweeps `tests/pass` AND `tests/ui`, and `snc llvm` discards borrow
-> errors, so a fixture meant to be REJECTED still gets its IR compared to `scg`'s. Two of
+> ⚠ **A NEW FIXTURE IS SWEPT BY THE STAGE DIFFERENTIALS IF IT TYPE-CHECKS CLEANLY —
+> `tests/ui` INCLUDED.** `collect_fixtures` sweeps `tests/pass` AND `tests/ui`; `snc mir`
+> and `snc llvm` discard BORROW errors but bail on a TYPE error. So a fixture meant to be
+> rejected by the BORROW layer still gets its IR compared to `scg`'s, while one the TYPE
+> layer rejects is skipped. That is the line between the two ADR 0073 fixtures (safe) and
+> the two below that were not. Two of
 > mine failed differentials on contents unrelated to references — D82 (`ptr 0` for
 > `return null` of a `?&T`) and D83 (the two MIR lowerers on `return` in a handler arm).
 > Both settled as PRE-EXISTING by constructing a probe holding the construct and no
@@ -437,7 +440,7 @@ reference as you work through the milestones.
 >      scalar-4 arm, which it now has. Also worth doing with it: `examples/math/quadratic.sentinel` and
 >      `sentinel_library/std/math/float.sentinel` currently reach only lex/ast, because
 >      `snc merge`'s Bar-A printer rejects both a float literal and `sqrt` (menu item 5).
->   4. **THE FILED-DEFECT REGISTER — EIGHTY-FIVE items (D1-D85); **D1, D2, D3, D4, D5, D8, D9, D10, D15, D16, D17, D24, D25, D26, D29, D31, D34, D37, D39, D42, D43, D44, D47(option A), D51, D54, D55, D56, D58, D59, D60, D61, D66, D74 and D76 are DONE (34 of 85)**, the rest verified against a pre-slice binary. MOST are
+>   4. **THE FILED-DEFECT REGISTER — EIGHTY-FIVE items (D1-D85); **D1, D2, D3, D4, D5, D8, D9, D10, D15, D16, D17, D24, D25, D26, D29, D31, D34, D37, D39, D42, D43, D44, D47(option A), D51, D54, D55, D56, D58, D59, D60, D61, D66, D74, D76 and D85 are DONE (35 of 85)**, the rest verified against a pre-slice binary. MOST are
 >      unregistered in any `DEFERRED_PROGRAMS` / `KNOWN_SCG_BUGS` list because no corpus program
 >      reaches them — but FOUR are, and the blanket "NONE" that stood here was falsified by
 >      this register's own new entries: D24/D25/D26 share the
@@ -958,7 +961,7 @@ reference as you work through the milestones.
 >      what is wrong. Filed rather than edited: ADR 0017 is ACCEPTED-WITH-AMENDMENTS
 >      and correcting a ratified decision's text is a maintainer call.
 >
->      **D85 — a REFERENCE in an effect-op signature reaches codegen and PANICS
+>      **D85 — DONE (2026-09-19, ADR 0073). A REFERENCE in an effect-op signature reached codegen and PANICKED
 >      inkwell.** Found 2026-09-19 while probing the operand positions;
 >      pre-existing, and independent of the reference's liveness. `effect Io {
 >      write(r: &i64) -> i64; }` with `perform Io.write(r)` on a LIVE `&x` aborts
@@ -970,10 +973,17 @@ reference as you work through the milestones.
 >      input must surface a `miette` diagnostic rather than panic. The designed fix
 >      is the deferred `RefInEffectSignature` fence (ref-escape plan §2.8): refuse a
 >      reference type in an effect-op parameter or return at the type layer. That
->      is a new language rule, so it wants an ADR line before it ships — which is
->      why the plan deferred it and why it is filed rather than fixed here. ⚠ Do
->      NOT ship the broader `handle`-value fence alongside it: it over-rejects
->      `n5g_handle_ref_retarm`, which this slice deliberately keeps accepted.
+>      is a new language rule, so it needed an ADR: **[ADR 0073](decisions/0073-effect-op-signature-reference-fence.md)**
+>      D1 refuses a reference in an op's parameters AND its return, keyed on
+>      `carries_ref` so all four spellings (`&T`, `&mut T`, `?&T`, `secret &T`) are
+>      covered, with the diagnostic on the DECLARATION rather than a distant
+>      `perform`. The return side was already stopped by two unrelated checks (the
+>      borrow layer's fail-closed source rule, and ADR 0072's `FITS`); stating it
+>      once at the declaration is the point. ⚠ The broader `handle`-value fence was
+>      considered and REJECTED (ADR 0073 D3): it over-rejects `n5g_handle_ref_retarm`,
+>      which the ref-escape slice deliberately keeps accepted. Corpus reach is ZERO —
+>      no `effect` block in the repo contains a `&`. `secret i64` op params stay legal
+>      (they are in `FITS`), pinned by a control.
 >
 >      **D78 — stale corpus fixture counts in `llvm.rs` and `README.md`, at six sites, stale
 >      before this change.** Found by D74's reviews. `crates/sentinel-driver/tests/llvm.rs`

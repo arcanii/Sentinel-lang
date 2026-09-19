@@ -334,3 +334,9 @@ ui_snapshot!(c22_method_ref_then_mut_method, "c22_method_ref_then_mut_method.sen
 // borrow-checked by any run, and what keeps the interprocedural summary sound
 // at that boundary is that no reference can cross it.
 ui_snapshot!(c21_extern_ref_param, "c21_extern_ref_param.sentinel");
+
+// ADR 0073 D1: an effect operation's parameters and result cross the `Kont*`
+// seam, which carries one `i64`. Before this rule the four reference spellings
+// reached codegen and aborted inkwell on a perfectly live reference.
+ui_snapshot!(c21_ref_in_effect_op_param, "c21_ref_in_effect_op_param.sentinel");
+ui_snapshot!(c21_ref_in_effect_op_return, "c21_ref_in_effect_op_return.sentinel");

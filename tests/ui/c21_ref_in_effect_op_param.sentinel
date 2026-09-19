@@ -1,0 +1,15 @@
+// ADR 0073 D1: an effect operation's parameters are reified into the continuation
+// when a `perform` suspends, and the `Kont*` seam is one `i64` wide (abi-v1 §3), so
+// a reference cannot travel through it. The reference here is perfectly LIVE — `&x`
+// outlives the `handle` — which is why the borrow checker has nothing to say about
+// it, and why the rule belongs on the declaration.
+effect Io {
+    write(r: &i64) -> i64;
+}
+fn emit(r: &i64) -> i64 ! { Io } {
+    perform Io.write(r)
+}
+fn main() -> i64 {
+    let x: i64 = 5;
+    handle { emit(&x) } with { Io.write(r, k) => k(0) }
+}

@@ -4560,6 +4560,25 @@ pub enum TypeError {
         span: miette::SourceSpan,
     },
 
+    /// ADR 0073 D1: a reference in an effect-op signature — a parameter or the
+    /// return. An op's parameters are reified into the continuation when a
+    /// `perform` suspends, and its return type is what a `k(v)` resume delivers;
+    /// both cross the `Kont*` seam, which is one `i64` wide (`abi-v1.md` §3), so a
+    /// pointer cannot travel through it. Without this the four reference spellings
+    /// reached codegen and aborted inkwell ("expected the IntValue variant").
+    ///
+    /// Positional, not global: `secret &T` stays a legal type (ADR 0019 D5), and a
+    /// `secret i64` parameter stays legal — it is in ADR 0072's `FITS`.
+    #[error("references are not allowed in an effect operation's signature")]
+    #[diagnostic(
+        code(sentinel::types::ref_in_effect_signature),
+        help("an operation's parameters and result cross the continuation seam, which carries one `i64` (ADR 0073 D1); pass the value rather than a reference to it")
+    )]
+    RefInEffectSignature {
+        #[label("reference in an effect operation's signature")]
+        span: miette::SourceSpan,
+    },
+
     /// ADR 0017 D7: references in ENUM variant payload types. A payload is
     /// heap-boxed storage — the same first-class-ref case as a struct field.
     #[error("references in enum variant payloads are not allowed at C2")]
@@ -5477,6 +5496,13 @@ pub fn check_module(
                     &mut arrays,
                     &struct_type_param_counts,
                 )?;
+                // ADR 0073 D1: an op parameter is reified into the continuation,
+                // whose seam is one `i64` — a reference cannot cross it.
+                if ty.carries_ref(&secrets) {
+                    return Err(TypeError::RefInEffectSignature {
+                        span: to_source_span(&p.ty.span),
+                    });
+                }
                 typed_params.push(TypedParam {
                     id: p.id,
                     mutable: p.mutable,
@@ -5503,6 +5529,17 @@ pub fn check_module(
                 )?,
                 None => Type::I64,
             };
+            // ADR 0073 D1: the return travels back through the same seam. Two
+            // unrelated checks already stop a use of one (the borrow layer's
+            // fail-closed source rule, and ADR 0072's `FITS`); stating it here puts
+            // the diagnostic on the declaration that created the obligation.
+            if return_type.carries_ref(&secrets) {
+                let span = match &op.return_type {
+                    Some(rt) => to_source_span(&rt.span),
+                    None => to_source_span(&op.span),
+                };
+                return Err(TypeError::RefInEffectSignature { span });
+            }
             typed_ops.push(TypedOpDecl {
                 name: op.name.clone(),
                 name_span: op.name_span.clone(),
@@ -12260,6 +12297,11 @@ fn type_error_to_diagnostic(err: &TypeError) -> Diagnostic {
             "references in class fields are not allowed at C2".to_string(),
             span.offset()..(span.offset() + span.len()),
         ),
+        TypeError::RefInEffectSignature { span } => (
+            "sentinel::types::ref_in_effect_signature",
+            "references are not allowed in an effect operation's signature".to_string(),
+            span.offset()..(span.offset() + span.len()),
+        ),
         TypeError::RefInEnumPayload { span } => (
             "sentinel::types::ref_in_enum_payload",
             "references in enum variant payloads are not allowed at C2".to_string(),
@@ -13249,6 +13291,47 @@ fn main() -> i64 {
             "struct Box<T> { v: T }\nfn mk<T>(x: T) -> Box<T> { Box { v: x } }\nfn main() -> i64 { let x: i64 = 5; let b = mk(&x); 0 }",
         );
         assert!(matches!(err, TypeError::RefInGenericField { .. }), "got {err:?}");
+    }
+
+    // ----- ADR 0073 D1 (the effect-op signature fence): an operation's parameters
+    // are reified into the continuation and its result comes back through the same
+    // seam, which is one `i64` wide. All four reference spellings reached codegen
+    // and aborted inkwell before this rule, on perfectly LIVE references. -----
+
+    #[test]
+    fn ref_in_effect_op_param_rejected() {
+        for ty in ["&i64", "&mut i64", "?&i64", "secret &i64"] {
+            let src = format!(
+                "effect Io {{ write(r: {ty}) -> i64; }}\nfn main() -> i64 {{ 0 }}"
+            );
+            let err = check_err(&src);
+            assert!(
+                matches!(err, TypeError::RefInEffectSignature { .. }),
+                "for `{ty}` got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn ref_in_effect_op_return_rejected() {
+        for ty in ["&i64", "&mut i64", "?&i64", "secret &i64"] {
+            let src = format!("effect Io {{ get() -> {ty}; }}\nfn main() -> i64 {{ 0 }}");
+            let err = check_err(&src);
+            assert!(
+                matches!(err, TypeError::RefInEffectSignature { .. }),
+                "for `{ty}` got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn secret_scalar_effect_op_ok() {
+        // The control. `secret i64` is in ADR 0072's `FITS`, so it crosses the seam
+        // and must stay legal — the fence is positional, not a ban on the type
+        // (ADR 0019 D5 / ADR 0073 D2).
+        check_ok(
+            "effect Io { write(s: secret i64) -> secret i64; }\nfn emit(s: secret i64) -> secret i64 ! { Io } { perform Io.write(s) }\nfn main() -> i64 { let s: secret i64 = 7; declassify(handle { emit(s) } with { Io.write(v, k) => k(v) }) }",
+        );
     }
 
     #[test]

@@ -1,0 +1,11 @@
+// ADR 0073 D1, the other direction: what a `k(v)` resume delivers crosses the same
+// one-`i64` seam. Two unrelated checks already stopped a USE of a ref-returning op —
+// the borrow layer's fail-closed source rule, and ADR 0072's `FITS` — but each fired
+// several lines from the declaration that made the use impossible, and either could
+// be re-scoped for its own reasons. The rule is stated once, here.
+effect Io {
+    get() -> &i64;
+}
+fn main() -> i64 {
+    0
+}

@@ -101,14 +101,39 @@ a `?&T`, which LLVM 18 will not assemble; the Rust and self-hosted MIR lowerers 
 `run_mir` never calls `borrow_check`); ADR 0017's own text credits the second-class rule to
 D6, which is about lexical-vs-Polonius; and a reference in an effect-op signature panics
 inkwell regardless of liveness (the deferred §2.8 fence). The first two positions are pinned
-by borrow-check unit tests instead of corpus fixtures, because every fixture in `tests/` is
-swept by those differentials.
+by borrow-check unit tests instead of corpus fixtures. Those differentials sweep every
+fixture that TYPE-CHECKS CLEANLY — `snc mir` and `snc llvm` discard borrow errors but bail
+on a type error — and both of these type-check, which is exactly why they were swept. A
+fixture the TYPE layer rejects is skipped, which is what makes ADR 0073's two safe.
 
 Four-check: 1,967 passed with exactly the 18 known Windows failures, doctests and clippy
 clean, every `selfhost_*` differential green. `docs/borrow-check-limitations.md` gains the
 closed-gap section, three new over-rejections and four Tracking rows;
 `docs/PROGRAMMING_GUIDE.md`'s "the one historical under-rejection … is closed" is corrected
-— over-claiming the guarantee is itself a bug. **Register: 85 items, 34 done.**
+— over-claiming the guarantee is itself a bug.
+
+**Also (2026-09-19) — [ADR 0073](decisions/0073-effect-op-signature-reference-fence.md):
+a reference may not appear in an effect-op signature. Closes D85.** An op's parameters are
+reified into the continuation when a `perform` suspends, and its result comes back through
+the same seam — one `i64` wide (`SentinelKont.arg: i64`, `sentinel_perform_op(i32, i64)`,
+`abi-v1.md` §3/§5). Nothing applied that constraint to the DECLARATION, so a reference in an
+op parameter passed every front-end stage and aborted inkwell ("Found PointerValue … but
+expected the IntValue variant") — on a perfectly LIVE reference, so it was never a question
+the borrow checker was going to answer, and a `panic!` on ordinary source besides. All four
+spellings (`&T`, `&mut T`, `?&T`, `secret &T`) aborted identically.
+
+D1 refuses them at the op declaration, keyed on `carries_ref`, parameters AND return. The
+return side was already stopped by two unrelated checks — the borrow layer's fail-closed
+source rule and ADR 0072's `FITS` — but each fired at a USE, several lines from the
+declaration that made the use impossible; the property is now stated once, where the
+obligation is created. ⚠ D3 REJECTS the broader `handle`-value fence: it over-rejects
+`n5g_handle_ref_retarm`, which the ref-escape slice deliberately keeps accepted, and a
+`handle`'s value never travels through a `Kont*`. Positional, not global — `secret &T`
+stays a legal type (ADR 0019 D5) and a `secret i64` op param stays legal (it is in `FITS`),
+both pinned by controls. **Corpus reach ZERO**: no `effect` block in the repo contains a
+`&`, measured by extracting every block. Rejection-only, so no `selfhost/` mirror; the two
+new ui fixtures are TYPE rejections, so the mir/codegen differentials skip them.
+**Register: 85 items, 35 done.**
 
 **Previously (2026-09-14) — D76: a captured frame pushed onto a pure-return kont was never run,
 and leaked. Runtime-only. NOT PUSHED.** An effecting fn whose body never performs returns
