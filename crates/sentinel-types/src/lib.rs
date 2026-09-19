@@ -880,6 +880,27 @@ impl Type {
         matches!(self, Type::Ref(_))
     }
 
+    /// `true` if a value of this type HOLDS a reference at the top level:
+    /// `&T`, `?&T`, or `secret` over either. The type-layer twin of
+    /// borrow-check's `carries_ref`, and the key every "references are
+    /// second-class" rule (ADR 0017 D7) tests: struct and class fields, enum
+    /// payloads, and the nested-ref gates. Those rules used `is_ref()`, which
+    /// sees only a bare `Type::Ref` — so a `?&T` or `secret &T` in the same
+    /// position walked straight through it.
+    ///
+    /// The match is deliberately NOT exhaustive-with-`_`-arm shaped by accident:
+    /// the two ref-carrying shapes are named, `Secret` recurses through its
+    /// payload, and everything else is a non-ref shape.
+    pub fn carries_ref(self, secrets: &[SecretData]) -> bool {
+        match self {
+            Type::Ref(_) | Type::Nullable(NullableInner::Ref(_)) => true,
+            Type::Secret(id) => secrets
+                .get(id.0 as usize)
+                .is_some_and(|sd| sd.inner.carries_ref(secrets)),
+            _ => false,
+        }
+    }
+
     /// Try to demote this Type to a [`NullableInner`] for use as
     /// the payload of a `Nullable`. Returns `None` for `Nullable`
     /// (would be nested per ADR 0014 D6) AND for `Array` (the
@@ -2315,7 +2336,10 @@ fn resolve_type_expr_with_scope(
                 arrays,
                 struct_type_param_counts,
             )?;
-            if inner_ty.is_ref() {
+            // ADR 0017 D7: `&?&T` / `&mut ?&T` / `&secret &T` are nested refs
+            // too. `is_ref()` saw only a bare `&T`, so a `&mut ?&i64` slot let a
+            // callee store `&local` into the caller's slot.
+            if inner_ty.carries_ref(secrets) {
                 return Err(TypeError::NestedRef {
                     span: to_source_span(&te.span),
                 });
@@ -5343,7 +5367,9 @@ pub fn check_module(
             // C2 / ADR 0017 D7 / D12: refs can't live in struct
             // fields at C2 — that's the first-class-refs case,
             // deferred until named regions land.
-            if ty.is_ref() {
+            // A `?&T` or `secret &T` field is the same first-class-ref case
+            // (was `is_ref()`, which saw neither).
+            if ty.carries_ref(&secrets) {
                 return Err(TypeError::RefInStructField {
                     span: to_source_span(&f.ty.span),
                 });
@@ -9179,7 +9205,7 @@ fn check_expr(
                     // Reject `&&T` at the type level — though the
                     // lexer + parser typically rule this out via
                     // longest-match (`&&` lexes as logical-and).
-                    if inner_ty.is_ref() {
+                    if inner_ty.carries_ref(secrets) {
                         return Err(TypeError::NestedRef {
                             span: to_source_span(&expr.span),
                         });
