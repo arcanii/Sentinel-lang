@@ -1,0 +1,13 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c21_ref_in_generic_field_call.sentinel\")"
+---
+sentinel::types::ref_in_generic_field
+
+  × generic struct `Box` would store a reference in a field
+   ╭─[tests/ui/c21_ref_in_generic_field_call.sentinel:4:44]
+ 3 │ fn mk<T>(x: T) -> Box<T> { Box { v: x } }
+ 4 │ fn main() -> i64 { let x: i64 = 5; let b = mk(&x); *b.v }
+   ·                                            ───┬──
+   ·                                               ╰── 
+   ╰────

@@ -1,0 +1,37 @@
+// ADR 0017 D7: a `delegate` field is a class field — resolve folds it into the
+// same field list — so a reference in one is the same first-class-ref case. It
+// is worth its own fixture because the delegate spelling names its type in a
+// different production from `let`, so a rule that only walked `let` fields
+// would miss it and nothing else in the corpus would notice.
+
+trait Peek {
+    fn peek(self: &Self) -> i64;
+}
+
+class Inner {
+    let v: i64;
+    init(v: i64) {
+        self.v = v;
+        0
+    }
+}
+
+impl as Peek for Inner {
+    fn peek(self: &Self) -> i64 {
+        self.v
+    }
+}
+
+class Holder {
+    delegate inner: &Inner to Peek;
+    init(i: &Inner) {
+        self.inner = i;
+        0
+    }
+}
+
+fn main() -> i64 {
+    let i: Inner = Inner::init(5);
+    let h: Holder = Holder::init(&i);
+    42
+}

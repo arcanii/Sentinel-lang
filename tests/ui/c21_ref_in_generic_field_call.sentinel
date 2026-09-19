@@ -1,0 +1,4 @@
+// A type argument that lands in a FIELD cannot be a reference (a phantom one can).
+struct Box<T> { v: T }
+fn mk<T>(x: T) -> Box<T> { Box { v: x } }
+fn main() -> i64 { let x: i64 = 5; let b = mk(&x); *b.v }

@@ -1,0 +1,11 @@
+// ADR 0017 D7: `&p` where `p: ?&i64` builds a nested reference by INFERENCE,
+// with no `&?&i64` written anywhere. The written spelling is caught by the gate
+// on type expressions; this one can only be caught at the borrow expression,
+// and that gate tested `is_ref()`, which a `?&T` is not. So this shape stayed
+// open even for programs whose written twin was rejected.
+fn main() -> i64 {
+    let z: i64 = 1;
+    let p: ?&i64 = &z;
+    let q = &p;
+    *unwrap_or(*q, &z)
+}

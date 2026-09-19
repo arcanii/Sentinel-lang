@@ -1,0 +1,14 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c21_nested_ref_inferred.sentinel\")"
+---
+sentinel::types::nested_ref
+
+  × nested references `&&T` are not allowed
+    ╭─[tests/ui/c21_nested_ref_inferred.sentinel:9:13]
+  8 │     let p: ?&i64 = &z;
+  9 │     let q = &p;
+    ·             ─┬
+    ·              ╰── 
+ 10 │     *unwrap_or(*q, &z)
+    ╰────

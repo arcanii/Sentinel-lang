@@ -278,3 +278,15 @@ ui_snapshot!(c52_secret_divisor, "c52_secret_divisor.sentinel");
 // ---- Fuzzer-found parse robustness (review F11 / P2.5): a trailing `pub`
 // with no item used to panic (`unreachable!`); now a clean unexpected_eof. ----
 ui_snapshot!(parse_trailing_pub, "parse_trailing_pub.sentinel");
+
+// ADR 0017 D7 (ref-escape): references are second-class, so they cannot be
+// stored in an aggregate, and a reference to a reference is not a type. These
+// pin the positions where the rules keyed on `is_ref()` and so saw nothing.
+ui_snapshot!(c21_nested_nullable_ref, "c21_nested_nullable_ref.sentinel");
+ui_snapshot!(c21_nested_ref_inferred, "c21_nested_ref_inferred.sentinel");
+ui_snapshot!(c21_nullable_ref_struct_field, "c21_nullable_ref_struct_field.sentinel");
+ui_snapshot!(c21_ref_in_class_field, "c21_ref_in_class_field.sentinel");
+ui_snapshot!(c21_ref_in_class_field_delegate, "c21_ref_in_class_field_delegate.sentinel");
+ui_snapshot!(c21_ref_in_enum_payload, "c21_ref_in_enum_payload.sentinel");
+ui_snapshot!(c21_ref_in_generic_field_call, "c21_ref_in_generic_field_call.sentinel");
+ui_snapshot!(c21_ref_in_generic_field_literal, "c21_ref_in_generic_field_literal.sentinel");

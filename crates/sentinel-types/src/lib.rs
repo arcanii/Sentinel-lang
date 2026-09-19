@@ -4538,6 +4538,46 @@ pub enum TypeError {
         span: miette::SourceSpan,
     },
 
+    /// ADR 0017 D7: references in CLASS field types — the class twin of
+    /// [`TypeError::RefInStructField`]. `delegate` fields resolve into the same
+    /// field list, so they are covered here too.
+    #[error("references in class fields are not allowed at C2")]
+    #[diagnostic(
+        code(sentinel::types::ref_in_class_field),
+        help("first-class refs (storable in class fields) need named regions per ADR 0017 D7; this is deferred to a later ADR")
+    )]
+    RefInClassField {
+        #[label("reference in class field type")]
+        span: miette::SourceSpan,
+    },
+
+    /// ADR 0017 D7: references in ENUM variant payload types. A payload is
+    /// heap-boxed storage — the same first-class-ref case as a struct field.
+    #[error("references in enum variant payloads are not allowed at C2")]
+    #[diagnostic(
+        code(sentinel::types::ref_in_enum_payload),
+        help("first-class refs (storable in enum payloads) need named regions per ADR 0017 D7; this is deferred to a later ADR")
+    )]
+    RefInEnumPayload {
+        #[label("reference in variant payload type")]
+        span: miette::SourceSpan,
+    },
+
+    /// ADR 0017 D7: a generic struct instantiated so that one of its FIELDS
+    /// holds a reference (`Box<&i64>` where the field is `v: T`). A phantom ref
+    /// type argument — one no field uses — stays allowed; the corpus relies on
+    /// it (`Tagged<i64, &mut i64>`, `Pair<i64, &[[u8]]>`).
+    #[error("generic struct `{struct_name}` would store a reference in a field")]
+    #[diagnostic(
+        code(sentinel::types::ref_in_generic_field),
+        help("a type argument that lands in a field cannot be a reference (ADR 0017 D7: refs are second-class); pass the value, or the reference separately")
+    )]
+    RefInGenericField {
+        struct_name: String,
+        #[label("this value's type stores a reference in a field of `{struct_name}`")]
+        span: miette::SourceSpan,
+    },
+
     /// C2 / ADR 0017 D3 + D5: `&expr` / `&mut expr` requires the
     /// operand to be an lvalue (a place — Var, deref, field-access,
     /// or index). R-value borrowing like `&5` or `&(a + b)` is
@@ -5301,7 +5341,7 @@ pub fn check_module(
         for v in &ed.variants {
             let mut payloads = Vec::with_capacity(v.payloads.len());
             for p in &v.payloads {
-                payloads.push(resolve_type_expr(
+                let pty = resolve_type_expr(
                     p,
                     &struct_table,
                     &class_table,
@@ -5311,7 +5351,15 @@ pub fn check_module(
                     &mut secrets,
                     &mut arrays,
                     &struct_type_param_counts,
-                )?);
+                )?;
+                // ADR 0017 D7: a payload is heap-boxed storage, so a reference
+                // in one is the first-class-ref case a struct field already is.
+                if pty.carries_ref(&secrets) {
+                    return Err(TypeError::RefInEnumPayload {
+                        span: to_source_span(&p.span),
+                    });
+                }
+                payloads.push(pty);
             }
             variants.push(VariantData {
                 name: v.name.clone(),
@@ -6276,6 +6324,13 @@ pub fn check_module(
                 &mut arrays,
                 &struct_type_param_counts,
             )?;
+            // ADR 0017 D7: the class twin of the struct-field rule. `delegate`
+            // fields land in this same list, so they are covered here.
+            if ty.carries_ref(&secrets) {
+                return Err(TypeError::RefInClassField {
+                    span: to_source_span(&f.ty.span),
+                });
+            }
             fields.push(TypedClassField {
                 visibility: f.visibility,
                 name: f.name.clone(),
@@ -8283,6 +8338,57 @@ fn unify_one(
     }
 }
 
+/// ADR 0017 D7: if a value of type `ty` would hold a reference inside a
+/// GENERIC-STRUCT FIELD once the instance's type arguments are substituted,
+/// return that struct's name.
+///
+/// A phantom ref type argument — one no field uses — is deliberately NOT
+/// flagged: the corpus depends on those. A plain top-level `&T` is not an
+/// aggregate and is not flagged here either; the field rules cover storage.
+fn generic_field_ref_owner(
+    ty: Type,
+    structs: &[TypedStructDecl],
+    instances: &mut Vec<GenericInstanceData>,
+    refs: &mut Vec<RefData>,
+    secrets: &[SecretData],
+    seen: &mut Vec<GenericInstanceId>,
+) -> Option<String> {
+    let gi = match ty {
+        Type::GenericInstance(id)
+        | Type::Nullable(NullableInner::GenericInstance(id))
+        | Type::Array(ArrayElem::GenericInstance(id))
+        | Type::Vec(VecElem::GenericInstance(id)) => id,
+        Type::Secret(sid) => {
+            let inner = secrets.get(sid.0 as usize)?.inner;
+            return generic_field_ref_owner(inner, structs, instances, refs, secrets, seen);
+        }
+        Type::Ref(rid) => {
+            let inner = refs.get(rid.0 as usize)?.inner;
+            return generic_field_ref_owner(inner, structs, instances, refs, secrets, seen);
+        }
+        _ => return None,
+    };
+    // A generic instance can reach itself through a field; stop at the cycle.
+    if seen.contains(&gi) {
+        return None;
+    }
+    seen.push(gi);
+    let inst = instances.get(gi.0 as usize)?.clone();
+    let decl = structs.get(inst.struct_id.0 as usize)?;
+    let field_tys: Vec<Type> = decl.fields.iter().map(|f| f.ty).collect();
+    let name = decl.name.clone();
+    for fty in field_tys {
+        let sub = fty.substitute(&inst.args, instances, refs);
+        if sub.carries_ref(secrets) {
+            return Some(name);
+        }
+        if let Some(n) = generic_field_ref_owner(sub, structs, instances, refs, secrets, seen) {
+            return Some(n);
+        }
+    }
+    None
+}
+
 /// Type-check a fn call per ADR 0016 D4 / D7c / D8a. Handles both
 /// non-generic calls (signature.type_params is empty) and generic
 /// calls (TypeParams in param / return types). For generic calls,
@@ -8964,6 +9070,19 @@ fn check_call(
     let ret_ty = signature
         .return_type
         .substitute(&concrete_type_args, instances, refs);
+    // ADR 0017 D7: a generic call can MINT an aggregate holding a reference in a
+    // field — `mk(&x)` returning `Box<&i64>`, built by `Box { v: x }` inside the
+    // abstract body, which the struct-literal check below never sees.
+    if n_type_params > 0 {
+        if let Some(struct_name) =
+            generic_field_ref_owner(ret_ty, structs, instances, refs, secrets, &mut Vec::new())
+        {
+            return Err(TypeError::RefInGenericField {
+                struct_name,
+                span: to_source_span(call_span),
+            });
+        }
+    }
 
     let typed_args: Vec<TypedExpr> =
         typed_args.into_iter().map(|o| o.expect("filled above")).collect();
@@ -9878,6 +9997,14 @@ fn check_expr(
                 } else {
                     raw_field_ty.substitute(&type_args, instances, refs)
                 };
+                // ADR 0017 D7: a generic struct literal whose instance puts a
+                // reference in THIS field (`let b: Box<&i64> = Box { v: &x }`).
+                if !type_args.is_empty() && expected_field_ty.carries_ref(secrets) {
+                    return Err(TypeError::RefInGenericField {
+                        struct_name: decl.name.clone(),
+                        span: to_source_span(&fi.value.span),
+                    });
+                }
                 // ADR 0014 D5: push the field's expected type down so
                 // `null` / widening work inside struct literals.
                 let value_t = check_expr(
@@ -12119,6 +12246,21 @@ fn type_error_to_diagnostic(err: &TypeError) -> Diagnostic {
             "references in struct fields are not allowed at C2".to_string(),
             span.offset()..(span.offset() + span.len()),
         ),
+        TypeError::RefInClassField { span } => (
+            "sentinel::types::ref_in_class_field",
+            "references in class fields are not allowed at C2".to_string(),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        TypeError::RefInEnumPayload { span } => (
+            "sentinel::types::ref_in_enum_payload",
+            "references in enum variant payloads are not allowed at C2".to_string(),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        TypeError::RefInGenericField { struct_name, span } => (
+            "sentinel::types::ref_in_generic_field",
+            format!("generic struct `{struct_name}` would store a reference in a field"),
+            span.offset()..(span.offset() + span.len()),
+        ),
         TypeError::BorrowOfRvalue { span } => (
             "sentinel::types::borrow_of_rvalue",
             "cannot borrow a non-lvalue expression".to_string(),
@@ -13034,6 +13176,78 @@ fn main() -> i64 {
         assert!(
             matches!(err, TypeError::RefInStructField { .. }),
             "got {err:?}"
+        );
+    }
+
+    // ----- ADR 0017 D7 (ref-escape): references are second-class, so they
+    // cannot be stored in ANY aggregate, and `&&T` is not a type. Each rule
+    // keyed on `is_ref()`, which matches only a bare `Type::Ref`. -----
+
+    #[test]
+    fn nullable_ref_struct_field_rejected() {
+        // `?&T` in the position `&T` was already refused.
+        let err = check_err("struct Bad { r: ?&i64 }\nfn main() -> i64 { 0 }");
+        assert!(matches!(err, TypeError::RefInStructField { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn nested_nullable_ref_rejected() {
+        // `&mut ?&T` written as a type expression.
+        let err = check_err(
+            "fn stash(slot: &mut ?&i64) -> i64 { 0 }\nfn main() -> i64 { 0 }",
+        );
+        assert!(matches!(err, TypeError::NestedRef { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn nested_ref_from_inference_rejected() {
+        // The same nested reference built by INFERENCE, with no `&?&i64`
+        // written: only the borrow-expression gate can see this one.
+        let err = check_err(
+            "fn main() -> i64 { let z: i64 = 1; let p: ?&i64 = &z; let q = &p; 0 }",
+        );
+        assert!(matches!(err, TypeError::NestedRef { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn ref_in_class_field_rejected() {
+        let err = check_err(
+            "class Cell { let r: &i64;\n init(r: &i64) { self.r = r; 0 } }\nfn main() -> i64 { 0 }",
+        );
+        assert!(matches!(err, TypeError::RefInClassField { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn ref_in_enum_payload_rejected() {
+        let err = check_err("enum Box { Ref(&i64) }\nfn main() -> i64 { 0 }");
+        assert!(matches!(err, TypeError::RefInEnumPayload { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn ref_in_generic_field_literal_rejected() {
+        // The instance puts the reference in a field of the literal.
+        let err = check_err(
+            "struct Box<T> { v: T }\nfn main() -> i64 { let x: i64 = 5; let b: Box<&i64> = Box { v: &x }; 0 }",
+        );
+        assert!(matches!(err, TypeError::RefInGenericField { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn ref_in_generic_field_call_rejected() {
+        // The generic call MINTS the aggregate; the struct literal that builds
+        // it lives in the abstract body, where the field type is still `T`.
+        let err = check_err(
+            "struct Box<T> { v: T }\nfn mk<T>(x: T) -> Box<T> { Box { v: x } }\nfn main() -> i64 { let x: i64 = 5; let b = mk(&x); 0 }",
+        );
+        assert!(matches!(err, TypeError::RefInGenericField { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn phantom_ref_type_arg_ok() {
+        // A ref type argument no FIELD uses stores nothing, so it stays legal —
+        // the corpus relies on this.
+        check_ok(
+            "struct Tag<A, B> { v: A }\nfn main() -> i64 { let x: i64 = 5; let t: Tag<i64, &i64> = Tag { v: 7 }; t.v }",
         );
     }
 

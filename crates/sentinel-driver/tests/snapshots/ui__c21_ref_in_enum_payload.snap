@@ -1,0 +1,13 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c21_ref_in_enum_payload.sentinel\")"
+---
+sentinel::types::ref_in_enum_payload
+
+  × references in enum variant payloads are not allowed at C2
+   ╭─[tests/ui/c21_ref_in_enum_payload.sentinel:1:16]
+ 1 │ enum Box { Ref(&i64) }
+   ·                ──┬─
+   ·                  ╰── 
+ 2 │ fn main() -> i64 { let x: i64 = 5; let b: Box = Box::Ref(&x); match b { Box::Ref(r) => *r } }
+   ╰────

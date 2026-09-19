@@ -1,0 +1,2 @@
+struct S { r: ?&i64 }
+fn main() -> i64 { let x: i64 = 5; let z: i64 = 0; let s: S = S { r: &x }; *unwrap_or(s.r, &z) }
