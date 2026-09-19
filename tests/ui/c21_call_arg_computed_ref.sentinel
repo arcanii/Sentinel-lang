@@ -1,0 +1,11 @@
+// A reference produced by a BLOCK and passed straight into a call. The block's
+// local dies at its closing brace, so the callee receives a dangling reference —
+// and the operand is bound to nothing, so the let-RHS, assignment and return
+// checks all look right past it.
+fn read_after_spray(r: &i64) -> i64 { *r }
+fn main() -> i64 {
+    read_after_spray({
+        let v: [i64] = [5, 5, 5, 5];
+        &v[0]
+    })
+}

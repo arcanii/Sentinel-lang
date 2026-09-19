@@ -1,0 +1,14 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c23_move_while_borrowed.sentinel\")"
+---
+sentinel::borrow::move_while_borrowed
+
+  × cannot move out of `data` while it is borrowed
+   ╭─[tests/ui/c23_move_while_borrowed.sentinel:6:29]
+ 5 │     let p: &i64 = &data[0];
+ 6 │     let dropped: i64 = sink(data);
+   ·                             ──┬─
+   ·                               ╰── 
+ 7 │     *p
+   ╰────

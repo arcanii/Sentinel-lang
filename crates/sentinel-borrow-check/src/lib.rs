@@ -342,6 +342,108 @@ pub enum BorrowError {
         #[label("moved out of `self` here")]
         move_span: miette::SourceSpan,
     },
+
+    /// A binding is moved while a borrow of it is still active
+    /// (lexically). The move may transfer ownership to a callee that frees it,
+    /// leaving the reference dangling (RESULTS R14). The lexical rule: a place
+    /// cannot be moved out of while it is borrowed.
+    #[error("cannot move out of `{binding_name}` while it is borrowed")]
+    #[diagnostic(
+        code(sentinel::borrow::move_while_borrowed),
+        help("the reference into `{binding_name}` must die before it is moved; end the borrow's scope first (wrap it in an inner block)")
+    )]
+    MoveWhileBorrowed {
+        binding_name: String,
+        #[label("borrowed here")]
+        borrow_span: miette::SourceSpan,
+        #[label("moved here while still borrowed")]
+        move_span: miette::SourceSpan,
+    },
+
+    /// A reference-carrying value is stored into a place other
+    /// than a binding (a field, an element, or through a deref). Refs are
+    /// second-class (ADR 0017 D6/D7): they may live only in bindings, where the
+    /// checker tracks them. Unreachable while the type layer's rules hold; this
+    /// is the fail-closed backstop.
+    #[error("a reference cannot be stored into `{place}`")]
+    #[diagnostic(
+        code(sentinel::borrow::ref_stored_into_place),
+        help("references are second-class (ADR 0017 D7): bind the reference to a `let` instead of storing it in a field, element, or through a dereference")
+    )]
+    RefStoredIntoPlace {
+        place: String,
+        #[label("reference stored here")]
+        span: miette::SourceSpan,
+    },
+
+    /// A `let` binding is INITIALIZED with a reference to storage that is
+    /// already dead — a block-local whose scope just closed, or a temporary:
+    ///
+    /// ```text
+    /// let r: &i64 = { let inner: i64 = 5; &inner };  // ERROR: `inner` is gone
+    /// ```
+    ///
+    /// Distinct from [`BorrowError::OutlivesSource`], which fires where such a
+    /// reference is READ. This one fires at the binding, which is both earlier
+    /// and where the fix belongs.
+    #[error("`{binding_name}` would be bound to a reference into `{source_name}`, which is already gone")]
+    #[diagnostic(
+        code(sentinel::borrow::ref_outlives_binding),
+        help("`{source_name}` dies before `{binding_name}` does; give the value its own `let` in the same scope as `{binding_name}` and borrow that, or bind it by copy instead of by reference")
+    )]
+    RefOutlivesBinding {
+        binding_name: String,
+        source_name: String,
+        #[label("source binding here")]
+        source_span: miette::SourceSpan,
+        #[label("bound here")]
+        init_span: miette::SourceSpan,
+    },
+
+    /// A reference-typed binding is RE-POINTED by assignment at storage that
+    /// does not live as long as the binding — either already dead, or a local
+    /// declared in a deeper scope (which dies first):
+    ///
+    /// ```text
+    /// let mut q: &i64 = &outer;
+    /// { let inner: i64 = 5; q = &inner; }  // ERROR: `inner` dies at the brace
+    /// ```
+    ///
+    /// Checking this is what makes the strong update sound: the target can
+    /// never come to point at something narrower than itself.
+    #[error("`{binding_name}` would be re-pointed at `{source_name}`, which does not live as long as it does")]
+    #[diagnostic(
+        code(sentinel::borrow::ref_outlives_assignment),
+        help("`{source_name}` dies before `{binding_name}` does; assign a reference whose source outlives `{binding_name}`, or narrow `{binding_name}` to an inner scope")
+    )]
+    RefOutlivesAssignment {
+        binding_name: String,
+        source_name: String,
+        #[label("source here")]
+        source_span: miette::SourceSpan,
+        #[label("assigned here")]
+        assign_span: miette::SourceSpan,
+    },
+
+    /// A reference-carrying value is passed as a call argument or dereferenced
+    /// AS AN OPERAND, and the storage it points at is already dead. The operand
+    /// is bound to nothing, so no other check sees it:
+    ///
+    /// ```text
+    /// read(&{ let v: [i64] = [5]; &v[0] })  // ERROR: `v` dies at the brace
+    /// ```
+    #[error("this operand carries a reference into `{source_name}`, which is already gone")]
+    #[diagnostic(
+        code(sentinel::borrow::ref_operand_dead),
+        help("`{source_name}` dies before the operand is used; give the value its own `let` in a scope that outlives the call and pass a reference to that, or pass it by copy")
+    )]
+    RefOperandDead {
+        source_name: String,
+        #[label("source here")]
+        source_span: miette::SourceSpan,
+        #[label("dead reference used here")]
+        use_span: miette::SourceSpan,
+    },
 }
 
 // =============================================================================
@@ -350,7 +452,7 @@ pub enum BorrowError {
 
 /// What a ref-typed binding ultimately points to, for liveness
 /// purposes. See module doc.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum BorrowSource {
     /// Tied to a specific binding in this fn (let or by-value
     /// param). The VarId lets us look up the source's name + span
@@ -367,6 +469,13 @@ enum BorrowSource {
     /// source. Treated like Local for lifetime purposes; no place-
     /// key, so no XOR tracking applies.
     LocalAnonymous,
+    /// Points into storage that is already dead once the
+    /// current statement ends — a temporary (the non-place base of a borrow or
+    /// receiver), or anything the source function cannot attribute. The MOST
+    /// restrictive source: never alive at a later read, never returnable. This
+    /// is what makes `source_of_expr` total: an unmodelled ref-carrying kind
+    /// fails CLOSED here instead of returning `None` (= accepted).
+    Temporary,
 }
 
 impl BorrowSource {
@@ -375,8 +484,66 @@ impl BorrowSource {
     fn place_key(self) -> Option<VarId> {
         match self {
             BorrowSource::Local(id) | BorrowSource::Incoming(id) => Some(id),
-            BorrowSource::LocalAnonymous => None,
+            BorrowSource::LocalAnonymous | BorrowSource::Temporary => None,
         }
+    }
+}
+
+/// Does a value of this type hold a reference? Refs are
+/// second-class (ADR 0017 D6/D7): the type layer keeps them out of struct/class
+/// fields, enum payloads, array/Vec/container elements and generic-instance
+/// FIELDS, so the only ref-carrying types are a ref, a nullable ref, and
+/// `secret` over either. EXHAUSTIVE ON PURPOSE — a new variant must be
+/// classified deliberately (a wrong `false` re-opens the gate-skip routes).
+fn carries_ref(ty: Type, program: &TypedProgram) -> bool {
+    match ty {
+        Type::Ref(_) => true,
+        Type::Nullable(inner) => match inner {
+            NullableInner::Ref(_) => true,
+            NullableInner::I64
+            | NullableInner::I32
+            | NullableInner::Bool
+            | NullableInner::U8
+            | NullableInner::U128
+            | NullableInner::F64
+            | NullableInner::Ptr
+            | NullableInner::Struct(_)
+            | NullableInner::TypeParam(_)
+            | NullableInner::GenericInstance(_)
+            | NullableInner::Guard(_)
+            | NullableInner::Channel(_) => false,
+        },
+        Type::Secret(id) => carries_ref(program.secret_data(id).inner, program),
+        // Aggregates: ref-free by the type layer's second-class rules (struct /
+        // class fields, enum payloads, generic-instance FIELDS; a phantom ref type
+        // ARG on a generic struct is allowed and carries nothing).
+        Type::Struct(_)
+        | Type::Class(_)
+        | Type::Enum(_)
+        | Type::GenericInstance(_)
+        | Type::Array(_)
+        | Type::Vec(_)
+        // A generic body's `T` is abstract; the body can only hand back what it
+        // was given (it can form `&T`, never a `T` pointing at its own frame).
+        | Type::TypeParam(_)
+        | Type::TraitSelf(_)
+        // Handles + scalars: element / result types are word scalars.
+        | Type::I64
+        | Type::I32
+        | Type::U8
+        | Type::U128
+        | Type::F64
+        | Type::Ptr
+        | Type::Bool
+        | Type::Kont(_)
+        | Type::Task(_)
+        | Type::Channel(_)
+        | Type::Process
+        | Type::SealedChannel
+        | Type::Fn(_)
+        | Type::Shared(_)
+        | Type::Mutex(_)
+        | Type::Guard(_) => false,
     }
 }
 
@@ -405,6 +572,9 @@ struct BorrowInstance {
     /// this borrow — used as the "prior borrow" label.
     span: Span,
     lifetime: BorrowLifetime,
+    /// Creation order, so the borrows taken while evaluating one
+    /// sub-expression can be ended when it completes (`end_transients_since`).
+    seq: u64,
 }
 
 /// Per-place active-borrow state. Per ADR 0017 D6's shared-XOR-
@@ -435,7 +605,18 @@ struct FnCtx {
     /// For every ref-typed binding, what does it point to? Updated
     /// at declaration time + on `*` deref-assignment and var
     /// re-assignment of ref-typed bindings.
-    ref_source: HashMap<VarId, BorrowSource>,
+    /// `Some(None)` = a declared ref-carrying binding that points
+    /// at nothing fn-local (initialized from `null`); a MISSING entry for a
+    /// ref-carrying binding (an unseeded pattern binding / handler param) fails
+    /// closed as `Temporary` at every read and flow.
+    ref_source: HashMap<VarId, Option<BorrowSource>>,
+    /// Declaration scope depth of every binding, for the
+    /// binding-widening check and the depth-aware source merge.
+    var_depth: HashMap<VarId, usize>,
+    /// The enclosing fn's name + whether its return type carries
+    /// a ref, so a `return` operand is checked AT the return site.
+    fn_name: String,
+    returns_ref: bool,
     /// Stack of scopes; each scope is the list of VarIds
     /// declared in it. Popping a scope removes those VarIds from
     /// [`var_in_scope`].
@@ -479,6 +660,19 @@ struct FnCtx {
     /// Register D61: the method's (or init's) `self` binding, which is always a
     /// borrow, so nothing Move-typed may be moved out of it. `None` in a free fn.
     self_var: Option<VarId>,
+    /// Next `BorrowInstance::seq`.
+    next_seq: u64,
+    /// Sources already reported dead in this fn. One dead binding is reachable
+    /// from many positions at once — the `let` that binds it, every later read of
+    /// that binding, and every operand the reference flows into — and each of
+    /// those is the SAME mistake. The first report wins (it is the earliest in
+    /// program order, so the most actionable) and the rest are dropped.
+    ///
+    /// Only the duplicates go: at least one report always survives, so a program
+    /// with a dead reference is still rejected. `ReturnsLocalRef` is deliberately
+    /// outside this set — escaping the function is a distinct hazard with a
+    /// distinct fix, and it names the function, so it is worth saying separately.
+    reported_dead: HashSet<BorrowSource>,
 }
 
 #[derive(Debug, Clone)]
@@ -492,6 +686,9 @@ impl FnCtx {
         Self {
             var_info: HashMap::new(),
             ref_source: HashMap::new(),
+            var_depth: HashMap::new(),
+            fn_name: String::new(),
+            returns_ref: false,
             scopes: Vec::new(),
             var_in_scope: HashMap::new(),
             places: HashMap::new(),
@@ -499,6 +696,8 @@ impl FnCtx {
             moved_sources_union: HashSet::new(),
             moved_fields: HashMap::new(),
             moved_fields_union: HashSet::new(),
+            next_seq: 0,
+            reported_dead: HashSet::new(),
             self_var: None,
         }
     }
@@ -539,6 +738,7 @@ impl FnCtx {
             top.push(id);
         }
         self.var_in_scope.insert(id, ());
+        self.var_depth.insert(id, self.current_depth());
         self.var_info.insert(id, VarInfo { name, span });
     }
 
@@ -552,6 +752,90 @@ impl FnCtx {
             // — the check that matters for this variant is the fn-
             // return check (it can't escape via return).
             BorrowSource::LocalAnonymous => true,
+            // A temporary is dead by the next statement.
+            BorrowSource::Temporary => false,
+        }
+    }
+
+    /// Is this the FIRST time `source` is reported dead in this fn? Records it
+    /// either way. See [`FnCtx::reported_dead`].
+    fn first_report_of(&mut self, source: BorrowSource) -> bool {
+        self.reported_dead.insert(source)
+    }
+
+    /// The recorded source of a ref-carrying binding, failing
+    /// CLOSED (`Temporary`) when the binding was never seeded.
+    fn var_source(&self, id: VarId) -> Option<BorrowSource> {
+        match self.ref_source.get(&id) {
+            Some(s) => *s,
+            None => Some(BorrowSource::Temporary),
+        }
+    }
+
+    /// How restrictive a source is, for the merge. Dead (a
+    /// temporary, or a Local whose scope already ended) beats every live one; a
+    /// live Local declared DEEPER dies first; then anonymous; then incoming.
+    fn restrictiveness(&self, s: BorrowSource) -> (u8, usize) {
+        match s {
+            BorrowSource::Local(id) if !self.var_in_scope.contains_key(&id) => (5, 1),
+            BorrowSource::Temporary => (5, 0),
+            BorrowSource::Local(id) => (4, self.var_depth.get(&id).copied().unwrap_or(0)),
+            BorrowSource::LocalAnonymous => (2, 0),
+            BorrowSource::Incoming(_) => (1, 0),
+        }
+    }
+
+    /// Root every borrow that is transient, or rooted in a scope
+    /// DEEPER than `depth`, at `depth` — a ref-carrying value stored into a binding
+    /// declared at `depth` keeps its places borrowed for that binding's life.
+    fn root_borrows_at(&mut self, depth: usize) {
+        for state in self.places.values_mut() {
+            for b in state.shared.iter_mut().chain(state.mut_borrow.iter_mut()) {
+                match b.lifetime {
+                    BorrowLifetime::Transient => b.lifetime = BorrowLifetime::UntilScope(depth),
+                    BorrowLifetime::UntilScope(d) if d > depth => {
+                        b.lifetime = BorrowLifetime::UntilScope(depth)
+                    }
+                    BorrowLifetime::UntilScope(_) => {}
+                }
+            }
+        }
+    }
+
+    /// Pop a scope whose VALUE carries a ref: the borrows rooted
+    /// in it may back that value, so they survive the pop as TRANSIENT (the
+    /// enclosing statement then roots them in its binding, or clears them).
+    fn pop_scope_yield(&mut self, yields_ref: bool) {
+        if yields_ref {
+            let d = self.current_depth();
+            for state in self.places.values_mut() {
+                for b in state.shared.iter_mut().chain(state.mut_borrow.iter_mut()) {
+                    if b.lifetime == BorrowLifetime::UntilScope(d) {
+                        b.lifetime = BorrowLifetime::Transient;
+                    }
+                }
+            }
+        }
+        self.pop_scope();
+    }
+
+    /// End the TRANSIENT borrows created since `mark`. Called when
+    /// a sub-expression whose value carries no ref has been evaluated (a call
+    /// returning a non-ref, an `if` condition): refs are second-class, so nothing
+    /// that expression was lent can outlive it. Keeps `if pred(&x) { x } else ..`
+    /// (selfhost `fixpoint`) clear of the move-while-borrowed rule.
+    fn end_transients_since(&mut self, mark: u64) {
+        for state in self.places.values_mut() {
+            state
+                .shared
+                .retain(|b| !(b.lifetime == BorrowLifetime::Transient && b.seq >= mark));
+            if state
+                .mut_borrow
+                .as_ref()
+                .is_some_and(|b| b.lifetime == BorrowLifetime::Transient && b.seq >= mark)
+            {
+                state.mut_borrow = None;
+            }
         }
     }
 
@@ -817,12 +1101,20 @@ fn check_body(
     errors: &mut Vec<BorrowError>,
 ) -> (BTreeSet<VarId>, BTreeSet<(VarId, u32)>) {
     let mut ctx = FnCtx::new();
+    // The fn body is scope 0 and every nested scope is >= 1.
+    // Without this push the body and the FIRST nested scope both sat at depth 0,
+    // so popping any inner block / if-branch / match arm / loop body erased every
+    // borrow the body had rooted (write-while-borrowed and `&mut`-vs-`&` then went
+    // unchecked for the rest of the fn: a `push` could realloc under a live `&v[0]`).
+    ctx.push_scope();
+    ctx.fn_name = fn_name.to_string();
+    ctx.returns_ref = return_type.is_some_and(|t| carries_ref(t, program));
     // Register D61: `self` is an INCOMING borrow — the caller owns the object — so it
     // is alive for the whole body, may be returned through, and nothing Move-typed may
     // be moved out of it (`ctx.self_var`).
     if let Some((id, span)) = self_var {
         ctx.declare(id, "self".to_string(), span.clone());
-        ctx.ref_source.insert(id, BorrowSource::Incoming(id));
+        ctx.ref_source.insert(id, Some(BorrowSource::Incoming(id)));
         ctx.self_var = Some(id);
     }
     // Register params at "depth 0" — they're alive for the whole
@@ -831,9 +1123,9 @@ fn check_body(
     // source (the caller owns the underlying place).
     for param in params {
         ctx.declare(param.id, param.name.clone(), param.span.clone());
-        if param.ty.is_ref() {
+        if carries_ref(param.ty, program) {
             ctx.ref_source
-                .insert(param.id, BorrowSource::Incoming(param.id));
+                .insert(param.id, Some(BorrowSource::Incoming(param.id)));
         }
     }
 
@@ -856,34 +1148,44 @@ fn check_body(
     // compute source_of_expr on the (still-walked) tail; var_info
     // persists across scope pops so we can name the offending
     // source binding in the diagnostic.
-    if return_type.is_some_and(|t| t.is_ref()) {
+    // Gated on "the return type CARRIES a ref" (`?&T`, `secret &T`),
+    // not `is_ref()`; every `return e` operand is checked at its own site in walk_expr.
+    if ctx.returns_ref {
         let tail_source = source_of_expr(&body.tail, &ctx, program);
-        match tail_source {
-            Some(BorrowSource::Incoming(_)) | None => {}
-            Some(BorrowSource::Local(src_id)) => {
-                let info = ctx
-                    .var_info
-                    .get(&src_id)
-                    .cloned()
-                    .unwrap_or(VarInfo { name: "<unknown>".into(), span: 0..0 });
-                errors.push(BorrowError::ReturnsLocalRef {
-                    fn_name: fn_name.to_string(),
-                    source_name: info.name,
-                    source_span: to_source_span(&info.span),
-                    return_span: to_source_span(&body.tail.span),
-                });
-            }
-            Some(BorrowSource::LocalAnonymous) => {
-                errors.push(BorrowError::ReturnsLocalRef {
-                    fn_name: fn_name.to_string(),
-                    source_name: "<anonymous>".to_string(),
-                    source_span: to_source_span(&body.tail.span),
-                    return_span: to_source_span(&body.tail.span),
-                });
-            }
-        }
+        check_returned_source(tail_source, &body.tail.span, &ctx, errors);
     }
     (moved_btree, moved_fields_btree)
+}
+
+/// ADR 0017 D7 "second-class refs": a returned ref-carrying value may point only
+/// into the caller's storage (`Incoming`), or nowhere fn-local (`None`: a `null`,
+/// or a divergent `return` checked at its own site). Shared by the
+/// tail check and every `return` operand; `Temporary` is refused like a local.
+fn check_returned_source(
+    source: Option<BorrowSource>,
+    return_span: &Span,
+    ctx: &FnCtx,
+    errors: &mut Vec<BorrowError>,
+) {
+    let (source_name, source_span) = match source {
+        None | Some(BorrowSource::Incoming(_)) => return,
+        Some(BorrowSource::Local(src_id)) => {
+            let info = ctx
+                .var_info
+                .get(&src_id)
+                .cloned()
+                .unwrap_or(VarInfo { name: "<unknown>".into(), span: 0..0 });
+            (info.name, info.span)
+        }
+        Some(BorrowSource::LocalAnonymous) => ("<anonymous>".to_string(), return_span.clone()),
+        Some(BorrowSource::Temporary) => ("<temporary>".to_string(), return_span.clone()),
+    };
+    errors.push(BorrowError::ReturnsLocalRef {
+        fn_name: ctx.fn_name.clone(),
+        source_name,
+        source_span: to_source_span(&source_span),
+        return_span: to_source_span(return_span),
+    });
 }
 
 /// Walk a block's statements + tail in the **current** scope
@@ -915,10 +1217,18 @@ fn walk_stmt(
             // BEFORE declaring `id` so `let r = r;` (self-ref RHS)
             // wouldn't see itself — though such a program would
             // already fail resolve.
-            if ty.is_ref() {
-                if let Some(source) = source_of_expr(value, ctx, program) {
-                    ctx.ref_source.insert(*id, source);
+            if carries_ref(*ty, program) {
+                // Total source (never a silent None for a ref-
+                // carrying RHS); binding widening — a binding may not start out
+                // pointing at a referent that is ALREADY dead (a block-local that
+                // just went out of scope, a temporary).
+                let source = source_of_expr(value, ctx, program);
+                if let Some(s) = source {
+                    if !ctx.is_alive(s) {
+                        emit_outlives_binding(ctx, errors, name, s, &value.span);
+                    }
                 }
+                ctx.ref_source.insert(*id, source);
                 // C2.2: promote any transient borrows created by
                 // the RHS to live until the *current* scope pops
                 // — they're now rooted in `id`, which lives at
@@ -938,13 +1248,40 @@ fn walk_stmt(
             // its recorded source — re-assignment shifts which
             // place the ref points to. Same transient promotion
             // as the ref-typed Let path.
-            if target.ty.is_ref() {
+            if carries_ref(target.ty, program) {
                 if let TypedExprKind::Var(id) = &target.kind {
-                    if let Some(source) = source_of_expr(value, ctx, program) {
-                        ctx.ref_source.insert(*id, source);
+                    // Binding widening. The assigned referent must
+                    // outlive the TARGET binding (declared at `td`): reject a dead
+                    // one or a live Local declared deeper than the target. With
+                    // that, the strong update below is sound — the target can never
+                    // come to point at something narrower than itself, so a
+                    // conditional overwrite cannot hide a dead source.
+                    let td = ctx.var_depth.get(id).copied().unwrap_or(0);
+                    let source = source_of_expr(value, ctx, program);
+                    if let Some(s) = source {
+                        let too_narrow = match s {
+                            BorrowSource::Local(src) => {
+                                ctx.var_depth.get(&src).copied().unwrap_or(0) > td
+                            }
+                            _ => false,
+                        };
+                        if !ctx.is_alive(s) || too_narrow {
+                            emit_outlives_assignment(ctx, errors, *id, s, &value.span);
+                        }
                     }
+                    ctx.ref_source.insert(*id, source);
+                    // Root at the TARGET's depth, not the current one: `{ q = &v[0]; }`
+                    // roots the borrow where `q` lives, so it is not dropped at the inner
+                    // brace while `q` still holds it.
+                    ctx.root_borrows_at(td);
+                } else {
+                    // Fail-closed backstop — a ref stored into a
+                    // field / element / through a deref is untrackable (D6/D7).
+                    errors.push(BorrowError::RefStoredIntoPlace {
+                        place: render_projection(target, ctx),
+                        span: to_source_span(&target.span),
+                    });
                 }
-                ctx.promote_transients(ctx.current_depth());
             }
             ctx.clear_transients();
         }
@@ -1044,7 +1381,13 @@ fn walk_assign_target(
             // for r itself); the write to r's pointee is sound
             // because XOR already ensured r is the only active
             // borrow of its source.
+            //
+            // That read-check only reaches a `Var`, so a COMPUTED operand
+            // (`*{ let v = [5]; &mut v[0] } = 9`) needs the operand check too —
+            // it is bound to nothing, and the write lands on storage that is
+            // already gone.
             walk_expr(inner, ctx, errors, program);
+            check_operand_alive(inner, ctx, errors, program);
         }
         TypedExprKind::FieldAccess { target: inner_target, .. } => {
             // `p.field = v;` — recurse. The eventual Var leaf
@@ -1065,6 +1408,33 @@ fn walk_assign_target(
 }
 
 fn walk_expr(
+    expr: &TypedExpr,
+    ctx: &mut FnCtx,
+    errors: &mut Vec<BorrowError>,
+    program: &TypedProgram,
+) {
+    // A call-like expression whose value carries no ref ends the
+    // transient borrows its operands took (see `end_transients_since`).
+    let mark = ctx.next_seq;
+    walk_expr_inner(expr, ctx, errors, program);
+    let call_like = matches!(
+        expr.kind,
+        TypedExprKind::Call { .. }
+            | TypedExprKind::QualifiedCall { .. }
+            | TypedExprKind::MethodCall { .. }
+            | TypedExprKind::ImplMethodCall { .. }
+            | TypedExprKind::ClassInit { .. }
+            | TypedExprKind::EnumConstruct { .. }
+            | TypedExprKind::StructLit { .. }
+            | TypedExprKind::Perform { .. }
+            | TypedExprKind::ResumeKont { .. }
+    );
+    if call_like && !carries_ref(expr.ty, program) {
+        ctx.end_transients_since(mark);
+    }
+}
+
+fn walk_expr_inner(
     expr: &TypedExpr,
     ctx: &mut FnCtx,
     errors: &mut Vec<BorrowError>,
@@ -1092,12 +1462,8 @@ fn walk_expr(
         // mutably-borrowed check AND the C2.3 use-after-move
         // check + consume.
         TypedExprKind::Var(id) => {
-            if expr.ty.is_ref() {
-                if let Some(source) = ctx.ref_source.get(id).copied() {
-                    if !ctx.is_alive(source) {
-                        emit_outlives(ctx, errors, source, &expr.span);
-                    }
-                }
+            if carries_ref(expr.ty, program) {
+                check_ref_read(*id, &expr.span, ctx, errors);
             } else {
                 // C2.2: reading a non-ref binding while a `&mut T`
                 // of it is active violates exclusivity.
@@ -1122,14 +1488,22 @@ fn walk_expr(
         | TypedExprKind::Declassify(inner)
         // ADR 0049: an integer cast is a pure type-level width conversion of a
         // Copy scalar — walk the inner; no move/borrow change.
-        | TypedExprKind::Cast(inner)
-        // ADR 0065: `return expr` moves/borrows its inner exactly as a tail
-        // value being returned does — walk it. (The lexical 1.0 checker is
-        // path-insensitive, so code after an early return on a divergent path
-        // is still walked; that over-rejection matches the documented 1.0
-        // behavior — fix a false rejection by scoping, not by weakening this.)
-        | TypedExprKind::Return(inner) => {
+        | TypedExprKind::Cast(inner) => {
             walk_expr(inner, ctx, errors, program);
+        }
+        // ADR 0065: `return expr` moves/borrows its inner like a returned tail
+        // value (the lexical 1.0 checker is path-insensitive, so code after an
+        // early return is still walked — fix a false rejection by scoping).
+        // AND it is a fn exit, so the ADR 0017 D7 second-class
+        // check runs HERE, at the site, with the operand's scopes still live —
+        // the tail check alone never saw a `return` in statement position, in a
+        // handler arm, or inside a `scope` body.
+        TypedExprKind::Return(inner) => {
+            walk_expr(inner, ctx, errors, program);
+            if ctx.returns_ref {
+                let source = source_of_expr(inner, ctx, program);
+                check_returned_source(source, &expr.span, ctx, errors);
+            }
         }
 
         TypedExprKind::Unary(UnaryOp::Ref, inner) => {
@@ -1167,12 +1541,17 @@ fn walk_expr(
                 walk_expr(inner, ctx, errors, program);
             }
         }
-        TypedExprKind::Unary(_, inner) => {
+        TypedExprKind::Unary(op, inner) => {
             // Deref / Neg / Not: walk the inner. Deref through a
             // ref-typed Var triggers the C2.1 OutlivesSource
             // check on r; the inner value's `*r` doesn't create
             // a new borrow.
             walk_expr(inner, ctx, errors, program);
+            // `*pass({ let v = [5]; &v[0] })` — the deref operand carries a
+            // reference to storage that is already dead, and is bound to nothing.
+            if matches!(op, UnaryOp::Deref) {
+                check_operand_alive(inner, ctx, errors, program);
+            }
         }
 
         TypedExprKind::Binary(_, l, r) | TypedExprKind::Logic(_, l, r) => {
@@ -1196,11 +1575,14 @@ fn walk_expr(
         TypedExprKind::Block(b) => {
             ctx.push_scope();
             walk_block_contents(b, ctx, errors, program);
-            ctx.pop_scope();
+            ctx.pop_scope_yield(carries_ref(expr.ty, program));
         }
 
         TypedExprKind::If { cond, then_branch, else_branch } => {
+            // A `bool` condition carries no ref — its borrows end.
+            let cond_mark = ctx.next_seq;
             walk_expr(cond, ctx, errors, program);
+            ctx.end_transients_since(cond_mark);
             // C2.3: snapshot the move-state, walk each branch in
             // isolation, then merge — "moved in either branch →
             // moved after". This is what makes `if c { fst(p) }
@@ -1209,15 +1591,16 @@ fn walk_expr(
             // is fine when no further uses follow.
             let snapshot_moved = ctx.moved.clone();
             let snapshot_moved_fields = ctx.moved_fields.clone();
+            let yields_ref = carries_ref(expr.ty, program);
             ctx.push_scope();
             walk_block_contents(then_branch, ctx, errors, program);
-            ctx.pop_scope();
+            ctx.pop_scope_yield(yields_ref);
             let then_moved = std::mem::replace(&mut ctx.moved, snapshot_moved);
             let then_moved_fields =
                 std::mem::replace(&mut ctx.moved_fields, snapshot_moved_fields);
             ctx.push_scope();
             walk_block_contents(else_branch, ctx, errors, program);
-            ctx.pop_scope();
+            ctx.pop_scope_yield(yields_ref);
             // Merge: any binding (or field — ADR 0046) moved in the then-branch but
             // not in the else-branch is conservatively Moved after (we can't statically
             // know which branch ran).
@@ -1282,10 +1665,14 @@ fn walk_expr(
                         }
                         _ => walk_expr_lvalue(arg, ctx, errors, program),
                     }
+                    // Whichever of the three ways it was walked, a ref-carrying
+                    // argument bound to no binding is checked by nothing else.
+                    check_operand_alive(arg, ctx, errors, program);
                 }
             } else {
                 for arg in args {
                     walk_expr(arg, ctx, errors, program);
+                    check_operand_alive(arg, ctx, errors, program);
                 }
             }
         }
@@ -1364,11 +1751,30 @@ fn walk_expr(
         // codegen at C3.5/C3.6.
         TypedExprKind::Handle { body, arms, return_arm, .. } => {
             walk_expr(body, ctx, errors, program);
+            let yields_ref = carries_ref(expr.ty, program);
+            // Handler-arm params and the return-arm binding are
+            // DECLARED in their arm's scope (they were never declared, so a ref in
+            // one had no source and every read of it went unchecked). A ref-typed
+            // op param is left UNSEEDED → fails closed (its referent is in the
+            // performing frame, which is gone once `k` has run).
             for arm in arms {
+                ctx.push_scope();
+                for (vid, nm) in arm.param_var_ids.iter().zip(arm.param_names.iter()) {
+                    ctx.declare(*vid, nm.kind.clone(), nm.span.clone());
+                }
                 walk_expr(&arm.body, ctx, errors, program);
+                ctx.pop_scope_yield(yields_ref);
             }
             if let Some(ra) = return_arm {
+                ctx.push_scope();
+                // The handled body's value flows into the return-arm binding.
+                if carries_ref(body.ty, program) {
+                    let s = source_of_expr(body, ctx, program);
+                    ctx.ref_source.insert(ra.value_var_id, s);
+                }
+                ctx.declare(ra.value_var_id, ra.value_name.kind.clone(), ra.value_name.span.clone());
                 walk_expr(&ra.body, ctx, errors, program);
+                ctx.pop_scope_yield(yields_ref);
             }
         }
         TypedExprKind::Perform { args, .. } => {
@@ -1388,32 +1794,45 @@ fn walk_expr(
         // Without this, repeated method calls on a Move-typed
         // receiver (e.g., two `s.write(...)`-style calls on a
         // class instance) would surface use-after-move spuriously.
-        TypedExprKind::MethodCall { target, args, .. } => {
+        TypedExprKind::MethodCall { target, args, class_id, method_index, .. } => {
             walk_expr_lvalue(target, ctx, errors, program);
             for a in args {
                 walk_expr(a, ctx, errors, program);
+                check_operand_alive(a, ctx, errors, program);
             }
+            // The auto-ref IS a borrow (ADR 0022 D3) — register it,
+            // AFTER the args (two-phase, so `k.set(k.get())` stays legal). Transient:
+            // it ends with the call unless the result carries a ref, in which case
+            // the enclosing `let` roots it (`let r = k.p(); k.grow()` → conflict).
+            let kind = program.class_decl(*class_id).methods[*method_index].self_kind;
+            add_receiver_borrow(target, kind, &expr.span, ctx, errors, program);
         }
         // C4.1 / ADR 0022 D5: `Name::init(args)` is purely a
         // value-producing expression — walk its args.
         TypedExprKind::ClassInit { args, .. } => {
             for a in args {
                 walk_expr(a, ctx, errors, program);
+                check_operand_alive(a, ctx, errors, program);
             }
         }
         // C4.2 / ADR 0023 D5 Path 1: receiver-typed dispatch. The
         // receiver is non-consuming (auto-ref produces a borrow),
         // mirroring the class MethodCall arm above.
-        TypedExprKind::ImplMethodCall { target, args, .. } => {
+        TypedExprKind::ImplMethodCall { target, args, impl_id, method_index, .. } => {
             walk_expr_lvalue(target, ctx, errors, program);
             for a in args {
                 walk_expr(a, ctx, errors, program);
+                check_operand_alive(a, ctx, errors, program);
             }
+            // As MethodCall — the receiver's auto-ref is a borrow.
+            let kind = program.impl_decl(*impl_id).methods[*method_index].self_kind;
+            add_receiver_borrow(target, kind, &expr.span, ctx, errors, program);
         }
         // C4.2 / ADR 0023 D5 Path 2: args includes the receiver.
         TypedExprKind::QualifiedCall { args, .. } => {
             for a in args {
                 walk_expr(a, ctx, errors, program);
+                check_operand_alive(a, ctx, errors, program);
             }
         }
         // C4.4 / ADR 0024: `scope concurrent { ... }` is a nested
@@ -1421,7 +1840,7 @@ fn walk_expr(
         TypedExprKind::Scope { body, .. } => {
             ctx.push_scope();
             walk_block_contents(body, ctx, errors, program);
-            ctx.pop_scope();
+            ctx.pop_scope_yield(carries_ref(expr.ty, program));
         }
         // `spawn fn(args)` walks the inner call; its args are moved
         // into the task (spawned fns take owned args per D10), so
@@ -1456,12 +1875,22 @@ fn walk_expr(
             let snapshot_moved_fields = ctx.moved_fields.clone();
             let mut union_moved = snapshot_moved.clone();
             let mut union_moved_fields = snapshot_moved_fields.clone();
+            let yields_ref = carries_ref(expr.ty, program);
             for arm in arms {
                 ctx.moved = snapshot_moved.clone();
                 ctx.moved_fields = snapshot_moved_fields.clone();
                 ctx.push_scope();
+                // Pattern bindings are declared in the arm scope, so
+                // `&k` of a payload binding is `Local(k)` (named, depth-tracked) and
+                // dies at the arm's end. A ref-typed binding is unreachable (enum
+                // payloads cannot carry refs) and, unseeded, would fail closed.
+                if let sentinel_types::TypedPattern::Variant { bindings, .. } = &arm.pattern {
+                    for b in bindings {
+                        ctx.declare(b.var_id, b.name.clone(), b.span.clone());
+                    }
+                }
                 walk_expr(&arm.body, ctx, errors, program);
-                ctx.pop_scope();
+                ctx.pop_scope_yield(yields_ref);
                 for (id, span) in std::mem::take(&mut ctx.moved) {
                     union_moved.entry(id).or_insert(span);
                 }
@@ -1492,6 +1921,12 @@ fn walk_expr_lvalue(
             // is rejected at the `p.field` site). No CONSUME
             // here — postfix projection is non-destructive.
             check_use_alive(*id, &expr.span, ctx, errors);
+            // A ref-carrying lvalue root is a READ of the ref too
+            // — a method receiver `r.m()` (auto-deref, ADR 0022 D7) or a builtin's
+            // by-reference arg — so it gets the same liveness check as `*r`.
+            if carries_ref(expr.ty, program) {
+                check_ref_read(*id, &expr.span, ctx, errors);
+            }
         }
         TypedExprKind::Unary(UnaryOp::Deref, inner) => {
             // ADR 0071 M1.4b slice 3c: `& *g` reads through the (Move-typed)
@@ -1531,6 +1966,34 @@ fn walk_expr_lvalue(
     }
 }
 
+/// Records a method receiver's implicit `&target` / `&mut target` borrow (per
+/// the method's `self_kind`) against the receiver's place.
+fn add_receiver_borrow(
+    target: &TypedExpr,
+    kind: sentinel_ast::SelfKind,
+    span: &Span,
+    ctx: &mut FnCtx,
+    errors: &mut Vec<BorrowError>,
+    program: &TypedProgram,
+) {
+    if let Some(source) = source_of_lvalue(target, ctx, program) {
+        match kind {
+            sentinel_ast::SelfKind::Shared => check_and_add_shared_borrow(source, span, ctx, errors),
+            sentinel_ast::SelfKind::Exclusive => check_and_add_mut_borrow(source, span, ctx, errors),
+        }
+    }
+}
+
+/// A read of ref-carrying binding `id` — its referent must still
+/// be alive. An unseeded binding fails closed (`var_source` → `Temporary`).
+fn check_ref_read(id: VarId, span: &Span, ctx: &mut FnCtx, errors: &mut Vec<BorrowError>) {
+    if let Some(source) = ctx.var_source(id) {
+        if !ctx.is_alive(source) {
+            emit_outlives(ctx, errors, source, span);
+        }
+    }
+}
+
 /// C2.2: attempt to add a shared borrow at the source's place-
 /// key. If a `&mut T` is already active, emit
 /// `SharedBorrowOfMutable`. Otherwise record the borrow as
@@ -1555,10 +2018,14 @@ fn check_and_add_shared_borrow(
         });
         return;
     }
+    // `seq` first: `places.entry` and `next_seq` both borrow `ctx`.
+    let seq = ctx.next_seq;
+    ctx.next_seq += 1;
     let state = ctx.places.entry(place).or_default();
     state.shared.push(BorrowInstance {
         span: span.clone(),
         lifetime: BorrowLifetime::Transient,
+        seq,
     });
 }
 
@@ -1596,10 +2063,14 @@ fn check_and_add_mut_borrow(
         });
         return;
     }
+    // `seq` first: `places.entry` and `next_seq` both borrow `ctx`.
+    let seq = ctx.next_seq;
+    ctx.next_seq += 1;
     let state = ctx.places.entry(place).or_default();
     state.mut_borrow = Some(BorrowInstance {
         span: span.clone(),
         lifetime: BorrowLifetime::Transient,
+        seq,
     });
 }
 
@@ -1824,6 +2295,27 @@ fn check_and_record_move(
         return;
     }
     if !is_copy_type(ty, program) {
+        // A place cannot be moved out of while borrowed — the new
+        // owner may free it under a live reference (RESULTS R14). Keyed on the
+        // per-place borrow records, so it is exact through merges (`if c {&a[0]}
+        // else {&b[0]}` borrows BOTH places) where a single recorded source is not.
+        if let Some(state) = ctx.places.get(&id) {
+            if let Some(b) = state.mut_borrow.as_ref().or(state.shared.first()) {
+                let borrow_span = b.span.clone();
+                errors.push(BorrowError::MoveWhileBorrowed {
+                    binding_name: place_name(ctx, id),
+                    borrow_span: to_source_span(&borrow_span),
+                    move_span: to_source_span(use_span),
+                });
+            }
+        }
+        // Record the move even when it was just reported. The [`DropPlan`]
+        // describes what the program DOES — codegen elides the drop of a
+        // moved-from binding — and it must not depend on which diagnostics fired:
+        // the emitted IR is compared byte-for-byte against the self-hosted
+        // compiler, whose checker has no `MoveWhileBorrowed`. Returning early here
+        // left the move unrecorded, so the oracle emitted a drop that `scg` did
+        // not, and the codegen differential diverged on the two `c23_*` fixtures.
         ctx.moved.insert(id, use_span.clone());
         ctx.moved_sources_union.insert(id);
     }
@@ -1932,6 +2424,39 @@ fn emit_use_after_move(
     });
 }
 
+/// A ref-carrying value CONSUMED AS AN OPERAND — a call or method argument, or
+/// a deref operand — that is bound to no binding, and so is checked by nothing
+/// else. `f({ let v = [5]; &v[0] })` hands `f` a reference to a block local that
+/// is already dead at the call; the `let`-RHS and tail checks never see it
+/// because it is never a let-RHS and never a tail.
+///
+/// A plain `Var` operand is skipped: it is checked where it is read. A BORROW
+/// operand is NOT skipped — `&place` resolves to the place it names, so a live
+/// one passes anyway, while `& *<computed operand>` is rooted at no binding and
+/// was reached by nothing else. Exit positions (a tail, a `return`) are skipped,
+/// so the clearer `ReturnsLocalRef` wins there rather than both firing.
+///
+/// Call this AFTER walking the operand, so any scope it opened has been popped
+/// and its locals read as dead.
+fn check_operand_alive(
+    e: &TypedExpr,
+    ctx: &mut FnCtx,
+    errors: &mut Vec<BorrowError>,
+    program: &TypedProgram,
+) {
+    if !carries_ref(e.ty, program) {
+        return;
+    }
+    if matches!(e.kind, TypedExprKind::Var(_)) {
+        return;
+    }
+    if let Some(src) = source_of_expr(e, ctx, program) {
+        if !ctx.is_alive(src) {
+            emit_operand_dead(ctx, errors, src, &e.span);
+        }
+    }
+}
+
 /// Compute the [`BorrowSource`] of a ref-typed expression. Used
 /// at let-RHS and tail-expr sites. Returns `None` for non-ref
 /// expressions (which should never happen if the caller already
@@ -1941,21 +2466,51 @@ fn source_of_expr(
     ctx: &FnCtx,
     program: &TypedProgram,
 ) -> Option<BorrowSource> {
+    // Total over the ref-carrying kinds: `None` means only "points at nothing
+    // fn-local" (a `null`, a divergent `return` — checked at its own site — or a
+    // value that carries no ref). Every ref-carrying kind has an arm, and an
+    // unmodelled one fails CLOSED (`Temporary`), never open.
     match &expr.kind {
         TypedExprKind::Unary(UnaryOp::Ref, inner)
         | TypedExprKind::Unary(UnaryOp::RefMut, inner) => {
             source_of_lvalue(inner, ctx, program)
         }
-        TypedExprKind::Var(id) => ctx.ref_source.get(id).copied(),
+        TypedExprKind::Var(id) => ctx.var_source(*id),
+        TypedExprKind::NullLit | TypedExprKind::Return(_) => None,
+        // Type-level wrappers are transparent (as walk_expr already treats them).
+        TypedExprKind::WidenToNullable(inner)
+        | TypedExprKind::WidenToSecret(inner)
+        | TypedExprKind::Declassify(inner)
+        | TypedExprKind::Cast(inner) => source_of_expr(inner, ctx, program),
         TypedExprKind::Block(b) => source_of_expr(&b.tail, ctx, program),
+        TypedExprKind::Scope { body, .. } => source_of_expr(&body.tail, ctx, program),
         TypedExprKind::If { then_branch, else_branch, .. } => {
             // Both branches contribute; merge to the most
             // restrictive (Local wins over Incoming).
             let t = source_of_expr(&then_branch.tail, ctx, program);
             let e = source_of_expr(&else_branch.tail, ctx, program);
-            merge_sources(t, e)
+            merge_sources(t, e, ctx)
         }
-        TypedExprKind::Call { args, .. } => {
+        TypedExprKind::Match { arms, .. } => {
+            let mut acc = None;
+            for arm in arms {
+                acc = merge_sources(acc, source_of_expr(&arm.body, ctx, program), ctx);
+            }
+            acc
+        }
+        TypedExprKind::Handle { body, arms, return_arm, .. } => {
+            // The value is the return arm's (which sees the body's value through
+            // its seeded binding), else the body's; any op arm may yield instead.
+            let mut acc = match return_arm {
+                Some(ra) => source_of_expr(&ra.body, ctx, program),
+                None => source_of_expr(body, ctx, program),
+            };
+            for arm in arms {
+                acc = merge_sources(acc, source_of_expr(&arm.body, ctx, program), ctx);
+            }
+            acc
+        }
+        TypedExprKind::Call { args, .. } | TypedExprKind::QualifiedCall { args, .. } => {
             // Conservative inter-procedural rule: the result ref
             // inherits the most-restrictive source among the
             // call's ref args. If no ref args contribute, return
@@ -1963,16 +2518,43 @@ fn source_of_expr(
             // ref out of thin air, which can only borrow-check
             // if it's actually a Local of some inaccessible
             // scope. Either way, not escapable via return.
+            // Sound now that EVERY body is checked at every
+            // exit (a callee can hand back only what came in by reference).
+            // `QualifiedCall` passes its receiver as `args[0]` (`&s`).
             let mut acc: Option<BorrowSource> = None;
             for arg in args {
-                if arg.ty.is_ref() {
+                if carries_ref(arg.ty, program) {
                     let arg_source = source_of_expr(arg, ctx, program);
-                    acc = merge_sources(acc, arg_source);
+                    acc = merge_sources(acc, arg_source, ctx);
                 }
             }
             acc.or(Some(BorrowSource::LocalAnonymous))
         }
-        _ => None,
+        TypedExprKind::MethodCall { target, args, .. }
+        | TypedExprKind::ImplMethodCall { target, args, .. } => {
+            // The auto-ref'd receiver `&target` is an implicit ref
+            // arg (ADR 0022 D7) — `k.p()` on a local `k` may point into `k`.
+            let mut acc = source_of_lvalue(target, ctx, program);
+            for arg in args {
+                if carries_ref(arg.ty, program) {
+                    acc = merge_sources(acc, source_of_expr(arg, ctx, program), ctx);
+                }
+            }
+            acc.or(Some(BorrowSource::LocalAnonymous))
+        }
+        // `perform` yields whatever the handler resumed with — alive for the rest
+        // of the handled computation, i.e. this whole fn body, but not beyond it.
+        TypedExprKind::Perform { .. } => Some(BorrowSource::LocalAnonymous),
+        // Everything else (ResumeKont, the aggregates, projections, handles and
+        // scalar ops) either carries no ref, or carries one the rules above cannot
+        // attribute — fail closed.
+        _ => {
+            if carries_ref(expr.ty, program) {
+                Some(BorrowSource::Temporary)
+            } else {
+                None
+            }
+        }
     }
 }
 
@@ -1990,10 +2572,13 @@ fn source_of_lvalue(
             // (`&r`) would give `&&T` which is rejected at type-
             // check. So we only reach here for non-ref Vars —
             // their source is just themselves (Local).
-            if ctx.ref_source.contains_key(id) {
-                // Defensive: `&` of a ref-typed Var; surface as
-                // the underlying source so diagnostics chain.
-                ctx.ref_source.get(id).copied()
+            // ...except as an auto-deref method receiver
+            // (`c.p()` with `c: &K`), where the place is `*c` — the ref's own
+            // source. A SEEDED binding (a ref param, D61's `self` — whose Var node
+            // is typed as the object, not `&Self`) resolves to its entry; an
+            // UNSEEDED ref-carrying one fails closed.
+            if ctx.ref_source.contains_key(id) || carries_ref(expr.ty, program) {
+                ctx.var_source(*id)
             } else {
                 Some(BorrowSource::Local(*id))
             }
@@ -2009,51 +2594,137 @@ fn source_of_lvalue(
         TypedExprKind::Index { target, .. } => {
             source_of_lvalue(target, ctx, program)
         }
-        _ => None,
+        // Any other base is not a place — a temporary (`&mk().x`,
+        // `K::init(5).p()`), dead by the next statement. Was `None` (= accepted).
+        _ => Some(BorrowSource::Temporary),
     }
 }
 
-/// Merge two optional borrow sources — Local wins over Incoming
-/// over None.
+/// Merge two optional borrow sources to the MOST RESTRICTIVE; `None` (points at
+/// nothing fn-local) is the identity. Depth-aware — a dead source
+/// beats a live one and a deeper Local beats a shallower one, where the old rule
+/// kept the FIRST Local (`if c { &outer } else { let inner..; &inner }` resolved to
+/// the live `outer` and the dead `inner` path went unchecked).
 fn merge_sources(
     a: Option<BorrowSource>,
     b: Option<BorrowSource>,
+    ctx: &FnCtx,
 ) -> Option<BorrowSource> {
     match (a, b) {
         (None, x) | (x, None) => x,
-        (Some(x), Some(y)) => Some(merge(x, y)),
+        (Some(x), Some(y)) => Some(if ctx.restrictiveness(y) > ctx.restrictiveness(x) { y } else { x }),
     }
 }
 
-fn merge(a: BorrowSource, b: BorrowSource) -> BorrowSource {
-    match (a, b) {
-        (BorrowSource::Local(_), _) => a,
-        (_, BorrowSource::Local(_)) => b,
-        (BorrowSource::LocalAnonymous, _) => a,
-        (_, BorrowSource::LocalAnonymous) => b,
-        (BorrowSource::Incoming(_), BorrowSource::Incoming(_)) => a,
-    }
-}
-
-fn emit_outlives(
+/// Render a [`BorrowSource`] for a diagnostic: the name to print and the span
+/// to point at. `None` for `Incoming`, which is always alive and so never
+/// reaches a diagnostic — every caller gates on `is_alive` first, and this is
+/// the backstop if one ever forgets.
+fn describe_source(
     ctx: &FnCtx,
-    errors: &mut Vec<BorrowError>,
     source: BorrowSource,
     use_span: &Span,
-) {
-    let (source_name, source_span) = match source {
+) -> Option<(String, Span)> {
+    match source {
         BorrowSource::Local(id) => {
             let info = ctx
                 .var_info
                 .get(&id)
                 .cloned()
                 .unwrap_or(VarInfo { name: "<unknown>".into(), span: 0..0 });
-            (info.name, info.span)
+            Some((info.name, info.span))
         }
-        BorrowSource::LocalAnonymous => ("<anonymous>".to_string(), use_span.clone()),
-        BorrowSource::Incoming(_) => return, // Incoming is always alive; no error
+        BorrowSource::LocalAnonymous => Some(("<anonymous>".to_string(), use_span.clone())),
+        BorrowSource::Temporary => Some(("<temporary>".to_string(), use_span.clone())),
+        BorrowSource::Incoming(_) => None,
+    }
+}
+
+/// C2.1: a dead reference is READ. The four positions a dead source can be
+/// caught at each get their own code (read / bind / assign / operand) so the
+/// `help` line can name the fix that actually applies there.
+fn emit_outlives(
+    ctx: &mut FnCtx,
+    errors: &mut Vec<BorrowError>,
+    source: BorrowSource,
+    use_span: &Span,
+) {
+    let Some((source_name, source_span)) = describe_source(ctx, source, use_span) else {
+        return;
     };
+    if !ctx.first_report_of(source) {
+        return;
+    }
     errors.push(BorrowError::OutlivesSource {
+        source_name,
+        source_span: to_source_span(&source_span),
+        use_span: to_source_span(use_span),
+    });
+}
+
+/// A `let` is initialized with a reference to already-dead storage.
+fn emit_outlives_binding(
+    ctx: &mut FnCtx,
+    errors: &mut Vec<BorrowError>,
+    binding_name: &str,
+    source: BorrowSource,
+    init_span: &Span,
+) {
+    let Some((source_name, source_span)) = describe_source(ctx, source, init_span) else {
+        return;
+    };
+    if !ctx.first_report_of(source) {
+        return;
+    }
+    errors.push(BorrowError::RefOutlivesBinding {
+        binding_name: binding_name.to_string(),
+        source_name,
+        source_span: to_source_span(&source_span),
+        init_span: to_source_span(init_span),
+    });
+}
+
+/// A ref binding is re-pointed at storage that dies before it does.
+fn emit_outlives_assignment(
+    ctx: &mut FnCtx,
+    errors: &mut Vec<BorrowError>,
+    target: VarId,
+    source: BorrowSource,
+    assign_span: &Span,
+) {
+    let Some((source_name, source_span)) = describe_source(ctx, source, assign_span) else {
+        return;
+    };
+    if !ctx.first_report_of(source) {
+        return;
+    }
+    let binding_name = ctx
+        .var_info
+        .get(&target)
+        .map(|i| i.name.clone())
+        .unwrap_or_else(|| "<unknown>".to_string());
+    errors.push(BorrowError::RefOutlivesAssignment {
+        binding_name,
+        source_name,
+        source_span: to_source_span(&source_span),
+        assign_span: to_source_span(assign_span),
+    });
+}
+
+/// A call argument or deref operand carries a reference into dead storage.
+fn emit_operand_dead(
+    ctx: &mut FnCtx,
+    errors: &mut Vec<BorrowError>,
+    source: BorrowSource,
+    use_span: &Span,
+) {
+    let Some((source_name, source_span)) = describe_source(ctx, source, use_span) else {
+        return;
+    };
+    if !ctx.first_report_of(source) {
+        return;
+    }
+    errors.push(BorrowError::RefOperandDead {
         source_name,
         source_span: to_source_span(&source_span),
         use_span: to_source_span(use_span),
@@ -2103,6 +2774,25 @@ pub fn borrow_check_query(db: &dyn SentinelDb, file: SourceFile) -> Option<DropP
 
 fn borrow_error_to_diagnostic(err: &BorrowError) -> Diagnostic {
     let (code, message, span): (&'static str, String, std::ops::Range<usize>) = match err {
+        BorrowError::RefOutlivesBinding { binding_name, source_name, init_span, .. } => (
+            "sentinel::borrow::ref_outlives_binding",
+            format!(
+                "`{binding_name}` would be bound to a reference into `{source_name}`, which is already gone"
+            ),
+            init_span.offset()..(init_span.offset() + init_span.len()),
+        ),
+        BorrowError::RefOutlivesAssignment { binding_name, source_name, assign_span, .. } => (
+            "sentinel::borrow::ref_outlives_assignment",
+            format!(
+                "`{binding_name}` would be re-pointed at `{source_name}`, which does not live as long as it does"
+            ),
+            assign_span.offset()..(assign_span.offset() + assign_span.len()),
+        ),
+        BorrowError::RefOperandDead { source_name, use_span, .. } => (
+            "sentinel::borrow::ref_operand_dead",
+            format!("this operand carries a reference into `{source_name}`, which is already gone"),
+            use_span.offset()..(use_span.offset() + use_span.len()),
+        ),
         BorrowError::OutlivesSource { source_name, use_span, .. } => (
             "sentinel::borrow::outlives_source",
             format!("borrow of `{source_name}` outlives its source"),
@@ -2158,6 +2848,16 @@ fn borrow_error_to_diagnostic(err: &BorrowError) -> Diagnostic {
             "sentinel::borrow::move_out_of_self",
             format!("cannot move `{place}` out: `self` is only borrowed"),
             move_span.offset()..(move_span.offset() + move_span.len()),
+        ),
+        BorrowError::MoveWhileBorrowed { binding_name, move_span, .. } => (
+            "sentinel::borrow::move_while_borrowed",
+            format!("cannot move out of `{binding_name}` while it is borrowed"),
+            move_span.offset()..(move_span.offset() + move_span.len()),
+        ),
+        BorrowError::RefStoredIntoPlace { place, span } => (
+            "sentinel::borrow::ref_stored_into_place",
+            format!("a reference cannot be stored into `{place}`"),
+            span.offset()..(span.offset() + span.len()),
         ),
     };
     Diagnostic {
@@ -2293,12 +2993,19 @@ mod tests {
     #[test]
     fn use_after_inner_scope_rejected() {
         // `let r = { let inner = 5; &inner }; *r` — inner is dead
-        // by the time r is dereferenced.
+        // by the time r is dereferenced. Caught at the BINDING now (the earlier,
+        // more actionable site), and the `*r` read is suppressed as the same
+        // mistake reported again — so this is one error, not two.
         let errs = borrow_check_err(
             "fn main() -> i64 { let r: &i64 = { let inner: i64 = 5; &inner }; *r }",
         );
+        assert_eq!(errs.len(), 1, "one mistake, one error: {errs:?}");
         assert!(
-            matches!(&errs[0], BorrowError::OutlivesSource { source_name, .. } if source_name == "inner"),
+            matches!(
+                &errs[0],
+                BorrowError::RefOutlivesBinding { binding_name, source_name, .. }
+                    if binding_name == "r" && source_name == "inner"
+            ),
             "got {errs:?}"
         );
     }
@@ -3014,5 +3721,361 @@ mod tests {
         let main = typed.fns.iter().find(|f| f.name == "main").unwrap();
         let moved = plan.moved_sources_for(main.id);
         assert!(moved.is_empty(), "expected no moved sources, got {moved:?}");
+    }
+
+    // ----- ADR 0017 D7 (ref-escape): a reference may not outlive the storage it
+    // points at. One test per POSITION a dead source can be caught at, plus the
+    // precision controls that keep each position from over-rejecting. -----
+
+    #[test]
+    fn return_local_stmt_rejected() {
+        // `return &cell` in STATEMENT position, not as the tail.
+        let errs = borrow_check_err(
+            "fn f(fallback: &i64, c: bool) -> &i64 { let cell: i64 = 5; if c { return &cell } else { 0 }; fallback }\nfn main() -> i64 { let z: i64 = 1; *f(&z, true) }",
+        );
+        assert!(
+            matches!(&errs[0], BorrowError::ReturnsLocalRef { source_name, .. } if source_name == "cell"),
+            "got {errs:?}"
+        );
+    }
+
+    #[test]
+    fn return_refmut_local_rejected() {
+        // `&mut` escapes exactly as `&` does.
+        let errs = borrow_check_err(
+            "fn f() -> &mut i64 { let mut x: i64 = 5; &mut x }\nfn main() -> i64 { *f() }",
+        );
+        assert!(
+            matches!(&errs[0], BorrowError::ReturnsLocalRef { source_name, .. } if source_name == "x"),
+            "got {errs:?}"
+        );
+    }
+
+    #[test]
+    fn return_incoming_via_return_ok() {
+        // The control for the two above: a caller-owned `&T` escapes fine, from
+        // both the statement and the tail position.
+        borrow_check_ok(
+            "fn f(x: &i64, c: bool) -> &i64 { if c { return x } else { 0 }; x }\nfn main() -> i64 { let y: i64 = 5; *f(&y, true) }",
+        );
+    }
+
+    #[test]
+    fn if_return_local_branch_rejected() {
+        // Only ONE branch returns the local; the other is fine. A merge that kept
+        // the live source would let this through.
+        let errs = borrow_check_err(
+            "fn f(x: &i64, c: bool) -> &i64 { let local: i64 = 5; if c { &local } else { x } }\nfn main() -> i64 { let y: i64 = 5; *f(&y, true) }",
+        );
+        assert!(
+            matches!(&errs[0], BorrowError::ReturnsLocalRef { source_name, .. } if source_name == "local"),
+            "got {errs:?}"
+        );
+    }
+
+    #[test]
+    fn match_tail_local_ref_rejected() {
+        let errs = borrow_check_err(
+            "enum One { Only }\nfn g(o: One) -> &i64 { let v: i64 = 5; match o { One::Only => &v } }\nfn main() -> i64 { *g(One::Only) }",
+        );
+        assert!(
+            matches!(&errs[0], BorrowError::ReturnsLocalRef { source_name, .. } if source_name == "v"),
+            "got {errs:?}"
+        );
+    }
+
+    #[test]
+    fn scope_tail_local_ref_rejected() {
+        let errs = borrow_check_err(
+            "fn g() -> &i64 { let v: i64 = 5; scope concurrent { &v } }\nfn main() -> i64 { *g() }",
+        );
+        assert!(
+            matches!(&errs[0], BorrowError::ReturnsLocalRef { source_name, .. } if source_name == "v"),
+            "got {errs:?}"
+        );
+    }
+
+    #[test]
+    fn return_in_handler_arm_rejected() {
+        // A handler arm is a fn exit like any other. Pinned HERE rather than as a
+        // corpus fixture: `return` inside a handler arm makes the Rust and
+        // self-hosted MIR lowerers disagree (constructed on a reference-free
+        // program, so it is not about references — registered), and every fixture
+        // in `tests/` is swept by that differential.
+        let errs = borrow_check_err(
+            "fn escape(x: &i64) -> &i64 { let doomed: i64 = 5; let h: i64 = handle 1 with { return v => if v == 1 { return &doomed } else { 0 } }; x }\nfn main() -> i64 { let z: i64 = 1; *escape(&z) }",
+        );
+        assert!(
+            matches!(&errs[0], BorrowError::ReturnsLocalRef { source_name, .. } if source_name == "doomed"),
+            "got {errs:?}"
+        );
+    }
+
+    #[test]
+    fn return_null_nullable_ref_ok() {
+        // `return null` of a `?&T` returns no reference at all, so it is accepted.
+        // Also not a corpus fixture: `snc llvm` emits `ptr 0` for the null half of
+        // the `{i1, ptr}` pair and LLVM 18 will not assemble it (registered).
+        borrow_check_ok(
+            "fn maybe(x: &i64, some: bool) -> ?&i64 { if some { return x } else { 0 }; return null }\nfn main() -> i64 { let a: i64 = 5; let z: i64 = 0; *unwrap_or(maybe(&a, true), &z) }",
+        );
+    }
+
+    #[test]
+    fn ref_return_nullable_rejected() {
+        // `?&T` carries a reference just as `&T` does — the gate must reach
+        // through `Nullable`.
+        let errs = borrow_check_err(
+            "fn g() -> ?&i64 { let s: i64 = 5; &s }\nfn main() -> i64 { 0 }",
+        );
+        assert!(
+            matches!(&errs[0], BorrowError::ReturnsLocalRef { source_name, .. } if source_name == "s"),
+            "got {errs:?}"
+        );
+    }
+
+    #[test]
+    fn ref_return_secret_rejected() {
+        // ...and through `Secret`. ADR 0019 D5 keeps `secret &T` a legal TYPE;
+        // what is refused here is the escape, not the type.
+        let errs = borrow_check_err(
+            "fn g() -> secret &i64 { let v: i64 = 9; &v }\nfn main() -> i64 { let r: secret &i64 = g(); let p: &i64 = declassify(r); *p }",
+        );
+        assert!(
+            matches!(&errs[0], BorrowError::ReturnsLocalRef { source_name, .. } if source_name == "v"),
+            "got {errs:?}"
+        );
+    }
+
+    #[test]
+    fn laundered_read_via_match_rhs_rejected() {
+        // The source is laundered through a `match` before being bound. Caught at
+        // the BINDING, which is where the fix belongs.
+        let errs = borrow_check_err(
+            "enum One { Only }\nfn main() -> i64 { let s: One = One::Only; let r: &i64 = { let v: [i64] = [5, 5, 5, 5]; match s { One::Only => &v[0] } }; *r }",
+        );
+        assert!(
+            matches!(&errs[0], BorrowError::RefOutlivesBinding { binding_name, .. } if binding_name == "r"),
+            "got {errs:?}"
+        );
+    }
+
+    #[test]
+    fn assign_narrower_ref_rejected() {
+        // The ASSIGNMENT position: `q` outlives the inner block, so re-pointing it
+        // at a binding declared deeper leaves it dangling at the closing brace.
+        // Checking this is what makes the strong update sound.
+        let errs = borrow_check_err(
+            "fn main() -> i64 { let outer: i64 = 1; let mut q: &i64 = &outer; { let inner: i64 = 5; q = &inner; 0 }; *q }",
+        );
+        assert!(
+            matches!(
+                &errs[0],
+                BorrowError::RefOutlivesAssignment { binding_name, source_name, .. }
+                    if binding_name == "q" && source_name == "inner"
+            ),
+            "got {errs:?}"
+        );
+    }
+
+    #[test]
+    fn borrow_of_temporary_rejected() {
+        // `&mk().x` borrows into a value no binding owns, so no scope keeps it
+        // alive. `source_of_expr` fails closed to `Temporary`, which is never
+        // alive. A conservative over-rejection, documented in
+        // `docs/borrow-check-limitations.md`.
+        let errs = borrow_check_err(
+            "struct P { x: i64 }\nfn mk() -> P { P { x: 5 } }\nfn main() -> i64 { let r: &i64 = &mk().x; *r }",
+        );
+        assert!(
+            matches!(&errs[0], BorrowError::RefOutlivesBinding { source_name, .. } if source_name == "<temporary>"),
+            "got {errs:?}"
+        );
+    }
+
+    #[test]
+    fn borrow_field_of_bound_value_ok() {
+        // The workaround the limitations doc prescribes for the case above, and
+        // the help text's own suggestion: give the value a `let` and borrow that.
+        // Pinned so the documented fix cannot quietly stop working.
+        borrow_check_ok(
+            "struct P { x: i64 }\nfn mk() -> P { P { x: 5 } }\nfn main() -> i64 { let p: P = mk(); let r: &i64 = &p.x; *r }",
+        );
+    }
+
+    #[test]
+    fn class_init_arg_computed_ref_rejected() {
+        // `Name::init(args)` is its own walk arm; it walked its arguments without
+        // checking them, so the operand position was open there.
+        let errs = borrow_check_err(
+            "class K { let n: i64; pub init(r: &i64) { self.n = *r; 0 } pub fn get(self: &Self) -> i64 { self.n } }\nfn main() -> i64 { let k: K = K::init({ let v: [i64] = [5, 5, 5, 5]; &v[0] }); k.get() }",
+        );
+        assert!(
+            matches!(&errs[0], BorrowError::RefOperandDead { source_name, .. } if source_name == "v"),
+            "got {errs:?}"
+        );
+    }
+
+    #[test]
+    fn class_init_arg_live_ref_ok() {
+        // The control: a live computed reference into an init stays accepted.
+        borrow_check_ok(
+            "class K { let n: i64; pub init(r: &i64) { self.n = *r; 0 } pub fn get(self: &Self) -> i64 { self.n } }\nfn main() -> i64 { let x: i64 = 5; let k: K = K::init({ &x }); k.get() }",
+        );
+    }
+
+    #[test]
+    fn deref_assign_target_computed_ref_rejected() {
+        // The WRITE twin of the operand check: `*<computed operand> = v`. The
+        // deref target's own read-check only reaches a `Var`.
+        let errs = borrow_check_err(
+            "fn main() -> i64 { let keep: i64 = 1; *{ let mut v: [i64] = [5, 5]; &mut v[0] } = 9; keep }",
+        );
+        assert!(
+            matches!(&errs[0], BorrowError::RefOperandDead { source_name, .. } if source_name == "v"),
+            "got {errs:?}"
+        );
+    }
+
+    #[test]
+    fn reborrow_of_computed_ref_rejected() {
+        // `& *<computed operand>` re-wraps the reference, which used to skip the
+        // operand check outright. A borrow is only checked where it is taken when
+        // the thing borrowed is rooted at a binding; this one is rooted at nothing.
+        let errs = borrow_check_err(
+            "fn read(r: &i64) -> i64 { *r }\nfn main() -> i64 { read(& *{ let v: [i64] = [5, 5, 5, 5]; &v[0] }) }",
+        );
+        assert!(
+            matches!(&errs[0], BorrowError::RefOperandDead { source_name, .. } if source_name == "v"),
+            "got {errs:?}"
+        );
+    }
+
+    #[test]
+    fn borrow_operand_of_live_place_ok() {
+        // The control for narrowing that skip list: an ordinary `&place` operand
+        // resolves to the place it names, so a live one still passes.
+        borrow_check_ok(
+            "struct P { x: i64 }\nfn read(r: &i64) -> i64 { *r }\nfn main() -> i64 { let x: i64 = 5; let p: P = P { x: 7 }; let a: [i64] = [1, 2]; read(&x) + read(&p.x) + read(&a[0]) }",
+        );
+    }
+
+    #[test]
+    fn block_yielding_ref_keeps_its_borrows_overrejects() {
+        // A documented OVER-rejection (docs/borrow-check-limitations.md). The only
+        // borrow of `v` is inside a block that closes, and the value the block
+        // yields points at `x` — but the checker has no provenance to tell which
+        // of a block's borrows the yielded reference depends on, so when the block
+        // yields one it keeps them all (`{ let s = &v[0]; s }` genuinely needs `v`
+        // to stay borrowed). Pinned so making this precise is a deliberate change.
+        let errs = borrow_check_err(
+            "fn main() -> i64 { let mut v: [i64] = [1, 2, 3]; let x: i64 = 9; let r: &i64 = { let s: &i64 = &v[0]; let t: i64 = *s; &x }; v[0] = 7; *r + v[0] }",
+        );
+        assert!(
+            errs.iter().any(|e| matches!(e, BorrowError::WriteWhileBorrowed { .. })),
+            "got {errs:?}"
+        );
+    }
+
+    #[test]
+    fn block_yielding_ref_workaround_ok() {
+        // The workaround the limitations doc prescribes: split the borrow out of
+        // the block whose value is a reference.
+        borrow_check_ok(
+            "fn main() -> i64 { let mut v: [i64] = [1, 2, 3]; let x: i64 = 9; let t: i64 = { let s: &i64 = &v[0]; *s }; let r: &i64 = &x; v[0] = 7; *r + v[0] + t }",
+        );
+    }
+
+    #[test]
+    fn ref_returning_method_receiver_moved_overrejects() {
+        // The other documented over-rejection: `p()` returns a reference, so the
+        // receiver's auto-ref (ADR 0022 D3) is rooted for the statement and `k`
+        // cannot also be moved by it — even though what is consumed is the
+        // dereferenced `i64`.
+        let errs = borrow_check_err(
+            "class K { let n: i64; pub init(n: i64) { self.n = n; 0 } pub fn p(self: &Self) -> &i64 { &self.n } pub fn get(self: &Self) -> i64 { self.n } }\nfn sink(a: i64, k: K) -> i64 { a + k.get() }\nfn main() -> i64 { let k: K = K::init(7); sink(*k.p(), k) }",
+        );
+        assert!(
+            errs.iter().any(|e| matches!(e, BorrowError::MoveWhileBorrowed { .. })),
+            "got {errs:?}"
+        );
+    }
+
+    #[test]
+    fn ref_returning_method_receiver_workaround_ok() {
+        // Bind the read before the move.
+        borrow_check_ok(
+            "class K { let n: i64; pub init(n: i64) { self.n = n; 0 } pub fn p(self: &Self) -> &i64 { &self.n } pub fn get(self: &Self) -> i64 { self.n } }\nfn sink(a: i64, k: K) -> i64 { a + k.get() }\nfn main() -> i64 { let k: K = K::init(7); let a: i64 = *k.p(); sink(a, k) }",
+        );
+    }
+
+    #[test]
+    fn call_arg_computed_ref_rejected() {
+        // The OPERAND position. The block's local is dead by the time the callee
+        // runs, and the operand is bound to nothing — so the let-RHS, assignment
+        // and return checks all look right past it. This is the position that
+        // needs its own check.
+        let errs = borrow_check_err(
+            "fn read(r: &i64) -> i64 { *r }\nfn main() -> i64 { read({ let v: [i64] = [5, 5, 5, 5]; &v[0] }) }",
+        );
+        assert!(
+            matches!(&errs[0], BorrowError::RefOperandDead { source_name, .. } if source_name == "v"),
+            "got {errs:?}"
+        );
+    }
+
+    #[test]
+    fn deref_computed_ref_rejected() {
+        // The same position reached by dereferencing the result instead of passing
+        // it on. The value that comes out is an i64, so nothing downstream carries
+        // a reference and no other check has a reason to look.
+        let errs = borrow_check_err(
+            "fn id(r: &i64) -> &i64 { r }\nfn main() -> i64 { *id({ let v: [i64] = [5, 5, 5, 5]; &v[0] }) }",
+        );
+        assert!(
+            matches!(&errs[0], BorrowError::RefOperandDead { source_name, .. } if source_name == "v"),
+            "got {errs:?}"
+        );
+    }
+
+    #[test]
+    fn call_arg_live_ref_ok() {
+        // The control for the two above: a COMPUTED ref operand whose source is
+        // still in scope is fine. Without the liveness gate this check would
+        // reject every computed operand.
+        borrow_check_ok(
+            "fn read(r: &i64) -> i64 { *r }\nfn main() -> i64 { let x: i64 = 5; read({ &x }) + read(&x) }",
+        );
+    }
+
+    #[test]
+    fn move_while_borrowed_rejected() {
+        // Moving a value out from under a live reference into it: the reference is
+        // left pointing at storage the new owner may free.
+        let errs = borrow_check_err(
+            "fn sink(v: [i64]) -> i64 { v[0] - v[1] }\nfn main() -> i64 { let data: [i64] = [5, 8, 11]; let p: &i64 = &data[0]; let dropped: i64 = sink(data); *p }",
+        );
+        assert!(
+            errs.iter().any(|e| matches!(e, BorrowError::MoveWhileBorrowed { .. })),
+            "got {errs:?}"
+        );
+    }
+
+    #[test]
+    fn pick_if_two_incoming_ok() {
+        // Two CALLER-OWNED sources merged by an if: both escape fine, so the merge
+        // must not manufacture a conflict.
+        borrow_check_ok(
+            "fn pick(a: &i64, b: &i64, c: bool) -> &i64 { if c { a } else { b } }\nfn main() -> i64 { let x: i64 = 1; let y: i64 = 2; *pick(&x, &y, true) }",
+        );
+    }
+
+    #[test]
+    fn two_same_scope_locals_merged_ok() {
+        // The merge resolves to the most restrictive source so a dead branch cannot
+        // hide behind a live one; two sources at the SAME depth are not a conflict.
+        borrow_check_ok(
+            "fn main() -> i64 { let a: i64 = 9; let b: i64 = 7; let c: bool = true; let r: &i64 = if c { &a } else { &b }; *r }",
+        );
     }
 }

@@ -1,0 +1,8 @@
+// The borrow behind a ref that leaves a block is rooted in the binding that receives it.
+fn main() -> i64 {
+    let mut v: Vec<i64> = vec_new();
+    push(&mut v, 5);
+    let q: &i64 = { let p: &i64 = &v[0]; p };
+    push(&mut v, 6);
+    *q
+}

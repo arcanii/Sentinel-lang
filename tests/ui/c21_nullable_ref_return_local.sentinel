@@ -1,0 +1,3 @@
+// `?&T` carries a reference: the return check is structural, not `is_ref()`.
+fn grab() -> ?&i64 { let s: i64 = 5; &s }
+fn main() -> i64 { let z: i64 = 0; *unwrap_or(grab(), &z) }

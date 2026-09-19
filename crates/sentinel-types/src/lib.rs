@@ -1056,12 +1056,19 @@ impl Type {
     /// `[secret u8]` (the `Vec<secret u8> → [secret u8]` bridge; else it falls back
     /// to `[T]` and the annotation match fails). The [`SecretId`] is taken straight
     /// from the `Type::Secret`, so no `secrets` table is needed (the resolution-site
-    /// [`Type::to_array_elem_secret`] validates scalar-ness). A `[secret NON-scalar]`
-    /// is unreachable on this path: every source spelling is rejected at resolution,
-    /// so a `secret` reaching here wraps a scalar (see ADR 0053).
+    /// [`Type::to_array_elem_secret`] validates scalar-ness).
+    ///
+    /// Scalar-ness is checked HERE too, rather than assumed. An earlier comment
+    /// held that a `[secret NON-scalar]` could not reach this path because every
+    /// source spelling is rejected at resolution — but `secret &T` is a legal
+    /// spelling (ADR 0019 D5), and binding it to the `T` of a `[T]` arrives here
+    /// without passing any resolution gate. `secret_scalar_slot` is the existing
+    /// name for "one of the pre-interned secretable scalars" (`SECRET_SCALARS`,
+    /// `SecretId`s 0..=3); `intern_secret` deduplicates by inner, so a `secret
+    /// i64` always carries id 0 and the test is exact without the interner.
     fn to_array_elem_subst(self) -> Option<ArrayElem> {
         if let Type::Secret(id) = self {
-            return Some(ArrayElem::Secret(id));
+            return secret_scalar_slot(id).map(|_| ArrayElem::Secret(id));
         }
         self.to_array_elem()
     }
@@ -1148,7 +1155,9 @@ impl Type {
     /// `secret` reaching here wraps a scalar (see ADR 0052 "Scope / Deferred").
     fn to_vec_elem_subst(self) -> Option<VecElem> {
         if let Type::Secret(id) = self {
-            return Some(VecElem::Secret(id));
+            // The array twin's reasoning applies unchanged: only a pre-interned
+            // secretable SCALAR demotes to an element. See `to_array_elem_subst`.
+            return secret_scalar_slot(id).map(|_| VecElem::Secret(id));
         }
         self.to_vec_elem()
     }
@@ -13240,6 +13249,49 @@ fn main() -> i64 {
             "struct Box<T> { v: T }\nfn mk<T>(x: T) -> Box<T> { Box { v: x } }\nfn main() -> i64 { let x: i64 = 5; let b = mk(&x); 0 }",
         );
         assert!(matches!(err, TypeError::RefInGenericField { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn generic_subst_cannot_put_a_ref_in_a_container_element() {
+        // ADR 0017 D7 by way of the SUBSTITUTION path. `[&T]` written in source is
+        // refused by `RefInArray`, but binding a reference to the `T` of a `[T]`
+        // never visits that gate — it goes through `to_array_elem_subst`, which
+        // demoted any `Type::Secret` to an element without looking at what the
+        // secret wrapped. `secret &i64` is a legal spelling (ADR 0019 D5), so the
+        // element could come out holding a reference — and borrow-check's
+        // `carries_ref` answers `false` for `Type::Array(_)` precisely because
+        // that is supposed to be impossible.
+        //
+        // The demote now admits only a pre-interned secretable SCALAR, so the
+        // element cannot be formed and every spelling fails closed. What it fails
+        // WITH varies by shape (this one is the consuming spelling); the property
+        // being pinned is that none of them yields `[secret &i64]`.
+        let err = check_err(
+            "fn wrap<T>(x: T) -> [T] { [x] }\nfn first<T>(a: [T]) -> T { a[0] }\nfn main() -> i64 { let o: i64 = 7; let r: secret &i64 = &o; let p: &i64 = declassify(first(wrap(r))); *p }",
+        );
+        assert!(
+            matches!(err, TypeError::Mismatch { .. }),
+            "expected the substitution to fail closed, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn annotated_secret_ref_container_rejected() {
+        // The annotated spellings of the same thing, which the representability
+        // demote refuses at resolution.
+        let a = check_err(
+            "fn wrap<T>(x: T) -> [T] { [x] }\nfn main() -> i64 { let o: i64 = 7; let r: secret &i64 = &o; let a: [secret &i64] = wrap(r); 0 }",
+        );
+        assert!(matches!(a, TypeError::NestedArray { .. }), "got {a:?}");
+    }
+
+    #[test]
+    fn generic_subst_secret_scalar_element_still_ok() {
+        // The control for the gate above: a secret SCALAR is what that path exists
+        // for, and it must keep round-tripping (ADR 0052 / 0053).
+        check_ok(
+            "fn wrap<T>(x: T) -> [T] { [x] }\nfn main() -> i64 { let s: secret i64 = 7; let a: [secret i64] = wrap(s); declassify(a[0]) }",
+        );
     }
 
     #[test]

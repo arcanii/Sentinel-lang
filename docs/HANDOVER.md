@@ -361,7 +361,7 @@ reference as you work through the milestones.
 >      scalar-4 arm, which it now has. Also worth doing with it: `examples/math/quadratic.sentinel` and
 >      `sentinel_library/std/math/float.sentinel` currently reach only lex/ast, because
 >      `snc merge`'s Bar-A printer rejects both a float literal and `sqrt` (menu item 5).
->   4. **THE FILED-DEFECT REGISTER — EIGHTY-ONE items (D1-D81); **D1, D2, D3, D4, D5, D8, D9, D10, D15, D16, D17, D24, D25, D26, D29, D31, D34, D37, D39, D42, D43, D44, D47(option A), D51, D54, D55, D56, D58, D59, D60, D61, D66, D74 and D76 are DONE (34 of 81)**, the rest verified against a pre-slice binary. MOST are
+>   4. **THE FILED-DEFECT REGISTER — EIGHTY-FIVE items (D1-D85); **D1, D2, D3, D4, D5, D8, D9, D10, D15, D16, D17, D24, D25, D26, D29, D31, D34, D37, D39, D42, D43, D44, D47(option A), D51, D54, D55, D56, D58, D59, D60, D61, D66, D74 and D76 are DONE (34 of 85)**, the rest verified against a pre-slice binary. MOST are
 >      unregistered in any `DEFERRED_PROGRAMS` / `KNOWN_SCG_BUGS` list because no corpus program
 >      reaches them — but FOUR are, and the blanket "NONE" that stood here was falsified by
 >      this register's own new entries: D24/D25/D26 share the
@@ -839,6 +839,65 @@ reference as you work through the milestones.
 >      { let v = handle perform Io.get() with { Io.get(k2) => k2(40) }; k(v + 2) } }` answered a
 >      different garbage value on each run where its source says 42. All three back ends; no
 >      corpus program nests a `handle` in an arm.
+>
+>      **D82 — `snc llvm` emits an invalid null pointer constant for `return null`
+>      of a `?&T`.** Found 2026-09-19 while adding the ref-escape corpus fixtures;
+>      pre-existing, and not reachable through any fixture before them. The text
+>      oracle renders the null half of the `{i1, ptr}` nullable-reference pair as
+>      `ret { i1, ptr } { i1 0, ptr 0 }`, and `llvm-as` 18 refuses it: "integer
+>      constant must have integer type" — a null pointer constant must be spelled
+>      `null`. `fn maybe(x: &i64, some: bool) -> ?&i64 { if some { return x } else
+>      { 0 }; return null }` reproduces it, and `llvm_emitted_ir_assembles_over_corpus`
+>      fails the moment such a program enters `tests/`. inkwell emits it correctly,
+>      so no `snc build` is affected and no exit code can see it; only the `.ll`
+>      oracle is wrong. Fixing it moves the oracle, so it needs the `selfhost/`
+>      mirror and a re-blessed codegen differential — which is why it is filed
+>      rather than fixed beside a two-crate borrow-check change. The position is
+>      pinned meanwhile by the `return_null_nullable_ref_ok` unit test in
+>      `sentinel-borrow-check`, which no differential sweeps.
+>
+>      **D83 — the Rust and self-hosted MIR lowerers diverge on a `return` inside a
+>      handler arm.** Found 2026-09-19 the same way; pre-existing. The self-hosted
+>      lowerer emits 127 bytes MORE than `snc mir` for the construct, on every
+>      program containing it. **Constructed on a reference-free program** — `fn
+>      by_handler(x: i64) -> i64 { let h: i64 = handle 1 with { return v => if v ==
+>      1 { return x } else { 0 } }; h }` diverges 205 vs 332 bytes — so it is not
+>      about references, and `run_mir` (`crates/sentinel-driver/src/main.rs:431`)
+>      never calls `borrow_check` at all, so no borrow-check change can reach it.
+>      `sentinel_mir_matches_oracle_on_corpus` has no deferred/known-bug list (that
+>      mechanism belongs to the per-construct test), so the construct cannot appear
+>      in any `tests/` fixture until one lowerer is brought to the other. Which one
+>      is right is undetermined — that is the first thing to settle. The borrow
+>      rule at that position is pinned meanwhile by the
+>      `return_in_handler_arm_rejected` unit test.
+>
+>      **D84 — ADR 0017's own text attributes the second-class-reference rule to
+>      the wrong decision.** Cosmetic but load-bearing for anyone following the
+>      trail. D7 ("Regions: lexical at C2 minimum") says the first-class-ref problem
+>      "is handled by **D6's** 'second-class everywhere' rule", but D6 is "Borrow-
+>      checker formulation: lexical first, Polonius later" and states no such rule.
+>      The rule is stated in D7's own implications bullet ("arrays / struct fields
+>      can NOT hold refs at C2") and in D1's `RefInArray` rejection. The codebase
+>      already cites D7 for it, which is the closest correct anchor; the ADR text is
+>      what is wrong. Filed rather than edited: ADR 0017 is ACCEPTED-WITH-AMENDMENTS
+>      and correcting a ratified decision's text is a maintainer call.
+>
+>      **D85 — a REFERENCE in an effect-op signature reaches codegen and PANICS
+>      inkwell.** Found 2026-09-19 while probing the operand positions;
+>      pre-existing, and independent of the reference's liveness. `effect Io {
+>      write(r: &i64) -> i64; }` with `perform Io.write(r)` on a LIVE `&x` aborts
+>      in `inkwell-0.5.0/src/values/enums.rs:309` — "Found PointerValue … but
+>      expected the IntValue variant" — because the continuation seam is one i64
+>      (ADR 0072 A1's allow-list) and a `ptr` is not representable there. A dead
+>      reference in the same position panics identically, so this is about the
+>      TYPE, not the borrow rules. It violates the standing rule that user-program
+>      input must surface a `miette` diagnostic rather than panic. The designed fix
+>      is the deferred `RefInEffectSignature` fence (ref-escape plan §2.8): refuse a
+>      reference type in an effect-op parameter or return at the type layer. That
+>      is a new language rule, so it wants an ADR line before it ships — which is
+>      why the plan deferred it and why it is filed rather than fixed here. ⚠ Do
+>      NOT ship the broader `handle`-value fence alongside it: it over-rejects
+>      `n5g_handle_ref_retarm`, which this slice deliberately keeps accepted.
 >
 >      **D78 — stale corpus fixture counts in `llvm.rs` and `README.md`, at six sites, stale
 >      before this change.** Found by D74's reviews. `crates/sentinel-driver/tests/llvm.rs`

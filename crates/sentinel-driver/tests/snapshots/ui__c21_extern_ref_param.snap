@@ -1,0 +1,14 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c21_extern_ref_param.sentinel\")"
+---
+sentinel::types::extern_ffi_type
+
+  × `extern` fn types must be public FFI-safe scalars (`i64` or `f64`)
+    ╭─[tests/ui/c21_extern_ref_param.sentinel:14:21]
+ 13 │ extern "C" {
+ 14 │     fn takes_ref(r: &i64) -> i64;
+    ·                     ──┬─
+    ·                       ╰── 
+ 15 │ }
+    ╰────

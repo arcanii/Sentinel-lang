@@ -1,0 +1,7 @@
+// The merged source is the MOST restrictive one: the dead `inner` path, not live `outer`.
+fn main() -> i64 {
+    let c: bool = false;
+    let outer: [i64] = [7, 7];
+    let r: &i64 = if c { &outer[0] } else { let inner: [i64] = [5, 5]; &inner[0] };
+    *r
+}

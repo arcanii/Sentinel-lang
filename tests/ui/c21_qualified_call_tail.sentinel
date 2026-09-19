@@ -1,0 +1,5 @@
+trait Peek { fn peek(self: &Self) -> &i64; }
+struct Slot { v: i64 }
+impl Named as Peek for Slot { fn peek(self: &Self) -> &i64 { &self.v } }
+fn escape() -> &i64 { let s: Slot = Slot { v: 5 }; Named::peek(&s) }
+fn main() -> i64 { *escape() }

@@ -1,0 +1,14 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c21_assign_widens_ref.sentinel\")"
+---
+sentinel::borrow::ref_outlives_assignment
+
+  × `r` would be re-pointed at `inner`, which does not live as long as it does
+   ╭─[tests/ui/c21_assign_widens_ref.sentinel:6:38]
+ 5 │     let mut r: &i64 = &outer;
+ 6 │     { let inner: [i64] = [5, 5]; r = &inner[0]; 0 };
+   ·                                      ────┬────
+   ·                                          ╰── 
+ 7 │     if c { r = &outer; 0 } else { 0 };
+   ╰────

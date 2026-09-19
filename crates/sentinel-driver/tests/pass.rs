@@ -2278,3 +2278,77 @@ fn pass_c16_transitive_mono_order() {
     // real pin is the codegen differential over `tests/pass`.
     assert_eq!(run_exit("c16_transitive_mono_order.sentinel"), 42);
 }
+
+#[test]
+fn pass_c21_return_incoming_positions() {
+    // ADR 0017 D7 (ref-escape): the sharpest precision guard for the return-site
+    // check. Returning a CALLER-OWNED `&T` is legal from every exit position the
+    // language has — tail, statement `return`, match arm, scope body, handler arm —
+    // including through a `?&T` return type. The check keys on the operand's
+    // SOURCE, not on its type: an `Incoming` source escapes fine, a fn-local does
+    // not.
+    //
+    // Two exit positions are pinned by unit tests instead, because each trips a
+    // pre-existing, reference-unrelated divergence that this tree's stage
+    // differentials sweep: a `return` in a handler arm (the two MIR lowerers
+    // disagree) and `return null` of a `?&T` (`snc llvm` emits `ptr 0`, which
+    // LLVM 18 will not assemble). Both are registered. 10 + 20 + 20 + 10 = 60.
+    assert_eq!(run_exit("c21_return_incoming_positions.sentinel"), 60);
+}
+
+#[test]
+fn pass_c21_ref_through_method_and_merge_ok() {
+    // A method result bound while its receiver is still live, an if-merge of two
+    // equally-live sources, and a generic `pick<T>(&x, &y)` pass-through. Pins that
+    // threading a reference through calls and merges does not trip the liveness
+    // rules when every source outlives the use. Exit 16.
+    assert_eq!(run_exit("c21_ref_through_method_and_merge_ok.sentinel"), 16);
+}
+
+#[test]
+fn pass_c22_twophase_method_ok() {
+    // `k.set(k.get())` — the receiver's auto-ref (ADR 0022 D3) is a real borrow, so
+    // registering it naively would make the outer `&mut self` conflict with the
+    // inner `&self`. It is registered AFTER the arguments are walked (two-phase),
+    // which is what keeps this accepted. Exit 6.
+    assert_eq!(run_exit("c22_twophase_method_ok.sentinel"), 6);
+}
+
+#[test]
+fn pass_c23_move_after_borrow_ends_ok() {
+    // Moving a value once every borrow of it has ended: after a scoped borrow, after
+    // an if-condition borrow, and after a completed call. Pins that
+    // `move_while_borrowed` keys on a LIVE borrow, not on any borrow ever taken —
+    // including `h(g(&c[0]), c)`, where the argument's borrow dies with the inner
+    // call. Exit 21.
+    assert_eq!(run_exit("c23_move_after_borrow_ends_ok.sentinel"), 21);
+}
+
+#[test]
+fn pass_c21_nullable_secret_ref_passthrough() {
+    // ADR 0019 D5: `secret &T` is a SECRET VALUE behind a PUBLIC reference, and it
+    // stays legal. The ref-escape work widened several gates from `is_ref()` to
+    // `carries_ref()`, which reaches through `Secret` and `Nullable` — this pins
+    // that the widening did not turn `secret &T` (or `?&T`) into a banned type.
+    // Both are caller-owned pass-throughs here, so nothing escapes. Exit 6.
+    assert_eq!(run_exit("c21_nullable_secret_ref_passthrough.sentinel"), 6);
+}
+
+#[test]
+fn pass_c21_call_arg_live_ref_ok() {
+    // Precision guard for the operand-liveness check: only a DEAD computed
+    // reference is refused. A block yielding `&x` with `x` still in scope, a plain
+    // `&x`, a block yielding `&v[0]` into a live array, and a reference threaded
+    // through `id()` then dereferenced all stay accepted. Without the liveness
+    // gate the check would reject every computed ref operand. 5+5+7+5+5 = 27.
+    assert_eq!(run_exit("c21_call_arg_live_ref_ok.sentinel"), 27);
+}
+
+#[test]
+fn pass_c21_if_two_same_scope_refs_ok() {
+    // Precision guard for the depth-aware source merge. The merge resolves an
+    // if-expression to its most restrictive source so a dead branch cannot hide
+    // behind a live one; this pins that two sources at the SAME depth are not
+    // treated as a conflict, at the fn's top level and one block in. 9 + 7 + 3 = 19.
+    assert_eq!(run_exit("c21_if_two_same_scope_refs_ok.sentinel"), 19);
+}

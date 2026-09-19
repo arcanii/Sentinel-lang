@@ -1,0 +1,16 @@
+// Moves are legal once every borrow of the place has ended: a scoped borrow, a borrow
+// in an `if` condition, and a borrow passed to a completed call.
+fn sink(v: [i64]) -> i64 { v[0] }
+fn peek(v: &[i64]) -> bool { (*v)[0] > 0 }
+fn g(r: &i64) -> i64 { *r }
+fn h(a: i64, v: [i64]) -> i64 { a + v[1] }
+fn main() -> i64 {
+    let a: [i64] = [5, 6];
+    let n: i64 = { let p: &i64 = &a[1]; *p };
+    let r1: i64 = sink(a);
+    let b: [i64] = [7, 8];
+    let r2: i64 = if peek(&b) { sink(b) } else { 0 };
+    let c: [i64] = [1, 2];
+    let r3: i64 = h(g(&c[0]), c);
+    n + r1 + r2 + r3
+}

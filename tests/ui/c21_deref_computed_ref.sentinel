@@ -1,0 +1,11 @@
+// The dead computed reference as a DEREF operand: `*id({ ... })`. The result is
+// an i64, so nothing downstream carries a reference and no other check has a
+// reason to look — the dereference itself reads freed storage.
+fn id(r: &i64) -> &i64 { r }
+fn main() -> i64 {
+    let got: i64 = *id({
+        let v: [i64] = [5, 5, 5, 5];
+        &v[0]
+    });
+    got
+}

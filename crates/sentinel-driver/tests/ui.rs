@@ -290,3 +290,47 @@ ui_snapshot!(c21_ref_in_class_field_delegate, "c21_ref_in_class_field_delegate.s
 ui_snapshot!(c21_ref_in_enum_payload, "c21_ref_in_enum_payload.sentinel");
 ui_snapshot!(c21_ref_in_generic_field_call, "c21_ref_in_generic_field_call.sentinel");
 ui_snapshot!(c21_ref_in_generic_field_literal, "c21_ref_in_generic_field_literal.sentinel");
+
+// ---- ADR 0017 D7 (ref-escape), borrow layer. A reference may not outlive the
+// storage it points at. Each family below pins one POSITION where a dead source
+// can be caught, and each position has its own diagnostic code so the `help`
+// line can name the fix that applies there. ----
+
+// Exit positions (-> returns_local_ref): a reference to a fn-local escaping the
+// function, from every exit shape the language has.
+ui_snapshot!(c21_return_local_ref_stmt, "c21_return_local_ref_stmt.sentinel");
+ui_snapshot!(c21_match_tail_local_ref, "c21_match_tail_local_ref.sentinel");
+ui_snapshot!(c21_scope_tail_local_ref, "c21_scope_tail_local_ref.sentinel");
+ui_snapshot!(c21_method_call_tail_local_recv, "c21_method_call_tail_local_recv.sentinel");
+ui_snapshot!(c21_qualified_call_tail, "c21_qualified_call_tail.sentinel");
+ui_snapshot!(c21_nullable_ref_return_local, "c21_nullable_ref_return_local.sentinel");
+ui_snapshot!(c21_secret_ref_return_local, "c21_secret_ref_return_local.sentinel");
+
+// Binding / assignment positions (-> ref_outlives_binding, ref_outlives_assignment):
+// a binding may not start out, or be re-pointed at, storage that dies before it.
+ui_snapshot!(c21_match_launder_outlives, "c21_match_launder_outlives.sentinel");
+ui_snapshot!(c21_if_merge_dead_branch, "c21_if_merge_dead_branch.sentinel");
+ui_snapshot!(c21_assign_widens_ref, "c21_assign_widens_ref.sentinel");
+ui_snapshot!(c21_nullable_ref_local_outlives, "c21_nullable_ref_local_outlives.sentinel");
+ui_snapshot!(c21_borrow_of_temporary, "c21_borrow_of_temporary.sentinel");
+
+// Operand position (-> ref_operand_dead): a ref-carrying value consumed as a call
+// argument or a deref operand is bound to nothing, so no other check sees it.
+ui_snapshot!(c21_call_arg_computed_ref, "c21_call_arg_computed_ref.sentinel");
+ui_snapshot!(c21_method_arg_computed_ref, "c21_method_arg_computed_ref.sentinel");
+ui_snapshot!(c21_deref_computed_ref, "c21_deref_computed_ref.sentinel");
+
+// Moving out from under a live reference (-> move_while_borrowed).
+ui_snapshot!(c23_move_while_borrowed, "c23_move_while_borrowed.sentinel");
+ui_snapshot!(c23_move_while_borrowed_merge, "c23_move_while_borrowed_merge.sentinel");
+
+// Borrows that outlive an inner block now keep their place borrowed for the
+// binding's life, so the shared-XOR-mutable rule sees them.
+ui_snapshot!(c22_borrow_survives_inner_block, "c22_borrow_survives_inner_block.sentinel");
+ui_snapshot!(c22_ref_out_of_block_then_push, "c22_ref_out_of_block_then_push.sentinel");
+ui_snapshot!(c22_method_ref_then_mut_method, "c22_method_ref_then_mut_method.sentinel");
+
+// The FFI fence from the reference side: an `extern "C"` body is never
+// borrow-checked by any run, and what keeps the interprocedural summary sound
+// at that boundary is that no reference can cross it.
+ui_snapshot!(c21_extern_ref_param, "c21_extern_ref_param.sentinel");

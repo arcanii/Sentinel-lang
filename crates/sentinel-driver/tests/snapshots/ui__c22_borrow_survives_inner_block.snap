@@ -1,0 +1,14 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c22_borrow_survives_inner_block.sentinel\")"
+---
+sentinel::borrow::mutable_borrow_of_shared
+
+  × cannot take `&mut v` while it is already borrowed shared
+   ╭─[tests/ui/c22_borrow_survives_inner_block.sentinel:8:10]
+ 7 │     let k: i64 = if c { 1 } else { 2 };
+ 8 │     push(&mut v, 6);
+   ·          ───┬──
+   ·             ╰── 
+ 9 │     *q
+   ╰────

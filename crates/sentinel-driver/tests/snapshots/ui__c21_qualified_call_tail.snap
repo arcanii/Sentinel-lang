@@ -1,0 +1,14 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c21_qualified_call_tail.sentinel\")"
+---
+sentinel::borrow::returns_local_ref
+
+  × function `escape` returns a reference to local `s`
+   ╭─[tests/ui/c21_qualified_call_tail.sentinel:4:52]
+ 3 │ impl Named as Peek for Slot { fn peek(self: &Self) -> &i64 { &self.v } }
+ 4 │ fn escape() -> &i64 { let s: Slot = Slot { v: 5 }; Named::peek(&s) }
+   ·                                                    ───────┬───────
+   ·                                                           ╰── 
+ 5 │ fn main() -> i64 { *escape() }
+   ╰────

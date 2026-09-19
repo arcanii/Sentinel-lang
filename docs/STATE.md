@@ -14,7 +14,103 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
-**Latest (2026-09-14) — D76: a captured frame pushed onto a pure-return kont was never run,
+**Latest (2026-09-19) — the ref-escape family: a reference could outlive the storage it
+pointed at, from the positions ADR 0017 D7's second-class rule was never checked at.
+`snc`-side, rejection-only. NOT PUSHED.** C2.1 enforced D7 where a ref-typed BINDING IS
+READ and where a function RETURNS one, and the type layer refused a `&T` written into a
+struct field. The gap was in WHERE the rule ran, not in the rule:
+`read({ let v: [i64] = [5, 5]; &v[0] })` was accepted, because the operand is bound to
+nothing and so neither check ever looks at it. So were a `return` in statement position, a
+`match` / `scope` / method-call / qualified-call tail, a `let` or an assignment widening
+the referent's scope, a move out from under a live reference, and — in the type layer — a
+reference stored in a class field, an enum payload, or a generic struct's field.
+
+Three commits. The type layer first (`309047c`, `66818a2`): `Type::carries_ref`, which
+reaches through `?T` and `secret T` where the old `is_ref()` saw only a bare `&T`; the
+widened `nested_ref` (×2 — the written annotation AND the inferred borrow) and
+`ref_in_struct_field` gates; and `ref_in_class_field` / `ref_in_enum_payload` /
+`ref_in_generic_field`. A PHANTOM reference type argument — one no field uses — stays
+legal, and `secret &T` stays a legal type (ADR 0019 D5: a secret value behind a public
+reference); both are pinned by `tests/pass` controls.
+
+Then the borrow layer: `source_of_expr` made TOTAL and fail-CLOSED (an unmodelled kind
+resolves to `Temporary`, never alive), the return check moved to the `return` SITE, read
+liveness, binding and assignment widening, a depth-aware source merge, the receiver
+auto-ref borrow, match/handler arm binder declaration, `MoveWhileBorrowed`, the
+`RefStoredIntoPlace` backstop, and `check_operand_alive` — the operand position, which
+both prototype designs missed and which the example above needs.
+
+Each position carries its own diagnostic code so the `help` line can name the fix that
+applies there: `ref_outlives_binding`, `ref_outlives_assignment`, `ref_operand_dead`
+beside `outlives_source` and `returns_local_ref`. One dead SOURCE reports once per fn;
+only duplicates are dropped, so a program with a dead reference is still rejected.
+
+**The adversarial review found five more operand positions and reproduced each.** The
+check had been wired to five call sites; `Name::init(args)`, the deref ASSIGNMENT target
+(`*<operand> = v`), and every runtime-builtin argument were not among them, and `& *` /
+`&mut *` operands were skipped outright — on a premise that holds only when the thing
+borrowed is rooted at a binding, which a reborrow of a computed operand is not. All four
+are now checked; the skip list is a bare `Var`, and an ordinary `&place` operand resolves
+to the place it names and still passes. Separately, `to_array_elem_subst` /
+`to_vec_elem_subst` admitted ANY `Type::Secret` as a container element without looking at
+what the secret wrapped, on a comment's premise that a `secret NON-scalar` cannot reach
+them — false, since `secret &T` is a legal spelling. They now admit only a pre-interned
+secretable scalar (`secret_scalar_slot`, `SECRET_SCALARS` 0..=3; `intern_secret`
+deduplicates, so the test is exact without the interner), and every spelling of the
+laundering shape fails closed while `[secret u8]` via `vec_to_array<T>` still round-trips.
+
+Measured: a 153-row battery over the 31 reproduced routes plus controls closes every
+targeted route with the deliberate exclusions intact. A corpus sweep — 362 programs across
+`tests/pass`, `examples`, `demos`, `sentinel_library`, `selfhost`, `tools` and
+`crates/**/fixtures`, with the file list taken from `git ls-files` rather than a written
+list of trees — rejects 44, every one a `sentinel::resolve::*` error on a library module or
+a multi-file-module part compiled standalone, and not one borrow or reference rejection.
+New: 21 `tests/ui` fixtures, 7 `tests/pass` controls, borrow-check unit tests 65 → 94,
+types 282 → 293.
+
+**Cross-unit soundness confirmed rather than assumed.** The interprocedural summary (a
+call's result reference comes from its reference ARGUMENTS) holds only if every callee body
+was borrow-checked. All four build modes check every body they compile (`main.rs:1229`,
+`1333`, `1507`, `2461`); an import always resolves from `.sentinel` SOURCE, never a
+pre-built object; `--separate`'s fingerprint cache reuses an object only for identical
+source under the same compiler version. The one body-less callable is `extern "C"`, and
+`is_ffi_safe` admits only `i64` / `f64` / opaque `ptr`, so no reference crosses it —
+`c21_extern_ref_param` now pins that, which nothing did. ⚠ ADR 0063 (`.sif` pre-built
+libraries) would flip this: a caller would bind to a body it never sees over the full ABI.
+It is PROPOSED and unwired (`descriptor.rs` is `#![allow(dead_code)]`); the precondition
+must be re-argued before that increment ships.
+
+**Two new over-rejections, documented rather than weakened.** A block whose VALUE carries a
+reference keeps every borrow taken inside it (the checker has no provenance to tell which
+the yielded reference depends on, and `{ let s = &v[0]; s }` genuinely needs `v`), and a
+ref-returning method's receiver stays borrowed for the statement, so it cannot also be moved
+by it. Both have reproducers, workarounds and unit-test pins in
+`docs/borrow-check-limitations.md`; narrowing either needs the per-borrow provenance ADR
+0018 step .a builds.
+
+**One bug in the applied change, caught by the codegen differential:** reporting
+`MoveWhileBorrowed` returned early and left the move unrecorded, so the oracle's `DropPlan`
+emitted a drop the self-hosted compiler did not. The plan describes what the program does,
+not which diagnostics fired; the move is now recorded either way. The borrow differential
+could not have caught this — it skips rejected fixtures — while the codegen one does,
+because `snc llvm` discards borrow errors.
+
+**Filed: D82-D85.** `snc llvm` emits `ret { i1, ptr } { i1 0, ptr 0 }` for `return null` of
+a `?&T`, which LLVM 18 will not assemble; the Rust and self-hosted MIR lowerers diverge by
+127 bytes on a `return` inside a handler arm (constructed on a reference-free program, and
+`run_mir` never calls `borrow_check`); ADR 0017's own text credits the second-class rule to
+D6, which is about lexical-vs-Polonius; and a reference in an effect-op signature panics
+inkwell regardless of liveness (the deferred §2.8 fence). The first two positions are pinned
+by borrow-check unit tests instead of corpus fixtures, because every fixture in `tests/` is
+swept by those differentials.
+
+Four-check: 1,967 passed with exactly the 18 known Windows failures, doctests and clippy
+clean, every `selfhost_*` differential green. `docs/borrow-check-limitations.md` gains the
+closed-gap section, three new over-rejections and four Tracking rows;
+`docs/PROGRAMMING_GUIDE.md`'s "the one historical under-rejection … is closed" is corrected
+— over-claiming the guarantee is itself a bug. **Register: 85 items, 34 done.**
+
+**Previously (2026-09-14) — D76: a captured frame pushed onto a pure-return kont was never run,
 and leaked. Runtime-only. NOT PUSHED.** An effecting fn whose body never performs returns
 `sentinel_kont_pure(v)`, and a let-site above it pushed its frame onto that pure kont, where
 nothing reads frames: a `handle`'s dispatch (through `sentinel_kont_consume_pure`) and

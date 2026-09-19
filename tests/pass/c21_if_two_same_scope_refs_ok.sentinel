@@ -1,0 +1,22 @@
+// Precision guard for the depth-aware source merge: when BOTH arms borrow from
+// the same scope, neither is "narrower", so the merged reference is fine. The
+// merge picks the most restrictive source, and this pins that it does not treat
+// two equally-live siblings as a conflict.
+fn main() -> i64 {
+    let a: i64 = 9;
+    let b: i64 = 7;
+    let cond: bool = true;
+
+    let r: &i64 = if cond { &a } else { &b };
+    let s: &i64 = if cond { &b } else { &a };
+
+    // Same shape one level in, where both sources are still declared together.
+    let inner: i64 = {
+        let p: i64 = 3;
+        let q: i64 = 2;
+        let t: &i64 = if cond { &p } else { &q };
+        *t
+    };
+
+    *r + *s + inner
+}

@@ -1,0 +1,5 @@
+fn leak() -> &i64 {
+    let v: i64 = 5;
+    scope concurrent { &v }
+}
+fn main() -> i64 { *leak() }

@@ -1,0 +1,9 @@
+// A reference may not be assigned into a binding that outlives its referent.
+fn main() -> i64 {
+    let outer: i64 = 9;
+    let c: bool = false;
+    let mut r: &i64 = &outer;
+    { let inner: [i64] = [5, 5]; r = &inner[0]; 0 };
+    if c { r = &outer; 0 } else { 0 };
+    *r
+}

@@ -1,0 +1,13 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c22_method_ref_then_mut_method.sentinel\")"
+---
+sentinel::borrow::mutable_borrow_of_shared
+
+  × cannot take `&mut k` while it is already borrowed shared
+   ╭─[tests/ui/c22_method_ref_then_mut_method.sentinel:8:81]
+ 7 │ }
+ 8 │ fn main() -> i64 { let mut k: K = K::init(5); let r: &i64 = k.p(); let z: i64 = k.grow(); *r }
+   ·                                                                                 ────┬───
+   ·                                                                                     ╰── 
+   ╰────

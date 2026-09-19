@@ -1,0 +1,8 @@
+// The auto-ref'd receiver is an implicit ref argument: `h.get()` may point into `h`.
+class H {
+    let v: i64;
+    pub init(v: i64) { self.v = v; 0 }
+    pub fn get(self: &Self) -> &i64 { &self.v }
+}
+fn leak() -> &i64 { let h: H = H::init(5); h.get() }
+fn main() -> i64 { *leak() }

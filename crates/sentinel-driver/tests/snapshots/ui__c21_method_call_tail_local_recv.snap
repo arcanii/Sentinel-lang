@@ -1,0 +1,14 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c21_method_call_tail_local_recv.sentinel\")"
+---
+sentinel::borrow::returns_local_ref
+
+  × function `leak` returns a reference to local `h`
+   ╭─[tests/ui/c21_method_call_tail_local_recv.sentinel:7:44]
+ 6 │ }
+ 7 │ fn leak() -> &i64 { let h: H = H::init(5); h.get() }
+   ·                                            ───┬───
+   ·                                               ╰── 
+ 8 │ fn main() -> i64 { *leak() }
+   ╰────

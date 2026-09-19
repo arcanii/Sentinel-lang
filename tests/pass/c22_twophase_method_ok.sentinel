@@ -1,0 +1,4 @@
+// The receiver's auto-ref is taken AFTER the arguments (two-phase), and a borrow
+// passed to a call returning a non-ref ends with that call.
+class K { let n: i64; pub init(n: i64) { self.n = n; 0 } pub fn get(self: &Self) -> i64 { self.n } pub fn set(self: &mut Self, v: i64) -> i64 { self.n = v; 0 } }
+fn main() -> i64 { let mut k: K = K::init(5); let z: i64 = k.set(k.get() + 1); k.get() }

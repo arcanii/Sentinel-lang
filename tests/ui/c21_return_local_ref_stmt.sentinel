@@ -1,0 +1,7 @@
+// A `return` operand is a fn exit: ADR 0017 D7's second-class check runs at the site.
+fn hand_out(fallback: &i64, early: bool) -> &i64 {
+    let cell: i64 = 5;
+    if early { return &cell } else { 0 };
+    fallback
+}
+fn main() -> i64 { let z: i64 = 1; *hand_out(&z, true) }

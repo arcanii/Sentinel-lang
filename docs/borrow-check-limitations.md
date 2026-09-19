@@ -182,6 +182,169 @@ reject) plus the pre-existing `c17_go_no_go` (which returns a generic
 field by value) exercise it. The self-hosted `scg` no longer has the
 gap.
 
+## Soundness gap: a reference outliving its storage — ✅ CLOSED (ADR 0017 D7)
+
+**Status: closed in `snc`.** Every check below only ever REJECTS. Programs that
+relied on the gap stop compiling — that is the point of the section — but no
+program keeps compiling and emits different code, so nothing the stage
+differentials compare moves and `selfhost/` needs no mirror.
+
+References are second-class (ADR 0017 D7): a reference may not outlive the
+storage it points at. C2.1 checked that rule at two places — where a
+ref-typed *binding is read*, and where a function *returns* one — and the
+type layer refused a `&T` written into a struct field. That left positions
+where a reference could reach dead storage without passing either check.
+
+```sentinel
+fn read(r: &i64) -> i64 { *r }
+fn main() -> i64 {
+    read({                        // the operand is bound to nothing, so the
+        let v: [i64] = [5, 5];    // binding and return checks never see it
+        &v[0]                     // ACCEPTED before this work
+    })
+}
+```
+
+The gap was in WHERE the rule was checked, not in the rule. Each position
+below is now checked, and each has its own diagnostic code so the `help`
+line can name the fix that applies there:
+
+  - `sentinel::borrow::returns_local_ref` — the exit positions. A
+    statement `return`, a `match` / `scope` / method-call / qualified-call
+    tail, and the `?&T` and `secret &T` spellings of each.
+  - `sentinel::borrow::ref_outlives_binding` — a `let` initialized with a
+    reference to storage that is already dead.
+  - `sentinel::borrow::ref_outlives_assignment` — a ref binding re-pointed
+    at storage that dies before it does. Checking this is what makes the
+    strong update on a ref binding sound.
+  - `sentinel::borrow::ref_operand_dead` — a reference consumed as a call
+    argument or a deref operand, which is bound to nothing and so was
+    reached by no other check.
+  - `sentinel::borrow::move_while_borrowed` — a place moved out of while a
+    reference into it is still live.
+  - `sentinel::borrow::ref_stored_into_place` — the fail-closed backstop
+    for a reference stored anywhere but a binding (a field, an element,
+    through a deref). Unreachable while the type-layer rules below hold.
+
+The type layer closed the matching storage positions, keyed on a new
+`carries_ref` predicate that reaches through `?T` and `secret T` where the
+old `is_ref()` saw only a bare `&T`: `ref_in_class_field`,
+`ref_in_enum_payload`, `ref_in_generic_field` (a type argument that lands
+in a field — a *phantom* ref type argument no field uses stays legal), and
+the widened `ref_in_struct_field` / `nested_ref` gates.
+
+`secret &T` remains a legal type (ADR 0019 D5) — it is a secret value
+behind a public reference, and `carries_ref` reaching through `Secret` does
+not ban it. `tests/pass/c21_nullable_secret_ref_passthrough.sentinel` pins
+that.
+
+One dead source reports once per function: the same mistake is reachable
+from the binding, from every later read, and from every operand the
+reference flows into, and the first report wins. Only duplicates are
+dropped — a program with a dead reference is still rejected.
+
+## Over-rejection: a block that yields a reference keeps its own borrows
+
+When a block's VALUE carries a reference, every borrow taken inside the block is
+kept alive for the enclosing binding's scope — including borrows the yielded
+reference does not point at.
+
+```sentinel
+fn main() -> i64 {
+    let mut v: [i64] = [1, 2, 3];
+    let x: i64 = 9;
+    let r: &i64 = { let s: &i64 = &v[0]; let t: i64 = *s; &x };
+    v[0] = 7;          // REJECTED: cannot assign to `v` while it is borrowed
+    *r + v[0]
+}
+```
+
+Diagnostic: `sentinel::borrow::write_while_borrowed` on the assignment. The same
+program with `&x` bound directly (no block) is accepted.
+
+Cause: `FnCtx::pop_scope_yield` cannot tell which of the block's borrows the
+yielded reference depends on, so when the block yields one it keeps them all —
+`{ let s: &i64 = &v[0]; s }` really does need `v` to stay borrowed, and the
+checker has no provenance to distinguish that case from the one above. Keeping
+all of them is the sound direction; narrowing it by the yielded value's single
+resolved source would drop a place that an if-merged reference still points at.
+
+Workaround: don't take a borrow inside a block whose value is a reference —
+split the two.
+
+```sentinel
+let t: i64 = { let s: &i64 = &v[0]; *s };   // borrow ends with this block
+let r: &i64 = &x;
+v[0] = 7;   // accepted
+```
+
+Closure: needs per-borrow provenance on the yielded value — the same fact
+generator ADR 0018 step .a builds for Polonius.
+
+## Over-rejection: a ref-returning method's receiver, moved in the same call
+
+A method whose result carries a reference keeps its receiver borrowed until the
+enclosing statement ends, so the receiver cannot also be moved by that statement.
+
+```sentinel
+fn sink(a: i64, k: K) -> i64 { a + k.get() }
+fn main() -> i64 {
+    let k: K = K::init(7);
+    sink(*k.p(), k)   // REJECTED: cannot move out of `k` while it is borrowed
+}
+```
+
+Diagnostic: `sentinel::borrow::move_while_borrowed` on `k`.
+
+Cause: the receiver's auto-ref (ADR 0022 D3) is registered as a real borrow, and
+because `p()` returns a reference the borrow is not transient — it is rooted for
+the statement. That the value actually consumed is the dereferenced `i64`, not
+the reference, is not tracked.
+
+Workaround: bind the read before the move.
+
+```sentinel
+let a: i64 = *k.p();
+sink(a, k)   // accepted
+```
+
+Closure: as above — this is the "borrow lives past last use" case wearing a
+different hat, and ADR 0018's migration closes it.
+
+## Over-rejection: borrowing a field of a temporary
+
+A reference into a value that is not bound to anything is refused, because
+there is no binding whose scope could keep the value alive.
+
+```sentinel
+struct P { x: i64 }
+fn mk() -> P { P { x: 5 } }
+fn main() -> i64 {
+    let r: &i64 = &mk().x;   // REJECTED: ref_outlives_binding on `<temporary>`
+    *r
+}
+```
+
+Diagnostic: `sentinel::borrow::ref_outlives_binding`, naming the source
+`<temporary>`.
+
+Cause: `source_of_expr` is total and fails closed — a base that is not a
+place resolves to `BorrowSource::Temporary`, which is never alive. A
+flow-sensitive analysis could extend the temporary's lifetime to the
+enclosing statement (Rust's temporary-lifetime-extension rules) and accept
+some of these.
+
+Workaround: bind the value first, then borrow it.
+
+```sentinel
+let p: P = mk();
+let r: &i64 = &p.x;   // accepted — `p` is a binding with a scope
+*r
+```
+
+Closure: temporary lifetime extension is not specified for Sentinel; it
+would be its own ADR. Until then this errs on the side of safety.
+
 ## Out of scope at this doc
 
 - Closures, async, traits, lifetime parameters — none of these
@@ -200,4 +363,8 @@ Each row here gets closed by a specific ADR or sub-phase:
 |-------------------------------------|----------------------------------|
 | Borrow past last use                | ADR 0018 step .b / .c (Polonius) |
 | Field-disjoint borrows              | Post-Polonius field-precise places ADR |
+| Block yielding a ref keeps its borrows | ADR 0018 step .a fact generator (needs provenance) |
+| Ref-returning method's receiver moved in the same call | ADR 0018 step .b / .c (Polonius) |
+| Borrow of a field of a temporary    | Temporary-lifetime-extension ADR (unspecified for Sentinel) |
 | Partial move + drop unsoundness     | ✅ CLOSED (ADR 0046) — `snc` + `scg` both, differentials byte-identical |
+| Reference outliving its storage     | ✅ CLOSED (ADR 0017 D7) — `snc`; rejection-only, so no `scg` mirror is needed |

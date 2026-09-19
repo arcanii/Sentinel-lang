@@ -1,0 +1,16 @@
+// The FFI fence, from the reference side (ADR 0057 `is_ffi_safe`).
+//
+// An `extern "C"` function is the one callable whose body no Sentinel run ever
+// borrow-checks: the declaration supplies a signature and the native linker binds
+// whatever object is on hand. The borrow checker's interprocedural summary — a
+// call's result reference comes from its reference ARGUMENTS — is sound only
+// because a callee can hand back nothing it was not given, and that argument
+// cannot be made about a foreign body.
+//
+// What keeps the summary sound at that boundary is that NO reference reaches it:
+// `is_ffi_safe` admits only a public `i64`, `f64` or the opaque `ptr`. This pins
+// it; nothing else in the corpus did.
+extern "C" {
+    fn takes_ref(r: &i64) -> i64;
+}
+fn main() -> i64 { let x: i64 = 5; takes_ref(&x) }

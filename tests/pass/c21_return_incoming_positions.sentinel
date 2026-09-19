@@ -1,0 +1,22 @@
+// Returning a caller-owned ref is legal from every exit position (tail, statement,
+// match arm, scope body), including through a `?&T` return type.
+//
+// Two cases are pinned by unit tests in `sentinel-borrow-check` instead of here,
+// because both trip a PRE-EXISTING divergence that has nothing to do with
+// references, and every fixture in this tree is swept by the stage differentials:
+//   - a `return` inside a HANDLER ARM: the two MIR lowerers disagree on it
+//     (constructed on a reference-free program; registered).
+//   - `return null` of a `?&T`: `snc llvm` emits `ptr 0` for the null half of the
+//     `{i1, ptr}` pair, which LLVM 18 refuses to assemble (registered).
+enum Pick { A, B }
+fn by_stmt(x: &i64, y: &i64, early: bool) -> &i64 { if early { return x } else { 0 }; y }
+fn by_match(p: Pick, x: &i64, y: &i64) -> &i64 { match p { Pick::A => { return x }, Pick::B => y } }
+fn by_scope(x: &i64) -> &i64 { let n: i64 = scope concurrent { return x; 0 }; x }
+fn maybe(x: &i64, some: bool) -> ?&i64 { if some { return x } else { 0 }; x }
+fn main() -> i64 {
+    let a: i64 = 10;
+    let b: i64 = 20;
+    let z: i64 = 0;
+    let m: ?&i64 = maybe(&a, false);
+    *by_stmt(&a, &b, true) + *by_match(Pick::B, &a, &b) + *by_scope(&b) + *unwrap_or(m, &z)
+}

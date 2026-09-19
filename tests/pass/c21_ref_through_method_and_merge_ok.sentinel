@@ -1,0 +1,13 @@
+// A method result pointing into a LIVE receiver, a merge of two live refs, and a
+// generic ref pass-through all stay accepted.
+class K { let v: i64; pub init(v: i64) { self.v = v; 0 } pub fn p(self: &Self) -> &i64 { &self.v } pub fn q(self: &Self) -> &i64 { self.p() } }
+fn pick<T>(a: &T, b: &T, c: bool) -> &T { if c { a } else { b } }
+fn main() -> i64 {
+    let k: K = K::init(7);
+    let r: &i64 = k.q();
+    let x: i64 = 4;
+    let y: i64 = 5;
+    let s: &i64 = if x < y { &x } else { &y };
+    let t: &i64 = pick(&x, &y, false);
+    *r + *s + *t
+}

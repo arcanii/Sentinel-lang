@@ -1,0 +1,14 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c21_match_tail_local_ref.sentinel\")"
+---
+sentinel::borrow::returns_local_ref
+
+  × function `grab` returns a reference to local `v`
+   ╭─[tests/ui/c21_match_tail_local_ref.sentinel:5:5]
+ 4 │     let v: i64 = 5;
+ 5 │     match o { _ => &v }
+   ·     ─────────┬─────────
+   ·              ╰── 
+ 6 │ }
+   ╰────

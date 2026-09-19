@@ -1,0 +1,14 @@
+// The same dead computed reference, this time as a METHOD argument — a separate
+// walk arm from the free-fn call, so it needs its own pin.
+class Reader {
+    let n: i64;
+    pub init(n: i64) { self.n = n; 0 }
+    pub fn take(self: &Self, r: &i64) -> i64 { *r + self.n }
+}
+fn main() -> i64 {
+    let k: Reader = Reader::init(1);
+    k.take({
+        let v: [i64] = [5, 5, 5, 5];
+        &v[0]
+    })
+}

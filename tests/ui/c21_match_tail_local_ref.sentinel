@@ -1,0 +1,7 @@
+// A `match` tail is a returned value like an `if` tail.
+enum One { Only }
+fn grab(o: One) -> &i64 {
+    let v: i64 = 5;
+    match o { _ => &v }
+}
+fn main() -> i64 { *grab(One::Only) }

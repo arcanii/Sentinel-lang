@@ -1,0 +1,25 @@
+// Precision guard for the operand-liveness check (ADR 0017 D7): only a DEAD
+// computed reference is refused. A block that yields a reference to something
+// still in scope, a plain `&x`, and a reference threaded through a call all stay
+// accepted — the check must not fire merely because the operand is computed.
+fn read(r: &i64) -> i64 { *r }
+fn id(r: &i64) -> &i64 { r }
+
+fn main() -> i64 {
+    let x: i64 = 5;
+    let v: [i64] = [7, 0, 0, 0];
+
+    // A computed operand whose source outlives the call.
+    let a: i64 = read({ &x });
+    // The ordinary direct borrow.
+    let b: i64 = read(&x);
+    // A block yielding a reference into a live local array.
+    let c: i64 = read({ &v[0] });
+    // A reference threaded through a call and then dereferenced as an operand.
+    let d: i64 = *id(&x);
+    // A live computed reference bound first, then used.
+    let r: &i64 = { &x };
+    let e: i64 = *r;
+
+    a + b + c + d + e
+}

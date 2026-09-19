@@ -1,0 +1,8 @@
+// A method receiver's auto-ref is a borrow of the receiver.
+class K {
+    let v: Vec<i64>;
+    pub init(n: i64) { self.v = vec_new(); push(&mut self.v, n); 0 }
+    pub fn p(self: &Self) -> &i64 { &self.v[0] }
+    pub fn grow(self: &mut Self) -> i64 { push(&mut self.v, 1); 0 }
+}
+fn main() -> i64 { let mut k: K = K::init(5); let r: &i64 = k.p(); let z: i64 = k.grow(); *r }

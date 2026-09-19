@@ -1,0 +1,16 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c21_deref_computed_ref.sentinel\")"
+---
+sentinel::borrow::ref_operand_dead
+
+  × this operand carries a reference into `v`, which is already gone
+    ╭─[tests/ui/c21_deref_computed_ref.sentinel:6:24]
+  5 │     fn main() -> i64 {
+  6 │ ╭─▶     let got: i64 = *id({
+  7 │ │           let v: [i64] = [5, 5, 5, 5];
+  8 │ │           &v[0]
+  9 │ ├─▶     });
+    · ╰──── 
+ 10 │         got
+    ╰────

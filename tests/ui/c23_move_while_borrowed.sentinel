@@ -1,0 +1,8 @@
+// A place cannot be moved out of while a reference into it is live.
+fn sink(v: [i64]) -> i64 { v[0] - v[1] }
+fn main() -> i64 {
+    let data: [i64] = [5, 8, 11];
+    let p: &i64 = &data[0];
+    let dropped: i64 = sink(data);
+    *p
+}

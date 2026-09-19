@@ -1,0 +1,10 @@
+// A borrow rooted in the fn body lives until the body's end — an inner block must not drop it.
+fn main() -> i64 {
+    let mut v: Vec<i64> = vec_new();
+    push(&mut v, 5);
+    let q: &i64 = &v[0];
+    let c: bool = true;
+    let k: i64 = if c { 1 } else { 2 };
+    push(&mut v, 6);
+    *q
+}

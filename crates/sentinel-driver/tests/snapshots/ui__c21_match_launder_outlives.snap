@@ -1,0 +1,14 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c21_match_launder_outlives.sentinel\")"
+---
+sentinel::borrow::ref_outlives_binding
+
+  × `r` would be bound to a reference into `v`, which is already gone
+   ╭─[tests/ui/c21_match_launder_outlives.sentinel:5:19]
+ 4 │     let s: Sel = Sel::A;
+ 5 │     let r: &i64 = { let v: [i64] = [5, 5]; match s { Sel::A => &v[0] } };
+   ·                   ───────────────────────────┬──────────────────────────
+   ·                                              ╰── 
+ 6 │     *r
+   ╰────

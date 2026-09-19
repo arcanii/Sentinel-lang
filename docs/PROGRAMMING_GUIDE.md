@@ -304,12 +304,20 @@ the original scope (the new owner drops it), so there's no double-free.
 
 **Known limitations.** The borrow checker is lexical (pre-Polonius), so it is
 *conservative*: it sometimes rejects a program that is actually safe — for
-example, a borrow whose last use was on the previous line, or a borrow of one
-struct field that blocks a write to a different field. Each such case has a
+example, a borrow whose last use was on the previous line, a borrow of one
+struct field that blocks a write to a different field, or a borrow of a field
+of a value that isn't bound to anything (`&mk().x`). Each such case has a
 documented workaround in
-[`borrow-check-limitations.md`](borrow-check-limitations.md). These are
-over-rejections (it errs on the side of safety); the one historical
-*under*-rejection (a moved struct field could double-free) is closed.
+[`borrow-check-limitations.md`](borrow-check-limitations.md).
+
+These are over-rejections: the checker errs on the side of safety. The
+*under*-rejections it has had are closed — a moved struct field that could
+double-free (ADR 0046), and a family of positions where a reference could
+outlive the storage it pointed at (ADR 0017 D7): a `return` in statement
+position, a `match` / `scope` / method-call tail, a binding or an assignment
+widening the referent's scope, and a reference computed inline as a call
+argument or a deref operand. Each position has its own diagnostic code, so
+the `help` line names the fix that applies there.
 
 ## Strings, bytes, and `Vec`
 

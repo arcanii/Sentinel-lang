@@ -1,0 +1,7 @@
+// A ref bound from ANY expression kind gets a source; the read check cannot go dark.
+enum Sel { A }
+fn main() -> i64 {
+    let s: Sel = Sel::A;
+    let r: &i64 = { let v: [i64] = [5, 5]; match s { Sel::A => &v[0] } };
+    *r
+}

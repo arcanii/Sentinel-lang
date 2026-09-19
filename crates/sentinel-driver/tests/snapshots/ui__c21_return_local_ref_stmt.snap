@@ -1,0 +1,14 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c21_return_local_ref_stmt.sentinel\")"
+---
+sentinel::borrow::returns_local_ref
+
+  × function `hand_out` returns a reference to local `cell`
+   ╭─[tests/ui/c21_return_local_ref_stmt.sentinel:4:16]
+ 3 │     let cell: i64 = 5;
+ 4 │     if early { return &cell } else { 0 };
+   ·                ──────┬─────
+   ·                      ╰── 
+ 5 │     fallback
+   ╰────
