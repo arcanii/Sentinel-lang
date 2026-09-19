@@ -124,7 +124,7 @@ reference as you work through the milestones.
 > confirming nothing pre-existing is newly refused; oracle-vs-scg byte-equality on the new
 > fixture at types, mir and llvm; and the secret-taint check in both directions.
 
-### ▶ RESUME HERE (2026-09-19 — `origin/main` is still `e686853`. Local and NOT PUSHED, oldest first: `5b69bce` (D76) + `39e7eff` (docs), then the ref-escape trio `309047c` + `66818a2` (type layer) and `d52bc88` (borrow layer + fixtures + docs), then `ff96c9e` (ADR 0073: the effect-op signature reference fence, closing D85) and `6a9b646` (D86: the `&T`-receiver address in both Rust emitters; the `scg` mirror is OUTSTANDING). Register: **86 items, 35 done**, D19 redacted; D82-D86 filed, **D85 and D86 closed** this session. The block below is this session's; the ones after it are kept for their lessons.
+### ▶ RESUME HERE (2026-09-19 — `origin/main` is still `e686853`. Local and NOT PUSHED, oldest first: `5b69bce` (D76) + `39e7eff` (docs), then the ref-escape trio `309047c` + `66818a2` (type layer) and `d52bc88` (borrow layer + fixtures + docs), then `ff96c9e` (ADR 0073: the effect-op signature reference fence, closing D85) and `6a9b646` (D86: the `&T`-receiver address in both Rust emitters) and `aae7823` (D86's `scg` mirror + the corpus fixture — D86 COMPLETE). Register: **86 items, 35 done**, D19 redacted; D82-D86 filed, **D85 and D86 closed** this session. The block below is this session's; the ones after it are kept for their lessons.
 
 > **What the 2026-09-19 ref-escape slice did — `309047c`, `66818a2` and `d52bc88`, all local
 > and NOT PUSHED (on top of the still-unpushed `5b69bce`/`39e7eff`).** Closed the
