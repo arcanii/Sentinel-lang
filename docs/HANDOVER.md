@@ -124,7 +124,83 @@ reference as you work through the milestones.
 > confirming nothing pre-existing is newly refused; oracle-vs-scg byte-equality on the new
 > fixture at types, mir and llvm; and the secret-taint check in both directions.
 
-### ▶ RESUME HERE (2026-09-14 — `origin/main` is at `e686853`, so `77e04cc` — D59+D60+D66, D69 closed in `snc build`, D70's refusal (ADR 0072 A1) — with `85d22ee` (D74) and `e686853` (docs) on top are ALL PUSHED; `5b69bce` (D76) on top of them is local and **NOT PUSHED**. The first two blocks below are this session's; the next is the 2026-09-11/12 session's, and the ones after it the 2026-09-06 session's, all kept for their lessons. STATE.md's entries from 2026-09-08 on record what has happened since. Register: **81 items, 34 done**, D19 redacted.
+### ▶ RESUME HERE (2026-09-19 — `origin/main` is still `e686853`. Local and NOT PUSHED, oldest first: `5b69bce` (D76) + `39e7eff` (docs), then the ref-escape trio `309047c` + `66818a2` (type layer) and `d52bc88` (borrow layer + fixtures + docs). Register: **85 items, 34 done**, D19 redacted; D82-D85 filed this session. The block below is this session's; the ones after it are kept for their lessons.
+
+> **What the 2026-09-19 ref-escape slice did — `309047c`, `66818a2` and `d52bc88`, all local
+> and NOT PUSHED (on top of the still-unpushed `5b69bce`/`39e7eff`).** Closed the
+> **ref-escape family**: a reference could outlive the storage it pointed at, from the
+> positions ADR 0017 D7's second-class rule was never checked at. C2.1 checked it where a
+> ref-typed BINDING IS READ and where a function RETURNS one; the type layer refused a `&T`
+> in a struct field. The gap was WHERE the rule ran — `read({ let v: [i64] = [5, 5]; &v[0] })`
+> was accepted because the operand is bound to nothing, so neither check looks at it.
+>
+> Type layer (`carries_ref` reaching through `?T`/`secret T`, the widened `nested_ref` ×2 and
+> `ref_in_struct_field` gates, plus `ref_in_class_field` / `ref_in_enum_payload` /
+> `ref_in_generic_field`), then the borrow layer (total fail-closed `source_of_expr`, the
+> return check at the `return` SITE, read liveness, binding and assignment widening,
+> depth-aware merge, receiver auto-ref borrow, arm-binder declaration, `MoveWhileBorrowed`,
+> the `RefStoredIntoPlace` backstop, and `check_operand_alive`). Rejection-only, so no
+> `selfhost/` mirror and no re-bless. Each position has its OWN code so the `help` names the
+> fix that applies there; one dead SOURCE reports once per fn, duplicates only.
+>
+> Battery of the 31 routes plus controls: every targeted route closed, exclusions intact.
+> Corpus sweep 362 programs, 44 rejected, all `sentinel::resolve::*` on library modules and
+> multi-file-module parts compiled standalone, zero borrow or reference rejections. 21 ui +
+> 7 pass fixtures; borrow-check unit tests 65 → 94, types 282 → 293.
+>
+> ⚠ **A NEW FIXTURE IS SWEPT BY EVERY STAGE DIFFERENTIAL, `tests/ui` INCLUDED.**
+> `collect_fixtures` sweeps `tests/pass` AND `tests/ui`, and `snc llvm` discards borrow
+> errors, so a fixture meant to be REJECTED still gets its IR compared to `scg`'s. Two of
+> mine failed differentials on contents unrelated to references — D82 (`ptr 0` for
+> `return null` of a `?&T`) and D83 (the two MIR lowerers on `return` in a handler arm).
+> Both settled as PRE-EXISTING by constructing a probe holding the construct and no
+> references, and both positions moved to borrow-check unit tests, which no differential
+> sweeps.
+>
+> ⚠ **A DIAGNOSTIC-ONLY EARLY `return` MOVED CODEGEN.** Reporting `MoveWhileBorrowed` left
+> the move unrecorded in `moved_sources_union` — the `DropPlan` codegen reads to elide a
+> moved-from binding's drop — so the oracle emitted a drop `scg` did not. The borrow
+> differential cannot see this (it skips rejected fixtures); the codegen one can. When you
+> add an early `return` to an error path, enumerate the state it now skips writing.
+>
+> ⚠ **THE REVIEW AGENTS MUTATE THE SHARED TREE.** One planted `if false && …` at the
+> `check_operand_alive` call site, disabling the check under review; others left probe tests
+> behind and reverted my concurrent edits three times. Stop the workflow before the final
+> audit, keep a `git diff` snapshot from launch to compare against, and re-count tests.
+>
+> ⚠ **`cargo test --workspace` STOPS AT THE FIRST FAILING BINARY** — `tests/examples.rs`
+> always fails here, so everything after it never runs. Use `--no-fail-fast`. The 18 known
+> Windows failures split as examples 9 + export 4 + modules 4 + llvm 1; none prints a
+> `sentinel::` diagnostic, so grepping the log for one separates a real rejection from the
+> baseline.
+>
+> **The review found five more operand positions and a container route, each reproduced
+> before fixing:** `Name::init(args)`, the deref ASSIGNMENT target, every runtime-builtin
+> argument, and `& *` / `&mut *` operands (skipped on a premise that holds only when the
+> borrowed thing is rooted at a binding). Plus `to_array_elem_subst` / `to_vec_elem_subst`,
+> which admitted any `Type::Secret` as a container element without checking what it wrapped —
+> now gated on `secret_scalar_slot` (`SECRET_SCALARS` 0..=3; `intern_secret` deduplicates, so
+> the test is exact without the interner), with `[secret u8]` via `vec_to_array<T>` still
+> round-tripping.
+>
+> **Cross-unit precondition CONFIRMED (plan §8 Q5), not assumed.** All four build modes
+> borrow-check every body they compile (`main.rs:1229`, `1333`, `1507`, `2461`); an import
+> always resolves from `.sentinel` SOURCE, never a pre-built object; `--separate`'s
+> fingerprint cache reuses an object only for identical source under the same compiler
+> version. The one body-less callable is `extern "C"`, and `is_ffi_safe` admits only
+> `i64`/`f64`/`ptr`, so no reference crosses it — now pinned by `c21_extern_ref_param`.
+> ⚠ **ADR 0063 (`.sif` pre-built libraries) would flip this**: a caller would bind to a body
+> it never sees over the full ABI. PROPOSED and unwired (`descriptor.rs` is
+> `#![allow(dead_code)]`); re-argue the precondition before that increment ships.
+>
+> **Two new over-rejections, documented rather than weakened** (both with reproducers,
+> workarounds and unit-test pins in `docs/borrow-check-limitations.md`): a block whose value
+> carries a reference keeps every borrow taken inside it, and a ref-returning method's
+> receiver stays borrowed for the statement so it cannot also be moved by it. Narrowing
+> either needs the per-borrow provenance ADR 0018 step .a builds — resolving the yielded
+> value to its single source would drop a place an if-merged reference still points at.
+
+### ▶ Earlier RESUME (2026-09-14 — `origin/main` is at `e686853`, so `77e04cc` — D59+D60+D66, D69 closed in `snc build`, D70's refusal (ADR 0072 A1) — with `85d22ee` (D74) and `e686853` (docs) on top are ALL PUSHED; `5b69bce` (D76) on top of them is local and **NOT PUSHED**. The first two blocks below are this session's; the next is the 2026-09-11/12 session's, and the ones after it the 2026-09-06 session's, all kept for their lessons. STATE.md's entries from 2026-09-08 on record what has happened since. Register: **81 items, 34 done**, D19 redacted.
 
 > **What the 2026-09-14 D76 slice did — `5b69bce`, NOT PUSHED (`85d22ee` and `e686853` are
 > already on `origin/main`).** Closed **D76**: a frame pushed onto a pure-return kont was never
