@@ -135,8 +135,7 @@ both pinned by controls. **Corpus reach ZERO**: no `effect` block in the repo co
 new ui fixtures are TYPE rejections, so the mir/codegen differentials skip them.
 
 **Also (2026-09-19) — D86: a method call on a REFERENCE-typed receiver passed the address
-of the reference's own slot, not the object. `snc` fixed; the `scg` mirror is
-OUTSTANDING.** ADR 0022 D7's auto-deref resolves `c.m()` on a `c: &K` by dereferencing the
+of the reference's own slot, not the object. Fixed in `snc` AND mirrored into `scg`.** ADR 0022 D7's auto-deref resolves `c.m()` on a `c: &K` by dereferencing the
 receiver to find the method — `check_method_call_expr` maps `Type::Ref(rid)` to
 `refs[rid].inner` and dispatches on that. Both Rust emitters computed `self` with
 `lower_lvalue_ptr`, which returns the receiver's own STORAGE: for an owned `k: K` that slot
@@ -154,26 +153,24 @@ drift apart again. `self` is untouched — it is bound to the object pointer und
 type (`env.insert(m.self_var_id, (Type::Class(cd.id), ..))`), not a reference, so it keeps
 the lvalue path and its `%arg0` special case.
 
-**Corpus reach ZERO, measured**: with the fix in, the codegen differential is
-byte-identical over `tests/pass` + `tests/ui`, so no existing program calls a method on a
-reference-typed receiver — which also settles the measurement the ref-escape design plan
-left open (its `refrecv_hits.txt` was empty, but that run was never confirmed). Pinned by
-three tests in `crates/sentinel-driver/tests/ref_receiver.rs`, deliberately NOT under
-`tests/pass`: everything there is swept by the differentials, and a fixture of this shape
-would fail the codegen differential until the mirror lands. All three fail without the fix
-(a frame pointer, 49 instead of 106, and a garbage control); the third pins the two shapes
-that must NOT change — an owned receiver and `self`.
+**Corpus reach was ZERO, measured**: before the fixture, the codegen differential was
+byte-identical over `tests/pass` + `tests/ui` with the fix in, so no existing program
+called a method on a reference-typed receiver — which also settles the measurement the
+ref-escape design plan left open (its `refrecv_hits.txt` was empty, but that run was never
+confirmed). Now pinned by `tests/pass/c22_ref_receiver_method_call.sentinel`, which IS in
+the differential corpus so both emitters are compared byte-for-byte on the shape (exit
+52), plus three focused tests in `crates/sentinel-driver/tests/ref_receiver.rs` that
+separate the receiver kinds. All three fail without the fix (a frame pointer, 49 instead
+of 106, a garbage control); the third pins the two shapes that must NOT change.
 
-⚠ **Remaining: the `scg` mirror.** `selfhost/types/borrow_arms.sentinel` computes
-`cg_m_selfv` as `cg_slot_get(c, cg_m_lvid)` — the var's slot — under a comment carrying the
-same false premise ("the alloca slot IS the address"), true only for an owned receiver. The
-mirror is to emit `cg_load` for the pointer when `strip_ref(c, tty) != tty` (scg's own
-auto-deref predicate, which the same function already
-calls a little further down for the method lookup) and pass that
-register as the operand, with the emission order matching the oracle: load, then args, then
-the call. Until it lands both bootstrap fixed points hold only because the corpus contains
-no program of this shape — the divergence is latent, and the first corpus fixture with a
-reference-typed receiver will expose it. **Register: 86 items, 35 done.**
+**The `scg` mirror landed in the same commit.** `selfhost/types/borrow_arms.sentinel`
+computed `cg_m_selfv` as `cg_slot_get(c, cg_m_lvid)` — the var's slot — under a comment
+carrying the same false premise ("the alloca slot IS the address"), true only for an owned
+receiver. It now emits `cg_load(c, tty, slot)` when `cg_is_ref(c, tty)`, keyed on the ref
+test the method lookup itself uses a few lines down, placed so the order is load / args /
+call as the oracle writes it. Verified by MUTATION: with the mirror reverted the codegen
+differential fails on the new fixture (oracle 1966 bytes vs sentinel 1862), so it is
+load-bearing. Both bootstrap fixed points green. **Register: 86 items, 36 done.**
 
 **Previously (2026-09-14) — D76: a captured frame pushed onto a pure-return kont was never run,
 and leaked. Runtime-only. NOT PUSHED.** An effecting fn whose body never performs returns

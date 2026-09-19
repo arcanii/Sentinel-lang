@@ -124,7 +124,7 @@ reference as you work through the milestones.
 > confirming nothing pre-existing is newly refused; oracle-vs-scg byte-equality on the new
 > fixture at types, mir and llvm; and the secret-taint check in both directions.
 
-### ▶ RESUME HERE (2026-09-19 — `origin/main` is still `e686853`. Local and NOT PUSHED, oldest first: `5b69bce` (D76) + `39e7eff` (docs), then the ref-escape trio `309047c` + `66818a2` (type layer) and `d52bc88` (borrow layer + fixtures + docs), then `ff96c9e` (ADR 0073: the effect-op signature reference fence, closing D85) and `6a9b646` (D86: the `&T`-receiver address in both Rust emitters; the `scg` mirror is OUTSTANDING). Register: **86 items, 35 done**, D19 redacted; D82-D86 filed, **D85 closed**; D86 is fixed in `snc` with its `scg` mirror OUTSTANDING this session. The block below is this session's; the ones after it are kept for their lessons.
+### ▶ RESUME HERE (2026-09-19 — `origin/main` is still `e686853`. Local and NOT PUSHED, oldest first: `5b69bce` (D76) + `39e7eff` (docs), then the ref-escape trio `309047c` + `66818a2` (type layer) and `d52bc88` (borrow layer + fixtures + docs), then `ff96c9e` (ADR 0073: the effect-op signature reference fence, closing D85) and `6a9b646` (D86: the `&T`-receiver address in both Rust emitters; the `scg` mirror is OUTSTANDING). Register: **86 items, 35 done**, D19 redacted; D82-D86 filed, **D85 and D86 closed** this session. The block below is this session's; the ones after it are kept for their lessons.
 
 > **What the 2026-09-19 ref-escape slice did — `309047c`, `66818a2` and `d52bc88`, all local
 > and NOT PUSHED (on top of the still-unpushed `5b69bce`/`39e7eff`).** Closed the
@@ -440,7 +440,7 @@ reference as you work through the milestones.
 >      scalar-4 arm, which it now has. Also worth doing with it: `examples/math/quadratic.sentinel` and
 >      `sentinel_library/std/math/float.sentinel` currently reach only lex/ast, because
 >      `snc merge`'s Bar-A printer rejects both a float literal and `sqrt` (menu item 5).
->   4. **THE FILED-DEFECT REGISTER — EIGHTY-SIX items (D1-D86); **D1, D2, D3, D4, D5, D8, D9, D10, D15, D16, D17, D24, D25, D26, D29, D31, D34, D37, D39, D42, D43, D44, D47(option A), D51, D54, D55, D56, D58, D59, D60, D61, D66, D74, D76 and D85 are DONE (35 of 86)**, the rest verified against a pre-slice binary. MOST are
+>   4. **THE FILED-DEFECT REGISTER — EIGHTY-SIX items (D1-D86); **D1, D2, D3, D4, D5, D8, D9, D10, D15, D16, D17, D24, D25, D26, D29, D31, D34, D37, D39, D42, D43, D44, D47(option A), D51, D54, D55, D56, D58, D59, D60, D61, D66, D74, D76, D85 and D86 are DONE (36 of 86)**, the rest verified against a pre-slice binary. MOST are
 >      unregistered in any `DEFERRED_PROGRAMS` / `KNOWN_SCG_BUGS` list because no corpus program
 >      reaches them — but FOUR are, and the blanket "NONE" that stood here was falsified by
 >      this register's own new entries: D24/D25/D26 share the
@@ -985,7 +985,7 @@ reference as you work through the milestones.
 >      no `effect` block in the repo contains a `&`. `secret i64` op params stay legal
 >      (they are in `FITS`), pinned by a control.
 >
->      **D86 — DONE in `snc` (2026-09-19); the `scg` MIRROR IS OUTSTANDING. A method call
+>      **D86 — DONE (2026-09-19), `snc` AND the `scg` mirror. A method call
 >      on a REFERENCE-typed receiver passed the address of the reference's own slot rather
 >      than the object.** ADR 0022 D7's auto-deref resolves `c.m()` on a `c: &K` by
 >      dereferencing the receiver to find the method (`check_method_call_expr` maps
@@ -1008,22 +1008,24 @@ reference as you work through the milestones.
 >      byte-identical over `tests/pass` + `tests/ui`, so no existing program calls a method
 >      on a reference-typed receiver. (That also settles the measurement the ref-escape
 >      design plan left open — its `refrecv_hits.txt` was empty but the run was never
->      confirmed.) Pinned by three tests in `crates/sentinel-driver/tests/ref_receiver.rs`,
->      which is deliberately NOT under `tests/pass` — everything there is swept by the
->      differentials, and a fixture of this shape would fail the codegen differential until
->      the mirror lands. All three fail without the fix; the third pins the two shapes that
->      must not change (an owned receiver, and `self`).
+>      confirmed.) Pinned by `tests/pass/c22_ref_receiver_method_call.sentinel`, which IS in
+>      the differential corpus so the two emitters are compared byte-for-byte on the shape
+>      (exit 52), plus three focused tests in `crates/sentinel-driver/tests/ref_receiver.rs`
+>      that separate the receiver kinds so a regression says which one broke. All three
+>      fail without the fix (a frame pointer, 49 instead of 106, a garbage control), and
+>      the third pins the two shapes that must NOT change — an owned receiver, and `self`.
 >
->      ⚠ **REMAINING: the `scg` mirror.** `selfhost/types/borrow_arms.sentinel` computes
->      `cg_m_selfv` as `cg_slot_get(c, cg_m_lvid)` — the var's slot — with a comment
->      carrying the same false premise ("the alloca slot IS the address"), which holds only
->      for an owned receiver. The mirror is to emit `cg_load` for the pointer when
->      `strip_ref(c, tty) != tty` (scg's own auto-deref predicate, which the same function
->      already calls a little further down for the method lookup) and pass that register as the operand. The emission
->      ORDER and register numbering must match the oracle: load, then args, then the call.
->      Until it lands, both bootstrap fixed points hold only because the corpus contains no
->      program of this shape — the divergence is latent, and the first corpus fixture with
->      a reference-typed receiver will expose it.
+>      **The `scg` mirror landed in the same commit.**
+>      `selfhost/types/borrow_arms.sentinel` computed `cg_m_selfv` as
+>      `cg_slot_get(c, cg_m_lvid)` — the var's slot — under a comment carrying the same
+>      false premise ("the alloca slot IS the address"), true only for an owned receiver.
+>      It now emits `cg_load(c, tty, slot)` when `cg_is_ref(c, tty)`, keyed on the ref test
+>      the method lookup itself uses a few lines further down, and placed so the order is
+>      load / args / call as the oracle writes it. `self` never reaches that branch (it
+>      leaves `cg_lastvid` at -1 and answers `%arg0`), and an owned receiver keeps the slot.
+>      Verified by MUTATION: with the mirror reverted the codegen differential fails on
+>      `c22_ref_receiver_method_call` (oracle 1966 bytes vs sentinel 1862), so the fixture
+>      is load-bearing rather than decorative. Both bootstrap fixed points green.
 >
 >      **D78 — stale corpus fixture counts in `llvm.rs` and `README.md`, at six sites, stale
 >      before this change.** Found by D74's reviews. `crates/sentinel-driver/tests/llvm.rs`

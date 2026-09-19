@@ -1,0 +1,40 @@
+// ADR 0022 D7's auto-deref: `c.m()` on a `c: &K` finds the method by dereferencing
+// the receiver, so the address passed as `self` must be the REFERENT's. The
+// receiver's own slot holds the POINTER, not the object — passing the slot gave a
+// `&Self` method the slot to read as an object and a `&mut Self` method the slot to
+// write into.
+//
+// Three receiver shapes in one program, because the discriminator is the TYPE and a
+// fix keyed on anything else breaks one of them:
+//   - `k`    owned      — the alloca IS the object, so the slot is right
+//   - `self` inside a method — bound to the object pointer, no alloca at all
+//   - `c`    `&K`/`&mut K` — the slot holds a pointer and must be loaded
+//
+// The exit code is the cheap half. The load also has to land in the same place in
+// both emitters, so this file is in the codegen differential's corpus and `snc llvm`
+// and `scg` are compared byte-for-byte on it.
+class K {
+    let v: i64;
+    pub init(v: i64) { self.v = v; 0 }
+    pub fn peek(self: &Self) -> i64 { self.v }
+    pub fn twice(self: &Self) -> i64 { self.peek() + self.peek() }
+    pub fn bump(self: &mut Self) -> i64 { self.v = self.v + 1; 0 }
+}
+
+// A shared reference: reads through the referent.
+fn read_shared(c: &K) -> i64 { c.peek() }
+
+// A shared reference whose method itself calls a method on `self`.
+fn read_nested(c: &K) -> i64 { c.twice() }
+
+// A mutable reference: writes through the referent, so the caller observes it.
+fn bump_twice(c: &mut K) -> i64 { c.bump(); c.bump() }
+
+fn main() -> i64 {
+    let mut k: K = K::init(10);
+    // 10 (owned receiver) + 10 (through &K) + 20 (nested self call through &K)
+    let before: i64 = k.peek() + read_shared(&k) + read_nested(&k);
+    let discard: i64 = bump_twice(&mut k);
+    // the two bumps must have landed on k itself: 12
+    before + k.peek()
+}

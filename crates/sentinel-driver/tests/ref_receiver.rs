@@ -7,13 +7,15 @@
 //! pointer rather than the object: one indirection too many. A `&Self` method
 //! then read the slot as an object, and a `&mut Self` method wrote into it.
 //!
-//! These live here rather than in `tests/pass/` on purpose. Everything under
-//! `tests/pass` and `tests/ui` is swept by the stage differentials, and the
-//! self-hosted `scg` still computes the receiver the old way (its mirror is a
-//! separate, registered step), so a corpus fixture with this shape would fail
-//! the codegen differential for a reason unrelated to the program. Nothing
-//! under `crates/sentinel-driver/tests/` is swept, so the fix is pinned here
-//! until the mirror lands.
+//! These complement `tests/pass/c22_ref_receiver_method_call.sentinel` rather
+//! than duplicating it. That fixture is in the stage differentials' corpus, so
+//! it pins the stronger property — `snc llvm` and the self-hosted `scg` emit
+//! byte-identical IR for the shape — and asserts one combined exit code. These
+//! three separate the receiver kinds, so a regression says WHICH one broke: a
+//! shared reference, a mutable one, or the owned/`self` controls that must not
+//! change. They were written before the `scg` mirror existed, when a corpus
+//! fixture would have failed the codegen differential for a reason unrelated to
+//! the program; nothing under `crates/sentinel-driver/tests/` is swept.
 //!
 //! Like `examples.rs` and `deadlock.rs`, the build links (needs the host link
 //! toolchain).

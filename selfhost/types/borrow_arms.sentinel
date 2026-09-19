@@ -1464,8 +1464,24 @@ fn dump_te_method(out: &mut Vec<u8>, mt: Expr, mn: [u8], ma: Args, exp: i64, src
             } else {
                 (*c).cglk
             };
-            let cg_m_selfv: i64 = if cg_m_lvid >= 0 {
+            let cg_m_slot: i64 = if cg_m_lvid >= 0 {
                 cg_slot_get(c, cg_m_lvid)
+            } else {
+                0 - 1
+            };
+            // (D86) a REFERENCE-typed receiver. The method LOOKUP below auto-derefs the
+            // receiver (`strip_ref`), so the ADDRESS must be dereferenced too: the var's
+            // slot holds the POINTER, and `self` wants what it holds, not where it lives.
+            // Mirrors the oracle's `lower_receiver_ptr`, keyed on the same ref test, and
+            // emitted HERE so the order is load / args / call as the oracle writes it.
+            // An owned receiver's slot IS the object, so it keeps the slot; `self` never
+            // reaches this branch (it leaves `cg_lastvid` at -1 and answers `%arg0`).
+            let cg_m_selfv: i64 = if cg_m_lvid >= 0 {
+                if cg_is_ref(c, tty) {
+                    cg_load(c, tty, cg_m_slot)
+                } else {
+                    cg_m_slot
+                }
             } else {
                 (*c).cglv
             };

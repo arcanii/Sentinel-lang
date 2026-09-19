@@ -2352,3 +2352,23 @@ fn pass_c21_if_two_same_scope_refs_ok() {
     // treated as a conflict, at the fn's top level and one block in. 9 + 7 + 3 = 19.
     assert_eq!(run_exit("c21_if_two_same_scope_refs_ok.sentinel"), 19);
 }
+
+#[test]
+fn pass_c22_ref_receiver_method_call() {
+    // Register D86: ADR 0022 D7's auto-deref resolves `c.m()` on a `c: &K` by
+    // dereferencing the receiver, so the address passed as `self` must be the
+    // REFERENT's. Both emitters passed the receiver's own slot, which for a
+    // ref-typed place holds the POINTER — a `&Self` method read that slot as an
+    // object, and a `&mut Self` method wrote into it.
+    //
+    // All three receiver shapes are here because the discriminator is the TYPE: an
+    // owned `k` (the alloca IS the object), `self` inside a method (bound to the
+    // object pointer, no alloca), and `&K` / `&mut K` (the slot must be loaded). A
+    // fix keyed on the expression kind rather than `Type::Ref` breaks one of them.
+    //
+    // The exit code is the cheap half — `bump_twice` proves the writes landed on
+    // `k` itself. The load also has to appear in the same place in both emitters,
+    // and this file is in the codegen differential's corpus, so `snc llvm` and
+    // `scg` are compared byte-for-byte on it. 10 + 10 + 20 + 12 = 52.
+    assert_eq!(run_exit("c22_ref_receiver_method_call.sentinel"), 52);
+}
