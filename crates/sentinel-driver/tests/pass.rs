@@ -1782,6 +1782,19 @@ fn pass_c5d5_break_continue() {
 }
 
 #[test]
+fn pass_c5d5_loop_slot_reuse() {
+    // ADR 0036 A3 (registers D62, D77, D88): a loop body's slots are allocated
+    // once, in the entry block, so the stack does not grow per iteration. Three
+    // families that used to allocate inline — a performing `handle`, a class
+    // construction and a `match` payload binding — each run 1,200,000 times,
+    // past the counts that overflowed the 16 MB stack before the hoist (about
+    // 524,000 for the `handle`, 1,050,000 for the other two). Against a
+    // compiler that leaves any of them inline this CRASHES rather than failing
+    // an assert. Exit = 42; about a second.
+    assert_eq!(run_exit("c5d5_loop_slot_reuse.sentinel"), 42);
+}
+
+#[test]
 fn pass_selfhost_ast_drop() {
     // ADR 0039 D4: the self-host parser's recursive-AST drop gate. A
     // recursive-enum `Node` (i64 + `[u8]` + recursive payloads) built, walked

@@ -1,0 +1,75 @@
+// ADR 0036 D4 + A3 (registers D62, D77, D88): a loop body allocates its slots ONCE.
+//
+// An `alloca` outside the entry block runs every time control reaches it, and nothing
+// reclaims its slot until the function returns — so a slot left inline in a loop body
+// grows the stack by its size each iteration and a long loop exhausts it. A2 hoisted a
+// body `let`, an `if`-result and a `match`-result; A3 hoists the other fifteen, of which
+// three families are exercised here, each past the count that overflowed before it:
+//
+//   - a performing `handle` (two slots per iteration: `current_kont_slot`, `kont_var`),
+//     which overflowed the 16 MB stack between 520,000 and 530,000 iterations (D77);
+//   - a one-field class construction (`classinit`), which overflowed between 1,040,000
+//     and 1,060,000 (D62 recorded the crash at its 2,000,000 probe, which is not the
+//     threshold; a wider class goes sooner, since this slot is the size of the class —
+//     an eight-field one overflows between 250,000 and 270,000);
+//   - a `match` payload binding (`enum_field`), which overflowed between 1,040,000 and
+//     1,060,000 for this one-`i64` payload — that slot is the binding's type too, so a
+//     wide payload goes sooner in the same way.
+//
+// Each loop runs 1,200,000 times — measured: each of the three ALONE crashes a pre-hoist
+// build at that count and completes with the hoist — so this fixture CRASHES (stack
+// overflow, no output) against a compiler that leaves any of the three inline, and exits
+// 42 with the hoist.
+// The IR shape itself is pinned by `d88_every_loop_body_slot_is_allocated_in_the_entry_block`
+// in `sentinel-codegen`, over all fifteen sites; this is the end-to-end half. About 1s.
+
+effect Io { read() -> i64; }
+
+class Cell {
+    let v: i64;
+    pub init(x: i64) {
+        self.v = x;
+        0
+    }
+}
+
+enum E { A, B(i64) }
+
+fn handled(n: i64) -> i64 {
+    let mut i: i64 = 0;
+    let mut acc: i64 = 0;
+    while i < n {
+        i = i + 1;
+        acc = acc + handle perform Io.read() with { Io.read(k) => k(1) };
+    }
+    acc
+}
+
+fn constructed(n: i64) -> i64 {
+    let mut i: i64 = 0;
+    let mut acc: i64 = 0;
+    while i < n {
+        i = i + 1;
+        let c: Cell = Cell::init(1);
+        acc = acc + 1;
+    }
+    acc
+}
+
+fn matched(n: i64) -> i64 {
+    let mut i: i64 = 0;
+    let mut acc: i64 = 0;
+    while i < n {
+        i = i + 1;
+        let e = E::B(1);
+        let v: i64 = match e { E::A => 0, E::B(x) => x };
+        acc = acc + v;
+    }
+    acc
+}
+
+fn main() -> i64 {
+    let n: i64 = 1200000;
+    let total: i64 = handled(n) + constructed(n) + matched(n);
+    total - 3 * n + 42
+}

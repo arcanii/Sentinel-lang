@@ -14,7 +14,52 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
-**Latest (2026-09-19b) — D79 closed by [ADR 0074](decisions/0074-handler-arm-owns-its-continuation.md):
+**Latest (2026-09-20) — D88 closed by [ADR 0036](decisions/0036-loops.md) A3, and D62 and D77
+with it: every slot a loop body reaches is allocated once, in the entry block. inkwell-only,
+NOT oracle-moving, NOT PUSHED.** ADR 0036 D4 says a loop body's slot is allocated once and
+reused each iteration, and A2 made that true for a body `let`, an `if`-result and a
+`match`-result by hoisting them to the function's entry block. Fifteen other slots stayed on
+`builder.build_alloca` at the insertion point: the handle lowering's five (`current_kont_slot`,
+`kont_var`, `arm_param` and both return-arm value slots), `classinit`, the `match` payload
+binding, and the out-slots of `recv`, `lock`, `read_file`, TCP read, process read, process
+recv, stdin recv and `arg`. Inside a loop each is a dynamic alloca: the stack grew by the slot's
+size every iteration and the loop exhausted the 16 MB main-thread stack. Thirteen are scalar or
+pointer slots at 16 bytes (8, rounded up to x86-64's stack alignment); the other two are the size
+of the value they hold — `classinit` is the class struct, the `match` payload binding is the
+binding's type — so a wider value overflows sooner. Measured: a performing `handle` between
+520,000 and 530,000 iterations, a `recv`, `lock`, one-binding `match` or one-field class loop
+(register D62) between 1,040,000 and 1,060,000, and an eight-`i64` class between 250,000 and
+270,000. All fifteen now go through `binding_alloca`.
+
+Reuse is sound because no slot's ADDRESS outlives the iteration that took it: the out-slots are
+C-ABI out-params the runtime writes through and does not retain, `classinit`'s buffer is loaded
+into a value at the call, and a reference to a binding is second class (ADR 0017 D7). Twelve of
+the fifteen also store before they load; `recv`, `process_recv` and `stdin_recv` do not — their
+runtime writes `*out` only on the success status, so on a failure the site loads a word this
+iteration never wrote, which the hoist turns from fresh stack garbage into the previous
+iteration's value. It stays unreachable: that word is the payload of a `?T` whose `valid` bit is
+the status, and every consumer reads it only under that bit. Measured with a matched pre/post
+pair, each smoke-tested before use: fifteen runs that overflowed now complete, including D62's
+class loop and D77's framed, frameless and declining handle loops at 3,000,000 iterations. The
+oracle and `scg` already hoisted every alloca to `entry:`, so nothing downstream moves — over the
+464 tracked `.sentinel` files (the new fixture aside; it is meant to differ) the oracle's IR is
+byte-identical, no program changes whether it is accepted or builds, and all 285 that build run
+the same. That sweep carries more weight than usual here: `llvm_behaviour_matches_inkwell_over_emitted_subset`,
+the suite's own oracle-versus-inkwell behavioural comparison, is one of the 18 known Windows
+failures (it looks for `libsentinel_runtime.a`), so it did not run. Pinned by
+`d88_every_loop_body_slot_is_allocated_in_the_entry_block`, which reads the IR inkwell verified
+for a program whose loops reach all fifteen sites, asserts each one's slot by name in the entry
+block, and asserts that no `alloca` sits outside it; each site was mutated back and caught, which
+also settles the eight sites no earlier probe reached: the six out-slots D88 listed as checked
+by reading (`read_file`, TCP read, process read, process recv, stdin recv and `arg`), and both
+return-arm value slots, which it had listed with the `handle` family as constructed though no
+probe carried a `return` arm. Four-check: 1,998 passed with exactly the 18 known Windows
+failures (9 in `examples`, 4 in `export`, 1 in `llvm`, 4 in `modules`), doctests and clippy
+clean, every `selfhost_*` differential green with the new fixture in the corpus, and both
+bootstrap fixed points byte-identical. **Register: 90 items, 40
+done.**
+
+**Previously (2026-09-19b) — D79 closed by [ADR 0074](decisions/0074-handler-arm-owns-its-continuation.md):
 a handler arm owns its continuation until it resumes it. All three back ends, oracle-moving.
 NOT PUSHED.** An arm that left without resuming `k` dropped the continuation, its frame nodes
 and their captured blocks on every call: declining to resume (ADR 0020 D4's abort), a

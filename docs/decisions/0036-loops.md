@@ -327,6 +327,69 @@ implementation:
 Still deferred (D8): `for` / ranges / iterators, labeled break, `break`-with-value
 / loop-as-expression, a termination check.
 
+### A3 (2026-09-20) — the hoist reaches every slot a loop body can (registers D62, D77, D88)
+
+A2 hoisted the slots it named — a body `let`, an `if`-result, a `match`-result — and
+left **fifteen** others on `builder.build_alloca` at the insertion point: the handle
+lowering's five (`current_kont_slot`, `kont_var`, `arm_param` and both return-arm value
+slots), `classinit`, the `match` payload binding, and the out-slots of `recv`, `lock`,
+`read_file`, TCP read, process read, process recv, stdin recv and `arg`. Inside a loop
+body each of those is a dynamic alloca, so D4's "the slot is reused each iteration" did
+not hold for them: the stack grew by the slot's size every iteration and the loop
+exhausted the 16 MB main-thread stack. Thirteen are scalar or pointer slots and cost 16
+bytes (8, rounded up to x86-64's stack alignment); the other two are the size of the value
+they hold — `classinit` is the class struct and the `match` payload binding is the
+binding's type — so a wider value overflows proportionally sooner. Measured: a performing
+`handle` between 520,000 and 530,000 iterations, and a `recv`, `lock`, one-binding `match`
+or one-field class loop (register D62) between 1,040,000 and 1,060,000, against 250,000 to
+270,000 for an eight-`i64` class. All fifteen now go through `binding_alloca`.
+
+Reusing one slot per site is sound because no slot's ADDRESS outlives the iteration that
+took it: the out-slots are C-ABI out-params the runtime writes through and does not
+retain, `classinit`'s buffer is loaded into a value at the call, and a reference to a
+binding is second class (ADR 0017 D7). Twelve of the fifteen also store before they load.
+The three that do not are `recv`, `process_recv` and `stdin_recv`: their runtime writes
+`*out` only on the success status, so on a failure the site loads a word this iteration
+never wrote — the previous iteration's value now, fresh stack garbage before. It is
+unreachable either way, because that word becomes the payload of a `?T` whose `valid` bit
+is the status, and every consumer reads the payload only under that bit.
+
+What is left on `builder.build_alloca` is prologue-only: a function's or a resumer's
+parameters, a resumer's `resumed_value` and captured-state slots, and the `slice` in the
+`export "C"` wrapper — each built into the entry block it belongs to and executed once per
+call, never per iteration.
+
+The trade-off is A2's: a function containing a loop now reserves those slots in its entry
+block even on a call where the loop body never runs, so every frame of such a function can
+be larger, which deep recursion pays for. The constant is program-dependent and scales with
+the SIZE of the hoisted slots rather than their number. Measured at `-O0` with a zero-trip
+loop inside a recursive fn: a handle-only body, a handle + `classinit` + `let` body, and a
+body with eight handle sites each cost ZERO extra frame bytes — the existing frame absorbs
+the slots as the dynamic-alloca bookkeeping goes away — while four constructions of a
+16-field class, whose `classinit` buffer is 128 bytes apiece, cost about 464 bytes a frame
+and some 40% of the recursion headroom (a zero-trip loop at depth 20,000 completes before
+the hoist and overflows after it). From one iteration on, the hoist is the cheaper side, and
+the deepest user of this compiler — `scg` compiling the whole merged compiler, in both
+bootstrap fixed points — stays green.
+
+**One position is still outside the hoist**, and this amendment does not change it: a
+`while` CONDITION is lowered before `loop_depth` is bumped (the increment brackets
+`lower_block(body)` only), so for an OUTERMOST loop every slot the condition allocates —
+A3's fifteen and A2's three alike — is still built inline in `loop_cond`, which the
+back-edge re-enters. Measured on a matched pre/post pair: `while i < (match E::B(n) { … })`
+completes at 500,000 iterations and overflows at 560,000, identically before and after this
+amendment, while the same loop nested inside another loop (so the condition is lowered at
+depth ≥ 1) completes. `lower_handle`'s own dispatch loop is invisible to `loop_depth` the
+same way. Register D90.
+
+The fix is inkwell-only and **not oracle-moving**: the `snc llvm` oracle and `scg` already
+hoist every alloca to `entry:`, so no stage dump, differential or `selfhost/` file moves.
+Pinned by `d88_every_loop_body_slot_is_allocated_in_the_entry_block`, which reads the IR
+inkwell verified for a program whose loops reach all fifteen and asserts that no `alloca`
+sits outside the entry block; every site was mutated back to prove the pin sees it. A slot
+added later belongs on `binding_alloca` too, and in that probe: the pin sees only the sites
+the probe's loops reach, so a sixteenth slot left inline is invisible until it is added.
+
 ## Revisit
 
 ACCEPTED-WITH-AMENDMENTS (D.5 closed). Triggers:

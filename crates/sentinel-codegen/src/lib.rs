@@ -4709,13 +4709,27 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
         Ok(ptr)
     }
 
-    /// Phase D.5 / ADR 0036 D4: allocate a stack slot for a binding /
-    /// result value. Inside a `while` body (`loop_depth > 0`) the alloca
-    /// is placed at the TOP of the function's entry block — executed once,
-    /// the slot reused each iteration — so the stack does not grow per
-    /// iteration (a loop body's inline alloca would, overflowing at large
-    /// counts). Outside any loop it is built inline, byte-identical to
-    /// pre-D.5 codegen.
+    /// Phase D.5 / ADR 0036 D4 (A2, widened by A3): allocate a stack slot —
+    /// a binding, a result value, or any other slot a loop body can reach.
+    /// Inside a `while` body (`loop_depth > 0`) the alloca is placed at the
+    /// TOP of the function's entry block — executed once, the slot reused
+    /// each iteration — so the stack does not grow per iteration (a loop
+    /// body's inline alloca would, overflowing at large counts: registers
+    /// D62, D77, D88). Outside any loop it is built inline, byte-identical
+    /// to pre-D.5 codegen.
+    ///
+    /// Reuse is sound because no slot's ADDRESS outlives the iteration that
+    /// took it: the runtime out-params are written through and not retained,
+    /// and a reference to a binding is second class (ADR 0017 D7). Most
+    /// callers also store before they load, but three do not — `recv`,
+    /// `process_recv` and `stdin_recv` load their out-slot unconditionally
+    /// while the runtime writes it only on the success status, so on a
+    /// failure they read a word this iteration never wrote (now the previous
+    /// iteration's value rather than fresh garbage). That word is the payload
+    /// of a `?T` whose `valid` bit is the status, and every consumer reads it
+    /// only under that bit, so it stays unreachable. A slot whose CONTENT
+    /// must survive an iteration, or whose address escapes it, does NOT
+    /// belong here.
     fn binding_alloca(
         &self,
         llvm_ty: BasicTypeEnum<'ctx>,
@@ -6139,10 +6153,7 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                 .builder
                 .build_load(field_ty, field_ptr, "enum_field")
                 .map_err(|e| CodegenError::Builder(e.to_string()))?;
-            let slot = self
-                .builder
-                .build_alloca(field_ty, &b.name)
-                .map_err(|e| CodegenError::Builder(e.to_string()))?;
+            let slot = self.binding_alloca(field_ty, &b.name)?;
             self.builder
                 .build_store(slot, val)
                 .map_err(|e| CodegenError::Builder(e.to_string()))?;
@@ -6541,10 +6552,7 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
             .into_pointer_value();
 
         // Out-param slot for the byte count (ADR 0035 D6 ABI (a)).
-        let out_len_slot = self
-            .builder
-            .build_alloca(i64_type, "read_file_len_slot")
-            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        let out_len_slot = self.binding_alloca(i64_type.into(), "read_file_len_slot")?;
         let data_ptr = self
             .builder
             .build_call(
@@ -6731,10 +6739,7 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
         let ptr_type = self.context.ptr_type(inkwell::AddressSpace::default());
         let conn_v = self.lower_expr(conn, program)?.into_int_value();
         let max_v = self.lower_expr(max, program)?.into_int_value();
-        let out_len_slot = self
-            .builder
-            .build_alloca(i64_type, "tcp_read_len_slot")
-            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        let out_len_slot = self.binding_alloca(i64_type.into(), "tcp_read_len_slot")?;
         let data_ptr = self
             .builder
             .build_call(
@@ -6881,10 +6886,7 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
     ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
         let i64_ty = self.context.i64_type();
         let ch_v = self.lower_expr(ch, program)?.into_pointer_value();
-        let out_slot = self
-            .builder
-            .build_alloca(i64_ty, "recv_out")
-            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        let out_slot = self.binding_alloca(i64_ty.into(), "recv_out")?;
         let status = self
             .builder
             .build_call(
@@ -7094,10 +7096,7 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
         let i64_ty = self.context.i64_type();
         let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
         let m_v = self.lower_expr(mutex, program)?.into_pointer_value();
-        let out_slot = self
-            .builder
-            .build_alloca(ptr_ty, "lock_out")
-            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        let out_slot = self.binding_alloca(ptr_ty.into(), "lock_out")?;
         let status = self
             .builder
             .build_call(self.mutex_lock_fn, &[m_v.into(), out_slot.into()], "mutex_lock")
@@ -7372,10 +7371,7 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
 
         let p_v = self.lower_expr(p, program)?.into_pointer_value();
         // Out-param slot for the byte count (the read_file ABI shape).
-        let out_len_slot = self
-            .builder
-            .build_alloca(i64_type, "process_read_len_slot")
-            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        let out_len_slot = self.binding_alloca(i64_type.into(), "process_read_len_slot")?;
         let data_ptr = self
             .builder
             .build_call(self.process_read_fn, &[p_v.into(), out_len_slot.into()], "process_read")
@@ -7429,10 +7425,7 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
         let i64_type = self.context.i64_type();
         let ptr_type = self.context.ptr_type(inkwell::AddressSpace::default());
         let i_v = self.lower_expr(idx, program)?.into_int_value();
-        let out_len_slot = self
-            .builder
-            .build_alloca(i64_type, "arg_len_slot")
-            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        let out_len_slot = self.binding_alloca(i64_type.into(), "arg_len_slot")?;
         let data_ptr = self
             .builder
             .build_call(self.arg_fn, &[i_v.into(), out_len_slot.into()], "arg")
@@ -7530,10 +7523,7 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
     ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
         let i64_ty = self.context.i64_type();
         let p_v = self.lower_expr(p, program)?.into_pointer_value();
-        let out_slot = self
-            .builder
-            .build_alloca(i64_ty, "precv_out")
-            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        let out_slot = self.binding_alloca(i64_ty.into(), "precv_out")?;
         let status = self
             .builder
             .build_call(
@@ -7624,10 +7614,7 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
     /// child-side twin of `lower_process_recv` (no `Process` arg, no element decode).
     fn lower_stdin_recv(&mut self) -> Result<BasicValueEnum<'ctx>, CodegenError> {
         let i64_ty = self.context.i64_type();
-        let out_slot = self
-            .builder
-            .build_alloca(i64_ty, "srecv_out")
-            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        let out_slot = self.binding_alloca(i64_ty.into(), "srecv_out")?;
         let status = self
             .builder
             .build_call(self.stdin_recv_fn, &[out_slot.into()], "stdin_recv")
@@ -9063,10 +9050,7 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
             // then load the now-constructed value.
             TypedExprKind::ClassInit { id, args, .. } => {
                 let class_struct_ty = self.class_types[id];
-                let alloca = self
-                    .builder
-                    .build_alloca(class_struct_ty, "classinit")
-                    .map_err(|e| CodegenError::Builder(e.to_string()))?;
+                let alloca = self.binding_alloca(class_struct_ty.into(), "classinit")?;
                 let init_fn = *self
                     .class_init_fns
                     .get(id)
@@ -9504,10 +9488,7 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
         })?;
         if let Some(ra) = handle_ctx.return_arm.as_ref() {
             let i64_ty = self.context.i64_type();
-            let alloca = self
-                .builder
-                .build_alloca(i64_ty, &ra.value_name.kind)
-                .map_err(|e| CodegenError::Builder(e.to_string()))?;
+            let alloca = self.binding_alloca(i64_ty.into(), &ra.value_name.kind)?;
             self.builder
                 .build_store(alloca, pure_unwrap.into_int_value())
                 .map_err(|e| CodegenError::Builder(e.to_string()))?;
@@ -9631,10 +9612,7 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
         // Allocate the dispatch slot for the current kont. Each
         // loop iteration re-loads from this slot; bubble paths
         // store the new kont here before branching back.
-        let current_kont_slot = self
-            .builder
-            .build_alloca(ptr_ty, "current_kont_slot")
-            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        let current_kont_slot = self.binding_alloca(ptr_ty.into(), "current_kont_slot")?;
         self.builder
             .build_store(current_kont_slot, initial_kont)
             .map_err(|e| CodegenError::Builder(e.to_string()))?;
@@ -9725,10 +9703,7 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                 if let Some(ra) = return_arm {
                     // C3.6(a) / ADR 0020 D4: bind the return
                     // arm's value VarId + lower the body.
-                    let alloca = self
-                        .builder
-                        .build_alloca(i64_ty, &ra.value_name.kind)
-                        .map_err(|e| CodegenError::Builder(e.to_string()))?;
+                    let alloca = self.binding_alloca(i64_ty.into(), &ra.value_name.kind)?;
                     self.builder
                         .build_store(alloca, pure_unwrap.into_int_value())
                         .map_err(|e| CodegenError::Builder(e.to_string()))?;
@@ -9874,13 +9849,16 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
 
     /// C3.5(b): bind a handler arm's op-param VarIds (via GEP
     /// reads from the kont struct's `arg` field) and the kont
-    /// VarId (holding the kont pointer). Allocas land in the
-    /// current builder block — the entry-block pattern used
-    /// elsewhere doesn't apply here because the switch we
-    /// already emitted is entry's terminator, and inserting
-    /// after a terminator would surface as an IR verification
-    /// failure. LLVM's mem2reg pass copes with non-entry
-    /// allocas; correctness is preserved.
+    /// VarId (holding the kont pointer). Both slots go through
+    /// [`Self::binding_alloca`] (ADR 0036 A3): outside a loop
+    /// they are built at the current insertion point; inside one
+    /// they are hoisted to the TOP of the entry block — before
+    /// its first instruction, so the switch already emitted as
+    /// entry's terminator is not in the way — and the one slot
+    /// is reused each iteration. Do not reason from mem2reg
+    /// here: a non-entry alloca inside a loop is a DYNAMIC
+    /// alloca that grows the stack every iteration (registers
+    /// D62, D77, D88), which is what the hoist fixes.
     fn bind_handler_arm_params(
         &mut self,
         arm: &TypedHandlerArm,
@@ -9906,10 +9884,7 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                 .builder
                 .build_load(i64_ty, arg_ptr, "kont_arg")
                 .map_err(|e| CodegenError::Builder(e.to_string()))?;
-            let alloca = self
-                .builder
-                .build_alloca(i64_ty, "arm_param")
-                .map_err(|e| CodegenError::Builder(e.to_string()))?;
+            let alloca = self.binding_alloca(i64_ty.into(), "arm_param")?;
             self.builder
                 .build_store(alloca, arg_val)
                 .map_err(|e| CodegenError::Builder(e.to_string()))?;
@@ -9922,10 +9897,7 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
             .param_var_ids
             .last()
             .expect("type-check guarantees the kont VarId is present");
-        let kont_alloca = self
-            .builder
-            .build_alloca(ptr_ty, "kont_var")
-            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        let kont_alloca = self.binding_alloca(ptr_ty.into(), "kont_var")?;
         self.builder
             .build_store(kont_alloca, kont_ptr)
             .map_err(|e| CodegenError::Builder(e.to_string()))?;
@@ -12301,6 +12273,168 @@ mod tests {
         for name in ["brk", "cont"] {
             let body = ir_fn_body(&ir, name);
             assert_eq!(guarded_releases(body), 4, "@{name}:\n{body}");
+        }
+    }
+
+    // ===== Register D88 / ADR 0036 D4 (A2's hoist): a loop body allocates nothing =====
+    //
+    // An `alloca` outside the entry block runs every time control reaches it, and
+    // nothing reclaims its slot until the function returns — so one inside a loop body
+    // grows the stack by its size each iteration and a long loop overflows (registers
+    // D62, D77, D88). A2 hoisted a `let`'s slot, an `if`-result and a `match`-result
+    // through `binding_alloca`; every other slot a loop body can reach now goes through
+    // it too. This program puts one family of them in each fn's loop.
+
+    const D88_SITES: &str = r#"
+class S { let v: i64; pub init(x: i64) { self.v = x; 0 } }
+enum E { A, B(i64) }
+effect Io { put(x: i64) -> i64; }
+
+fn handles(n: i64) -> i64 {
+    let mut i: i64 = 0; let mut acc: i64 = 0;
+    while i < n {
+        i = i + 1;
+        acc = acc + handle perform Io.put(i) with { Io.put(x, k) => k(x), return v => v + 1 };
+    }
+    acc
+}
+
+fn matches(n: i64) -> i64 {
+    let mut i: i64 = 0; let mut acc: i64 = 0;
+    while i < n { i = i + 1; let e = E::B(i); let v: i64 = match e { E::A => 0, E::B(x) => x }; acc = acc + v; }
+    acc
+}
+
+fn classes(n: i64) -> i64 {
+    let mut i: i64 = 0; let mut acc: i64 = 0;
+    while i < n { i = i + 1; let s: S = S::init(i); acc = acc + 1; }
+    acc
+}
+
+fn conc(n: i64) -> i64 {
+    let ch = channel_new(); let m = mutex_new(0);
+    let mut i: i64 = 0; let mut acc: i64 = 0;
+    while i < n { i = i + 1; send(ch, 1); let r: ?i64 = recv(ch); let g = lock(m); acc = acc + unwrap_or(r, 0); }
+    acc
+}
+
+fn io(n: i64, probe: bool) -> i64 {
+    let mut i: i64 = 0; let mut acc: i64 = 0;
+    while i < n {
+        i = i + 1;
+        if probe {
+            let f: [u8] = read_file("x");
+            let d: [u8] = tcp_read(7, 256);
+            let a: [u8] = arg(0);
+            let s: ?i64 = stdin_recv();
+            acc = acc + len(f) + len(d) + len(a) + unwrap_or(s, 0);
+            0
+        } else { 0 };
+    }
+    acc
+}
+
+fn procs(n: i64, probe: bool) -> i64 ! { Subprocess } {
+    let mut i: i64 = 0; let mut acc: i64 = 0;
+    while i < n {
+        i = i + 1;
+        if probe {
+            let argv: [[u8]] = ["-"];
+            let p = process_spawn("cat", argv);
+            let o: [u8] = process_read(p);
+            let r: ?i64 = process_recv(p);
+            acc = acc + len(o) + unwrap_or(r, 0) + process_wait(p);
+            0
+        } else { 0 };
+    }
+    acc
+}
+
+fn main() -> i64 { handles(2) + matches(2) + classes(2) + conc(2) + io(0, false) }
+"#;
+
+    /// The `alloca`s in `body` that sit outside its entry block — each one a slot the
+    /// enclosing loop would allocate again on every iteration.
+    fn allocas_outside_entry(body: &str) -> Vec<String> {
+        ir_blocks(body)
+            .iter()
+            .skip(1)
+            .flat_map(|(label, lines)| {
+                lines
+                    .iter()
+                    .filter(|l| l.contains(" = alloca "))
+                    .map(move |l| format!("{label}: {l}"))
+            })
+            .collect()
+    }
+
+    /// How many `alloca`s in `body`'s entry block LLVM named `%name` — counting the
+    /// `%name1`, `%name2`, … it uses when one name is taken more than once.
+    fn entry_slots(body: &str, name: &str) -> usize {
+        ir_blocks(body)
+            .first()
+            .map(|(_, lines)| {
+                lines
+                    .iter()
+                    .filter(|l| l.contains(" = alloca "))
+                    .filter(|l| {
+                        l.split(" = ").next().is_some_and(|ssa| {
+                            let Some(rest) = ssa.strip_prefix(&format!("%{name}")) else {
+                                return false;
+                            };
+                            rest.chars().all(|c| c.is_ascii_digit())
+                        })
+                    })
+                    .count()
+            })
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn d88_every_loop_body_slot_is_allocated_in_the_entry_block() {
+        // Each fn's loop reaches the slots named beside it — all fifteen between them.
+        // Naming them is what keeps the stray-alloca check below honest: every fn takes
+        // a parameter, whose slot is in the entry block whatever the loop body does, so
+        // "this fn allocates something" would pass a probe that had stopped reaching its
+        // site. Twelve slots carry a fixed name; the return arm's value slot (`v`, built
+        // on both the resume and the handle pure paths) and the `match` payload binding
+        // (`x`) are named after the source binding.
+        let sites: &[(&str, &[(&str, usize)])] = &[
+            ("handles", &[("current_kont_slot", 1), ("kont_var", 1), ("arm_param", 1), ("v", 2)]),
+            ("matches", &[("x", 1)]),
+            ("classes", &[("classinit", 1)]),
+            ("conc", &[("recv_out", 1), ("lock_out", 1)]),
+            (
+                "io",
+                &[
+                    ("read_file_len_slot", 1),
+                    ("tcp_read_len_slot", 1),
+                    ("arg_len_slot", 1),
+                    ("srecv_out", 1),
+                ],
+            ),
+            ("procs", &[("process_read_len_slot", 1), ("precv_out", 1)]),
+        ];
+        let ir = compile_src_ir(D88_SITES);
+        for (name, want) in sites {
+            let body = ir_fn_body(&ir, name);
+            for (slot, n) in *want {
+                assert_eq!(
+                    entry_slots(body, slot),
+                    *n,
+                    "@{name}: expected {n} `{slot}` slot(s) in the entry block — the probe \
+                     no longer reaches that site, so the check below proves nothing about \
+                     it:\n{body}"
+                );
+            }
+            let stray = allocas_outside_entry(body);
+            assert!(
+                stray.is_empty(),
+                "@{name} allocates {} slot(s) outside the entry block, so its loop grows \
+                 the stack every iteration:\n{}\n\n{body}",
+                stray.len(),
+                stray.join("\n")
+            );
         }
     }
 

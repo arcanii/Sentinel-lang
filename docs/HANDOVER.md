@@ -124,7 +124,41 @@ reference as you work through the milestones.
 > confirming nothing pre-existing is newly refused; oracle-vs-scg byte-equality on the new
 > fixture at types, mir and llvm; and the secret-taint check in both directions.
 
-### ▶ RESUME HERE (2026-09-19b — `origin/main` is `e68837a`, pushed 2026-09-19 23:55; its reflog also shows `39e7eff` (09-14) and `076941a` (09-19 21:42), so the block below, which says `e686853`, is stale. The ADR 0074 commit on top of it is LOCAL and NOT PUSHED — run `git log --oneline origin/main..HEAD` for the live list; a count is deliberately not given. This session: **ADR 0074 closes D79** in all three back ends (oracle-moving, `scg` mirrored, both bootstrap fixed points green); D81 widened, D83's scope corrected; **D87, D88 and D89 filed**. Register: **89 items, 37 done**, D19 redacted. Four-check at HEAD: 1,996 passed with exactly the 18 known Windows failures, doctests and clippy clean, every `selfhost_*` differential green, both bootstrap fixed points byte-identical.
+### ▶ RESUME HERE (2026-09-20 — `origin/main` is `2f9afd8` (the ADR 0074 / D79 commit, pushed 2026-09-20 08:45), and `git log --oneline origin/main..HEAD` is EMPTY: nothing is committed ahead of it, and this slice is UNCOMMITTED in the working tree. This session: **D88 closed** — inkwell's fifteen loop-BODY allocas now hoist to the entry block ([ADR 0036](decisions/0036-loops.md) A3) — which closes **D62** and **D77** with it; **D90 filed** (the `while` CONDITION is still outside the hoist). Register: **90 items, 40 done**. Four-check: 1,998 passed with exactly the 18 known Windows failures (9 in `examples`, 4 in `export`, 1 in `llvm`, 4 in `modules`), doctests and clippy clean, every `selfhost_*` differential green with the new fixture in the corpus, and both bootstrap fixed points byte-identical.
+
+> **What the 2026-09-20 slice did — [ADR 0036](decisions/0036-loops.md) A3.** inkwell built
+> fifteen slots with `builder.build_alloca` at the insertion point, so inside a loop body each
+> allocated a fresh stack slot every iteration. Where that was measured — a `handle` (register
+> D77), a class construction (D62), a `match` payload binding, a channel `recv` and a `lock` —
+> a long loop exhausted the 16 MB stack; the other members are the out-slots of `read_file`,
+> TCP read, process read, process recv, stdin recv and `arg`, each confirmed to be a loop-body
+> alloca by mutating it back. All fifteen now go through `binding_alloca` — ADR 0036 D4's entry-block
+> hoist, which A2 had applied to a body `let`, an `if`-result and a `match`-result only. The
+> slot is reused because no slot's address outlives the iteration that took it (three sites
+> also read a word the runtime may not have written this iteration — see the D88 entry).
+> inkwell-only and not oracle-moving: the oracle and `scg` already hoist, so no stage dump,
+> differential or `selfhost/` file moves. What the hoist still does NOT reach is a `while`
+> CONDITION of an outermost loop, filed as **D90**.
+>
+> ⚠ **A REBUILD OF THE SAME SOURCE CAN FLIP THE RESULT — SMOKE-TEST EVERY PINNED BINARY.** Two
+> traps in a row here. (1) The first sweep showed twelve programs "regressing" to a compiler
+> stack overflow. `cargo build`'s dev-profile `snc.exe` runs on Windows' default 1 MB
+> main-thread stack, and a rebuild of the REVERTED source reproduced it — so it tracks the
+> build, not the change. Probe binaries go through `--profile test` (optimized), which does
+> not overflow on these inputs. (2) The matched pair built next was bogus: `Copy-Item` preserves the
+> source file's timestamp, so restoring the fixed file left cargo thinking nothing had changed,
+> and the "post" binary was the pre one. **That sweep came back perfectly clean — zero
+> differences — which reads exactly like success.** Both traps were caught only by running a
+> known shape through each binary before measuring with it.
+>
+> **NEXT:** **D87** (a bubbling `k(v)` abandons the rest of its arm: a leak and a wrong value —
+> top priority by the leak directive, but a lowering design, so it wants an ADR). **D90** is the
+> cheap one after it — the same hoist, around the `while` condition — and it needs its own
+> corpus sweep because it moves inkwell IR. Then the list below: D69's remainder, D68(c), D13
+> fail-closed, D73, D78, D80, D81, D89; D75 needs the maintainer's call; lower: D82, D83, D84
+> and the two `borrow-check-limitations.md` over-rejections that wait on ADR 0018's provenance.
+
+### ▶ Earlier RESUME (2026-09-19b — `origin/main` is `e68837a`, pushed 2026-09-19 23:55; its reflog also shows `39e7eff` (09-14) and `076941a` (09-19 21:42), so the block below, which says `e686853`, is stale. The ADR 0074 commit on top of it is LOCAL and NOT PUSHED — run `git log --oneline origin/main..HEAD` for the live list; a count is deliberately not given. This session: **ADR 0074 closes D79** in all three back ends (oracle-moving, `scg` mirrored, both bootstrap fixed points green); D81 widened, D83's scope corrected; **D87, D88 and D89 filed**. Register: **89 items, 37 done**, D19 redacted. Four-check at HEAD: 1,996 passed with exactly the 18 known Windows failures, doctests and clippy clean, every `selfhost_*` differential green, both bootstrap fixed points byte-identical.
 
 > **What the 2026-09-19b slice did — [ADR 0074](decisions/0074-handler-arm-owns-its-continuation.md).**
 > A handler arm now owns its continuation until it resumes it: the arm's `k` slot is the
@@ -534,7 +568,7 @@ reference as you work through the milestones.
 >      scalar-4 arm, which it now has. Also worth doing with it: `examples/math/quadratic.sentinel` and
 >      `sentinel_library/std/math/float.sentinel` currently reach only lex/ast, because
 >      `snc merge`'s Bar-A printer rejects both a float literal and `sqrt` (menu item 5).
->   4. **THE FILED-DEFECT REGISTER — EIGHTY-NINE items (D1-D89); **D1, D2, D3, D4, D5, D8, D9, D10, D15, D16, D17, D24, D25, D26, D29, D31, D34, D37, D39, D42, D43, D44, D47(option A), D51, D54, D55, D56, D58, D59, D60, D61, D66, D74, D76, D79, D85 and D86 are DONE (37 of 89)**, the rest verified against a pre-slice binary. MOST are
+>   4. **THE FILED-DEFECT REGISTER — NINETY items (D1-D90); **D1, D2, D3, D4, D5, D8, D9, D10, D15, D16, D17, D24, D25, D26, D29, D31, D34, D37, D39, D42, D43, D44, D47(option A), D51, D54, D55, D56, D58, D59, D60, D61, D62, D66, D74, D76, D77, D79, D85, D86 and D88 are DONE (40 of 90)**, the rest verified against a pre-slice binary. MOST are
 >      unregistered in any `DEFERRED_PROGRAMS` / `KNOWN_SCG_BUGS` list because no corpus program
 >      reaches them — but FOUR are, and the blanket "NONE" that stood here was falsified by
 >      this register's own new entries: D24/D25/D26 share the
@@ -1245,10 +1279,11 @@ reference as you work through the milestones.
 >      its value back to the arm — so it is filed rather than folded into D79. **A memory
 >      leak, so top priority under the standing directive.**
 >
->      **D88 — inkwell builds allocas at the insertion point, so every one inside a loop body is
->      a DYNAMIC alloca and the stack grows per iteration: a `match` with a payload binding, a
->      channel `recv`, a `lock`, a class construction or a `handle` in a long loop overflows the
->      stack of `snc build`'s binary. The cause of D62 and D77.** Found 2026-09-19 (the ADR 0074 slice) while
+>      **D88 — DONE (2026-09-20, [ADR 0036](decisions/0036-loops.md) A3), inkwell-only; it closes
+>      D62 and D77 with it. inkwell built allocas at the insertion point, so every one inside a
+>      loop body was a DYNAMIC alloca and the stack grew per iteration: a `match` with a payload
+>      binding, a channel `recv`, a `lock`, a class construction or a `handle` in a long loop
+>      overflowed the stack of `snc build`'s binary.** Found 2026-09-19 (the ADR 0074 slice) while
 >      re-reading D77; pre-existing. ADR 0036 D4 hoists a `let` binding's slot to the entry block
 >      when the `let` is inside a loop (`binding_alloca`), but fifteen other allocas in
 >      `sentinel-codegen` call `builder.build_alloca` at the current insertion point. An alloca
@@ -1273,11 +1308,50 @@ reference as you work through the milestones.
 >      source: the handle lowering's five (`current_kont_slot`, `kont_var`, `arm_param` and both
 >      return-arm slots), `classinit`, the `match` payload binding (`enum_field`), and the
 >      out-slots of `recv`, `lock`, `read_file`, TCP read, process read, process recv, stdin recv
->      and `arg`. The `handle`, `classinit`, `match`, `recv` and `lock` sites are verified by
->      construction, the rest by reading. (The `slice` alloca in the `export "C"` wrapper sits in
->      a prologue and is not a member.) The fix is inkwell-only: route those sites through
->      `binding_alloca`. The oracle and `scg` already hoist, so no stage dump or differential
->      moves, and `selfhost/` needs nothing.
+>      and `arg`. (The `slice` alloca in the `export "C"` wrapper sits in a prologue and is not a
+>      member.) All fifteen are now verified by construction: each was mutated back to the inline
+>      `alloca` and the pin caught it, which settles the eight sites no earlier probe had
+>      actually reached: the six out-slots this entry listed as checked by reading (`read_file`,
+>      TCP read, process read, process recv, stdin recv and `arg`), and both return-arm value
+>      slots — listed with the `handle` family as constructed, but no probe carried a `return`
+>      arm, and a `handle` loop that completes at 400,000 overflows at that same count once one
+>      is added.
+>
+>      **Fixed 2026-09-20** by routing all fifteen through `binding_alloca`, ADR 0036 D4's
+>      entry-block hoist — A2 had applied it to a body `let`, an `if`-result and a `match`-result
+>      and left these behind (ADR 0036 A3). Reuse of one slot per site is sound because no
+>      slot's ADDRESS outlives the iteration that took it: the out-slots are C-ABI out-params the
+>      runtime writes through and does not retain, `classinit`'s buffer is loaded into a value at
+>      the call, and a reference to a binding is second class (ADR 0017 D7). Twelve of the
+>      fifteen also store before they load; `recv`, `process_recv` and `stdin_recv` do not —
+>      their runtime writes `*out` only on the success status, so on a failure the site loads a
+>      word this iteration never wrote, which the hoist turns from fresh stack garbage into the
+>      previous iteration's value. That word is the payload of a `?T` whose `valid` bit is the
+>      status and every consumer reads it only under that bit, so it stays unreachable either
+>      way. The cost per iteration is the slot's size: thirteen are 16-byte scalar or pointer
+>      slots, while `classinit` and the `match` payload binding are the size of the value they
+>      hold, so a wider one overflows sooner (an eight-`i64` class between 250,000 and 270,000,
+>      against 1,040,000 to 1,060,000 for a one-field one). Measured with a matched pre/post pair
+>      (same profile, same build command, each smoke-tested before use): fifteen runs that
+>      overflowed now complete — the performing `handle` at 530,000 and 3,000,000, a
+>      one-parameter op at 360,000, the never-performing `handle`, `recv`, `lock` and
+>      one-binding `match` loops at 1,060,000 and 3,000,000, D62's class loop at 2,000,000 and
+>      3,000,000, and D77's framed and declining handle loops at 3,000,000. Inkwell-only and not
+>      oracle-moving, confirmed over the 464 tracked `.sentinel` files (the new fixture aside; it
+>      is meant to differ): the oracle's IR is byte-identical, no program changes whether it is
+>      accepted or builds, and all 285 that build run the same. Two notes on that sweep. It
+>      carries more weight than usual, because `llvm_behaviour_matches_inkwell_over_emitted_subset`
+>      — the suite's own oracle-versus-inkwell behavioural comparison, the most on-point test for
+>      an inkwell-only change — is one of the 18 known Windows failures (it looks for
+>      `libsentinel_runtime.a`) and did not run. And it builds each program twice under paths of
+>      different length (`<work>\<key>\pre\a.exe` against `…\post\a.exe`), so a program whose
+>      output depended on `len(arg(0))` — argv[0] is the exe path — would report a spurious
+>      difference; none does, because the one fixture that calls `arg(0)` guards it behind a
+>      runtime-false flag, which also means the sweep gives the `arg` out-slot no runtime
+>      coverage: that site rests on the IR pin and its mutation. Pinned by
+>      `d88_every_loop_body_slot_is_allocated_in_the_entry_block` in `sentinel-codegen`, which
+>      reads the IR inkwell verified for a program whose loops reach all fifteen sites and
+>      asserts that no `alloca` sits outside the entry block.
 >
 >      **D89 — a `handle` whose value is not an `i64` passes the type checker, then produces IR
 >      no back end can use.** Found 2026-09-19 by ADR 0074's review; pre-existing, identical
@@ -1291,6 +1365,27 @@ reference as you work through the milestones.
 >      emit the same invalid IR. Same seam as D68(c) (an effecting fn's non-`i64` value). Either
 >      the type checker refuses a non-`i64` `handle` result, or all three back ends widen and
 >      narrow around `sentinel_kont_pure` / `sentinel_kont_consume_pure`.
+>
+>      **D90 — a `while` CONDITION's slots are still allocated inline when the loop is
+>      OUTERMOST, so a condition that allocates grows the stack per iteration.** Found
+>      2026-09-20 by D88's review; pre-existing, and identical before and after ADR 0036 A3.
+>      `lower_stmt`'s `While` arm lowers the condition BEFORE it bumps `loop_depth` — the
+>      increment brackets `lower_block(body)` only — so for an outermost loop every slot the
+>      condition allocates, A3's fifteen and A2's `let` / `if`-result / `match`-result alike, is
+>      built inline in `loop_cond`, which the back-edge re-enters. Measured on a matched
+>      pre/post pair: `while i < (match E::B(n) { E::A => 0, E::B(x) => x })` completes at
+>      500,000 iterations and overflows the 16 MB stack at 560,000 (two slots, 32 B per
+>      iteration), the same before and after A3, while the SAME loop nested inside another loop
+>      completes — the inner condition is then lowered at depth ≥ 1. A second member, same root:
+>      `lower_handle` emits its own dispatch loop, which `loop_depth` (a count of SOURCE `while`
+>      nesting) cannot see, so a `handle` with no enclosing `while` builds its arm slots inline
+>      inside that loop; a single `handle` in `main` disassembles to four dynamic allocas. That
+>      one is bounded today only because ADR 0072 refuses a `perform` outside tail position, so
+>      the number of bubbles is the number of syntactic `perform`s on the path. The fix for the
+>      first is to bump `loop_depth` around the condition as well as the body — it moves inkwell
+>      IR for condition-allocating programs, so it wants its own sweep. Widening ADR 0072's gate
+>      must come with hoisting the dispatch-loop slots, and with a probe in the D88 pin that
+>      reaches a handler arm with no enclosing `while`.
 >
 >      **D78 — stale corpus fixture counts in `llvm.rs` and `README.md`, at six sites, stale
 >      before this change.** Found by D74's reviews. `crates/sentinel-driver/tests/llvm.rs`
@@ -1344,9 +1439,9 @@ reference as you work through the milestones.
 >      the three that fail when the bind is disabled. ADR 0020 D7 clarified again;
 >      `docs/abi-v1.md` §3 states the push's two cases.
 >
->      **D77 — a `handle` written DIRECTLY in a loop body grows the STACK per iteration, and
->      the loop exhausts it — by 600k iterations when the handled computation performs, by
->      1.8M when it does not (D88 has the thresholds).** Found 2026-09-12 while probing D74; pre-existing and
+>      **D77 — DONE (2026-09-20, by D88's fix). A `handle` written DIRECTLY in a loop body grew
+>      the STACK per iteration, and the loop exhausted it — by 600k iterations when the handled
+>      computation performs, by 1.8M when it does not (D88 has the thresholds).** Found 2026-09-12 while probing D74; pre-existing and
 >      independent of it. In `while i < N { acc = acc + handle <computation> with { ... } }`,
 >      five shapes were built and run at N = 500,000 and N = 600,000. All THREE whose
 >      computation performs survive 500,000 and die at 600,000 with 0xC00000FD
@@ -1373,7 +1468,8 @@ reference as you work through the milestones.
 >      per op dispatched to the arm) are dynamic allocas of 16 bytes of stack each, and the same
 >      defect is D62's cause. An attacker who
 >      controls the iteration count controls the crash (D62 records the same). No corpus program
->      loops a `handle` far enough.
+>      loops a `handle` far enough. **Fixed 2026-09-20** with the rest of D88's fifteen: the
+>      framed, frameless, declining and never-performing handle loops all complete at 3,000,000.
 >      (Earlier drafts of this entry made three wrong claims: the first reported a flat
 >      frameless control — a poll too slow for a short run, and a control never run at the
 >      crash threshold — and concluded the growth tracked frame reification; the second
@@ -1618,13 +1714,15 @@ reference as you work through the milestones.
 >      security note). ⚠ **Do not re-add the drop without asking** — it waits on a maintainer
 >      decision.
 >
->      **D62 — a class constructed inside a loop overflows the STACK.** With a class whose
+>      **D62 — DONE (2026-09-20, by D88's fix). A class constructed inside a loop overflowed the
+>      STACK.** With a class whose
 >      `init` takes a single SCALAR, `while i < 2000000 { let s: S = S::init(i); ... }` dies
 >      under `snc build` with 0xC00000FD STATUS_STACK_OVERFLOW, on the pre- and post-D61
 >      binaries alike; the free-fn twin is flat. Found while measuring D61's leak. The cause was
 >      not established then — the scalar param only rules out the param path. An attacker who
 >      controls the iteration count controls the crash. **Cause established 2026-09-19 — see
->      D88:** `classinit` is a dynamic alloca in the loop body.
+>      D88:** `classinit` is a dynamic alloca in the loop body. **Fixed 2026-09-20** with the
+>      rest of D88's fifteen: the same loop now completes at 2,000,000 and at 3,000,000.
 >
 >      **D59 — DONE (2026-09-11). ⚠ An `if` whose THEN arm diverges had its result slot sized
 >      from the DIVERGENT branch — a memory-safety miscompile in the SHIPPING back end.**
