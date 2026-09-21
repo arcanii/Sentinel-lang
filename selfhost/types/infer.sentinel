@@ -984,11 +984,113 @@ fn dump_channel_recv(out: &mut Vec<u8>, ca: Args, src: &[u8], c: &mut TyCtx, gb:
     }
 }
 
-// (4c-1) struct-literal fields: emit each field's VALUE positionally (the names
-// are dropped — the typed StructLit is nameless/positional). Source order. (4h) for
-// a GENERIC struct-lit (`gen`), the field's declared type is SUBSTITUTED with the
-// instance's type-args `gargs` before it expects the value (so `Box { value: 42 }`
-// types `42` against `i64`, and `Pair { first: a }` against `<T#0>`).
+// (register D95) the struct-literal ORDERING pass: answer `f` with its cells in DECLARED
+// field order. Source order is what the parser hands over, and the Rust side sorts into
+// declaration order (`provided.sort_by_key(|(idx, _)| *idx)` in
+// `crates/sentinel-types/src/lib.rs`), so this is where the two are reconciled. It runs
+// once per literal, not once per field.
+//
+// One pass computes the keys and rebuilds the list unchanged; if they are already
+// ascending — which every literal in the corpus is — that rebuilt list IS the answer and
+// nothing else happens. Only a literal actually written out of order pays for the sort.
+// The split matters: `field_index` scans every field of every struct in the program, so
+// calling it once per cell rather than once per cell PER STEP is the difference between
+// linear and quadratic. Measured on `scg` compiling its own `types.sentinel`, whose
+// `TyCtx` literal has about 300 fields, the quadratic form cost about 20%.
+//
+// `arfi` is a stack, not a buffer: a field's VALUE can be another struct literal, so an
+// outer pass is still live when an inner one starts.
+fn sort_fields(c: &mut TyCtx, sid: i64, f: Fields) -> Fields {
+    let base: i64 = len((*c).arfi);
+    let g: Fields = fields_keys(c, sid, f);
+    let sorted: bool = arfi_ascending(c, base);
+    let r: Fields = if sorted {
+        g
+    } else {
+        sort_fields_slow(c, sid, g)
+    };
+    truncate_i64(&mut (*c).arfi, base);
+    r
+}
+
+// Rebuild `f` unchanged, pushing each cell's declared index onto `arfi` in source order.
+fn fields_keys(c: &mut TyCtx, sid: i64, f: Fields) -> Fields {
+    match f {
+        Fields::FieldEnd => Fields::FieldEnd,
+        Fields::FieldCell(nm, v, rest) => {
+            let idx: i64 = field_index(c, sid, &nm);
+            push(&mut (*c).arfi, idx);
+            Fields::FieldCell(nm, v, fields_keys(c, sid, rest))
+        },
+    }
+}
+
+// Are the keys from `base` up non-decreasing? Equal keys count as ordered: two cells can
+// only share a key if the literal names a field twice, which the type check refuses.
+fn arfi_ascending(c: &mut TyCtx, base: i64) -> bool {
+    let n: i64 = len((*c).arfi);
+    let mut i: i64 = base + 1;
+    let mut ok: bool = true;
+    while i < n {
+        if (*c).arfi[i] < (*c).arfi[i - 1] { ok = false; 0 } else { 0 };
+        i = i + 1;
+    }
+    ok
+}
+
+// Selection sort by repeated hoist — quadratic, and only reached by a literal written out
+// of declaration order, which the corpus never is. `field_index` answers -1 for a name the
+// struct does not declare; -1 sorts first, and the value is then checked against
+// `field_type`'s own -1 on the way out, so an ill-typed literal is not made well-typed by
+// being reordered.
+fn sort_fields_slow(c: &mut TyCtx, sid: i64, f: Fields) -> Fields {
+    let g: Fields = hoist_min_field(c, sid, f);
+    match g {
+        Fields::FieldEnd => Fields::FieldEnd,
+        Fields::FieldCell(nm, v, rest) => Fields::FieldCell(nm, v, sort_fields_slow(c, sid, rest)),
+    }
+}
+
+// Move the cell with the SMALLEST declared index to the front of `f`. The list is a
+// consuming ADT — `match` moves it and there is no way to read a cell twice — so this
+// rebuilds rather than permutes in place: hoist the minimum of the tail, then compare it
+// against the head. The comparison is strict, so a tie keeps the earlier cell in front;
+// the cells BEHIND the winner are not left in source order, and nothing depends on their
+// order because the caller re-hoists over the remainder.
+fn hoist_min_field(c: &mut TyCtx, sid: i64, f: Fields) -> Fields {
+    match f {
+        Fields::FieldEnd => Fields::FieldEnd,
+        Fields::FieldCell(nm, v, rest) => {
+            let mine: i64 = field_index(c, sid, &nm);
+            let h: Fields = hoist_min_field(c, sid, rest);
+            match h {
+                Fields::FieldEnd => Fields::FieldCell(nm, v, Fields::FieldEnd),
+                Fields::FieldCell(nm2, v2, rest2) => {
+                    let theirs: i64 = field_index(c, sid, &nm2);
+                    if theirs < mine {
+                        Fields::FieldCell(nm2, v2, Fields::FieldCell(nm, v, rest2))
+                    } else {
+                        Fields::FieldCell(nm, v, Fields::FieldCell(nm2, v2, rest2))
+                    }
+                },
+            }
+        },
+    }
+}
+
+// (4c-1) struct-literal fields: emit each field's VALUE positionally (the names are
+// dropped — the typed StructLit is nameless/positional). (4h) for a GENERIC struct-lit
+// (`gen`), the field's declared type is SUBSTITUTED with the instance's type-args
+// `gargs` before it expects the value (so `Box { value: 42 }` types `42` against
+// `i64`, and `Pair { first: a }` against `<T#0>`).
+//
+// `f` arrives in DECLARATION order: the caller runs `sort_fields` over it first. The
+// order is load-bearing three times over — this one walk writes the typed DUMP, collects
+// the MIR args, and collects the codegen operands that the `insertvalue` chain consumes
+// positionally. Walking in source order put each VALUE in the wrong declared SLOT:
+// invalid IR where the transposed fields had different LLVM types, a silent transposition
+// where they had the same width. It stayed invisible because every literal in the corpus
+// happens to be written in declaration order, so no differential ever moved.
 fn dump_sfields(out: &mut Vec<u8>, f: Fields, sid: i64, gen: bool, gargs: &Vec<i64>, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
     match f {
         Fields::FieldEnd => 0,

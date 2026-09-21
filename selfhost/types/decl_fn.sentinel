@@ -110,6 +110,12 @@ fn type_fn(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u
     if cg_on(c) {
         cg_reset(c);
         (*c).cgmain = cg_is_main(src, name_s, name_e);
+        // (ADR 0075 D6) an arm-remainder resumer is named `__armrem_<this fn>_<seq>` on
+        // both sides. The bubble that emits the reference sits deep inside expression
+        // lowering, where the span is not a local, so publish it here -- after
+        // `cg_reset`, which does not clear it.
+        (*c).cg_fn_s = name_s;
+        (*c).cg_fn_e = name_e;
         // (Bar B / effects c35b) an effecting fn (non-Async row, recorded in pass-1)
         // uses the Kont* ABI — `cg_emit_fn` returns `ptr` (wrapping a pure tail).
         (*c).cg_eff = (*c).ufeff[fnidx] != 0;
@@ -227,7 +233,16 @@ fn type_fn(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u
         } else {
             cg_emit_fn(c, src, name_s, name_e, rty);
             0
-        }
+        };
+        // (ADR 0075 D6) now that THIS fn's define is written, emit one resumer define per
+        // class (R) bubble it contained. It has to be here rather than at the bubble:
+        // building a define needs `cg_reset`, which clears the per-fn cg state with no
+        // save/restore, so it cannot run in the middle of the parent's body. The text
+        // oracle flushes its `extra_defines` at the same point, so the order agrees.
+        // The fn's names are still bound -- nothing truncates the scope stack until the
+        // next decl moves `base` -- which is what lets the remainder's `Var`s resolve.
+        cg_ar_drain(c, src, name_s, name_e, k, s, e, gb);
+        0
     } else {
         0
     };

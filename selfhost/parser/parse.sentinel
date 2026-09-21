@@ -197,9 +197,18 @@ fn parse_harms(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i
         *cur = *cur + 1;
         let hparams: Binds = parse_binds(k, s, e, src, cur);
         *cur = *cur + 1;
+        // (ADR 0075 D6) the body's first token, before `parse_expr` consumes it.
+        let hbtok0: i64 = *cur;
         let hbody: Expr = parse_expr(k, s, e, src, cur);
         let hrest: HArms = parse_harms(k, s, e, src, cur, ret);
-        HArms::HCell(slice_of(src, hes, hee), slice_of(src, hos, hoe), hparams, hbody, hrest)
+        HArms::HCell(
+            slice_of(src, hes, hee),
+            slice_of(src, hos, hoe),
+            hparams,
+            hbody,
+            hbtok0,
+            hrest,
+        )
     }
 }
 

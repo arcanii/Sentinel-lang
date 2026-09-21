@@ -338,6 +338,10 @@ struct TyCtx {
     cg_used_prbytes: bool, // (8d) `declare sentinel_print_bytes`
     cg_used_memcpy: bool, // (8d-Vec-2) `declare void @llvm.memcpy.p0.p0.i64` (vec_to_array)
     cg_used_free: bool, // (8d-drops) `declare void @sentinel_free` (scope-exit heap drops)
+    // (ADR 0075 D6) `declare void @sentinel_kont_panic_remainder` -- class (A), a bubbling
+    // `k(v)` whose remainder cannot be replayed. Declared between `sentinel_free` and
+    // `sentinel_panic_oob`, which is where the text oracle puts it.
+    cg_used_kontpanicrem: bool,
     // (8d-drops) per-block scope frames for drop emission: each bound var (param /
     // `let`) records (VarId, type, slot); a block's exit frees the un-moved
     // heap-backed ones in reverse order. Frames nest via the recursive Block walk —
@@ -498,6 +502,57 @@ struct TyCtx {
     cg_h_merge: i64,  // the merge block (each arm / pure branches here; the load follows)
     cg_h_depth: i64,  // (c36b) dynamic handle nesting depth; `> 1` ⇒ this handle is nested
                       //   (its result is a Kont* the enclosing handle dispatches on)
+    cg_h_rcls: i64,   // (ADR 0075 D6) what THIS arm's bubble does: 0 = branch away (the
+                      //   arm is Tail or Diverging, or never resumes), 1 = reify its
+                      //   remainder onto the bubbled kont, 2 = class (A), abort.
+    cg_h_cbase: i64,  // (ADR 0075 D6) where THIS arm's captures start in `arcaps`. The
+                      //   list is a STACK, not a scratch buffer: a `handle` nested inside
+                      //   an arm classifies while the outer arm's entry is still live.
+    cg_armseq: i64,   // (ADR 0075 D6) the per-fn counter each resumer's name is drawn
+                      //   from. Taken at BUBBLE time, not at classification time — the
+                      //   text oracle's `armrem_seq` advances inside
+                      //   `emit_arm_remainder_resumer`, and for a `handle` nested in an
+                      //   arm the two orders differ.
+    cg_fn_s: i64,     // (ADR 0075 D6) the enclosing fn's source-NAME span. The resumer
+    cg_fn_e: i64,     //   symbol is `__armrem_<that name>_<seq>` on both sides, because
+                      //   `scg` numbers FnIds differently from the Rust back ends.
+    // (ADR 0075 D6) the DEFERRED arm-remainder worklist, drained once the enclosing
+    // define is assembled. A resumer is a whole second `define`, and building one needs
+    // `cg_reset` — which clears about twenty pools and ten scalars with no save/restore,
+    // so it cannot run in the middle of the parent's body the way the text oracle's
+    // `extra_defines` does. Emitting after the parent also matches where the oracle
+    // flushes that buffer, so the two agree on define ORDER for free.
+    arwb: Vec<i64>,   // the arm BODY's first token, for the resumer's own re-parse
+    arwq: Vec<i64>,   // the sequence number in this resumer's symbol
+    arwk: Vec<i64>,   // the arm's continuation VarId (what the remainder resumes)
+    arwcs: Vec<i64>,  // where this entry's captures start in `arwc`
+    arwcn: Vec<i64>,  // how many captures this entry has
+    arwc: Vec<i64>,   // the flat capture VarIds of every entry
+    arfi: Vec<i64>,   // (ADR 0041 / register D95) scratch for the struct-literal ordering
+                      //   pass: one declared-field index per literal field, in source
+                      //   order. A STACK, because a field's VALUE can be another literal.
+    arwkn: Vec<u8>,   // the arm continuations' NAMES, concatenated
+    arwks: Vec<i64>,  // where entry i's kont name starts in `arwkn`
+    arwke: Vec<i64>,  //   and where it ends
+    cg_arm_ph: i64,   // while a resumer body is being lowered, the slot holding the
+                      //   RESUMED value; a call to the name in [`cg_arm_phs`,
+                      //   `cg_arm_phe`) lowers as a load of it, and its argument is not
+                      //   lowered at all — the oracle's `substitute_susp_with_var`
+                      //   replaces the whole `k(v)` node.
+    cg_arm_phs: i64,  // the armed continuation's name span in `arwkn`. Keyed by NAME and
+    cg_arm_phe: i64,  //   not by VarId because the arm's scope is already truncated when
+                      //   the drain runs, so `sc_lookup` no longer answers for `k`.
+    arcaps: Vec<i64>, // (ADR 0075 D6) the VarIds an arm's remainder reads from the frame
+                      //   AROUND it, in first-read order — the `i64[N]` capture struct's
+                      //   layout. A name the remainder binds itself is not in scope when
+                      //   the classification runs, so `sc_lookup` answers -1 and it is a
+                      //   local, not a capture — which is what the oracle's `ty_of`
+                      //   returning `None` means there.
+    cg_h_btok: i64,   // (ADR 0075 D6) the arm BODY's first token, for the disposable
+                      //   classification copy a bubbling `k(v)` is judged on.
+    cg_h_kont: i64,   // (ADR 0075 D6) the arm's own continuation VID. A `handle` inside an
+                      //   arm puts the INNER arm's `k2(v)` in this arm's subtree, and it is
+                      //   not this arm's suspension point.
     cg_h_floor: i64,  // (ADR 0075 D2) the ARM floor: `len(cgdv)` before the arm's body is
                       //   lowered. A `k(v)` bubble LEAVES the arm, so it drains the drop
                       //   records at or above it before branching (register D87).
@@ -779,18 +834,21 @@ pub fn run(src: [u8], mode: i64, result: &mut Vec<u8>) -> i64 {
             };
             cg_ri = cg_ri + 1;
         }
-        if cg_has_ret {
-            let mut cg_ci: i64 = 0;
-            while cg_ci < ntok {
-                push(&mut ctx.cgtk, kinds[cg_ci]);
-                push(&mut ctx.cgts, starts[cg_ci]);
-                push(&mut ctx.cgte, ends[cg_ci]);
-                cg_ci = cg_ci + 1;
-            }
-            0
-        } else {
-            0
-        };
+        // (ADR 0075 D6) the token stream is kept for EVERY cg run, not only one with a
+        // `return` arm. `cg_apply_return_arm` was its first reader, hence the old
+        // `cg_has_ret` gate; the arm-remainder classification re-parses a disposable copy
+        // of any handler arm's body from `cg_h_btok`, and with the gate in place those
+        // arrays were empty and the re-parse ran off the end -- `scg` emitted nothing for
+        // all 29 handle fixtures, which the codegen differential caught as
+        // "oracle N bytes vs sentinel 0 bytes".
+        let _hr: bool = cg_has_ret;
+        let mut cg_ci: i64 = 0;
+        while cg_ci < ntok {
+            push(&mut ctx.cgtk, kinds[cg_ci]);
+            push(&mut ctx.cgts, starts[cg_ci]);
+            push(&mut ctx.cgte, ends[cg_ci]);
+            cg_ci = cg_ci + 1;
+        }
         0
     } else {
         0
@@ -1439,6 +1497,12 @@ pub fn run(src: [u8], mode: i64, result: &mut Vec<u8>) -> i64 {
         } else {
             0
         };
+        if ctx.cg_used_kontpanicrem {
+            append_str(result, "declare void @sentinel_kont_panic_remainder()\n");
+            0
+        } else {
+            0
+        };
         if ctx.cg_used_panic {
             append_str(result, "declare void @sentinel_panic_oob(i64, i64)\n");
             0
@@ -1734,7 +1798,7 @@ pub fn run(src: [u8], mode: i64, result: &mut Vec<u8>) -> i64 {
         // without also setting `procspawn`. That accident is one grammar change away
         // from ending, with no test that would catch it; hence the mirror is restored
         // rather than left to luck.
-        let cg_anydecl: bool = ctx.cg_used_alloc || ctx.cg_used_realloc || ctx.cg_used_free || ctx.cg_used_panic || ctx.cg_used_streq || ctx.cg_used_rdfile || ctx.cg_used_wrfile || ctx.cg_used_print || ctx.cg_used_prbytes || ctx.cg_used_perform || ctx.cg_used_resume || ctx.cg_used_consume || ctx.cg_used_kontpure || ctx.cg_used_kontpush || ctx.cg_used_kontfree || ctx.cg_used_taskspawn || ctx.cg_used_taskawait || ctx.cg_used_scopeenter || ctx.cg_used_scoperegister || ctx.cg_used_scopeexit || ctx.cg_used_channelnew || ctx.cg_used_channelsend || ctx.cg_used_channelrecv || ctx.cg_used_channelclose || ctx.cg_used_sharednew || ctx.cg_used_sharednewsecret || ctx.cg_used_sharedget || ctx.cg_used_sharedclone || ctx.cg_used_sharedrelease || ctx.cg_used_mutexnew || ctx.cg_used_mutexnewsecret || ctx.cg_used_mutexlock || ctx.cg_used_mutexclone || ctx.cg_used_mutexrelease || ctx.cg_used_mutexunlock || ctx.cg_used_mutexdata || ctx.cg_used_procspawn || ctx.cg_used_procwait || ctx.cg_used_procwrite || ctx.cg_used_procread || ctx.cg_used_procsend || ctx.cg_used_procrecv || ctx.cg_used_stdinrecv || ctx.cg_used_stdoutsend || ctx.cg_used_argcount || ctx.cg_used_arg || ctx.cg_used_memcpy;
+        let cg_anydecl: bool = ctx.cg_used_alloc || ctx.cg_used_realloc || ctx.cg_used_free || ctx.cg_used_kontpanicrem || ctx.cg_used_panic || ctx.cg_used_streq || ctx.cg_used_rdfile || ctx.cg_used_wrfile || ctx.cg_used_print || ctx.cg_used_prbytes || ctx.cg_used_perform || ctx.cg_used_resume || ctx.cg_used_consume || ctx.cg_used_kontpure || ctx.cg_used_kontpush || ctx.cg_used_kontfree || ctx.cg_used_taskspawn || ctx.cg_used_taskawait || ctx.cg_used_scopeenter || ctx.cg_used_scoperegister || ctx.cg_used_scopeexit || ctx.cg_used_channelnew || ctx.cg_used_channelsend || ctx.cg_used_channelrecv || ctx.cg_used_channelclose || ctx.cg_used_sharednew || ctx.cg_used_sharednewsecret || ctx.cg_used_sharedget || ctx.cg_used_sharedclone || ctx.cg_used_sharedrelease || ctx.cg_used_mutexnew || ctx.cg_used_mutexnewsecret || ctx.cg_used_mutexlock || ctx.cg_used_mutexclone || ctx.cg_used_mutexrelease || ctx.cg_used_mutexunlock || ctx.cg_used_mutexdata || ctx.cg_used_procspawn || ctx.cg_used_procwait || ctx.cg_used_procwrite || ctx.cg_used_procread || ctx.cg_used_procsend || ctx.cg_used_procrecv || ctx.cg_used_stdinrecv || ctx.cg_used_stdoutsend || ctx.cg_used_argcount || ctx.cg_used_arg || ctx.cg_used_memcpy;
         if cg_anydecl {
             push(result, '\n');
             0
@@ -1904,6 +1968,16 @@ pub fn dump_moves(c: &mut TyCtx, src: &[u8], out: &mut Vec<u8>) -> i64 {
 
 fn clear_i64(v: &mut Vec<i64>) -> i64 {
     while len(*v) > 0 {
+        let _x: i64 = pop(v);
+        0
+    }
+    0
+}
+
+// (ADR 0075 D6) pop back down to `n`. `clear_i64` is the `n == 0` case; the arm-capture
+// stack needs a floor because an enclosing arm's entry sits below this one's.
+fn truncate_i64(v: &mut Vec<i64>, n: i64) -> i64 {
+    while len(*v) > n {
         let _x: i64 = pop(v);
         0
     }

@@ -156,8 +156,13 @@ ADR-0040 A1 discipline — `docs/agent-protocol.md`). See ## Amendments A1.
     blob comparator is hardwired to ONE blob — the scope blob and the decl-name blob
     need separate comparators.)
   - **struct-lit + field-access.** `(struct-lit #sid Name <v0> <v1>… :Name)` — positional
-    VALUES in **declaration order** (the corpus writes fields in decl order, so source
-    order = decl order; a name-keyed reorder is a follow-up if a fixture needs it).
+    VALUES in **declaration order**. This originally read "the corpus writes fields in
+    decl order, so source order = decl order; a name-keyed reorder is a follow-up if a
+    fixture needs it", and shipped the follow-up's absence as an invariant: it was a
+    property of the corpus, not of the compiler, and a literal written any other way was
+    transposed. Corrected 2026-09-22 — `sort_fields` in `selfhost/types/infer.sentinel`
+    now selects declaration order, and `tests/pass/c14_struct_field_order` pins it
+    (register D95).
     `(field <target :Struct> name <field_index> :fty)` — the field's decl index + type,
     looked up in the field table.
   - **(4c-2) arrays:** `(array <e…> :[T])` (T from the first element; empty-array

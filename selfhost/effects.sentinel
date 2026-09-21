@@ -493,7 +493,7 @@ fn walk_fields(f: Fields, disch: i64, own: &mut i64, c: &mut ECtx, gb: &mut Vec<
 fn walk_harms(a: HArms, disch: i64, own: &mut i64, c: &mut ECtx, gb: &mut Vec<u8>, src: &[u8], fidx: i64, aid: i64) -> i64 {
     match a {
         HArms::HEnd => 0,
-        HArms::HCell(eff, op, params, body, rest) => {
+        HArms::HCell(eff, op, params, body, _btok, rest) => {
             let eid: i64 = effect_lookup(c, src, &eff);
             sink_name(gb, eff);
             sink_name(gb, op);

@@ -1,0 +1,78 @@
+// ADR 0075 D6 (register D87): a bubbling `k(v)` no longer ABANDONS the rest of its arm.
+// Slice 1 made the bubble drain the arm's scopes; this is the other half — the arm's
+// REMAINDER is reified onto the bubbled continuation, so the inner dispatch replays it
+// when the chain drains (ADR 0020 D3's `k := \v. handle (kont.resume v) with H`).
+//
+// `two()` performs twice, so the first `k(v)` in each arm below bubbles. Before this
+// slice the branch went straight back to the dispatch loop and everything after the
+// `k(v)` was simply lost: `replayed` answered 12 for 22 and `captured` 102 for 202.
+//
+//   - `replayed`  — class (R) with NO captures, so the frame carries `ptr null`;
+//   - `captured`  — class (R) reading `base` from the frame AROUND the `k(v)`, so the
+//                   frame carries an `i64[1]` built by `sentinel_alloc`;
+//   - `preceded`   — class (A): `side()` is evaluated BEFORE the resume, so the
+//                   remainder cannot be replayed without re-running it, and the bubble
+//                   aborts instead of answering wrongly. `one()` performs only ONCE, so
+//                   that bubble is not taken at run time — what this pins is the
+//                   emitted abort, which the differentials compare, not a crash.
+//                   (An `if` around the resume is the other class (A) shape and reads
+//                   more directly, but an `if` anywhere inside a handler ARM diverges in
+//                   the MIR stage, independently of anything here — register D98.)
+//
+// Exits 42: 22 + 202 + 8 + 5 - 195.
+effect Io { read() -> i64; }
+
+fn two() -> i64 ! { Io } {
+    let a: i64 = perform Io.read();
+    let b: i64 = perform Io.read();
+    a + b
+}
+
+fn one() -> i64 ! { Io } {
+    let a: i64 = perform Io.read();
+    a
+}
+
+fn replayed() -> i64 {
+    handle two() with {
+        Io.read(k) => k(1) + 10,
+        return v => v,
+    }
+}
+
+fn captured() -> i64 {
+    let base: i64 = 100;
+    handle two() with {
+        Io.read(k) => k(1) + base,
+        return v => v,
+    }
+}
+
+fn side() -> i64 {
+    3
+}
+
+fn preceded() -> i64 {
+    handle one() with {
+        Io.read(k) => side() + k(5),
+        return v => v,
+    }
+}
+
+// A resume inside a STRUCT LITERAL is class (A) too, by a narrowing rather than by the
+// prefix rule proper: a literal does evaluate its fields in a straight line, but only in
+// DECLARATION order, and `scg` asks that question of raw tokens in SOURCE order. All
+// three back ends refuse it instead, which is the safe direction. Written `b` first so
+// the two orders disagree about what precedes the resume.
+struct Holder { a: i64, b: i64 }
+
+fn in_literal() -> i64 {
+    handle one() with {
+        Io.read(k) => Holder { b: 1, a: k(5) }.a,
+        return v => v,
+    }
+}
+
+fn main() -> i64 {
+    replayed() + captured() + preceded() + in_literal() - 195
+}

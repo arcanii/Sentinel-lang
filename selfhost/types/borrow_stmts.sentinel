@@ -294,7 +294,7 @@ fn cg_store_hresult(c: &mut TyCtx, is_nested: bool, vk: i64, vv: i64, rslot: i64
 fn dump_tharms(out: &mut Vec<u8>, a: HArms, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>, is_nested: bool) -> i64 {
     match a {
         HArms::HEnd => 0,
-        HArms::HCell(hef, hop, hparams, hbody, hrest) => {
+        HArms::HCell(hef, hop, hparams, hbody, hbtok, hrest) => {
             let heid: i64 = effect_lookup(c, src, &hef);
             let hoidx: i64 = op_index_lookup(c, src, heid, &hop);
             // (Bar B / effects) cg: this arm's op_id check (the if-else chain) — branch to
@@ -353,8 +353,37 @@ fn dump_tharms(out: &mut Vec<u8>, a: HArms, src: &[u8], c: &mut TyCtx, gb: &mut 
             // inside this arm sets its own floor for ITS arms.
             let sv_hfloor: i64 = (*c).cg_h_floor;
             (*c).cg_h_floor = len((*c).cgdv);
+            // (ADR 0075 D6) the body's token start and this arm's own kont VID, for the
+            // classification a bubbling `k(v)` inside it is judged by. Saved/restored with
+            // the floor, because a `handle` written inside this arm sets its own.
+            let sv_hbtok: i64 = (*c).cg_h_btok;
+            let sv_hkont: i64 = (*c).cg_h_kont;
+            (*c).cg_h_btok = hbtok;
+            (*c).cg_h_kont = cg_pvn - 1;
+            // (ADR 0075 D6) decide what a bubbling `k(v)` in THIS arm does, before the
+            // body is lowered -- a name the remainder binds itself is not in scope yet,
+            // which is what separates a capture from a local.
+            let sv_hrcls: i64 = (*c).cg_h_rcls;
+            let sv_hcbase: i64 = (*c).cg_h_cbase;
+            // The captures live on a STACK: this arm's slice starts at the current top,
+            // and the restore below truncates back to it. A `handle` written inside this
+            // arm classifies its own arm while this entry is still live, so a scratch
+            // buffer would lose the outer one.
+            (*c).cg_h_cbase = len((*c).arcaps);
+            if cg_on(c) {
+                cg_ar_classify(c, hbtok, cg_pvn - 1, src)
+            } else {
+                0
+            };
             dump_texpr(out, hbody, 0 - 1, src, c, gb);
             (*c).cg_h_floor = sv_hfloor;
+            (*c).cg_h_btok = sv_hbtok;
+            (*c).cg_h_kont = sv_hkont;
+            (*c).cg_h_rcls = sv_hrcls;
+            // Truncate to THIS arm's base, not to the saved one: the arm's own captures
+            // were consumed at its bubble (the worklist entry copies them out).
+            truncate_i64(&mut (*c).arcaps, (*c).cg_h_cbase);
+            (*c).cg_h_cbase = sv_hcbase;
             truncate_scope(c, mark);
             push(out, ')');
             // (cg) store the arm value to the result cell + branch to merge; open the next

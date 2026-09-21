@@ -1468,10 +1468,12 @@ fn reachable_labels<'a>(body: &[&'a str]) -> Vec<&'a str> {
 fn llvm_a_bubbling_resume_drains_the_arms_scopes() {
     // (fn, frees on its bubble path, frees everywhere else) over
     // `tests/pass/c75_bubble_drains_the_arm.sentinel`. `simple` holds one array in the
-    // arm, `nested` two frames' worth, `looped` one in a `while` body inside the arm,
-    // and `enclosing` one in the arm plus a SECOND array below the arm floor, in the fn
-    // around the `handle`, which must not be drained here — so a floor at the function
-    // makes its bubble count 2.
+    // arm, `nested` two frames' worth, and `enclosing` one in the arm plus a SECOND array
+    // below the arm floor, in the fn around the `handle`, which must not be drained here
+    // — so a floor at the function makes its bubble count 2. (A `while` written INSIDE
+    // the arm, around the `k(v)`, would open a body frame at the bubble as well; ADR 0075
+    // D6 classifies such a `k(v)` (A), so its bubble aborts and that drain is
+    // unreachable.)
     //
     // The second number is the half a bubble-only check cannot see: the drain is an
     // ADDITION, so the pure path must keep freeing what it freed before. An
@@ -1479,7 +1481,7 @@ fn llvm_a_bubbling_resume_drains_the_arms_scopes() {
     // the fixture, the corpus differential and both bootstrap fixed points, and leaks
     // on the pure path at exactly the unfixed rate.
     let cases: &[(&str, usize, usize)] =
-        &[("simple", 1, 1), ("nested", 2, 2), ("looped", 1, 1), ("enclosing", 1, 2)];
+        &[("simple", 1, 1), ("nested", 2, 2), ("enclosing", 1, 2)];
     let src = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../tests/pass/c75_bubble_drains_the_arm.sentinel");
     let out = Command::new(env!("CARGO_BIN_EXE_snc"))

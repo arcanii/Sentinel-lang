@@ -146,6 +146,1268 @@ fn cg_release_arm_konts(c: &mut TyCtx, floor: i64) -> i64 {
     0
 }
 
+// (ADR 0075 D6) the NAME bound to `vid`, copied out of the name blob. Needed because the
+// classification walks a syntax tree, where a resume is a call to the arm's kont NAME.
+fn cg_vid_name(c: &mut TyCtx, vid: i64) -> [u8] {
+    let n: i64 = len((*c).scs);
+    let mut i: i64 = n - 1;
+    let mut st: i64 = 0 - 1;
+    let mut en: i64 = 0 - 1;
+    while i >= 0 {
+        if st < 0 {
+            if (*c).scv[i] == vid {
+                st = (*c).scs[i];
+                en = (*c).sce[i];
+                0
+            } else {
+                0
+            };
+            0
+        } else {
+            0
+        };
+        i = i - 1;
+    }
+    let mut v: Vec<u8> = vec_new();
+    let mut j: i64 = st;
+    while j < en {
+        push(&mut v, (*c).nb[j]);
+        j = j + 1;
+    }
+    vec_to_array(v)
+}
+
+// (ADR 0075 D6) the env type recorded for `vid`, or -1.
+fn cg_vid_ty(c: &mut TyCtx, vid: i64) -> i64 {
+    let n: i64 = len((*c).scv);
+    let mut i: i64 = n - 1;
+    let mut found: i64 = 0 - 1;
+    while i >= 0 {
+        if found == 0 - 1 {
+            if (*c).scv[i] == vid { found = (*c).env[i]; 0 } else { 0 };
+            0
+        } else {
+            0
+        };
+        i = i - 1;
+    }
+    found
+}
+
+// (ADR 0072 D3, as ADR 0075 D6 applies it) does a value of this type cross the `i64[N]`
+// continuation seam? `i64` and `secret i64` only -- `strip_secret` renders both as type
+// code 0. Mirrors `sentinel-codegen`'s `fits_kont_slot`.
+fn cg_ar_fits(c: &mut TyCtx, ty: i64) -> bool {
+    strip_secret(c, ty) == 0
+}
+
+// (ADR 0075 D6) every capture collected for THIS arm must cross the seam. `arcaps` is a
+// stack shared with any enclosing arm, so this reads only the slice from `base` up.
+fn cg_ar_caps_fit(c: &mut TyCtx, base: i64) -> bool {
+    let n: i64 = len((*c).arcaps);
+    let mut i: i64 = base;
+    let mut ok: bool = true;
+    while i < n {
+        let ty: i64 = cg_vid_ty(c, (*c).arcaps[i]);
+        if ty < 0 { ok = false; 0 } else { if cg_ar_fits(c, ty) { 0 } else { ok = false; 0 } };
+        i = i + 1;
+    }
+    ok
+}
+
+// (ADR 0075 D6) classify THIS arm and, when its remainder is observable, judge whether it
+// can be reified. Sets `cg_h_rcls` (0 = branch away, 1 = reify, 2 = class (A) abort) and,
+// for 1, appends the remainder's captures to `arcaps` above `cg_h_cbase`. Each question
+// consumes its own disposable re-parse of the arm body, as `eff_classify` does for an
+// effecting fn's tail. The resumer's SEQUENCE NUMBER is NOT taken here: the text oracle
+// advances its counter when it emits the resumer, which for a `handle` nested inside an
+// arm is a different order from classification.
+//
+// Mirrors `sentinel-codegen`'s `arm_resume_class` + `arm_remainder_verdict`, which inkwell
+// and the text oracle share; the walkers below are this back end's half of that pair.
+fn cg_ar_classify(c: &mut TyCtx, btok: i64, kvid: i64, src: &[u8]) -> i64 {
+    let kname: [u8] = cg_vid_name(c, kvid);
+    let mut c1: i64 = btok;
+    let b1: Expr = parse_expr(&(*c).cgtk, &(*c).cgts, &(*c).cgte, src, &mut c1);
+    let n: i64 = cg_ar_count(b1, &kname);
+    if n == 0 {
+        (*c).cg_h_rcls = 0;
+        let _k: [u8] = kname;
+        0
+    } else {
+        let mut c2: i64 = btok;
+        let b2: Expr = parse_expr(&(*c).cgtk, &(*c).cgts, &(*c).cgte, src, &mut c2);
+        let is_tail: bool = if n == 1 { cg_ar_tail(b2, &kname) } else { let _b2: Expr = b2; false };
+        let mut c3: i64 = btok;
+        let b3: Expr = parse_expr(&(*c).cgtk, &(*c).cgts, &(*c).cgte, src, &mut c3);
+        let is_div: bool = cg_ar_returns(b3);
+        if is_tail {
+            (*c).cg_h_rcls = 0;
+            0
+        } else {
+            if is_div {
+                (*c).cg_h_rcls = 0;
+                0
+            } else {
+                // Observable: the verdict decides (R) from (A).
+                let mut c4: i64 = btok;
+                let b4: Expr = parse_expr(&(*c).cgtk, &(*c).cgts, &(*c).cgte, src, &mut c4);
+                let unc: i64 = if n == 1 { cg_ar_uncond(b4, &kname) } else { let _b4: Expr = b4; 2 };
+                let mut c5: i64 = btok;
+                let b5: Expr = parse_expr(&(*c).cgtk, &(*c).cgts, &(*c).cgte, src, &mut c5);
+                let pre: i64 = if n == 1 { cg_ar_pre(b5, &kname) } else { let _b5: Expr = b5; 2 };
+                // APPEND this arm's captures; `cg_h_cbase` was set to the stack top
+                // by the caller before this ran, and the caller truncates back to it.
+                let cbase: i64 = (*c).cg_h_cbase;
+                let mut c6: i64 = btok;
+                let b6: Expr = parse_expr(&(*c).cgtk, &(*c).cgts, &(*c).cgte, src, &mut c6);
+                let _cn: i64 = cg_ar_caps(c, b6, &kname);
+                let fits: bool = cg_ar_caps_fit(c, cbase);
+                if n == 1 {
+                    if unc == 1 {
+                        if pre == 1 {
+                            if fits {
+                                (*c).cg_h_rcls = 1;
+                                0
+                            } else { (*c).cg_h_rcls = 2; 0 }
+                        } else { (*c).cg_h_rcls = 2; 0 }
+                    } else { (*c).cg_h_rcls = 2; 0 }
+                } else {
+                    (*c).cg_h_rcls = 2;
+                    0
+                }
+            }
+        }
+    }
+}
+
+// (ADR 0075 D6) allocate and fill the `i64[N]` captured-state struct a continuation frame
+// carries, and answer the operand to hand `sentinel_kont_push`: the alloc register, or -1
+// for `null` when nothing is captured (the shape the other frames already emit).
+// Ownership passes to the push, which frees it after the resumer runs. Mirrors the text
+// oracle's `build_captured_state` instruction for instruction, because the registers this
+// burns are in the PARENT's define and the two are compared byte for byte.
+fn cg_ar_build_caps(c: &mut TyCtx, base: i64, n: i64) -> i64 {
+    if n == 0 {
+        0 - 1
+    } else {
+        let a: i64 = cg_dst(c);
+        cgo_str(c, "call ptr @sentinel_alloc(i64 ");
+        cgo_int(c, n * 8);
+        cgo_str(c, ")\n");
+        (*c).cg_used_alloc = true;
+        let mut i: i64 = 0;
+        while i < n {
+            let gp: i64 = cg_dst(c);
+            cgo_str(c, "getelementptr i8, ptr %v");
+            cgo_int(c, a);
+            cgo_str(c, ", i64 ");
+            cgo_int(c, i * 8);
+            cg_putc(c, '\n');
+            let slot: i64 = cg_slot_get(c, (*c).arcaps[base + i]);
+            let ld: i64 = cg_dst(c);
+            cgo_str(c, "load i64, ptr %v");
+            cgo_int(c, slot);
+            cg_putc(c, '\n');
+            cgo_str(c, "  store i64 %v");
+            cgo_int(c, ld);
+            cgo_str(c, ", ptr %v");
+            cgo_int(c, gp);
+            cg_putc(c, '\n');
+            i = i + 1;
+        }
+        a
+    }
+}
+
+// (ADR 0075 D6) class (R) at the bubble: reify the rest of THIS arm onto the bubbled kont,
+// so the inner dispatch replays it when the chain drains (ADR 0020 D3's re-wrap). Emits the
+// captured state and the push, takes the resumer's sequence number, and records a WORKLIST
+// entry; the resumer's own `define` is emitted after the enclosing one is assembled, by
+// `cg_ar_drain`.
+fn cg_ar_reify(c: &mut TyCtx, kr: i64, src: &[u8]) -> i64 {
+    let base: i64 = (*c).cg_h_cbase;
+    let n: i64 = len((*c).arcaps) - base;
+    let cap: i64 = cg_ar_build_caps(c, base, n);
+    let seq: i64 = (*c).cg_armseq;
+    (*c).cg_armseq = (*c).cg_armseq + 1;
+    cgo_str(c, "  call void @sentinel_kont_push(ptr %v");
+    cgo_int(c, kr);
+    cgo_str(c, ", ptr @__armrem_");
+    cgo_slice(c, src, (*c).cg_fn_s, (*c).cg_fn_e);
+    cg_putc(c, '_');
+    cgo_int(c, seq);
+    cgo_str(c, ", ptr ");
+    if cap < 0 {
+        cgo_str(c, "null")
+    } else {
+        cgo_str(c, "%v");
+        cgo_int(c, cap)
+    };
+    cgo_str(c, ")\n");
+    (*c).cg_used_kontpush = true;
+    // The worklist entry COPIES this arm's capture slice: the arm's own stack frame is
+    // truncated when the arm finishes, long before the drain runs.
+    push(&mut (*c).arwb, (*c).cg_h_btok);
+    push(&mut (*c).arwq, seq);
+    push(&mut (*c).arwk, (*c).cg_h_kont);
+    // The continuation's NAME, copied out while it is still in scope. The drain runs
+    // after the arm's `truncate_scope`, so a VarId is useless there.
+    let kn: [u8] = cg_vid_name(c, (*c).cg_h_kont);
+    push(&mut (*c).arwks, len((*c).arwkn));
+    let knn: i64 = len(kn);
+    let mut ki: i64 = 0;
+    while ki < knn {
+        push(&mut (*c).arwkn, kn[ki]);
+        ki = ki + 1;
+    }
+    push(&mut (*c).arwke, len((*c).arwkn));
+    push(&mut (*c).arwcs, len((*c).arwc));
+    push(&mut (*c).arwcn, n);
+    let mut j: i64 = 0;
+    while j < n {
+        push(&mut (*c).arwc, (*c).arcaps[base + j]);
+        j = j + 1;
+    }
+    0
+}
+
+// (ADR 0075 D6) is `q` the continuation name currently armed as the resumer's
+// placeholder? `[s,e)` indexes `arwkn`, the worklist's own name blob.
+fn cg_arm_ph_is(c: &mut TyCtx, q: &[u8]) -> bool {
+    let s: i64 = (*c).cg_arm_phs;
+    let e: i64 = (*c).cg_arm_phe;
+    if (*c).cg_arm_ph < 0 {
+        false
+    } else if e - s != len(*q) {
+        false
+    } else {
+        let mut i: i64 = 0;
+        let mut ok: bool = true;
+        while i < e - s {
+            if (*c).arwkn[s + i] != (*q)[i] { ok = false; 0 } else { 0 };
+            i = i + 1;
+        }
+        ok
+    }
+}
+
+// (ADR 0075 D6) drain the arm-remainder worklist: one `define` per class (R) bubble in
+// the enclosing fn, emitted AFTER that fn's own define. The text oracle buffers each
+// resumer in `extra_defines` as it lowers the bubble and flushes that buffer right after
+// the parent's closing brace, so the two agree on ORDER without either side sorting.
+//
+// Each resumer is the two-define shape `cg_emit_chained` already uses for an embedded
+// perform: `cg_reset`, bind `%arg0` to a fresh slot, load each capture off `%arg1`,
+// lower the remainder with the placeholder armed, wrap in `sentinel_kont_pure`, then
+// `cg_to_body = false` and assemble the header. The lowering re-parses the arm body from
+// the token stream, as the classification did — `Expr` is consumed by its walk, so every
+// question about an arm gets its own copy.
+//
+// The resumer runs OUTSIDE the arm: no `k`, no enclosing `handle`, which is exactly why
+// the verdict refuses a remainder that resumes again or leaves the arm.
+fn cg_ar_drain(c: &mut TyCtx, src: &[u8], name_s: i64, name_e: i64, k: &Vec<i64>, ts: &Vec<i64>, te: &Vec<i64>, gb: &mut Vec<u8>) -> i64 {
+    let n: i64 = len((*c).arwb);
+    // The enclosing define was written with the blank line that separates it from the
+    // next one already appended. These resumers belong BEFORE that separator: the text
+    // oracle closes the parent with `}\n`, flushes `extra_defines` immediately after,
+    // and the blank between defines comes later. So take the separator back and re-emit
+    // it once the last resumer is out — which also leaves the no-resumer case untouched.
+    (*c).cg_to_body = false;
+    let m: i64 = len((*c).cgout);
+    if n > 0 {
+        if m > 0 {
+            if (*c).cgout[m - 1] == '\n' {
+                let _sep: u8 = pop(&mut (*c).cgout);
+                0
+            } else {
+                0
+            }
+        } else {
+            0
+        }
+    } else {
+        0
+    };
+    let mut i: i64 = 0;
+    while i < n {
+        let btok: i64 = (*c).arwb[i];
+        let seq: i64 = (*c).arwq[i];
+        let _kvid: i64 = (*c).arwk[i];
+        let kns: i64 = (*c).arwks[i];
+        let kne: i64 = (*c).arwke[i];
+        let cs: i64 = (*c).arwcs[i];
+        let cn: i64 = (*c).arwcn[i];
+        cg_reset(c);
+        let ph: i64 = cg_alloca(c, 0);
+        cgo_str(c, "  store i64 %arg0, ptr %v");
+        cgo_int(c, ph);
+        cg_putc(c, '\n');
+        let mut j: i64 = 0;
+        while j < cn {
+            let gp: i64 = cg_dst(c);
+            cgo_str(c, "getelementptr i8, ptr %arg1, i64 ");
+            cgo_int(c, j * 8);
+            cg_putc(c, '\n');
+            let ld: i64 = cg_dst(c);
+            cgo_str(c, "load i64, ptr %v");
+            cgo_int(c, gp);
+            cg_putc(c, '\n');
+            let slot: i64 = cg_alloca(c, 0);
+            cgo_str(c, "  store i64 %v");
+            cgo_int(c, ld);
+            cgo_str(c, ", ptr %v");
+            cgo_int(c, slot);
+            cg_putc(c, '\n');
+            cg_slot_set(c, (*c).arwc[cs + j], slot);
+            j = j + 1;
+        }
+        (*c).cg_arm_ph = ph;
+        (*c).cg_arm_phs = kns;
+        (*c).cg_arm_phe = kne;
+        let mut cur: i64 = btok;
+        let rb: Expr = parse_expr(k, ts, te, src, &mut cur);
+        let mut rbuf: Vec<u8> = vec_new();
+        let _rrt: i64 = dump_texpr(&mut rbuf, rb, 0 - 1, src, c, gb);
+        let _rbx: [u8] = vec_to_array(rbuf);
+        (*c).cg_arm_ph = 0 - 1;
+        (*c).cg_arm_phs = 0 - 1;
+        (*c).cg_arm_phe = 0 - 1;
+        let rk: i64 = (*c).cglk;
+        let rv: i64 = (*c).cglv;
+        let kp: i64 = cg_dst(c);
+        cgo_str(c, "call ptr @sentinel_kont_pure(i64 ");
+        cgo_operand(c, rk, rv);
+        cgo_str(c, ")\n");
+        (*c).cg_used_kontpure = true;
+        (*c).cg_to_body = false;
+        cgo_str(c, "define ptr @__armrem_");
+        cgo_slice(c, src, name_s, name_e);
+        cg_putc(c, '_');
+        cgo_int(c, seq);
+        cgo_str(c, "(i64 %arg0, ptr %arg1) {\nentry:\n");
+        cg_flush_allocas_body(c);
+        cgo_str(c, "  ret ptr %v");
+        cgo_int(c, kp);
+        cgo_str(c, "\n}\n\n");
+        i = i + 1;
+    }
+    if n > 0 {
+        cg_putc(c, '\n');
+        0
+    } else {
+        0
+    };
+    // The worklist is per-fn: the next `define` starts its sequence at 0, as the oracle's
+    // per-`Emit` `armrem_seq` does.
+    clear_i64(&mut (*c).arwb);
+    clear_i64(&mut (*c).arwq);
+    clear_i64(&mut (*c).arwk);
+    clear_i64(&mut (*c).arwks);
+    clear_i64(&mut (*c).arwke);
+    clear_u8(&mut (*c).arwkn);
+    clear_i64(&mut (*c).arwcs);
+    clear_i64(&mut (*c).arwcn);
+    clear_i64(&mut (*c).arwc);
+    (*c).cg_armseq = 0;
+    0
+}
+
+// ===== (ADR 0075 D6 / register D87) where an arm's `k(v)` sits =====
+//
+// A bubbling `k(v)` branches back to the dispatch loop, so the rest of the arm does not
+// run. ADR 0020 D3 says `k(v)` IS `handle (kont.resume v) with H`, so the arm's remainder
+// belongs inside that inner dispatch; abandoning it is right only when there is nothing to
+// abandon (the arm's value IS the resume's) or when the arm returns first.
+//
+// These walk a DISPOSABLE classification copy of the arm body, re-parsed from the token
+// index the parser stashes (`cg_h_btok`) — move semantics bar inspecting the copy that is
+// lowered, exactly as `cg_apply_return_arm` re-parses the return arm. Mirrors
+// `sentinel-codegen`'s `arm_resume_class`, which inkwell and the text oracle SHARE.
+//
+// ⚠ The one thing that cannot be mirrored directly is how a resume is IDENTIFIED. Those two
+// key on the arm's kont `VarId`; here the tree is still syntax, so a resume is a call to
+// the arm's kont NAME — and a `handle` written inside this arm whose own kont has the SAME
+// name shadows ours, so the walk stops at that arm. Without it,
+// `handle … with { Io.read(k) => { handle … with { Io.read(k) => k(1) }; k(2) } }` counts
+// the inner arm's resume as this arm's. (An inner arm with a DIFFERENT name may still hold
+// a `k(v)` of ours — register D81's shape — and that one counts.)
+
+// (ADR 0075 D6) how many times this arm resumes ITS OWN kont, named `kn`.
+fn cg_ar_count(e: Expr, kn: &[u8]) -> i64 {
+    match e {
+        Expr::Call(cn, ca) => {
+            let hit: i64 = if name_eq_lit(kn, cn) { 1 } else { 0 };
+            hit + cg_ar_count_args(ca, kn)
+        },
+        Expr::Unary(uo, ui) => {
+            let _u: i64 = uo;
+            cg_ar_count(ui, kn)
+        },
+        Expr::Binary(bo, bl, br) => {
+            let _b: i64 = bo;
+            cg_ar_count(bl, kn) + cg_ar_count(br, kn)
+        },
+        Expr::Method(mt, mn, ma) => {
+            let _m: [u8] = mn;
+            cg_ar_count(mt, kn) + cg_ar_count_args(ma, kn)
+        },
+        Expr::Field(ft, fnm) => {
+            let _f: [u8] = fnm;
+            cg_ar_count(ft, kn)
+        },
+        Expr::Index(it, ix) => cg_ar_count(it, kn) + cg_ar_count(ix, kn),
+        Expr::Qcall(qm, qn, qa) => {
+            let _q1: [u8] = qm;
+            let _q2: [u8] = qn;
+            cg_ar_count_args(qa, kn)
+        },
+        Expr::ClassInit(cin, cia) => {
+            let _c: [u8] = cin;
+            cg_ar_count_args(cia, kn)
+        },
+        Expr::Array(aa) => cg_ar_count_args(aa, kn),
+        Expr::If(ic, it2, ie) => {
+            cg_ar_count(ic, kn) + cg_ar_count(it2, kn) + cg_ar_count(ie, kn)
+        },
+        Expr::Block(bs, bt) => cg_ar_count_stmts(bs, kn) + cg_ar_count(bt, kn),
+        Expr::Match(ms, mr) => cg_ar_count(ms, kn) + cg_ar_count_arms(mr, kn),
+        Expr::StructLit(sn, sf) => {
+            let _s: [u8] = sn;
+            cg_ar_count_fields(sf, kn)
+        },
+        Expr::Declassify(di) => cg_ar_count(di, kn),
+        Expr::Return(ri) => cg_ar_count(ri, kn),
+        Expr::Cast(ce, ct) => {
+            let _c: [u8] = ct;
+            cg_ar_count(ce, kn)
+        },
+        Expr::Perform(pe, po, pa) => {
+            let _p1: [u8] = pe;
+            let _p2: [u8] = po;
+            cg_ar_count_args(pa, kn)
+        },
+        Expr::Scope(si) => cg_ar_count(si, kn),
+        Expr::Spawn(spi) => cg_ar_count(spi, kn),
+        Expr::Await(awi) => cg_ar_count(awi, kn),
+        Expr::Handle(hb, ha, hr) => {
+            let _r: Ret = hr;
+            cg_ar_count(hb, kn) + cg_ar_count_harms(ha, kn)
+        },
+        Expr::Int(iv) => {
+            let _i: i64 = iv;
+            0
+        },
+        Expr::Float(fv) => {
+            let _f: [u8] = fv;
+            0
+        },
+        Expr::Bool(bv) => {
+            let _b: bool = bv;
+            0
+        },
+        Expr::Null => 0,
+        Expr::Char(cv) => {
+            let _c: i64 = cv;
+            0
+        },
+        Expr::Str(sv) => {
+            let _s: [u8] = sv;
+            0
+        },
+        Expr::Var(vv) => {
+            let _v: [u8] = vv;
+            0
+        },
+        Expr::SynthZero => 0,
+    }
+}
+
+fn cg_ar_count_args(a: Args, kn: &[u8]) -> i64 {
+    match a {
+        Args::End => 0,
+        Args::Cell(ae, ar) => cg_ar_count(ae, kn) + cg_ar_count_args(ar, kn),
+    }
+}
+
+fn cg_ar_count_fields(f: Fields, kn: &[u8]) -> i64 {
+    match f {
+        Fields::FieldEnd => 0,
+        Fields::FieldCell(fnm, fe, fr) => {
+            let _f: [u8] = fnm;
+            cg_ar_count(fe, kn) + cg_ar_count_fields(fr, kn)
+        },
+    }
+}
+
+fn cg_ar_count_arms(m: Arms, kn: &[u8]) -> i64 {
+    match m {
+        Arms::ArmEnd => 0,
+        Arms::ArmCell(mp, me, mr) => {
+            let _p: Pattern = mp;
+            cg_ar_count(me, kn) + cg_ar_count_arms(mr, kn)
+        },
+    }
+}
+
+fn cg_ar_count_stmts(st: Stmts, kn: &[u8]) -> i64 {
+    match st {
+        Stmts::SEnd => 0,
+        Stmts::SCell(s1, sr) => {
+            let one: i64 = match s1 {
+                Stmt::SLet(lm, ln, lt, le) => {
+                    let _m: bool = lm;
+                    let _n: [u8] = ln;
+                    let _t: TyOpt = lt;
+                    cg_ar_count(le, kn)
+                },
+                Stmt::SAssign(at, av) => cg_ar_count(at, kn) + cg_ar_count(av, kn),
+                Stmt::SWhile(wc, wb) => cg_ar_count(wc, kn) + cg_ar_count(wb, kn),
+                Stmt::SBreak => 0,
+                Stmt::SContinue => 0,
+                Stmt::SExpr(se) => cg_ar_count(se, kn),
+            };
+            one + cg_ar_count_stmts(sr, kn)
+        },
+    }
+}
+
+// (ADR 0075 D6) the arms of a `handle` written INSIDE this arm. One whose own kont is
+// spelled `kn` shadows ours, so nothing in it is this arm's resume.
+fn cg_ar_count_harms(h: HArms, kn: &[u8]) -> i64 {
+    match h {
+        HArms::HEnd => 0,
+        HArms::HCell(hef, hop, hp, hb, hbt, hr) => {
+            let _e: [u8] = hef;
+            let _o: [u8] = hop;
+            let _t: i64 = hbt;
+            let shadowed: bool = name_eq_lit(kn, cg_binds_last(hp));
+            let inner: i64 = if shadowed {
+                let _b: Expr = hb;
+                0
+            } else {
+                cg_ar_count(hb, kn)
+            };
+            inner + cg_ar_count_harms(hr, kn)
+        },
+    }
+}
+
+// (ADR 0075 D6) collect, into `(*c).arcaps`, the VarIds the arm's REMAINDER reads from the
+// frame around it — the `i64[N]` capture struct's layout, in first-read order. Pre-order
+// and deduped, mirroring `sentinel-codegen`'s `walk_collect_var_refs` over the substituted
+// remainder; the resume CALL is skipped whole, name and arguments, because the remainder
+// the oracle builds has the placeholder there instead and filters it out.
+//
+// A name the remainder binds ITSELF is not yet in scope when this runs (the arm body has
+// not been lowered), so `sc_lookup` answers -1 and it is a local rather than a capture —
+// which is exactly what the oracle's `ty_of` answering `None` means there.
+fn cg_ar_caps(c: &mut TyCtx, e: Expr, kn: &[u8]) -> i64 {
+    match e {
+        Expr::Var(vv) => {
+            let vid: i64 = sc_lookup(c, &vv);
+            let _v: [u8] = vv;
+            if vid >= 0 {
+                if cg_arcaps_has(c, vid) { 0 } else { push(&mut (*c).arcaps, vid); 0 }
+            } else {
+                0
+            }
+        },
+        Expr::Call(cn, ca) => {
+            let hit: bool = name_eq_lit(kn, cn);
+            if hit {
+                let _a: Args = ca;
+                0
+            } else {
+                cg_ar_caps_args(c, ca, kn)
+            }
+        },
+        Expr::Unary(uo, ui) => { let _u: i64 = uo; cg_ar_caps(c, ui, kn) },
+        Expr::Cast(ce, ct) => { let _t: [u8] = ct; cg_ar_caps(c, ce, kn) },
+        Expr::Declassify(di) => cg_ar_caps(c, di, kn),
+        Expr::Return(ri) => cg_ar_caps(c, ri, kn),
+        Expr::Field(ft, fnm) => { let _f: [u8] = fnm; cg_ar_caps(c, ft, kn) },
+        Expr::Binary(bo, bl, br) => {
+            let _b: i64 = bo;
+            cg_ar_caps(c, bl, kn) + cg_ar_caps(c, br, kn)
+        },
+        Expr::Index(it, ix) => cg_ar_caps(c, it, kn) + cg_ar_caps(c, ix, kn),
+        Expr::Method(mt, mn, ma) => {
+            let _m: [u8] = mn;
+            cg_ar_caps(c, mt, kn) + cg_ar_caps_args(c, ma, kn)
+        },
+        Expr::Qcall(qm, qn, qa) => {
+            let _q1: [u8] = qm;
+            let _q2: [u8] = qn;
+            cg_ar_caps_args(c, qa, kn)
+        },
+        Expr::ClassInit(cin, cia) => { let _c: [u8] = cin; cg_ar_caps_args(c, cia, kn) },
+        Expr::Array(aa) => cg_ar_caps_args(c, aa, kn),
+        // (ADR 0075 D6 / register D95) the capture ORDER is the `i64[N]` frame's layout,
+        // and the oracle collects it from the TYPED tree, whose struct-literal fields are
+        // in declaration order. Order this copy the same way or the two frames disagree.
+        Expr::StructLit(sn, sf) => {
+            let scsid: i64 = struct_lookup(c, &sn);
+            let scord: Fields = sort_fields(c, scsid, sf);
+            cg_ar_caps_fields(c, scord, kn)
+        },
+        Expr::Block(bs, bt) => cg_ar_caps_stmts(c, bs, kn) + cg_ar_caps(c, bt, kn),
+        Expr::If(ic, it2, ie) => {
+            cg_ar_caps(c, ic, kn) + cg_ar_caps(c, it2, kn) + cg_ar_caps(c, ie, kn)
+        },
+        Expr::Match(ms, mr) => cg_ar_caps(c, ms, kn) + cg_ar_caps_arms(c, mr, kn),
+        Expr::Scope(si) => cg_ar_caps(c, si, kn),
+        Expr::Spawn(spi) => cg_ar_caps(c, spi, kn),
+        Expr::Await(awi) => cg_ar_caps(c, awi, kn),
+        Expr::Perform(pe, po, pa) => {
+            let _p1: [u8] = pe;
+            let _p2: [u8] = po;
+            cg_ar_caps_args(c, pa, kn)
+        },
+        Expr::Handle(hb, ha, hr) => {
+            let _r: Ret = hr;
+            cg_ar_caps(c, hb, kn) + cg_ar_caps_harms(c, ha, kn)
+        },
+        _ => { let _o: Expr = e; 0 },
+    }
+}
+
+fn cg_arcaps_has(c: &mut TyCtx, vid: i64) -> bool {
+    let n: i64 = len((*c).arcaps);
+    let base: i64 = (*c).cg_h_cbase;
+    let mut i: i64 = 0;
+    let mut found: bool = false;
+    while i < n {
+        if i >= base {
+            if (*c).arcaps[i] == vid { found = true; 0 } else { 0 };
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    found
+}
+
+fn cg_ar_caps_args(c: &mut TyCtx, a: Args, kn: &[u8]) -> i64 {
+    match a {
+        Args::End => 0,
+        Args::Cell(ae, ar) => cg_ar_caps(c, ae, kn) + cg_ar_caps_args(c, ar, kn),
+    }
+}
+
+fn cg_ar_caps_fields(c: &mut TyCtx, f: Fields, kn: &[u8]) -> i64 {
+    match f {
+        Fields::FieldEnd => 0,
+        Fields::FieldCell(fnm, fe, fr) => {
+            let _f: [u8] = fnm;
+            cg_ar_caps(c, fe, kn) + cg_ar_caps_fields(c, fr, kn)
+        },
+    }
+}
+
+fn cg_ar_caps_arms(c: &mut TyCtx, m: Arms, kn: &[u8]) -> i64 {
+    match m {
+        Arms::ArmEnd => 0,
+        Arms::ArmCell(mp, me, mr) => {
+            let _p: Pattern = mp;
+            cg_ar_caps(c, me, kn) + cg_ar_caps_arms(c, mr, kn)
+        },
+    }
+}
+
+fn cg_ar_caps_harms(c: &mut TyCtx, h: HArms, kn: &[u8]) -> i64 {
+    match h {
+        HArms::HEnd => 0,
+        HArms::HCell(hef, hop, hp, hb, hbt, hr) => {
+            let _e: [u8] = hef;
+            let _o: [u8] = hop;
+            let _t: i64 = hbt;
+            let _p: Binds = hp;
+            cg_ar_caps(c, hb, kn) + cg_ar_caps_harms(c, hr, kn)
+        },
+    }
+}
+
+fn cg_ar_caps_stmts(c: &mut TyCtx, st: Stmts, kn: &[u8]) -> i64 {
+    match st {
+        Stmts::SEnd => 0,
+        Stmts::SCell(s1, sr) => {
+            let one: i64 = match s1 {
+                Stmt::SLet(lm, ln, lt, le) => {
+                    let _m: bool = lm;
+                    let _n: [u8] = ln;
+                    let _t: TyOpt = lt;
+                    cg_ar_caps(c, le, kn)
+                },
+                Stmt::SAssign(at, av) => cg_ar_caps(c, at, kn) + cg_ar_caps(c, av, kn),
+                Stmt::SWhile(wc, wb) => cg_ar_caps(c, wc, kn) + cg_ar_caps(c, wb, kn),
+                Stmt::SBreak => 0,
+                Stmt::SContinue => 0,
+                Stmt::SExpr(se) => cg_ar_caps(c, se, kn),
+            };
+            one + cg_ar_caps_stmts(c, sr, kn)
+        },
+    }
+}
+
+// (ADR 0075 D6) what the arm evaluates BEFORE its `k(v)`. The remainder is replayed from
+// the top of the arm, so everything ahead of the resume runs a second time; (R) requires
+// that everything ahead of it be a literal or a name, which cannot be observed twice.
+//
+// Deliberately narrower than "pure": the faithful rule asks an operator-level purity
+// question (division traps, `&mut` and a deref are impure, the rest are not), and
+// mirroring THAT here means mirroring an operator TABLE into a second implementation,
+// where one wrong constant is a silent classification divergence no corpus program can
+// catch. A rule with no operator in it cannot drift. Mirrors `sentinel-codegen`'s
+// `resume_prefix`, which inkwell and the text oracle share.
+//
+//   0 = no resume here, and this subtree IS a literal or a name (it may precede one)
+//   1 = the resume is here, and everything before it was 0
+//   2 = a resume is here with something else evaluated first
+//   3 = no resume here, and this subtree is NOT a literal or a name
+fn cg_ar_pre(e: Expr, kn: &[u8]) -> i64 {
+    match e {
+        Expr::Call(cn, ca) => {
+            let hit: bool = name_eq_lit(kn, cn);
+            if hit {
+                let _a: Args = ca;
+                1
+            } else {
+                cg_ar_pre_args(ca, kn, 0)
+            }
+        },
+        Expr::Int(iv) => { let _i: i64 = iv; 0 },
+        Expr::Float(fv) => { let _f: [u8] = fv; 0 },
+        Expr::Bool(bv) => { let _b: bool = bv; 0 },
+        Expr::Null => 0,
+        Expr::Char(cv) => { let _c: i64 = cv; 0 },
+        Expr::Str(sv) => { let _s: [u8] = sv; 0 },
+        Expr::Var(vv) => { let _v: [u8] = vv; 0 },
+        Expr::SynthZero => 0,
+        Expr::Unary(uo, ui) => {
+            let _u: i64 = uo;
+            cg_ar_pre_wrap(cg_ar_pre(ui, kn))
+        },
+        Expr::Cast(ce, ct) => {
+            let _t: [u8] = ct;
+            cg_ar_pre_wrap(cg_ar_pre(ce, kn))
+        },
+        Expr::Declassify(di) => cg_ar_pre_wrap(cg_ar_pre(di, kn)),
+        Expr::Return(ri) => cg_ar_pre_wrap(cg_ar_pre(ri, kn)),
+        Expr::Field(ft, fnm) => {
+            let _f: [u8] = fnm;
+            cg_ar_pre_wrap(cg_ar_pre(ft, kn))
+        },
+        Expr::Binary(bo, bl, br) => {
+            let _b: i64 = bo;
+            cg_ar_pre_wrap(cg_ar_pre_two(bl, br, kn))
+        },
+        Expr::Index(it, ix) => cg_ar_pre_wrap(cg_ar_pre_two(it, ix, kn)),
+        Expr::Qcall(qm, qn, qa) => {
+            let _q1: [u8] = qm;
+            let _q2: [u8] = qn;
+            cg_ar_pre_args(qa, kn, 0)
+        },
+        Expr::ClassInit(cin, cia) => {
+            let _c: [u8] = cin;
+            cg_ar_pre_args(cia, kn, 0)
+        },
+        Expr::Array(aa) => cg_ar_pre_args(aa, kn, 0),
+        // (ADR 0075 D6 / register D95) a resume INSIDE a struct literal is out of reach,
+        // like one inside a branch. It could be reasoned about — a literal does evaluate
+        // its fields in a straight line — but only in DECLARATION order, which this walk
+        // reads off raw tokens in SOURCE order, with no struct id here to reorder by.
+        // Refusing it keeps all three back ends on one answer without that thread, and
+        // the refusal is the safe direction: class (A) aborts where a wrong guess would
+        // answer wrongly. A literal with NO resume in it already answered 3 here (the
+        // old field walk bottomed out at `FieldEnd => 3`), so nothing else moves.
+        Expr::StructLit(sn, sf) => {
+            let _s: [u8] = sn;
+            if cg_ar_count_fields(sf, kn) > 0 { 2 } else { 3 }
+        },
+        Expr::Method(mt, mn, ma) => {
+            let _m: [u8] = mn;
+            let t: i64 = cg_ar_pre(mt, kn);
+            if t == 1 {
+                let _a2: Args = ma;
+                1
+            } else {
+                if t == 2 {
+                    let _a3: Args = ma;
+                    2
+                } else {
+                    let seen: i64 = if t == 3 { 1 } else { 0 };
+                    cg_ar_pre_args(ma, kn, seen)
+                }
+            }
+        },
+        Expr::Block(bs, bt) => cg_ar_pre_block(bs, bt, kn),
+        // A branch, a loop, a nested handle or a concurrency form does not put its parts
+        // in one straight line. `cg_ar_uncond` already refuses a resume inside one; this
+        // agrees rather than reasoning about it a second way.
+        _ => {
+            if cg_ar_count(e, kn) > 0 { 2 } else { 3 }
+        },
+    }
+}
+
+// A wrapper node is never itself a literal or a name.
+fn cg_ar_pre_wrap(w: i64) -> i64 {
+    if w == 0 { 3 } else { w }
+}
+
+fn cg_ar_pre_two(a: Expr, b: Expr, kn: &[u8]) -> i64 {
+    let x: i64 = cg_ar_pre(a, kn);
+    if x == 1 {
+        let _b: Expr = b;
+        1
+    } else {
+        if x == 2 {
+            let _b2: Expr = b;
+            2
+        } else {
+            let y: i64 = cg_ar_pre(b, kn);
+            if y == 1 {
+                if x == 3 { 2 } else { 1 }
+            } else {
+                if y == 2 { 2 } else { 3 }
+            }
+        }
+    }
+}
+
+// `seen` is 1 once something not-a-literal-or-name has been evaluated in this sequence.
+fn cg_ar_pre_args(a: Args, kn: &[u8], seen: i64) -> i64 {
+    match a {
+        Args::End => 3,
+        Args::Cell(ae, ar) => {
+            let w: i64 = cg_ar_pre(ae, kn);
+            if w == 1 {
+                let _r: Args = ar;
+                if seen == 1 { 2 } else { 1 }
+            } else {
+                if w == 2 {
+                    let _r2: Args = ar;
+                    2
+                } else {
+                    let ns: i64 = if w == 3 { 1 } else { seen };
+                    cg_ar_pre_args(ar, kn, ns)
+                }
+            }
+        },
+    }
+}
+
+// A block evaluates each statement's value in order, then its tail.
+fn cg_ar_pre_block(bs: Stmts, bt: Expr, kn: &[u8]) -> i64 {
+    let st: i64 = cg_ar_pre_stmts(bs, kn, 0);
+    if st == 1 {
+        let _t: Expr = bt;
+        1
+    } else {
+        if st == 2 {
+            let _t2: Expr = bt;
+            2
+        } else {
+            let tl: i64 = cg_ar_pre(bt, kn);
+            if tl == 1 {
+                if st == 4 { 2 } else { 1 }
+            } else {
+                if tl == 2 { 2 } else { 3 }
+            }
+        }
+    }
+}
+
+// 0 = every statement so far was a literal/name value; 4 = something opaque ran; the
+// 1 / 2 answers settle the block immediately.
+fn cg_ar_pre_stmts(st: Stmts, kn: &[u8], seen: i64) -> i64 {
+    match st {
+        Stmts::SEnd => seen,
+        Stmts::SCell(s1, sr) => {
+            let one: i64 = match s1 {
+                Stmt::SLet(lm, ln, lt, le) => {
+                    let _m: bool = lm;
+                    let _n: [u8] = ln;
+                    let _t: TyOpt = lt;
+                    cg_ar_pre(le, kn)
+                },
+                // The write itself is observable, so a resume after it is blocked.
+                Stmt::SAssign(at, av) => {
+                    let t: i64 = cg_ar_pre(at, kn);
+                    if t == 1 {
+                        let _v: Expr = av;
+                        1
+                    } else {
+                        if t == 2 {
+                            let _v2: Expr = av;
+                            2
+                        } else {
+                            let v: i64 = cg_ar_pre(av, kn);
+                            if v == 1 { 2 } else { if v == 2 { 2 } else { 3 } }
+                        }
+                    }
+                },
+                Stmt::SWhile(wc, wb) => {
+                    let c: i64 = cg_ar_count(wc, kn);
+                    let b: i64 = cg_ar_count(wb, kn);
+                    if c + b > 0 { 2 } else { 3 }
+                },
+                Stmt::SBreak => 3,
+                Stmt::SContinue => 3,
+                Stmt::SExpr(se) => cg_ar_pre_wrap(cg_ar_pre(se, kn)),
+            };
+            if one == 1 {
+                let _r: Stmts = sr;
+                if seen == 4 { 2 } else { 1 }
+            } else {
+                if one == 2 {
+                    let _r2: Stmts = sr;
+                    2
+                } else {
+                    let ns: i64 = if one == 3 { 4 } else { seen };
+                    cg_ar_pre_stmts(sr, kn, ns)
+                }
+            }
+        },
+    }
+}
+
+// (ADR 0075 D6) is the arm's `k(v)` reached UNCONDITIONALLY, on every path through the
+// arm? Hoisted out of an `if` or `match` arm, the right of `&&` or `||`, a loop, a nested
+// `handle` or a concurrency form, it runs on paths the replay would not take, so the
+// replay is not the same computation and the arm is class (A).
+//
+// Tri-state, mirroring `sentinel-codegen`'s `susp_unconditional` (an `Option<bool>`):
+//   0 = no resume under here at all        (Rust `None`)
+//   1 = reached unconditionally            (Rust `Some(true)`)
+//   2 = held conditionally                 (Rust `Some(false)`)
+// The first non-zero answer in evaluation order wins, exactly as `find_map` does there.
+fn cg_ar_uncond(e: Expr, kn: &[u8]) -> i64 {
+    match e {
+        Expr::Call(cn, ca) => {
+            // The suspension point itself is reached right here; any OTHER call's
+            // arguments are walked in order.
+            let hit: bool = name_eq_lit(kn, cn);
+            if hit {
+                let _a: Args = ca;
+                1
+            } else {
+                cg_ar_unc_args(ca, kn)
+            }
+        },
+        Expr::Unary(uo, ui) => {
+            let _u: i64 = uo;
+            cg_ar_uncond(ui, kn)
+        },
+        Expr::Cast(ce, ct) => {
+            let _t: [u8] = ct;
+            cg_ar_uncond(ce, kn)
+        },
+        Expr::Declassify(di) => cg_ar_uncond(di, kn),
+        Expr::Return(ri) => cg_ar_uncond(ri, kn),
+        Expr::Binary(bo, bl, br) => {
+            // `&&` / `||` do not evaluate their right operand on every path.
+            if bo == 14 {
+                cg_ar_unc_logic(bl, br, kn)
+            } else {
+                if bo == 15 {
+                    cg_ar_unc_logic(bl, br, kn)
+                } else {
+                    let l: i64 = cg_ar_uncond(bl, kn);
+                    let r: i64 = cg_ar_uncond(br, kn);
+                    if l != 0 { l } else { r }
+                }
+            }
+        },
+        Expr::Method(mt, mn, ma) => {
+            let _m: [u8] = mn;
+            let t: i64 = cg_ar_uncond(mt, kn);
+            let a: i64 = cg_ar_unc_args(ma, kn);
+            if t != 0 { t } else { a }
+        },
+        Expr::Field(ft, fnm) => {
+            let _f: [u8] = fnm;
+            cg_ar_uncond(ft, kn)
+        },
+        Expr::Index(it, ix) => {
+            let t: i64 = cg_ar_uncond(it, kn);
+            let x: i64 = cg_ar_uncond(ix, kn);
+            if t != 0 { t } else { x }
+        },
+        Expr::Qcall(qm, qn, qa) => {
+            let _q1: [u8] = qm;
+            let _q2: [u8] = qn;
+            cg_ar_unc_args(qa, kn)
+        },
+        Expr::ClassInit(cin, cia) => {
+            let _c: [u8] = cin;
+            cg_ar_unc_args(cia, kn)
+        },
+        Expr::Array(aa) => cg_ar_unc_args(aa, kn),
+        Expr::StructLit(sn, sf) => {
+            let _s: [u8] = sn;
+            cg_ar_unc_fields(sf, kn)
+        },
+        Expr::Block(bs, bt) => {
+            let st: i64 = cg_ar_unc_stmts(bs, kn);
+            let tl: i64 = cg_ar_uncond(bt, kn);
+            if st != 0 { st } else { tl }
+        },
+        Expr::Scope(si) => {
+            // A scope's body is walked for a resume but never reached unconditionally
+            // from outside it, which is the Rust arm's `(block_susp > 0).then_some(false)`.
+            if cg_ar_count(si, kn) > 0 { 2 } else { 0 }
+        },
+        Expr::If(ic, it2, ie) => {
+            let c: i64 = cg_ar_uncond(ic, kn);
+            let t: i64 = cg_ar_count(it2, kn);
+            let f: i64 = cg_ar_count(ie, kn);
+            if c != 0 {
+                c
+            } else {
+                if t > 0 { 2 } else { if f > 0 { 2 } else { 0 } }
+            }
+        },
+        Expr::Match(ms, mr) => {
+            let sc: i64 = cg_ar_uncond(ms, kn);
+            let ar: i64 = cg_ar_count_arms(mr, kn);
+            if sc != 0 { sc } else { if ar > 0 { 2 } else { 0 } }
+        },
+        Expr::Handle(hb, ha, hr) => {
+            let _r: Ret = hr;
+            let b: i64 = cg_ar_count(hb, kn);
+            let a: i64 = cg_ar_count_harms(ha, kn);
+            if b + a > 0 { 2 } else { 0 }
+        },
+        Expr::Perform(pe, po, pa) => {
+            let _p1: [u8] = pe;
+            let _p2: [u8] = po;
+            if cg_ar_count_args(pa, kn) > 0 { 2 } else { 0 }
+        },
+        Expr::Spawn(spi) => {
+            if cg_ar_count(spi, kn) > 0 { 2 } else { 0 }
+        },
+        Expr::Await(awi) => {
+            if cg_ar_count(awi, kn) > 0 { 2 } else { 0 }
+        },
+        _ => {
+            let _o: Expr = e;
+            0
+        },
+    }
+}
+
+// `&&` / `||`: the left runs always, the right only sometimes.
+fn cg_ar_unc_logic(bl: Expr, br: Expr, kn: &[u8]) -> i64 {
+    let l: i64 = cg_ar_uncond(bl, kn);
+    let r: i64 = cg_ar_count(br, kn);
+    if l != 0 { l } else { if r > 0 { 2 } else { 0 } }
+}
+
+fn cg_ar_unc_args(a: Args, kn: &[u8]) -> i64 {
+    match a {
+        Args::End => 0,
+        Args::Cell(ae, ar) => {
+            let first: i64 = cg_ar_uncond(ae, kn);
+            let rest: i64 = cg_ar_unc_args(ar, kn);
+            if first != 0 { first } else { rest }
+        },
+    }
+}
+
+fn cg_ar_unc_fields(f: Fields, kn: &[u8]) -> i64 {
+    match f {
+        Fields::FieldEnd => 0,
+        Fields::FieldCell(fnm, fe, fr) => {
+            let _f: [u8] = fnm;
+            let first: i64 = cg_ar_uncond(fe, kn);
+            let rest: i64 = cg_ar_unc_fields(fr, kn);
+            if first != 0 { first } else { rest }
+        },
+    }
+}
+
+fn cg_ar_unc_stmts(st: Stmts, kn: &[u8]) -> i64 {
+    match st {
+        Stmts::SEnd => 0,
+        Stmts::SCell(s1, sr) => {
+            let one: i64 = match s1 {
+                Stmt::SLet(lm, ln, lt, le) => {
+                    let _m: bool = lm;
+                    let _n: [u8] = ln;
+                    let _t: TyOpt = lt;
+                    cg_ar_uncond(le, kn)
+                },
+                Stmt::SAssign(at, av) => {
+                    let t: i64 = cg_ar_uncond(at, kn);
+                    let v: i64 = cg_ar_uncond(av, kn);
+                    if t != 0 { t } else { v }
+                },
+                // A loop's body may run any number of times, its condition more than once.
+                Stmt::SWhile(wc, wb) => {
+                    let c: i64 = cg_ar_count(wc, kn);
+                    let b: i64 = cg_ar_count(wb, kn);
+                    if c + b > 0 { 2 } else { 0 }
+                },
+                Stmt::SBreak => 0,
+                Stmt::SContinue => 0,
+                Stmt::SExpr(se) => cg_ar_uncond(se, kn),
+            };
+            let rest: i64 = cg_ar_unc_stmts(sr, kn);
+            if one != 0 { one } else { rest }
+        },
+    }
+}
+
+// (ADR 0075 D6) is this arm's VALUE a `k(v)`'s value? Walks TAIL positions only — a
+// block's tail, an `if` branch's tail, a `match` arm's tail — so it answers "does the arm
+// evaluate TO the resume", not "does it contain one". A `return`'s operand is NOT a tail
+// position: the arm's value is not the `return`'s, which is why that case is Diverging.
+// Mirrors `sentinel-codegen`'s `resume_in_tail_position`.
+fn cg_ar_tail(e: Expr, kn: &[u8]) -> bool {
+    match e {
+        Expr::Call(cn, ca) => {
+            let _a: Args = ca;
+            name_eq_lit(kn, cn)
+        },
+        Expr::Block(bs, bt) => {
+            let _s: Stmts = bs;
+            cg_ar_tail(bt, kn)
+        },
+        Expr::Scope(si) => cg_ar_tail(si, kn),
+        Expr::If(ic, it2, ie) => {
+            let _c: Expr = ic;
+            // Both branches are walked; `||` would short-circuit and leave one unconsumed.
+            let a: bool = cg_ar_tail(it2, kn);
+            let b: bool = cg_ar_tail(ie, kn);
+            a || b
+        },
+        Expr::Match(ms, mr) => {
+            let _s: Expr = ms;
+            cg_ar_tail_arms(mr, kn)
+        },
+        _ => {
+            let _o: Expr = e;
+            false
+        },
+    }
+}
+
+fn cg_ar_tail_arms(m: Arms, kn: &[u8]) -> bool {
+    match m {
+        Arms::ArmEnd => false,
+        Arms::ArmCell(mp, me, mr) => {
+            let _p: Pattern = mp;
+            let this: bool = cg_ar_tail(me, kn);
+            let rest: bool = cg_ar_tail_arms(mr, kn);
+            this || rest
+        },
+    }
+}
+
+// (ADR 0075 D6) does EVERY path through the arm `return`? Then the entry that re-enters it
+// returns first, and the abandoned remainder is unreachable under ADR 0020 D3 as well.
+// Structural and conservative, mirroring `sentinel-codegen`'s `expr_always_returns` (which
+// is ADR 0065's divergence): only `return`, and a block / `if` / `match` all of whose paths
+// do. A `while` may not run, and `break` / `continue` stay inside the function.
+fn cg_ar_returns(e: Expr) -> bool {
+    match e {
+        Expr::Return(ri) => {
+            let _i: Expr = ri;
+            true
+        },
+        Expr::Block(bs, bt) => {
+            let st: bool = cg_ar_ret_stmts(bs);
+            let tl: bool = cg_ar_returns(bt);
+            st || tl
+        },
+        Expr::Scope(si) => cg_ar_returns(si),
+        Expr::If(ic, it2, ie) => {
+            let _c: Expr = ic;
+            let a: bool = cg_ar_returns(it2);
+            let b: bool = cg_ar_returns(ie);
+            a && b
+        },
+        Expr::Match(ms, mr) => {
+            let _s: Expr = ms;
+            cg_ar_ret_arms(mr) == 1
+        },
+        _ => {
+            let _o: Expr = e;
+            false
+        },
+    }
+}
+
+fn cg_ar_ret_stmts(st: Stmts) -> bool {
+    match st {
+        Stmts::SEnd => false,
+        Stmts::SCell(s1, sr) => {
+            let one: bool = match s1 {
+                Stmt::SLet(lm, ln, lt, le) => {
+                    let _m: bool = lm;
+                    let _n: [u8] = ln;
+                    let _t: TyOpt = lt;
+                    cg_ar_returns(le)
+                },
+                Stmt::SAssign(at, av) => {
+                    let _t: Expr = at;
+                    cg_ar_returns(av)
+                },
+                Stmt::SWhile(wc, wb) => {
+                    let _c: Expr = wc;
+                    let _b: Expr = wb;
+                    false
+                },
+                Stmt::SBreak => false,
+                Stmt::SContinue => false,
+                Stmt::SExpr(se) => cg_ar_returns(se),
+            };
+            let rest: bool = cg_ar_ret_stmts(sr);
+            one || rest
+        },
+    }
+}
+
+// 2 = the list ended (vacuous), 1 = non-empty and every arm returns, 0 = some arm does not.
+// An EMPTY `match` is not "all return" — `cg_ar_returns` asks for 1, so 2 answers false.
+fn cg_ar_ret_arms(m: Arms) -> i64 {
+    match m {
+        Arms::ArmEnd => 2,
+        Arms::ArmCell(mp, me, mr) => {
+            let _p: Pattern = mp;
+            let this: bool = cg_ar_returns(me);
+            let rest: i64 = cg_ar_ret_arms(mr);
+            if this {
+                if rest == 0 { 0 } else { 1 }
+            } else {
+                0
+            }
+        },
+    }
+}
+
+// (ADR 0075 D6) the LAST name in `b` — a handler arm's continuation binding — or `""` for
+// an empty list (which a handler arm never has: the kont is always the last param). Taken
+// by value because `match` needs an enum, not a reference to one.
+fn cg_binds_last(b: Binds) -> [u8] {
+    match b {
+        Binds::BindEnd => "",
+        Binds::BindCell(bn, br) => {
+            let rest: [u8] = cg_binds_last(br);
+            if len(rest) == 0 {
+                let _r: [u8] = rest;
+                bn
+            } else {
+                let _n: [u8] = bn;
+                rest
+            }
+        },
+    }
+}
+
 // (Bar B / effects) `k(arg)` part 1: load the kont pointer from `kid`'s slot, then CLEAR the
 // slot (ADR 0074 D1) — emitted AFTER the arg is collected, as the oracle's
 // `lower_resume_kont` does: an argument that leaves the arm (`k(return 5)`) must leave the
@@ -453,27 +1715,55 @@ fn cg_emit_resume_tail(c: &mut TyCtx, kreg: i64, snap: i64, src: &[u8], gb: &mut
     cgo_str(c, "bb");
     cgo_int(c, bubble_b);
     cgo_str(c, ":\n");
-    // (ADR 0075 D1 / register D87) this branch leaves the arm's ENTRY, so it drains the
-    // arm's scopes first — the drop records at or above the arm floor, in reverse,
-    // covering a nested block and the body of a `while` written inside the arm. Without
-    // it the arm's heap bindings are abandoned on every bubble, in the TAIL idiom as much
-    // as in a non-tail one.
-    // Unlike `break`/`continue` this branch COMES BACK: it re-enters the dispatch loop,
-    // which re-enters the arm, so the pure block's drops below are reachable from here.
-    // What is exclusive is the two paths through one ENTRY — it either bubbles and drains
-    // here, or completes and drops at its block's end — so an entry frees exactly what it
-    // allocated, which holds only because ADR 0075 D3 refuses an arm binding that takes
-    // over an allocation made outside the arm. `cg_drop_range` does NOT truncate, so the
-    // pure block still emits its own. Mirrors the oracle's `emit_loop_exit_drops`.
-    cg_drop_range(c, (*c).cg_h_floor);
-    cgo_str(c, "  store ptr %v");
-    cgo_int(c, kr);
-    cgo_str(c, ", ptr %v");
-    cgo_int(c, hcks);
-    cg_putc(c, '\n');
-    cgo_str(c, "  br label %bb");
-    cgo_int(c, hloop);
-    cg_putc(c, '\n');
+    // (ADR 0075 D6) class (A): the rest of this arm cannot be replayed as a continuation
+    // frame, so abort here rather than drop it — the answer would be wrong, not merely
+    // unsupported. `unreachable` ends the block, so there is no drain and no hand-off;
+    // the pure block below is still emitted, because the pure path is still the value of
+    // `k(v)`. Mirrors the text oracle's `abort_bubble`.
+    //
+    // Written as a two-armed `if` rather than an early `return` because no `return`
+    // appears anywhere in the `selfhost` sources — introducing the first one here would
+    // put a `scg` lowering path under test for the first time in the same slice that
+    // changes what it lowers. Both arms end in `0`, so the `if` is an ordinary
+    // expression, and the pure-block suffix below is shared: class (A) differs from the
+    // default in the bubble block ONLY, which is also true of the oracle.
+    if (*c).cg_h_rcls == 2 {
+        cgo_str(c, "  call void @sentinel_kont_panic_remainder()\n");
+        cgo_str(c, "  unreachable\n");
+        (*c).cg_used_kontpanicrem = true;
+        0
+    } else {
+        // (ADR 0075 D6) class (R): reify the rest of the arm onto the bubbled kont FIRST,
+        // then drain and hand off. The oracle emits the push before its own drain, and
+        // the captured state is loaded out of slots this branch has not dropped yet.
+        if (*c).cg_h_rcls == 1 {
+            cg_ar_reify(c, kr, src)
+        } else {
+            0
+        };
+        // (ADR 0075 D1 / register D87) this branch leaves the arm's ENTRY, so it drains the
+        // arm's scopes first — the drop records at or above the arm floor, in reverse,
+        // covering a nested block and the body of a `while` written inside the arm. Without
+        // it the arm's heap bindings are abandoned on every bubble, in the TAIL idiom as much
+        // as in a non-tail one.
+        // Unlike `break`/`continue` this branch COMES BACK: it re-enters the dispatch loop,
+        // which re-enters the arm, so the pure block's drops below are reachable from here.
+        // What is exclusive is the two paths through one ENTRY — it either bubbles and drains
+        // here, or completes and drops at its block's end — so an entry frees exactly what it
+        // allocated, which holds only because ADR 0075 D3 refuses an arm binding that takes
+        // over an allocation made outside the arm. `cg_drop_range` does NOT truncate, so the
+        // pure block still emits its own. Mirrors the oracle's `emit_loop_exit_drops`.
+        cg_drop_range(c, (*c).cg_h_floor);
+        cgo_str(c, "  store ptr %v");
+        cgo_int(c, kr);
+        cgo_str(c, ", ptr %v");
+        cgo_int(c, hcks);
+        cg_putc(c, '\n');
+        cgo_str(c, "  br label %bb");
+        cgo_int(c, hloop);
+        cg_putc(c, '\n');
+        0
+    };
     // Pure: unwrap to the resumed i64.
     cgo_str(c, "bb");
     cgo_int(c, pure_b);

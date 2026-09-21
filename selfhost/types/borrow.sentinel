@@ -559,10 +559,13 @@ fn dump_texpr_arm(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyC
             cg_widen(c, w, exp);
             widen_post(out, w, exp, 0, c)
         },
-        // (4c-1) struct literal — positional field VALUES in declaration order
-        // (the corpus writes fields in decl order, so source order = decl order;
-        // a reorder is a follow-up if a fixture needs it). The node's type is the
-        // struct. `(struct-lit #sid Name <v0> <v1>… :Name)`.
+        // (4c-1) struct literal — positional field VALUES in declaration order.
+        // `sort_fields` below SELECTS that order rather than assuming source order
+        // matches it; the note this comment used to carry ("the corpus writes fields
+        // in decl order, so source order = decl order; a reorder is a follow-up if a
+        // fixture needs it") described a coincidence, not an invariant, and a literal
+        // written out of order transposed its values. The node's type is the struct.
+        // `(struct-lit #sid Name <v0> <v1>… :Name)`.
         Expr::StructLit(snm, fields) => {
             let sid: i64 = struct_lookup(c, &snm);
             // (4h) a GENERIC struct-lit takes its type (and its type-args) from the
@@ -628,7 +631,10 @@ fn dump_texpr_arm(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyC
             } else {
                 0
             };
-            dump_sfields(out, fields, sid, sl_isg, &gargs, src, c, gb);
+            // (register D95) reorder into DECLARED field order before the walk — see
+            // `sort_fields`. The walk itself then stays the plain positional one.
+            let sl_ord: Fields = sort_fields(c, sid, fields);
+            dump_sfields(out, sl_ord, sid, sl_isg, &gargs, src, c, gb);
             (*c).consuming = sl_svc;
             close_ty(out, sty, c);
             if mir_on(c) {

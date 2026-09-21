@@ -416,7 +416,7 @@ fn emit_binds_rest(out: &mut Vec<u8>, b: Binds) -> i64 {
 fn emit_harms(out: &mut Vec<u8>, c: &MergeCtx, a: HArms) -> i64 {
     match a {
         HArms::HEnd => 0,
-        HArms::HCell(hef, hop, hparams, hbody, hrest) => {
+        HArms::HCell(hef, hop, hparams, hbody, _hbtok, hrest) => {
             emit_name(out, c, hef);
             push(out, '.');
             append_str(out, hop);

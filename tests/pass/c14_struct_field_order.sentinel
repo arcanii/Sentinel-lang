@@ -1,0 +1,44 @@
+// A struct literal's values land in their DECLARED slots whatever order the literal
+// writes them in, and the values are EVALUATED in declaration order. Every other
+// literal in the corpus happens to be written in declaration order, so source order
+// and declaration order coincide everywhere else and nothing here is covered
+// elsewhere — which is why this shape has to be pinned rather than assumed.
+//
+// The discrimination is on STDOUT, not the exit code: an exit code is masked to its
+// low 8 bits on POSIX, so a value that makes a transposition visible does not survive
+// the trip. Within each literal the two observable fields carry different weights, so
+// transposing them changes that literal's printed value. `Mixed.flag` is not weighted
+// because it cannot be transposed silently: its slot is an `i1`, so putting an `i64`
+// there is not even well-typed IR.
+struct Mixed { value: i64, flag: bool, count: i64 }
+struct Pair { lo: i64, hi: i64 }
+struct Pack<T> { first: T, second: T }
+// An OWNING field: `[i64]` is `{ i64, ptr }`, so a transposition here moves a heap
+// pointer between slots rather than an integer, and the drop plan follows the slot.
+struct Holder { head: [i64], tail: [i64] }
+
+// Prints its argument and answers it, so a field's evaluation is observable.
+fn tick(n: i64) -> i64 {
+    print(n);
+    n
+}
+
+fn main() -> i64 {
+    // Heterogeneous slots: putting `count` in `flag`'s i1 slot is not well-typed IR.
+    let m = Mixed { count: 9, value: 5, flag: true };
+    // Same width in both slots, so a transposition here stays well-typed and silent.
+    let p = Pair { hi: 30, lo: 2 };
+    // A generic instance takes the same route through the field walk.
+    let g: Pack<i64> = Pack { second: 7, first: 3 };
+    // Owning values, written out of order.
+    let h = Holder { tail: [40, 41], head: [10, 11] };
+    // Declaration order drives EVALUATION too: `lo` is evaluated first, so this
+    // prints 1 then 2 — source order would print 2 then 1.
+    let q = Pair { hi: tick(2), lo: tick(1) };
+    print(m.value * 100 + m.count);      // 509
+    print(p.lo * 10 + p.hi);             // 50
+    print(g.first * 1000 + g.second);    // 3007
+    print(h.head[0] * 100 + h.tail[0]);  // 1040
+    print(q.lo * 10 + q.hi);             // 12
+    if m.flag { 42 } else { 0 }
+}

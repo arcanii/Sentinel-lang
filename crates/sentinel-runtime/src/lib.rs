@@ -96,6 +96,23 @@ pub extern "C" fn sentinel_panic_oob(idx: i64, len: i64) -> ! {
     std::process::abort();
 }
 
+/// ADR 0075 D6 (register D87): a handler arm's `k(v)` resumed into another operation --
+/// the resume BUBBLED -- and the rest of that arm cannot be replayed as a continuation
+/// frame, so it would silently not run. Abort instead. Never returns.
+///
+/// Reached only from a `k(v)` the compiler classified (A): one whose remainder the
+/// arm-remainder verdict refuses (it is guarded, something observable runs before it, it
+/// suspends, it leaves the arm, or a name it reads does not fit a continuation slot). The
+/// diagnostic names the arm's own shape rather than the continuation, because the arm is
+/// what has to change.
+#[no_mangle]
+pub extern "C" fn sentinel_kont_panic_remainder() -> ! {
+    eprintln!(
+        "sentinel: a handler arm resumed into another operation, and the rest of the arm          cannot be replayed (ADR 0075 D6)"
+    );
+    std::process::abort();
+}
+
 /// Free a pointer previously returned by [`sentinel_alloc`]. C2.4
 /// / ADR 0017 D8: paired with `sentinel_alloc` to close the
 /// C1.6+ heap-leak deferral. Calls libc `free` directly because
@@ -3102,6 +3119,76 @@ mod tests {
         assert_eq!(sentinel_kont_consume_pure(out), 31, "3 -> 30 -> 31");
     }
 
+    /// ADR 0075 D6 (register D87): the frame protocol a non-tail `k(v)` will use.
+    ///
+    /// This is the whole route in miniature, over
+    /// `handle two() with { Io.read(k) => k(1) + 10 }` where
+    /// `two() = { let a = perform Io.read(); let b = perform Io.read(); a + b }`. The arm's
+    /// `k(1)` bubbles, because the resumed computation performs a second time. Today the
+    /// dispatch loop simply re-dispatches the bubbled kont and the arm's `+ 10` never runs,
+    /// so the `handle` answers 12. ADR 0020 D3's deep re-wrap says 22: `k(v)` is itself
+    /// `handle (kont.resume v) with H`, so the arm's remainder belongs INSIDE the inner
+    /// dispatch, not after it.
+    ///
+    /// D6 gets there by pushing the remainder onto the BUBBLED kont before re-dispatching.
+    /// `sentinel_kont_push` appends at the chain's tail and `sentinel_kont_resume` replays
+    /// head -> tail, so the remainder runs after the computation under it drains — which is
+    /// exactly the re-wrap. No runtime change is needed for it; this test is what says so.
+    #[test]
+    fn a_frame_pushed_onto_a_bubbled_kont_is_the_arms_remainder() {
+        const READ: u32 = 0;
+
+        // `two()`'s second resumer: `b` arrives, `a` was captured -> `a + b`, pure.
+        unsafe extern "C" fn two_tail(b: i64, captured: *mut u8) -> *mut SentinelKont {
+            // SAFETY: the matching push below allocated 8 bytes and wrote `a` there.
+            let a = unsafe { *(captured as *mut i64) };
+            sentinel_kont_pure(a + b)
+        }
+        // `two()`'s first resumer: `a` arrives, performs again, and carries `a` across.
+        unsafe extern "C" fn two_after_first(a: i64, _c: *mut u8) -> *mut SentinelKont {
+            let k2 = sentinel_perform_op(READ, 0);
+            let cap = sentinel_alloc(8) as *mut i64;
+            // SAFETY: freshly allocated, 8 bytes, written before any read.
+            unsafe { *cap = a };
+            sentinel_kont_push(k2, two_tail, cap as *mut u8);
+            k2
+        }
+        // The ARM's remainder, `_ + 10` — the frame D6 adds.
+        unsafe extern "C" fn arm_remainder(t: i64, _c: *mut u8) -> *mut SentinelKont {
+            sentinel_kont_pure(t + 10)
+        }
+
+        // One run of the handle's dispatch loop over the arm `k(1) + 10`. `push_remainder`
+        // is the only difference between D6 and what ships today.
+        fn run(push_remainder: bool) -> i64 {
+            let k1 = sentinel_perform_op(READ, 0);
+            sentinel_kont_push(k1, two_after_first, core::ptr::null_mut());
+            let mut current = k1;
+            loop {
+                // SAFETY: `current` is a live kont on every iteration.
+                if unsafe { (*current).op_id } == PURE_RETURN_OP_ID {
+                    return sentinel_kont_consume_pure(current);
+                }
+                let r = sentinel_kont_resume(current, 1);
+                // SAFETY: `r` is the live kont the resume handed back.
+                if unsafe { (*r).op_id } == PURE_RETURN_OP_ID {
+                    return sentinel_kont_consume_pure(r) + 10; // the arm's own tail
+                }
+                if push_remainder {
+                    sentinel_kont_push(r, arm_remainder, core::ptr::null_mut());
+                }
+                current = r;
+            }
+        }
+
+        assert_eq!(run(true), 22, "ADR 0020 D3's answer, with the remainder reified");
+        assert_eq!(
+            run(false),
+            12,
+            "and without it the arm's `+ 10` runs once instead of twice — the shape              register D87 reports, reproduced here at the runtime level"
+        );
+    }
+
     #[test]
     fn kont_resume_runs_a_frame_pushed_onto_a_pure_kont_inside_a_resumer() {
         // The chained-lets case: during a resume, a resumer's own call returns
@@ -3210,6 +3297,7 @@ mod tests {
             sentinel_kont_push as *const (),
             sentinel_kont_free as *const (),
             sentinel_kont_panic_resumed as *const (),
+            sentinel_kont_panic_remainder as *const (),
             sentinel_task_spawn as *const (),
             sentinel_task_await as *const (),
             sentinel_scope_enter as *const (),
@@ -3263,8 +3351,9 @@ mod tests {
         // M2.4b's 2 sentinel_stdin_recv/_stdout_send + the 2 sentinel_arg_count/_arg +
         // ADR 0071 M1.4a's 4 sentinel_shared_new/_clone/_get/_release + M1.4b's 7
         // sentinel_mutex_new/_clone/_release/_lock/_try_lock_for/_unlock/_data +
-        // M1.4c's 2 sentinel_shared_new_secret/sentinel_mutex_new_secret (D6.2).
-        assert_eq!(symbols.len(), 51);
+        // M1.4c's 2 sentinel_shared_new_secret/sentinel_mutex_new_secret (D6.2) +
+        // ADR 0075 D6's sentinel_kont_panic_remainder.
+        assert_eq!(symbols.len(), 52);
         assert!(symbols.iter().all(|&s| !s.is_null()), "every symbol has an address");
     }
 

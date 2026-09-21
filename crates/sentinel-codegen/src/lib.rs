@@ -32,7 +32,7 @@ use std::path::Path;
 
 use inkwell::builder::Builder;
 use inkwell::context::Context;
-use inkwell::module::Linkage;
+use inkwell::module::{Linkage, Module};
 use inkwell::targets::{
     CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine,
 };
@@ -624,6 +624,15 @@ pub fn compile_to_object_for_module(
         let void_ty = context.void_type();
         let panic_type = void_ty.fn_type(&[i64_ty.into(), i64_ty.into()], false);
         module.add_function("sentinel_panic_oob", panic_type, None)
+    };
+    // ADR 0075 D6: class (A) -- a bubbling `k(v)` whose remainder cannot be replayed.
+    let kont_panic_remainder_fn = {
+        let void_ty = context.void_type();
+        module.add_function(
+            "sentinel_kont_panic_remainder",
+            void_ty.fn_type(&[], false),
+            None,
+        )
     };
     // ADR 0058: the `llvm.sqrt.f64` intrinsic backing `sqrt(x)` — `double
     // @llvm.sqrt.f64(double)`. A target intrinsic (a hardware `fsqrt`), not a
@@ -1558,6 +1567,7 @@ pub fn compile_to_object_for_module(
 
         let mut cx = CodegenCtx {
             context: &context,
+            module: &module,
             builder,
             fns,
             mono_fns,
@@ -1571,6 +1581,7 @@ pub fn compile_to_object_for_module(
             op_id_base: op_id_base.clone(),
             alloc_fn,
             panic_oob_fn,
+            kont_panic_remainder_fn,
             sqrt_f64_fn,
             free_fn,
             str_eq_fn,
@@ -1638,6 +1649,7 @@ pub fn compile_to_object_for_module(
             current_method: None,
             vars: HashMap::new(),
             scope_stack: Vec::new(),
+            arm_remainder_seq: 0,
             drop_plan,
             arena_routed,
             array_route_active: false,
@@ -1738,6 +1750,13 @@ struct HandleContext<'ctx> {
     loop_block: inkwell::basic_block::BasicBlock<'ctx>,
     current_kont_slot: PointerValue<'ctx>,
     return_arm: Option<TypedReturnArm>,
+    /// ADR 0075 D6: what the ARM currently being lowered does with a bubbling `k(v)`.
+    /// `None` for a `Tail` or `Diverging` arm, whose bubble may branch away (the arm has
+    /// no observable remainder, or returns before one could run). `Some(Ok(_))` carries
+    /// the remainder to push onto the bubbled kont; `Some(Err(why))` is class (A) --
+    /// the remainder cannot be replayed and the bubble path aborts rather than dropping
+    /// it. Per ARM, so the context is pushed inside the arm loop.
+    remainder: Option<Result<ArmRemainderInfo, String>>,
     /// ADR 0075 D2: `scope_stack.len()` the instant before an arm's body is
     /// lowered — the index the arm's own block frame takes. A bubbling `k(v)`
     /// leaves the arm's ENTRY (ADR 0075 D1), so it drains every frame at index
@@ -1811,8 +1830,12 @@ struct LoopTarget<'ctx> {
 /// lifetime covers both the borrowed Context and the LLVM derived
 /// values (Builder, FunctionValue, etc.) — they all live and die
 /// together.
-struct CodegenCtx<'ctx, 'plan> {
+struct CodegenCtx<'ctx, 'plan, 'm> {
     context: &'ctx Context,
+    /// ADR 0075 D6: the module being built. An arm-remainder resumer is a free function
+    /// declared while its arm is being lowered -- nothing about it is known before the
+    /// arm is reached -- so the lowering needs somewhere to add it.
+    module: &'m Module<'ctx>,
     builder: Builder<'ctx>,
     fns: HashMap<FnId, FunctionValue<'ctx>>,
     /// C1.7.5 / ADR 0016 D7: monomorphic instances of generic user
@@ -1863,6 +1886,12 @@ struct CodegenCtx<'ctx, 'plan> {
     /// C1.6: `sentinel_panic_oob(i64 idx, i64 len) -> void` runtime
     /// function. Called from the bounds-check failure block.
     panic_oob_fn: FunctionValue<'ctx>,
+    /// ADR 0075 D6: `sentinel_kont_panic_remainder` -- the class (A) abort, called on the
+    /// bubble path of a `k(v)` whose remainder the verdict refuses.
+    kont_panic_remainder_fn: FunctionValue<'ctx>,
+    /// ADR 0075 D6: a per-module counter naming the arm-remainder resumers. Lowering
+    /// order is deterministic, so the names are too.
+    arm_remainder_seq: u32,
     /// C2.4 / ADR 0017 D8: `sentinel_free(ptr) -> void` runtime
     /// function. Emitted at scope-exit for un-moved heap-backed
     /// bindings (closes the C1.6+ heap-leak deferral).
@@ -3559,7 +3588,7 @@ fn llvm_int_type<'ctx>(context: &'ctx Context, ty: Type) -> IntType<'ctx> {
     }
 }
 
-impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
+impl<'ctx, 'plan, 'm> CodegenCtx<'ctx, 'plan, 'm> {
     fn llvm_basic_type(&self, ty: Type) -> BasicTypeEnum<'ctx> {
         llvm_basic_type(
             self.context,
@@ -9478,6 +9507,56 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
         // Bubble path: the enclosing handle's dispatch loop owns
         // re-dispatching the new kont. Store + branch.
         self.builder.position_at_end(bubble_block);
+        // ADR 0075 D6: the rest of THIS arm does not run after the branch. When the arm
+        // has an observable remainder, push it onto the bubbled kont as a continuation
+        // frame first, so the inner dispatch replays it when the chain drains -- which is
+        // ADR 0020 D3's re-wrap. When the verdict refuses it (class A), abort here rather
+        // than drop it: the answer would be wrong, not merely unsupported.
+        match handle_ctx.remainder.clone() {
+            None => {}
+            Some(Ok(info)) => {
+                let resumer = self.emit_arm_remainder_resumer(&info, program)?;
+                let captured = self.build_captured_state(&info.captured)?;
+                self.builder
+                    .build_call(
+                        self.kont_push_fn,
+                        &[result_kont.into(), resumer.as_global_value().as_pointer_value().into(), captured.into()],
+                        "",
+                    )
+                    .map_err(|e| CodegenError::Builder(e.to_string()))?;
+            }
+            Some(Err(_why)) => {
+                self.builder
+                    .build_call(self.kont_panic_remainder_fn, &[], "")
+                    .map_err(|e| CodegenError::Builder(e.to_string()))?;
+                self.builder
+                    .build_unreachable()
+                    .map_err(|e| CodegenError::Builder(e.to_string()))?;
+                // The pure path still has to be emitted; park the builder back on it.
+                self.builder.position_at_end(pure_block);
+                let consume_call = self
+                    .builder
+                    .build_call(self.kont_consume_pure_fn, &[result_kont.into()], "kv_pure_val")
+                    .map_err(|e| CodegenError::Builder(e.to_string()))?;
+                let pure_unwrap = consume_call.try_as_basic_value().left().ok_or_else(|| {
+                    CodegenError::Builder(
+                        "sentinel_kont_consume_pure returned void unexpectedly".to_string(),
+                    )
+                })?;
+                if let Some(ra) = handle_ctx.return_arm.as_ref() {
+                    let i64_ty = self.context.i64_type();
+                    let alloca = self.binding_alloca(i64_ty.into(), &ra.value_name.kind)?;
+                    self.builder
+                        .build_store(alloca, pure_unwrap.into_int_value())
+                        .map_err(|e| CodegenError::Builder(e.to_string()))?;
+                    self.vars.insert(ra.value_var_id, (alloca, Type::I64));
+                    let ra_val = self.lower_expr(&ra.body, program)?;
+                    self.vars.remove(&ra.value_var_id);
+                    return Ok(ra_val);
+                }
+                return Ok(pure_unwrap);
+            }
+        }
         // ADR 0075 D1 (register D87): this branch leaves the arm's ENTRY, so it
         // drains the arm's scopes first — every frame at or above the arm floor,
         // innermost first, which covers a nested block and the body of a `while`
@@ -9780,22 +9859,6 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
             .build_unconditional_branch(merge_block)
             .map_err(|e| CodegenError::Builder(e.to_string()))?;
 
-        // Push the dispatch context so any k(v) call inside an
-        // arm body's lowering can branch back to loop_block on
-        // bubble (see [`Self::lower_resume_kont`]). The return
-        // arm (if any) is cloned into the context so k(v)'s
-        // pure-unwrap path can apply it per Phase B's deep-
-        // handler re-wrap semantics.
-        self.handle_stack.push(HandleContext {
-            loop_block,
-            current_kont_slot,
-            return_arm: return_arm.cloned(),
-            // ADR 0075 D2: the arm floor, captured NOW — before the first arm's
-            // body pushes its block frame, and after every frame that belongs to
-            // the function around the `handle` (a bubble does not leave those).
-            scope_floor: self.scope_stack.len(),
-        });
-
         // Lower each arm: bind op-params + kont, lower the
         // arm body, optionally wrap the i64 in pure_kont (when
         // nested) so the merge type is Kont*, then branch to
@@ -9805,7 +9868,47 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
         for (arm, arm_bb) in arms.iter().zip(arm_blocks.iter()) {
             self.builder.position_at_end(*arm_bb);
             self.bind_handler_arm_params(arm, current_kont)?;
+            // ADR 0075 D6: decide what THIS arm's bubble does before lowering it. The
+            // dispatch context is pushed here, inside the loop, because the plan is the
+            // arm's, not the handle's; `scope_floor` is the same for every arm of the
+            // handle (each is lowered from the same scope stack, and
+            // `bind_handler_arm_params` pushes no frame), so D2 is unaffected.
+            let arm_kont = *arm
+                .param_var_ids
+                .last()
+                .expect("type-check guarantees the kont VarId is present");
+            let remainder = match arm_resume_class(&arm.body, arm_kont) {
+                // The arm's value IS the resume's, or the arm returns first: nothing
+                // observable follows the bubble, so it may branch away as it always has.
+                Some(ArmResumeClass::Tail) | Some(ArmResumeClass::Diverging) | None => None,
+                Some(ArmResumeClass::Observable) => {
+                    let vars = self.vars.clone();
+                    Some(arm_remainder_verdict(
+                        &arm.body,
+                        arm_kont,
+                        &move |id| vars.get(&id).map(|(_, ty)| *ty),
+                        program,
+                    ))
+                }
+            };
+            // Push the dispatch context so any k(v) call inside an
+            // arm body's lowering can branch back to loop_block on
+            // bubble (see [`Self::lower_resume_kont`]). The return
+            // arm (if any) is cloned into the context so k(v)'s
+            // pure-unwrap path can apply it per Phase B's deep-
+            // handler re-wrap semantics.
+            self.handle_stack.push(HandleContext {
+                loop_block,
+                current_kont_slot,
+                return_arm: return_arm.cloned(),
+                remainder,
+                // ADR 0075 D2: the arm floor, captured NOW — before the arm's body
+                // pushes its block frame, and after every frame that belongs to the
+                // function around the `handle` (a bubble does not leave those).
+                scope_floor: self.scope_stack.len(),
+            });
             let arm_val = self.lower_expr(&arm.body, program)?;
+            self.handle_stack.pop();
             // ADR 0074 D2: the fall-through leaves the arm with its value.
             // Release the kont if the arm still owns it — it declined to
             // resume (ADR 0020 D4's abort) — before the value goes to the
@@ -9838,8 +9941,6 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                 .map_err(|e| CodegenError::Builder(e.to_string()))?;
             arm_results.push((final_arm_val, post_arm_block));
         }
-
-        self.handle_stack.pop();
 
         // Default block:
         //   - Top-level (!is_nested): unreachable. Type-check
@@ -9888,6 +9989,151 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
         }
         phi.add_incoming(&incoming);
         Ok(phi.as_basic_value())
+    }
+
+    /// ADR 0075 D6: allocate and fill the `i64[N]` captured-state struct a continuation
+    /// frame carries. Null when nothing is captured, as the other frame shapes do.
+    /// Ownership passes to `sentinel_kont_push`, which frees it after the resumer runs.
+    fn build_captured_state(
+        &mut self,
+        captured: &[VarId],
+    ) -> Result<PointerValue<'ctx>, CodegenError> {
+        let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+        let i64_ty = self.context.i64_type();
+        let i8_ty = self.context.i8_type();
+        if captured.is_empty() {
+            return Ok(ptr_ty.const_null());
+        }
+        let size = i64_ty.const_int((captured.len() * 8) as u64, false);
+        let alloc_call = self
+            .builder
+            .build_call(self.alloc_fn, &[size.into()], "captured_alloc")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        let ptr = alloc_call
+            .try_as_basic_value()
+            .left()
+            .expect("sentinel_alloc returns ptr")
+            .into_pointer_value();
+        for (i, cap_id) in captured.iter().enumerate() {
+            let offset = i64_ty.const_int((i * 8) as u64, false);
+            let elem_ptr = unsafe {
+                self.builder
+                    .build_in_bounds_gep(i8_ty, ptr, &[offset], &format!("cap_store_ptr_{i}"))
+                    .map_err(|e| CodegenError::Builder(e.to_string()))?
+            };
+            let (cap_alloca, _ty) = *self
+                .vars
+                .get(cap_id)
+                .expect("the verdict captured only names in scope");
+            let cap_val = self
+                .builder
+                .build_load(i64_ty, cap_alloca, &format!("cap_read_{i}"))
+                .map_err(|e| CodegenError::Builder(e.to_string()))?;
+            self.builder
+                .build_store(elem_ptr, cap_val)
+                .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        }
+        Ok(ptr)
+    }
+
+    /// ADR 0075 D6: emit the free function that replays a handler arm's remainder, and
+    /// hand back its `FunctionValue`. Same shape as the embedded-perform resumer
+    /// (register D69): the resumed value binds the placeholder, each capture is loaded
+    /// out of the `i64[N]` struct, the remainder is lowered as plain code, and its value
+    /// goes back through `sentinel_kont_pure`.
+    ///
+    /// It is emitted HERE, in the middle of the parent's lowering, rather than in a
+    /// pre-pass: the remainder is the arm's, not the function's, and nothing about it is
+    /// known until the arm is reached. Every piece of parent state the lowering touches is
+    /// saved and restored, and the arm's own `handle_stack` / `arm_kont_slots` are cleared
+    /// inside it, because the resumer runs OUTSIDE the arm -- it has no `k` and no
+    /// enclosing handle.
+    fn emit_arm_remainder_resumer(
+        &mut self,
+        info: &ArmRemainderInfo,
+        program: &TypedProgram,
+    ) -> Result<FunctionValue<'ctx>, CodegenError> {
+        let parent = self.current_fn.expect("inside compile_fn");
+        // Same spelling as the text oracle's, so the two are easy to read side by side
+        // (they are not compared byte for byte -- only `scg` and the oracle are).
+        let name = format!(
+            "__armrem_{}_{}",
+            parent.get_name().to_str().unwrap_or("fn"),
+            self.arm_remainder_seq
+        );
+        self.arm_remainder_seq += 1;
+        let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+        let i64_ty = self.context.i64_type();
+        let i8_ty = self.context.i8_type();
+        let resumer = self
+            .module
+            .add_function(&name, ptr_ty.fn_type(&[i64_ty.into(), ptr_ty.into()], false), None);
+
+        let saved_block = self.builder.get_insert_block();
+        let saved_fn = self.current_fn;
+        let saved_vars = std::mem::take(&mut self.vars);
+        let saved_scope = std::mem::take(&mut self.scope_stack);
+        let saved_handles = std::mem::take(&mut self.handle_stack);
+        let saved_arms = std::mem::take(&mut self.arm_kont_slots);
+
+        self.current_fn = Some(resumer);
+        self.scope_stack.push(ScopeFrame::default());
+        let entry = self.context.append_basic_block(resumer, "entry");
+        self.builder.position_at_end(entry);
+
+        let value_param = resumer.get_nth_param(0).expect("value param").into_int_value();
+        let captured_param = resumer.get_nth_param(1).expect("captured param").into_pointer_value();
+        let v_alloca = self
+            .builder
+            .build_alloca(i64_ty, "resumed_value")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        self.builder
+            .build_store(v_alloca, value_param)
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        self.vars.insert(info.placeholder_id, (v_alloca, Type::I64));
+        for (i, cap_id) in info.captured.iter().enumerate() {
+            let offset = i64_ty.const_int((i * 8) as u64, false);
+            let elem_ptr = unsafe {
+                self.builder
+                    .build_in_bounds_gep(i8_ty, captured_param, &[offset], &format!("cap_ptr_{i}"))
+                    .map_err(|e| CodegenError::Builder(e.to_string()))?
+            };
+            let elem_val = self
+                .builder
+                .build_load(i64_ty, elem_ptr, &format!("cap_load_{i}"))
+                .map_err(|e| CodegenError::Builder(e.to_string()))?;
+            let cap_alloca = self
+                .builder
+                .build_alloca(i64_ty, &format!("cap_{i}"))
+                .map_err(|e| CodegenError::Builder(e.to_string()))?;
+            self.builder
+                .build_store(cap_alloca, elem_val)
+                .map_err(|e| CodegenError::Builder(e.to_string()))?;
+            self.vars.insert(*cap_id, (cap_alloca, Type::I64));
+        }
+
+        let val = self.lower_expr(&info.remainder, program)?.into_int_value();
+        let pure_call = self
+            .builder
+            .build_call(self.kont_pure_fn, &[val.into()], "pure_kont")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        let pure_kont = pure_call
+            .try_as_basic_value()
+            .left()
+            .expect("sentinel_kont_pure returns ptr");
+        self.builder
+            .build_return(Some(&pure_kont))
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+
+        self.current_fn = saved_fn;
+        self.vars = saved_vars;
+        self.scope_stack = saved_scope;
+        self.handle_stack = saved_handles;
+        self.arm_kont_slots = saved_arms;
+        if let Some(b) = saved_block {
+            self.builder.position_at_end(b);
+        }
+        Ok(resumer)
     }
 
     /// C3.5(b): bind a handler arm's op-param VarIds (via GEP
@@ -10812,10 +11058,502 @@ fn walk_collect_var_refs_stmt(kind: &TypedStmtKind, acc: &mut Vec<VarId>) {
 /// to require exactly one perform in the body's tail — when the
 /// count is 1 the surrounding context can be reified as a single
 /// per-site resumer fn.
+/// Register D69: the embedded-perform shape's walkers, at `Susp::Perform`. The bodies are
+/// shared with ADR 0075 D6's arm-remainder shape so the two cannot drift apart in how they
+/// read an expression; only the node that counts as the suspension point differs.
 fn count_performs(expr: &TypedExpr) -> usize {
+    count_susp(expr, Susp::Perform)
+}
+
+fn find_unique_perform(expr: &TypedExpr) -> Option<&TypedExpr> {
+    find_unique_susp(expr, Susp::Perform)
+}
+
+fn perform_unconditional(expr: &TypedExpr) -> Option<bool> {
+    susp_unconditional(expr, Susp::Perform)
+}
+
+fn pure_before_perform(expr: &TypedExpr) -> Option<bool> {
+    pure_before_susp(expr, Susp::Perform)
+}
+
+/// ADR 0075 D6: which suspension point a walker is keyed on. The embedded-perform shape
+/// (register D69) suspends at the tail's one `perform`; a handler arm's remainder suspends
+/// at its `k(v)`. The walkers that decide whether a replay is faithful ask the same
+/// questions either way, so they take this rather than being written twice.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Susp {
+    Perform,
+    /// A `k(v)` OF THIS ARM. The `VarId` is the arm's own continuation binding, and it is
+    /// load-bearing: a `handle` written inside an arm puts that inner arm's `k2(v)` in
+    /// this arm's subtree, and it is not this arm's suspension point -- the inner handle
+    /// dispatches it. Counting it made an outer arm whose tail is a plain `k(1)` look
+    /// like two resumes, so it fell to class (A) and its bubble aborted; the codegen
+    /// differential caught that on `c74_two_open_arms`.
+    Resume(VarId),
+}
+
+/// Is `expr` the suspension point `k` selects?
+fn is_susp(expr: &TypedExpr, k: Susp) -> bool {
+    match (&expr.kind, k) {
+        (TypedExprKind::Perform { .. }, Susp::Perform) => true,
+        (TypedExprKind::ResumeKont { kont, .. }, Susp::Resume(id)) => *kont == id,
+        _ => false,
+    }
+}
+
+/// ADR 0075 D6 (register D87): where a handler arm's `k(v)` sits, which decides whether the
+/// bubble may branch away from the rest of the arm.
+///
+/// A bubbling `k(v)` stores the new kont into the dispatch slot and branches to the top of
+/// the dispatch loop, so whatever follows it in the arm does not run. ADR 0020 D3 says
+/// `k(v)` IS `handle (kont.resume v) with H`, so the arm's remainder belongs inside that
+/// inner dispatch -- abandoning it is right only when there is nothing to abandon, or when
+/// the re-entered arm leaves the function before the remainder could have run.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ArmResumeClass {
+    /// The arm's value IS the `k(v)`'s value: the resume is reached from the arm body
+    /// through nothing but a block's tail, an `if` branch's tail and a `match` arm's tail.
+    /// Re-dispatching produces exactly what the arm would have, so the branch is correct.
+    Tail,
+    /// Not `Tail`, but the arm always `return`s, so the entry that re-enters it returns
+    /// first and the abandoned remainder is unreachable under D3 as well. Measured:
+    /// `return k(21)` answers 42 and `return k(1) + 10` answers 12, both D3's answers.
+    Diverging,
+    /// Anything else: the remainder is observable and the branch drops it. `k(1) + 10`
+    /// answers 12 where D3 gives 22.
+    Observable,
+}
+
+/// Classify the `k(v)`s in an arm body (ADR 0075 D6). `None` when the arm never resumes --
+/// ADR 0020 D4's abort -- which has no bubble at all.
+///
+/// An arm with MORE THAN ONE `k(v)` is `Observable` whatever their positions: a second
+/// resume is refused at run time (ADR 0074 D3), but until then both are lowered, and the
+/// remainder of one is not the remainder of the other. That is the same "exactly one
+/// suspension point" restriction `find_unique_perform` imposes on the embedded shape.
+pub fn arm_resume_class(arm_body: &TypedExpr, kont: VarId) -> Option<ArmResumeClass> {
+    match count_susp(arm_body, Susp::Resume(kont)) {
+        0 => None,
+        1 => {
+            if resume_in_tail_position(arm_body, kont) {
+                Some(ArmResumeClass::Tail)
+            } else if expr_always_returns(arm_body) {
+                Some(ArmResumeClass::Diverging)
+            } else {
+                Some(ArmResumeClass::Observable)
+            }
+        }
+        _ => Some(ArmResumeClass::Observable),
+    }
+}
+
+/// ADR 0075 D6: what is evaluated BEFORE an arm's `k(v)`, which decides whether its
+/// remainder can be replayed. The replay re-runs the arm from the top, so everything
+/// ahead of the resume runs a second time; (R) therefore requires that everything ahead
+/// of it be a literal or a name, which cannot be observed twice.
+///
+/// **This is deliberately narrower than "pure".** The faithful rule is the
+/// embedded-perform shape's `pure_before_susp`, which asks an operator-level purity
+/// question -- division traps, `&mut` and a deref are impure, the rest are not. Mirroring
+/// that into `scg` means mirroring an OPERATOR TABLE into a second implementation, where
+/// one wrong constant is a silent classification divergence that no corpus program can
+/// catch (none is class (R)). A rule with no operator in it cannot drift that way. The
+/// cost is real and specific: `{ let v: [i64] = [1,2,3,4]; k(1) + v[0] }` is (A) here,
+/// where the operator-level rule would reify it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Prefix {
+    /// No resume under here, and this subtree is a literal or a name -- it may precede one.
+    Trivial,
+    /// The resume is here, and everything evaluated before it was `Trivial`.
+    Resume,
+    /// A resume is under here with something else evaluated first.
+    Blocked,
+    /// No resume under here, and this subtree is not a literal or a name.
+    Opaque,
+}
+
+/// Walk `expr` in EVALUATION order. See [`Prefix`].
+fn resume_prefix(expr: &TypedExpr, kont: VarId) -> Prefix {
+    if is_susp(expr, Susp::Resume(kont)) {
+        return Prefix::Resume;
+    }
+    // Everything evaluated in order; the first sub-expression that settles it wins, and a
+    // resume after something `Opaque` is `Blocked`.
+    fn seq<'a>(
+        items: impl IntoIterator<Item = &'a TypedExpr>,
+        kont: VarId,
+    ) -> Prefix {
+        let mut seen_opaque = false;
+        for e in items {
+            match resume_prefix(e, kont) {
+                Prefix::Resume => {
+                    return if seen_opaque { Prefix::Blocked } else { Prefix::Resume }
+                }
+                Prefix::Blocked => return Prefix::Blocked,
+                Prefix::Opaque => seen_opaque = true,
+                Prefix::Trivial => {}
+            }
+        }
+        Prefix::Opaque
+    }
+    // A construct that does not evaluate its parts in a straight line: a resume anywhere
+    // under it is out of reach.
+    fn opaque_or_blocked(n: usize) -> Prefix {
+        if n > 0 {
+            Prefix::Blocked
+        } else {
+            Prefix::Opaque
+        }
+    }
+    let k = Susp::Resume(kont);
+    match &expr.kind {
+        TypedExprKind::IntLit(_)
+        | TypedExprKind::BoolLit(_)
+        | TypedExprKind::NullLit
+        | TypedExprKind::FloatLit(_)
+        | TypedExprKind::CharLit(_)
+        | TypedExprKind::StringLit(_)
+        | TypedExprKind::Var(_)
+        | TypedExprKind::FnRef(_) => Prefix::Trivial,
+        TypedExprKind::Unary(_, inner)
+        | TypedExprKind::WidenToNullable(inner)
+        | TypedExprKind::WidenToSecret(inner)
+        | TypedExprKind::Cast(inner)
+        | TypedExprKind::Return(inner)
+        | TypedExprKind::Declassify(inner) => match resume_prefix(inner, kont) {
+            Prefix::Trivial => Prefix::Opaque,
+            other => other,
+        },
+        TypedExprKind::Binary(_, l, r)
+        | TypedExprKind::Cmp(_, l, r)
+        | TypedExprKind::Logic(_, l, r) => match seq([l.as_ref(), r.as_ref()], kont) {
+            Prefix::Trivial => Prefix::Opaque,
+            other => other,
+        },
+        TypedExprKind::Index { target, index, .. } => {
+            match seq([target.as_ref(), index.as_ref()], kont) {
+                Prefix::Trivial => Prefix::Opaque,
+                other => other,
+            }
+        }
+        TypedExprKind::FieldAccess { target, .. } => match resume_prefix(target, kont) {
+            Prefix::Trivial => Prefix::Opaque,
+            other => other,
+        },
+        TypedExprKind::Call { args, .. }
+        | TypedExprKind::ClassInit { args, .. }
+        | TypedExprKind::QualifiedCall { args, .. }
+        | TypedExprKind::EnumConstruct { args, .. } => seq(args, kont),
+        TypedExprKind::ArrayLit { elements, .. } => seq(elements, kont),
+        TypedExprKind::MethodCall { target, args, .. }
+        | TypedExprKind::ImplMethodCall { target, args, .. } => {
+            seq(std::iter::once(target.as_ref()).chain(args.iter()), kont)
+        }
+        TypedExprKind::Block(b) => resume_prefix_block(b, kont),
+        // A branch, a loop, a nested handle or a concurrency form does not put its parts
+        // in one straight line. `susp_unconditional` already refuses a resume inside one;
+        // this agrees rather than reasoning about it a second way.
+        // ADR 0075 D6 (register D95): a struct literal joins them. It does evaluate its
+        // fields in a straight line, but only in DECLARATION order, and `scg` asks this
+        // question of raw tokens in SOURCE order with no struct id to reorder by. Refusing
+        // a resume inside one keeps all three back ends on one answer without threading
+        // that through, and refusing is the safe direction — class (A) aborts where a
+        // wrong guess would answer wrongly. A literal containing no resume was already
+        // `Opaque` through its `FieldAccess`, so nothing else moves.
+        TypedExprKind::If { .. }
+        | TypedExprKind::Match { .. }
+        | TypedExprKind::Scope { .. }
+        | TypedExprKind::Handle { .. }
+        | TypedExprKind::StructLit { .. }
+        | TypedExprKind::Perform { .. }
+        | TypedExprKind::ResumeKont { .. }
+        | TypedExprKind::Spawn { .. }
+        | TypedExprKind::Await { .. } => opaque_or_blocked(count_susp(expr, k)),
+    }
+}
+
+/// A block evaluates each statement's value in order, then its tail.
+fn resume_prefix_block(b: &TypedBlock, kont: VarId) -> Prefix {
+    let mut seen_opaque = false;
+    for st in &b.stmts {
+        let p = match &st.kind {
+            TypedStmtKind::Let { value, .. } => resume_prefix(value, kont),
+            TypedStmtKind::Assign { target, value } => {
+                // The write itself is observable, so a resume after it is blocked.
+                match resume_prefix(target, kont) {
+                    Prefix::Trivial | Prefix::Opaque => match resume_prefix(value, kont) {
+                        Prefix::Resume | Prefix::Blocked => Prefix::Blocked,
+                        _ => Prefix::Opaque,
+                    },
+                    other => other,
+                }
+            }
+            TypedStmtKind::While { cond, body } => {
+                if count_susp(cond, Susp::Resume(kont)) + block_susp(body, Susp::Resume(kont)) > 0 {
+                    Prefix::Blocked
+                } else {
+                    Prefix::Opaque
+                }
+            }
+            TypedStmtKind::Break | TypedStmtKind::Continue => Prefix::Opaque,
+            TypedStmtKind::Expr(e) => match resume_prefix(e, kont) {
+                Prefix::Trivial => Prefix::Opaque,
+                other => other,
+            },
+        };
+        match p {
+            Prefix::Resume => {
+                return if seen_opaque { Prefix::Blocked } else { Prefix::Resume }
+            }
+            Prefix::Blocked => return Prefix::Blocked,
+            Prefix::Opaque => seen_opaque = true,
+            Prefix::Trivial => {}
+        }
+    }
+    match resume_prefix(&b.tail, kont) {
+        Prefix::Resume if seen_opaque => Prefix::Blocked,
+        Prefix::Trivial => Prefix::Opaque,
+        other => other,
+    }
+}
+
+/// ADR 0075 D6 (register D87): what an [`ArmResumeClass::Observable`] arm needs for its
+/// remainder to be replayed as a continuation frame, or why it cannot be.
+#[derive(Clone)]
+pub struct ArmRemainderInfo {
+    /// The names the remainder reads from the frame around it, in first-read order. Each
+    /// crosses the `i64[N]` seam, so each must satisfy ADR 0072 D3's `FITS`.
+    pub captured: Vec<VarId>,
+    /// The arm body with its `k(v)` replaced by [`Self::placeholder_id`] -- what the
+    /// resumer evaluates when the chain drains.
+    pub remainder: TypedExpr,
+    /// The synthetic name the resumed value binds to. Distinct from the embedded-perform
+    /// shape's `u32::MAX` so a remainder that contains one cannot alias its placeholder.
+    pub placeholder_id: VarId,
+}
+
+/// Decide whether an arm's remainder can be reified onto the bubbled kont (ADR 0075 D6),
+/// and say why not when it cannot. `Err` is class (A): the site keeps the store-and-branch
+/// and the bubble path aborts, rather than silently dropping the remainder.
+///
+/// These are the embedded-perform shape's own questions (register D69, ADR 0072 A1), asked
+/// with `k(v)` as the suspension point instead of `perform` -- the walkers are shared, so
+/// the two shapes cannot drift apart in how they read an expression. `ty_of` answers with
+/// the type of a name bound in the frame AROUND the remainder, and `None` for one the
+/// remainder binds itself, which is what separates a capture from a local.
+pub fn arm_remainder_verdict(
+    arm_body: &TypedExpr,
+    kont: VarId,
+    ty_of: &dyn Fn(VarId) -> Option<Type>,
+    program: &TypedProgram,
+) -> Result<ArmRemainderInfo, String> {
+    // One suspension point. A second `k(v)` is refused at run time (ADR 0074 D3), but both
+    // are lowered until then, and the remainder of one is not the remainder of the other.
+    if count_susp(arm_body, Susp::Resume(kont)) != 1 {
+        return Err("the arm resumes more than once, and only one remainder can be reified"
+            .to_string());
+    }
+    let resume = find_unique_susp(arm_body, Susp::Resume(kont))
+        .ok_or_else(|| "the arm does not resume".to_string())?;
+    if !fits_kont_slot(resume.ty, program) {
+        return Err(format!(
+            "its `k(v)` answers `{}`, and a continuation carries one `i64`",
+            type_display(resume.ty, Some(program))
+        ));
+    }
+    // Hoisted out of an `if` or `match` arm, the right of `&&`, or a loop, the resume runs
+    // on paths the replay would not take, so the replay is not the same computation.
+    if susp_unconditional(arm_body, Susp::Resume(kont)) != Some(true) {
+        return Err("its `k(v)` is guarded (in an `if` or `match` arm, the right of `&&` or \
+                    `||`, a loop, a `handle` or a concurrency form), and the remainder is \
+                    replayed from the top of the arm"
+            .to_string());
+    }
+    // Anything the arm evaluates BEFORE the resume would run a second time in the replay,
+    // so the replay is the same computation only if nothing before it can be observed.
+    if resume_prefix(arm_body, kont) != Prefix::Resume {
+        return Err("the arm evaluates something before its `k(v)` that is not a literal or \
+                    a name, and the remainder is replayed from the top of the arm, so \
+                    everything before the resume would run a second time"
+            .to_string());
+    }
+    let placeholder_id = VarId(u32::MAX - 1);
+    let remainder = substitute_susp_with_var(arm_body, placeholder_id, Susp::Resume(kont));
+    // The resumer lowers the replay as plain code. A `perform`, an effecting call or a
+    // second `k(v)` left under a kind the substitution clones unchanged (a `match`, a
+    // method call, a class init) would suspend inside it. Check the RESULT, not the list.
+    if expr_suspends(&remainder, program) {
+        return Err("its remainder suspends -- a `perform`, a call to an effecting fn, a \
+                    local `handle`, or a `k(v)` under a `match`, a method call or a class \
+                    init -- and a replayed remainder can resume nothing"
+            .to_string());
+    }
+    // The replay runs in a free function, which cannot unwind the fn the arm is written in
+    // or branch to its loops. Conservative: any of the three anywhere in the remainder,
+    // including a `break` whose own loop is inside the remainder.
+    if remainder_leaves_the_arm(&remainder) {
+        return Err("its remainder contains a `return`, `break` or `continue`, and the \
+                    replay runs outside the function the arm is written in"
+            .to_string());
+    }
+    let mut refs: Vec<VarId> = Vec::new();
+    walk_collect_var_refs(&remainder, &mut refs);
+    let mut captured: Vec<VarId> = Vec::new();
+    for id in refs {
+        if id != placeholder_id && ty_of(id).is_some() && !captured.contains(&id) {
+            captured.push(id);
+        }
+    }
+    // ADR 0072 D3/D4: the parent copies each capture with an 8-byte load out of its slot,
+    // so only an `i64` or a `secret i64` fits. Widening this needs the SEAM widened first.
+    if let Some(bad) = captured.iter().find(|id| {
+        !fits_kont_slot(ty_of(**id).expect("filtered to names in scope"), program)
+    }) {
+        return Err(format!(
+            "its remainder reads a name across the continuation that is `{}`, and a \
+             continuation slot carries an `i64` or a `secret i64`",
+            type_display(ty_of(*bad).expect("in scope"), Some(program))
+        ));
+    }
+    // The resumer hands the replay's value to `sentinel_kont_pure`, the same one `i64`.
+    if !fits_kont_slot(arm_body.ty, program) {
+        return Err(format!(
+            "the arm answers `{}`, and a replayed remainder returns through one `i64`",
+            type_display(arm_body.ty, Some(program))
+        ));
+    }
+    Ok(ArmRemainderInfo { captured, remainder, placeholder_id })
+}
+
+/// Does `expr` contain a `return`, `break` or `continue`? The replay runs in a free
+/// function, so none of the three can mean there what it means in the arm. Conservative on
+/// purpose: a `break` whose `while` is itself inside the remainder would be sound, and is
+/// refused anyway rather than carrying a second rule that has to stay in step. Total over
+/// `TypedExprKind`, so a new variant cannot hide an exit.
+fn remainder_leaves_the_arm(expr: &TypedExpr) -> bool {
+    fn any<'a>(items: impl IntoIterator<Item = &'a TypedExpr>) -> bool {
+        items.into_iter().any(remainder_leaves_the_arm)
+    }
+    fn blk(b: &TypedBlock) -> bool {
+        b.stmts.iter().any(|s| match &s.kind {
+            TypedStmtKind::Break | TypedStmtKind::Continue => true,
+            TypedStmtKind::Let { value, .. } => remainder_leaves_the_arm(value),
+            TypedStmtKind::Assign { target, value } => {
+                remainder_leaves_the_arm(target) || remainder_leaves_the_arm(value)
+            }
+            TypedStmtKind::While { cond, body } => remainder_leaves_the_arm(cond) || blk(body),
+            TypedStmtKind::Expr(e) => remainder_leaves_the_arm(e),
+        }) || remainder_leaves_the_arm(&b.tail)
+    }
+    match &expr.kind {
+        TypedExprKind::Return(_) => true,
+        TypedExprKind::IntLit(_)
+        | TypedExprKind::BoolLit(_)
+        | TypedExprKind::NullLit
+        | TypedExprKind::FloatLit(_)
+        | TypedExprKind::CharLit(_)
+        | TypedExprKind::StringLit(_)
+        | TypedExprKind::Var(_)
+        | TypedExprKind::FnRef(_) => false,
+        TypedExprKind::Unary(_, inner)
+        | TypedExprKind::WidenToNullable(inner)
+        | TypedExprKind::WidenToSecret(inner)
+        | TypedExprKind::Cast(inner)
+        | TypedExprKind::Declassify(inner) => remainder_leaves_the_arm(inner),
+        TypedExprKind::Binary(_, l, r)
+        | TypedExprKind::Cmp(_, l, r)
+        | TypedExprKind::Logic(_, l, r) => {
+            remainder_leaves_the_arm(l) || remainder_leaves_the_arm(r)
+        }
+        TypedExprKind::Block(b) | TypedExprKind::Scope { body: b, .. } => blk(b),
+        TypedExprKind::If { cond, then_branch, else_branch } => {
+            remainder_leaves_the_arm(cond) || blk(then_branch) || blk(else_branch)
+        }
+        TypedExprKind::Perform { args, .. }
+        | TypedExprKind::Call { args, .. }
+        | TypedExprKind::ResumeKont { args, .. }
+        | TypedExprKind::ClassInit { args, .. }
+        | TypedExprKind::QualifiedCall { args, .. }
+        | TypedExprKind::EnumConstruct { args, .. } => any(args),
+        TypedExprKind::StructLit { fields, .. } => any(fields),
+        TypedExprKind::ArrayLit { elements, .. } => any(elements),
+        TypedExprKind::FieldAccess { target, .. } => remainder_leaves_the_arm(target),
+        TypedExprKind::Index { target, index, .. } => {
+            remainder_leaves_the_arm(target) || remainder_leaves_the_arm(index)
+        }
+        TypedExprKind::MethodCall { target, args, .. }
+        | TypedExprKind::ImplMethodCall { target, args, .. } => {
+            remainder_leaves_the_arm(target) || any(args)
+        }
+        TypedExprKind::Handle { body, arms, return_arm, .. } => {
+            remainder_leaves_the_arm(body)
+                || arms.iter().any(|a| remainder_leaves_the_arm(&a.body))
+                || return_arm.as_deref().is_some_and(|ra| remainder_leaves_the_arm(&ra.body))
+        }
+        TypedExprKind::Match { scrutinee, arms, .. } => {
+            remainder_leaves_the_arm(scrutinee)
+                || arms.iter().any(|a| remainder_leaves_the_arm(&a.body))
+        }
+        TypedExprKind::Spawn { call, .. } => remainder_leaves_the_arm(call),
+        TypedExprKind::Await { task_expr, .. } => remainder_leaves_the_arm(task_expr),
+    }
+}
+
+/// Is `expr`'s value a `k(v)`'s value? Walks only into TAIL positions -- a block's tail, an
+/// `if` branch's tail, a `match` arm's tail -- so this answers "does the arm evaluate to the
+/// resume", not "does the arm contain one". A `return`'s operand is NOT a tail position:
+/// the arm's value is not the `return`'s, which is why that case is `Diverging` instead.
+fn resume_in_tail_position(expr: &TypedExpr, kont: VarId) -> bool {
+    fn blk(b: &TypedBlock, kont: VarId) -> bool {
+        resume_in_tail_position(&b.tail, kont)
+    }
+    match &expr.kind {
+        TypedExprKind::ResumeKont { kont: id, .. } => *id == kont,
+        TypedExprKind::Block(b) | TypedExprKind::Scope { body: b, .. } => blk(b, kont),
+        TypedExprKind::If { then_branch, else_branch, .. } => {
+            blk(then_branch, kont) || blk(else_branch, kont)
+        }
+        TypedExprKind::Match { arms, .. } => {
+            arms.iter().any(|a| resume_in_tail_position(&a.body, kont))
+        }
+        _ => false,
+    }
+}
+
+/// ADR 0065's divergence, as codegen's own copy: does every path through `expr` `return`?
+/// Structural and conservative -- only `Return`, and a `Block` / `If` / `Match` all of whose
+/// paths do. `sentinel-types` keeps the original for type joins; this one decides whether a
+/// bubbling `k(v)`'s abandoned remainder could have run at all.
+fn expr_always_returns(expr: &TypedExpr) -> bool {
+    fn blk(b: &TypedBlock) -> bool {
+        if expr_always_returns(&b.tail) {
+            return true;
+        }
+        b.stmts.iter().any(|s| match &s.kind {
+            TypedStmtKind::Expr(e) => expr_always_returns(e),
+            TypedStmtKind::Let { value, .. } | TypedStmtKind::Assign { value, .. } => {
+                expr_always_returns(value)
+            }
+            // A `while` may not run, and `break` / `continue` stay in the function.
+            TypedStmtKind::While { .. } | TypedStmtKind::Break | TypedStmtKind::Continue => false,
+        })
+    }
+    match &expr.kind {
+        TypedExprKind::Return(_) => true,
+        TypedExprKind::Block(b) | TypedExprKind::Scope { body: b, .. } => blk(b),
+        TypedExprKind::If { then_branch, else_branch, .. } => blk(then_branch) && blk(else_branch),
+        TypedExprKind::Match { arms, .. } => {
+            !arms.is_empty() && arms.iter().all(|a| expr_always_returns(&a.body))
+        }
+        _ => false,
+    }
+}
+
+fn count_susp(expr: &TypedExpr, k: Susp) -> usize {
     match &expr.kind {
         TypedExprKind::Perform { args, .. } => {
-            1 + args.iter().map(count_performs).sum::<usize>()
+            usize::from(is_susp(expr, k)) + args.iter().map(|e| count_susp(e, k)).sum::<usize>()
         }
         TypedExprKind::IntLit(_)
         | TypedExprKind::BoolLit(_)
@@ -10830,102 +11568,103 @@ fn count_performs(expr: &TypedExpr) -> usize {
         | TypedExprKind::WidenToSecret(inner)
         | TypedExprKind::Cast(inner)
         | TypedExprKind::Return(inner)
-        | TypedExprKind::Declassify(inner) => count_performs(inner),
+        | TypedExprKind::Declassify(inner) => count_susp(inner, k),
         TypedExprKind::Binary(_, l, r)
         | TypedExprKind::Cmp(_, l, r)
-        | TypedExprKind::Logic(_, l, r) => count_performs(l) + count_performs(r),
+        | TypedExprKind::Logic(_, l, r) => count_susp(l, k) + count_susp(r, k),
         TypedExprKind::Block(b) => {
-            b.stmts.iter().map(|s| count_performs_stmt(&s.kind)).sum::<usize>()
-                + count_performs(&b.tail)
+            b.stmts.iter().map(|s| count_susp_stmt(&s.kind, k)).sum::<usize>()
+                + count_susp(&b.tail, k)
         }
         TypedExprKind::If { cond, then_branch, else_branch } => {
-            count_performs(cond)
+            count_susp(cond, k)
                 + then_branch
                     .stmts
                     .iter()
-                    .map(|s| count_performs_stmt(&s.kind))
+                    .map(|s| count_susp_stmt(&s.kind, k))
                     .sum::<usize>()
-                + count_performs(&then_branch.tail)
+                + count_susp(&then_branch.tail, k)
                 + else_branch
                     .stmts
                     .iter()
-                    .map(|s| count_performs_stmt(&s.kind))
+                    .map(|s| count_susp_stmt(&s.kind, k))
                     .sum::<usize>()
-                + count_performs(&else_branch.tail)
+                + count_susp(&else_branch.tail, k)
         }
-        TypedExprKind::Call { args, .. } => args.iter().map(count_performs).sum(),
+        TypedExprKind::Call { args, .. } => args.iter().map(|e| count_susp(e, k)).sum(),
         TypedExprKind::StructLit { fields, .. } => {
-            fields.iter().map(count_performs).sum()
+            fields.iter().map(|e| count_susp(e, k)).sum()
         }
-        TypedExprKind::FieldAccess { target, .. } => count_performs(target),
+        TypedExprKind::FieldAccess { target, .. } => count_susp(target, k),
         TypedExprKind::ArrayLit { elements, .. } => {
-            elements.iter().map(count_performs).sum()
+            elements.iter().map(|e| count_susp(e, k)).sum()
         }
         TypedExprKind::Index { target, index, .. } => {
-            count_performs(target) + count_performs(index)
+            count_susp(target, k) + count_susp(index, k)
         }
         TypedExprKind::Handle { body, arms, return_arm, .. } => {
-            count_performs(body)
-                + arms.iter().map(|a| count_performs(&a.body)).sum::<usize>()
+            count_susp(body, k)
+                + arms.iter().map(|a| count_susp(&a.body, k)).sum::<usize>()
                 + return_arm
                     .as_deref()
-                    .map_or(0, |ra| count_performs(&ra.body))
+                    .map_or(0, |ra| count_susp(&ra.body, k))
         }
-        TypedExprKind::ResumeKont { args, .. } => args.iter().map(count_performs).sum(),
+        TypedExprKind::ResumeKont { args, .. } => {
+            usize::from(is_susp(expr, k)) + args.iter().map(|e| count_susp(e, k)).sum::<usize>()
+        }
         TypedExprKind::MethodCall { target, args, .. } => {
-            count_performs(target) + args.iter().map(count_performs).sum::<usize>()
+            count_susp(target, k) + args.iter().map(|e| count_susp(e, k)).sum::<usize>()
         }
-        TypedExprKind::ClassInit { args, .. } => args.iter().map(count_performs).sum(),
+        TypedExprKind::ClassInit { args, .. } => args.iter().map(|e| count_susp(e, k)).sum(),
         TypedExprKind::ImplMethodCall { target, args, .. } => {
-            count_performs(target) + args.iter().map(count_performs).sum::<usize>()
+            count_susp(target, k) + args.iter().map(|e| count_susp(e, k)).sum::<usize>()
         }
-        TypedExprKind::QualifiedCall { args, .. } => args.iter().map(count_performs).sum(),
+        TypedExprKind::QualifiedCall { args, .. } => args.iter().map(|e| count_susp(e, k)).sum(),
         // C4.4 / ADR 0024: recurse into concurrency-form children.
         TypedExprKind::Scope { body, .. } => {
-            body.stmts.iter().map(|s| count_performs_stmt(&s.kind)).sum::<usize>()
-                + count_performs(&body.tail)
+            body.stmts.iter().map(|s| count_susp_stmt(&s.kind, k)).sum::<usize>()
+                + count_susp(&body.tail, k)
         }
-        TypedExprKind::Spawn { call, .. } => count_performs(call),
-        TypedExprKind::Await { task_expr, .. } => count_performs(task_expr),
+        TypedExprKind::Spawn { call, .. } => count_susp(call, k),
+        TypedExprKind::Await { task_expr, .. } => count_susp(task_expr, k),
         // Phase D.1 / ADR 0032 (3/N): sum performs across the
         // construction args / scrutinee / arm bodies.
-        TypedExprKind::EnumConstruct { args, .. } => args.iter().map(count_performs).sum(),
+        TypedExprKind::EnumConstruct { args, .. } => args.iter().map(|e| count_susp(e, k)).sum(),
         TypedExprKind::Match { scrutinee, arms, .. } => {
-            count_performs(scrutinee) + arms.iter().map(|a| count_performs(&a.body)).sum::<usize>()
+            count_susp(scrutinee, k) + arms.iter().map(|a| count_susp(&a.body, k)).sum::<usize>()
         }
     }
 }
 
-fn count_performs_stmt(kind: &TypedStmtKind) -> usize {
+fn count_susp_stmt(kind: &TypedStmtKind, k: Susp) -> usize {
     match kind {
-        TypedStmtKind::Let { value, .. } => count_performs(value),
+        TypedStmtKind::Let { value, .. } => count_susp(value, k),
         TypedStmtKind::Assign { target, value } => {
-            count_performs(target) + count_performs(value)
+            count_susp(target, k) + count_susp(value, k)
         }
         TypedStmtKind::While { cond, body } => {
-            count_performs(cond)
+            count_susp(cond, k)
                 + body
                     .stmts
                     .iter()
-                    .map(|s| count_performs_stmt(&s.kind))
+                    .map(|s| count_susp_stmt(&s.kind, k))
                     .sum::<usize>()
-                + count_performs(&body.tail)
+                + count_susp(&body.tail, k)
         }
         // D.5 (2/N): payload-free loop control contains no `perform`.
         TypedStmtKind::Break | TypedStmtKind::Continue => 0,
-        TypedStmtKind::Expr(e) => count_performs(e),
+        TypedStmtKind::Expr(e) => count_susp(e, k),
     }
 }
 
 /// C3.5(d) / ADR 0020 D7: locate the first Perform in
 /// pre-order. Used in tandem with `count_performs == 1` to find
 /// THE unique perform site that's being reified.
-fn find_unique_perform(expr: &TypedExpr) -> Option<&TypedExpr> {
-    if matches!(expr.kind, TypedExprKind::Perform { .. }) {
+fn find_unique_susp(expr: &TypedExpr, k: Susp) -> Option<&TypedExpr> {
+    if is_susp(expr, k) {
         return Some(expr);
     }
     match &expr.kind {
-        TypedExprKind::Perform { .. } => unreachable!("handled above"),
         TypedExprKind::IntLit(_)
         | TypedExprKind::BoolLit(_)
         | TypedExprKind::NullLit
@@ -10939,75 +11678,77 @@ fn find_unique_perform(expr: &TypedExpr) -> Option<&TypedExpr> {
         | TypedExprKind::WidenToSecret(inner)
         | TypedExprKind::Cast(inner)
         | TypedExprKind::Return(inner)
-        | TypedExprKind::Declassify(inner) => find_unique_perform(inner),
+        | TypedExprKind::Declassify(inner) => find_unique_susp(inner, k),
         TypedExprKind::Binary(_, l, r)
         | TypedExprKind::Cmp(_, l, r)
         | TypedExprKind::Logic(_, l, r) => {
-            find_unique_perform(l).or_else(|| find_unique_perform(r))
+            find_unique_susp(l, k).or_else(|| find_unique_susp(r, k))
         }
         TypedExprKind::Block(b) => {
             for s in &b.stmts {
-                if let Some(p) = find_unique_perform_stmt(&s.kind) {
+                if let Some(p) = find_unique_susp_stmt(&s.kind, k) {
                     return Some(p);
                 }
             }
-            find_unique_perform(&b.tail)
+            find_unique_susp(&b.tail, k)
         }
-        TypedExprKind::If { cond, then_branch, else_branch } => find_unique_perform(cond)
+        TypedExprKind::If { cond, then_branch, else_branch } => find_unique_susp(cond, k)
             .or_else(|| {
                 then_branch
                     .stmts
                     .iter()
-                    .find_map(|s| find_unique_perform_stmt(&s.kind))
-                    .or_else(|| find_unique_perform(&then_branch.tail))
+                    .find_map(|s| find_unique_susp_stmt(&s.kind, k))
+                    .or_else(|| find_unique_susp(&then_branch.tail, k))
             })
             .or_else(|| {
                 else_branch
                     .stmts
                     .iter()
-                    .find_map(|s| find_unique_perform_stmt(&s.kind))
-                    .or_else(|| find_unique_perform(&else_branch.tail))
+                    .find_map(|s| find_unique_susp_stmt(&s.kind, k))
+                    .or_else(|| find_unique_susp(&else_branch.tail, k))
             }),
-        TypedExprKind::Call { args, .. } => args.iter().find_map(find_unique_perform),
+        TypedExprKind::Call { args, .. } => args.iter().find_map(|e| find_unique_susp(e, k)),
         TypedExprKind::StructLit { fields, .. } => {
-            fields.iter().find_map(find_unique_perform)
+            fields.iter().find_map(|e| find_unique_susp(e, k))
         }
-        TypedExprKind::FieldAccess { target, .. } => find_unique_perform(target),
+        TypedExprKind::FieldAccess { target, .. } => find_unique_susp(target, k),
         TypedExprKind::ArrayLit { elements, .. } => {
-            elements.iter().find_map(find_unique_perform)
+            elements.iter().find_map(|e| find_unique_susp(e, k))
         }
         TypedExprKind::Index { target, index, .. } => {
-            find_unique_perform(target).or_else(|| find_unique_perform(index))
+            find_unique_susp(target, k).or_else(|| find_unique_susp(index, k))
         }
-        TypedExprKind::Handle { body, arms, return_arm, .. } => find_unique_perform(body)
-            .or_else(|| arms.iter().find_map(|a| find_unique_perform(&a.body)))
+        TypedExprKind::Handle { body, arms, return_arm, .. } => find_unique_susp(body, k)
+            .or_else(|| arms.iter().find_map(|a| find_unique_susp(&a.body, k)))
             .or_else(|| {
                 return_arm
                     .as_deref()
-                    .and_then(|ra| find_unique_perform(&ra.body))
+                    .and_then(|ra| find_unique_susp(&ra.body, k))
             }),
-        TypedExprKind::ResumeKont { args, .. } => args.iter().find_map(find_unique_perform),
+        TypedExprKind::Perform { args, .. } | TypedExprKind::ResumeKont { args, .. } => {
+            args.iter().find_map(|e| find_unique_susp(e, k))
+        }
         TypedExprKind::MethodCall { target, args, .. } => {
-            find_unique_perform(target).or_else(|| args.iter().find_map(find_unique_perform))
+            find_unique_susp(target, k).or_else(|| args.iter().find_map(|e| find_unique_susp(e, k)))
         }
-        TypedExprKind::ClassInit { args, .. } => args.iter().find_map(find_unique_perform),
+        TypedExprKind::ClassInit { args, .. } => args.iter().find_map(|e| find_unique_susp(e, k)),
         TypedExprKind::ImplMethodCall { target, args, .. } => {
-            find_unique_perform(target).or_else(|| args.iter().find_map(find_unique_perform))
+            find_unique_susp(target, k).or_else(|| args.iter().find_map(|e| find_unique_susp(e, k)))
         }
-        TypedExprKind::QualifiedCall { args, .. } => args.iter().find_map(find_unique_perform),
+        TypedExprKind::QualifiedCall { args, .. } => args.iter().find_map(|e| find_unique_susp(e, k)),
         // C4.4 / ADR 0024: recurse into concurrency-form children.
         TypedExprKind::Scope { body, .. } => body
             .stmts
             .iter()
-            .find_map(|s| find_unique_perform_stmt(&s.kind))
-            .or_else(|| find_unique_perform(&body.tail)),
-        TypedExprKind::Spawn { call, .. } => find_unique_perform(call),
-        TypedExprKind::Await { task_expr, .. } => find_unique_perform(task_expr),
+            .find_map(|s| find_unique_susp_stmt(&s.kind, k))
+            .or_else(|| find_unique_susp(&body.tail, k)),
+        TypedExprKind::Spawn { call, .. } => find_unique_susp(call, k),
+        TypedExprKind::Await { task_expr, .. } => find_unique_susp(task_expr, k),
         // Phase D.1 / ADR 0032 (3/N): search the construction args /
         // scrutinee / arm bodies for the unique embedded perform.
-        TypedExprKind::EnumConstruct { args, .. } => args.iter().find_map(find_unique_perform),
-        TypedExprKind::Match { scrutinee, arms, .. } => find_unique_perform(scrutinee)
-            .or_else(|| arms.iter().find_map(|a| find_unique_perform(&a.body))),
+        TypedExprKind::EnumConstruct { args, .. } => args.iter().find_map(|e| find_unique_susp(e, k)),
+        TypedExprKind::Match { scrutinee, arms, .. } => find_unique_susp(scrutinee, k)
+            .or_else(|| arms.iter().find_map(|a| find_unique_susp(&a.body, k))),
     }
 }
 
@@ -11019,16 +11760,19 @@ fn find_unique_perform(expr: &TypedExpr) -> Option<&TypedExpr> {
 /// the rest of the tail, so only `Some(true)` is faithful. Mirrors [`find_unique_perform`]'s
 /// traversal, and like it has no `_` arm, so a new expression kind must be placed
 /// deliberately.
-fn perform_unconditional(expr: &TypedExpr) -> Option<bool> {
-    fn seq<'a>(items: impl IntoIterator<Item = &'a TypedExpr>) -> Option<bool> {
-        items.into_iter().find_map(perform_unconditional)
+fn susp_unconditional(expr: &TypedExpr, k: Susp) -> Option<bool> {
+    // The suspension point `k` selects is reached unconditionally right here.
+    if is_susp(expr, k) {
+        return Some(true);
     }
-    // Whatever holds the `perform` here holds it conditionally.
-    fn guarded<'a>(items: impl IntoIterator<Item = &'a TypedExpr>) -> Option<bool> {
-        items.into_iter().any(|e| count_performs(e) > 0).then_some(false)
+    fn seq<'a>(items: impl IntoIterator<Item = &'a TypedExpr>, k: Susp) -> Option<bool> {
+        items.into_iter().find_map(|e| susp_unconditional(e, k))
+    }
+    // Whatever holds the suspension point here holds it conditionally.
+    fn guarded<'a>(items: impl IntoIterator<Item = &'a TypedExpr>, k: Susp) -> Option<bool> {
+        items.into_iter().any(|e| count_susp(e, k) > 0).then_some(false)
     }
     match &expr.kind {
-        TypedExprKind::Perform { .. } => Some(true),
         TypedExprKind::IntLit(_)
         | TypedExprKind::BoolLit(_)
         | TypedExprKind::NullLit
@@ -11042,65 +11786,71 @@ fn perform_unconditional(expr: &TypedExpr) -> Option<bool> {
         | TypedExprKind::WidenToSecret(inner)
         | TypedExprKind::Cast(inner)
         | TypedExprKind::Return(inner)
-        | TypedExprKind::Declassify(inner) => perform_unconditional(inner),
+        | TypedExprKind::Declassify(inner) => susp_unconditional(inner, k),
         TypedExprKind::Binary(_, l, r) | TypedExprKind::Cmp(_, l, r) => {
-            seq([l.as_ref(), r.as_ref()])
+            seq([l.as_ref(), r.as_ref()], k)
         }
         // The right of `&&` / `||` runs only when the left does not decide the answer.
         TypedExprKind::Logic(_, l, r) => {
-            perform_unconditional(l).or_else(|| guarded([r.as_ref()]))
+            susp_unconditional(l, k).or_else(|| guarded([r.as_ref()], k))
         }
-        TypedExprKind::Block(b) => perform_unconditional_block(b),
-        TypedExprKind::If { cond, then_branch, else_branch } => perform_unconditional(cond)
-            .or_else(|| (block_performs(then_branch) > 0).then_some(false))
-            .or_else(|| (block_performs(else_branch) > 0).then_some(false)),
+        TypedExprKind::Block(b) => susp_unconditional_block(b, k),
+        TypedExprKind::If { cond, then_branch, else_branch } => susp_unconditional(cond, k)
+            .or_else(|| (block_susp(then_branch, k) > 0).then_some(false))
+            .or_else(|| (block_susp(else_branch, k) > 0).then_some(false)),
         TypedExprKind::Call { args, .. }
         | TypedExprKind::ClassInit { args, .. }
         | TypedExprKind::QualifiedCall { args, .. }
-        | TypedExprKind::EnumConstruct { args, .. } => seq(args),
-        TypedExprKind::StructLit { fields, .. } => seq(fields),
-        TypedExprKind::FieldAccess { target, .. } => perform_unconditional(target),
-        TypedExprKind::ArrayLit { elements, .. } => seq(elements),
-        TypedExprKind::Index { target, index, .. } => seq([target.as_ref(), index.as_ref()]),
+        | TypedExprKind::EnumConstruct { args, .. } => seq(args, k),
+        TypedExprKind::StructLit { fields, .. } => seq(fields, k),
+        TypedExprKind::FieldAccess { target, .. } => susp_unconditional(target, k),
+        TypedExprKind::ArrayLit { elements, .. } => seq(elements, k),
+        TypedExprKind::Index { target, index, .. } => seq([target.as_ref(), index.as_ref()], k),
         TypedExprKind::Handle { body, arms, return_arm, .. } => guarded(
             std::iter::once(body.as_ref())
                 .chain(arms.iter().map(|a| &a.body))
                 .chain(return_arm.as_deref().map(|ra| &ra.body)),
+            k,
         ),
-        TypedExprKind::ResumeKont { args, .. } => guarded(args),
+        // The other suspension kind holds what is under it conditionally: a `perform`
+        // inside a `k(v)`'s argument, or a `k(v)` inside a `perform`'s, runs at a point
+        // this walk cannot order against the one it is looking for.
+        TypedExprKind::Perform { args, .. } | TypedExprKind::ResumeKont { args, .. } => {
+            guarded(args, k)
+        }
         TypedExprKind::MethodCall { target, args, .. }
         | TypedExprKind::ImplMethodCall { target, args, .. } => {
-            perform_unconditional(target).or_else(|| seq(args))
+            susp_unconditional(target, k).or_else(|| seq(args, k))
         }
-        TypedExprKind::Scope { body, .. } => (block_performs(body) > 0).then_some(false),
-        TypedExprKind::Spawn { call, .. } => guarded([call.as_ref()]),
-        TypedExprKind::Await { task_expr, .. } => guarded([task_expr.as_ref()]),
-        TypedExprKind::Match { scrutinee, arms, .. } => perform_unconditional(scrutinee)
-            .or_else(|| guarded(arms.iter().map(|a| &a.body))),
+        TypedExprKind::Scope { body, .. } => (block_susp(body, k) > 0).then_some(false),
+        TypedExprKind::Spawn { call, .. } => guarded([call.as_ref()], k),
+        TypedExprKind::Await { task_expr, .. } => guarded([task_expr.as_ref()], k),
+        TypedExprKind::Match { scrutinee, arms, .. } => susp_unconditional(scrutinee, k)
+            .or_else(|| guarded(arms.iter().map(|a| &a.body), k)),
     }
 }
 
-fn perform_unconditional_block(b: &TypedBlock) -> Option<bool> {
+fn susp_unconditional_block(b: &TypedBlock, k: Susp) -> Option<bool> {
     b.stmts
         .iter()
         .find_map(|s| match &s.kind {
-            TypedStmtKind::Let { value, .. } => perform_unconditional(value),
+            TypedStmtKind::Let { value, .. } => susp_unconditional(value, k),
             TypedStmtKind::Assign { target, value } => {
-                perform_unconditional(target).or_else(|| perform_unconditional(value))
+                susp_unconditional(target, k).or_else(|| susp_unconditional(value, k))
             }
             // A loop's body may run any number of times, and its condition more than once.
-            TypedStmtKind::While { cond, body } => (count_performs(cond) > 0
-                || block_performs(body) > 0)
+            TypedStmtKind::While { cond, body } => (count_susp(cond, k) > 0
+                || block_susp(body, k) > 0)
                 .then_some(false),
             TypedStmtKind::Break | TypedStmtKind::Continue => None,
-            TypedStmtKind::Expr(e) => perform_unconditional(e),
+            TypedStmtKind::Expr(e) => susp_unconditional(e, k),
         })
-        .or_else(|| perform_unconditional(&b.tail))
+        .or_else(|| susp_unconditional(&b.tail, k))
 }
 
 /// How many `perform`s a block holds, statements and tail.
-fn block_performs(b: &TypedBlock) -> usize {
-    b.stmts.iter().map(|s| count_performs_stmt(&s.kind)).sum::<usize>() + count_performs(&b.tail)
+fn block_susp(b: &TypedBlock, k: Susp) -> usize {
+    b.stmts.iter().map(|s| count_susp_stmt(&s.kind, k)).sum::<usize>() + count_susp(&b.tail, k)
 }
 
 /// Register D69: can evaluating `expr` be observed? It can if it calls anything, `return`s,
@@ -11198,10 +11948,14 @@ fn block_is_pure(b: &TypedBlock) -> bool {
 /// never. The `perform`'s own arguments are not part of the prefix: they are evaluated
 /// where the `perform` is (see [`perform_args_fit`]). Visits operands in inkwell's order,
 /// and like the walks above has no `_` arm.
-fn pure_before_perform(expr: &TypedExpr) -> Option<bool> {
-    fn seq<'a>(items: impl IntoIterator<Item = &'a TypedExpr>) -> Option<bool> {
+fn pure_before_susp(expr: &TypedExpr, k: Susp) -> Option<bool> {
+    // Nothing precedes the suspension point `k` selects when it IS this node.
+    if is_susp(expr, k) {
+        return Some(true);
+    }
+    fn seq<'a>(items: impl IntoIterator<Item = &'a TypedExpr>, k: Susp) -> Option<bool> {
         for e in items {
-            if let Some(v) = pure_before_perform(e) {
+            if let Some(v) = pure_before_susp(e, k) {
                 return Some(v);
             }
             if !expr_is_pure(e) {
@@ -11211,7 +11965,6 @@ fn pure_before_perform(expr: &TypedExpr) -> Option<bool> {
         None
     }
     match &expr.kind {
-        TypedExprKind::Perform { .. } => Some(true),
         TypedExprKind::IntLit(_)
         | TypedExprKind::BoolLit(_)
         | TypedExprKind::NullLit
@@ -11226,54 +11979,58 @@ fn pure_before_perform(expr: &TypedExpr) -> Option<bool> {
         | TypedExprKind::WidenToSecret(inner)
         | TypedExprKind::Cast(inner)
         | TypedExprKind::Return(inner)
-        | TypedExprKind::Declassify(inner) => pure_before_perform(inner),
+        | TypedExprKind::Declassify(inner) => pure_before_susp(inner, k),
         TypedExprKind::Binary(_, l, r)
         | TypedExprKind::Cmp(_, l, r)
-        | TypedExprKind::Logic(_, l, r) => seq([l.as_ref(), r.as_ref()]),
+        | TypedExprKind::Logic(_, l, r) => seq([l.as_ref(), r.as_ref()], k),
         TypedExprKind::Block(b) | TypedExprKind::Scope { body: b, .. } => {
-            pure_before_perform_block(b)
+            pure_before_susp_block(b, k)
         }
-        TypedExprKind::If { cond, then_branch, else_branch } => seq([cond.as_ref()])
-            .or_else(|| pure_before_perform_block(then_branch))
-            .or_else(|| pure_before_perform_block(else_branch)),
-        TypedExprKind::Call { args, .. }
+        TypedExprKind::If { cond, then_branch, else_branch } => seq([cond.as_ref()], k)
+            .or_else(|| pure_before_susp_block(then_branch, k))
+            .or_else(|| pure_before_susp_block(else_branch, k)),
+        // The other suspension kind is an ordinary node here: its ARGUMENTS are what run
+        // before the point `k` selects.
+        TypedExprKind::Perform { args, .. }
+        | TypedExprKind::Call { args, .. }
         | TypedExprKind::ResumeKont { args, .. }
         | TypedExprKind::ClassInit { args, .. }
         | TypedExprKind::QualifiedCall { args, .. }
-        | TypedExprKind::EnumConstruct { args, .. } => seq(args),
-        TypedExprKind::StructLit { fields, .. } => seq(fields),
-        TypedExprKind::FieldAccess { target, .. } => pure_before_perform(target),
-        TypedExprKind::ArrayLit { elements, .. } => seq(elements),
-        TypedExprKind::Index { target, index, .. } => seq([target.as_ref(), index.as_ref()]),
+        | TypedExprKind::EnumConstruct { args, .. } => seq(args, k),
+        TypedExprKind::StructLit { fields, .. } => seq(fields, k),
+        TypedExprKind::FieldAccess { target, .. } => pure_before_susp(target, k),
+        TypedExprKind::ArrayLit { elements, .. } => seq(elements, k),
+        TypedExprKind::Index { target, index, .. } => seq([target.as_ref(), index.as_ref()], k),
         TypedExprKind::Handle { body, arms, return_arm, .. } => seq(
             std::iter::once(body.as_ref())
                 .chain(arms.iter().map(|a| &a.body))
                 .chain(return_arm.as_deref().map(|ra| &ra.body)),
+            k,
         ),
         TypedExprKind::MethodCall { target, args, .. }
         | TypedExprKind::ImplMethodCall { target, args, .. } => {
-            seq(std::iter::once(target.as_ref()).chain(args.iter()))
+            seq(std::iter::once(target.as_ref()).chain(args.iter()), k)
         }
-        TypedExprKind::Spawn { call, .. } => pure_before_perform(call),
-        TypedExprKind::Await { task_expr, .. } => pure_before_perform(task_expr),
+        TypedExprKind::Spawn { call, .. } => pure_before_susp(call, k),
+        TypedExprKind::Await { task_expr, .. } => pure_before_susp(task_expr, k),
         TypedExprKind::Match { scrutinee, arms, .. } => {
-            seq(std::iter::once(scrutinee.as_ref()).chain(arms.iter().map(|a| &a.body)))
+            seq(std::iter::once(scrutinee.as_ref()).chain(arms.iter().map(|a| &a.body)), k)
         }
     }
 }
 
-fn pure_before_perform_block(b: &TypedBlock) -> Option<bool> {
+fn pure_before_susp_block(b: &TypedBlock, k: Susp) -> Option<bool> {
     for s in &b.stmts {
         let v = match &s.kind {
             TypedStmtKind::Let { value, .. } | TypedStmtKind::Expr(value) => {
-                pure_before_perform(value).or_else(|| (!expr_is_pure(value)).then_some(false))
+                pure_before_susp(value, k).or_else(|| (!expr_is_pure(value)).then_some(false))
             }
             // A `perform` in the value comes first (inkwell lowers most assignments' value
             // before their target; a guard's `*g = v` is the exception, and a guard cannot
             // reach here uncaptured); otherwise the assignment itself precedes the
             // `perform`, or the `perform` is in its target — decline both.
             TypedStmtKind::Assign { value, .. } => {
-                Some(pure_before_perform(value).unwrap_or(false))
+                Some(pure_before_susp(value, k).unwrap_or(false))
             }
             // A loop before the `perform` may not terminate; one holding it is guarded.
             TypedStmtKind::While { .. } | TypedStmtKind::Break | TypedStmtKind::Continue => {
@@ -11284,7 +12041,7 @@ fn pure_before_perform_block(b: &TypedBlock) -> Option<bool> {
             return v;
         }
     }
-    pure_before_perform(&b.tail)
+    pure_before_susp(&b.tail, k)
 }
 
 /// Register D69 / ADR 0072 A1: can evaluating `expr` disturb a continuation frame that was
@@ -11387,19 +12144,25 @@ fn perform_args_fit(perform: &TypedExpr, fn_def: &TypedFnDef, program: &TypedPro
     })
 }
 
-fn find_unique_perform_stmt(kind: &TypedStmtKind) -> Option<&TypedExpr> {
+fn find_unique_susp_stmt(kind: &TypedStmtKind, k: Susp) -> Option<&TypedExpr> {
     match kind {
-        TypedStmtKind::Let { value, .. } => find_unique_perform(value),
+        TypedStmtKind::Let { value, .. } => find_unique_susp(value, k),
         TypedStmtKind::Assign { target, value } => {
-            find_unique_perform(target).or_else(|| find_unique_perform(value))
+            find_unique_susp(target, k).or_else(|| find_unique_susp(value, k))
         }
-        TypedStmtKind::While { cond, body } => find_unique_perform(cond)
-            .or_else(|| body.stmts.iter().find_map(|s| find_unique_perform_stmt(&s.kind)))
-            .or_else(|| find_unique_perform(&body.tail)),
+        TypedStmtKind::While { cond, body } => find_unique_susp(cond, k)
+            .or_else(|| body.stmts.iter().find_map(|s| find_unique_susp_stmt(&s.kind, k)))
+            .or_else(|| find_unique_susp(&body.tail, k)),
         // D.5 (2/N): payload-free loop control contains no `perform`.
         TypedStmtKind::Break | TypedStmtKind::Continue => None,
-        TypedStmtKind::Expr(e) => find_unique_perform(e),
+        TypedStmtKind::Expr(e) => find_unique_susp(e, k),
     }
+}
+
+/// The embedded-perform shape's substitution (register D69): replace the tail's one
+/// `perform`. [`substitute_susp_with_var`] does the work.
+fn substitute_perform_with_var(expr: &TypedExpr, placeholder_id: VarId) -> TypedExpr {
+    substitute_susp_with_var(expr, placeholder_id, Susp::Perform)
 }
 
 /// C3.5(d) / ADR 0020 D7: clone an expression tree, replacing
@@ -11408,8 +12171,13 @@ fn find_unique_perform_stmt(kind: &TypedStmtKind) -> Option<&TypedExpr> {
 /// perform's return type. The resumer fn body uses the
 /// substituted tail; binding `placeholder_id` to the resumed
 /// value reconstitutes the original control flow.
-fn substitute_perform_with_var(expr: &TypedExpr, placeholder_id: VarId) -> TypedExpr {
-    if matches!(expr.kind, TypedExprKind::Perform { .. }) {
+///
+/// ADR 0075 D6: `k` selects WHICH suspension point is replaced -- the embedded-perform
+/// shape replaces the tail's `perform`, and a handler arm's remainder replaces its
+/// `k(v)`. The traversal is identical; only the node that becomes the placeholder
+/// differs, so the two shapes cannot drift apart in how they rebuild everything else.
+fn substitute_susp_with_var(expr: &TypedExpr, placeholder_id: VarId, k: Susp) -> TypedExpr {
+    if is_susp(expr, k) {
         return TypedExpr {
             kind: TypedExprKind::Var(placeholder_id),
             span: expr.span.clone(),
@@ -11417,7 +12185,6 @@ fn substitute_perform_with_var(expr: &TypedExpr, placeholder_id: VarId) -> Typed
         };
     }
     let new_kind = match &expr.kind {
-        TypedExprKind::Perform { .. } => unreachable!("handled above"),
         TypedExprKind::IntLit(n) => TypedExprKind::IntLit(*n),
         TypedExprKind::BoolLit(b) => TypedExprKind::BoolLit(*b),
         TypedExprKind::NullLit => TypedExprKind::NullLit,
@@ -11430,48 +12197,48 @@ fn substitute_perform_with_var(expr: &TypedExpr, placeholder_id: VarId) -> Typed
         TypedExprKind::FnRef(fid) => TypedExprKind::FnRef(*fid),
         TypedExprKind::Unary(op, inner) => TypedExprKind::Unary(
             *op,
-            Box::new(substitute_perform_with_var(inner, placeholder_id)),
+            Box::new(substitute_susp_with_var(inner, placeholder_id, k)),
         ),
         TypedExprKind::WidenToNullable(inner) => TypedExprKind::WidenToNullable(
-            Box::new(substitute_perform_with_var(inner, placeholder_id)),
+            Box::new(substitute_susp_with_var(inner, placeholder_id, k)),
         ),
         TypedExprKind::WidenToSecret(inner) => TypedExprKind::WidenToSecret(
-            Box::new(substitute_perform_with_var(inner, placeholder_id)),
+            Box::new(substitute_susp_with_var(inner, placeholder_id, k)),
         ),
         TypedExprKind::Declassify(inner) => TypedExprKind::Declassify(
-            Box::new(substitute_perform_with_var(inner, placeholder_id)),
+            Box::new(substitute_susp_with_var(inner, placeholder_id, k)),
         ),
         TypedExprKind::Return(inner) => TypedExprKind::Return(Box::new(
-            substitute_perform_with_var(inner, placeholder_id),
+            substitute_susp_with_var(inner, placeholder_id, k),
         )),
         TypedExprKind::Cast(inner) => TypedExprKind::Cast(Box::new(
-            substitute_perform_with_var(inner, placeholder_id),
+            substitute_susp_with_var(inner, placeholder_id, k),
         )),
         TypedExprKind::Binary(op, l, r) => TypedExprKind::Binary(
             *op,
-            Box::new(substitute_perform_with_var(l, placeholder_id)),
-            Box::new(substitute_perform_with_var(r, placeholder_id)),
+            Box::new(substitute_susp_with_var(l, placeholder_id, k)),
+            Box::new(substitute_susp_with_var(r, placeholder_id, k)),
         ),
         TypedExprKind::Cmp(op, l, r) => TypedExprKind::Cmp(
             *op,
-            Box::new(substitute_perform_with_var(l, placeholder_id)),
-            Box::new(substitute_perform_with_var(r, placeholder_id)),
+            Box::new(substitute_susp_with_var(l, placeholder_id, k)),
+            Box::new(substitute_susp_with_var(r, placeholder_id, k)),
         ),
         TypedExprKind::Logic(op, l, r) => TypedExprKind::Logic(
             *op,
-            Box::new(substitute_perform_with_var(l, placeholder_id)),
-            Box::new(substitute_perform_with_var(r, placeholder_id)),
+            Box::new(substitute_susp_with_var(l, placeholder_id, k)),
+            Box::new(substitute_susp_with_var(r, placeholder_id, k)),
         ),
         TypedExprKind::Block(b) => {
             let stmts: Vec<TypedStmt> = b
                 .stmts
                 .iter()
                 .map(|s| TypedStmt {
-                    kind: substitute_perform_with_var_stmt(&s.kind, placeholder_id),
+                    kind: substitute_susp_with_var_stmt(&s.kind, placeholder_id, k),
                     span: s.span.clone(),
                 })
                 .collect();
-            let tail = substitute_perform_with_var(&b.tail, placeholder_id);
+            let tail = substitute_susp_with_var(&b.tail, placeholder_id, k);
             TypedExprKind::Block(Box::new(TypedBlock {
                 stmts,
                 tail,
@@ -11480,16 +12247,16 @@ fn substitute_perform_with_var(expr: &TypedExpr, placeholder_id: VarId) -> Typed
             }))
         }
         TypedExprKind::If { cond, then_branch, else_branch } => TypedExprKind::If {
-            cond: Box::new(substitute_perform_with_var(cond, placeholder_id)),
-            then_branch: Box::new(substitute_block(then_branch, placeholder_id)),
-            else_branch: Box::new(substitute_block(else_branch, placeholder_id)),
+            cond: Box::new(substitute_susp_with_var(cond, placeholder_id, k)),
+            then_branch: Box::new(substitute_block(then_branch, placeholder_id, k)),
+            else_branch: Box::new(substitute_block(else_branch, placeholder_id, k)),
         },
         TypedExprKind::Call { id, callee_span, args, type_args } => TypedExprKind::Call {
             id: *id,
             callee_span: callee_span.clone(),
             args: args
                 .iter()
-                .map(|a| substitute_perform_with_var(a, placeholder_id))
+                .map(|a| substitute_susp_with_var(a, placeholder_id, k))
                 .collect(),
             type_args: type_args.clone(),
         },
@@ -11500,13 +12267,13 @@ fn substitute_perform_with_var(expr: &TypedExpr, placeholder_id: VarId) -> Typed
                 name_span: name_span.clone(),
                 fields: fields
                     .iter()
-                    .map(|f| substitute_perform_with_var(f, placeholder_id))
+                    .map(|f| substitute_susp_with_var(f, placeholder_id, k))
                     .collect(),
             }
         }
         TypedExprKind::FieldAccess { target, field, field_span, field_index } => {
             TypedExprKind::FieldAccess {
-                target: Box::new(substitute_perform_with_var(target, placeholder_id)),
+                target: Box::new(substitute_susp_with_var(target, placeholder_id, k)),
                 field: field.clone(),
                 field_span: field_span.clone(),
                 field_index: *field_index,
@@ -11516,15 +12283,16 @@ fn substitute_perform_with_var(expr: &TypedExpr, placeholder_id: VarId) -> Typed
             elem_ty: *elem_ty,
             elements: elements
                 .iter()
-                .map(|e| substitute_perform_with_var(e, placeholder_id))
+                .map(|e| substitute_susp_with_var(e, placeholder_id, k))
                 .collect(),
         },
         TypedExprKind::Index { target, index, elem_ty } => TypedExprKind::Index {
-            target: Box::new(substitute_perform_with_var(target, placeholder_id)),
-            index: Box::new(substitute_perform_with_var(index, placeholder_id)),
+            target: Box::new(substitute_susp_with_var(target, placeholder_id, k)),
+            index: Box::new(substitute_susp_with_var(index, placeholder_id, k)),
             elem_ty: *elem_ty,
         },
         TypedExprKind::Handle { .. }
+        | TypedExprKind::Perform { .. }
         | TypedExprKind::ResumeKont { .. }
         | TypedExprKind::MethodCall { .. }
         | TypedExprKind::ClassInit { .. }
@@ -11555,9 +12323,10 @@ fn substitute_perform_with_var(expr: &TypedExpr, placeholder_id: VarId) -> Typed
     }
 }
 
-fn substitute_perform_with_var_stmt(
+fn substitute_susp_with_var_stmt(
     kind: &TypedStmtKind,
     placeholder_id: VarId,
+    k: Susp,
 ) -> TypedStmtKind {
     match kind {
         TypedStmtKind::Let { id, mutable, name, name_span, ty, value } => {
@@ -11567,38 +12336,37 @@ fn substitute_perform_with_var_stmt(
                 name: name.clone(),
                 name_span: name_span.clone(),
                 ty: *ty,
-                value: substitute_perform_with_var(value, placeholder_id),
+                value: substitute_susp_with_var(value, placeholder_id, k),
             }
         }
         TypedStmtKind::Assign { target, value } => TypedStmtKind::Assign {
-            target: substitute_perform_with_var(target, placeholder_id),
-            value: substitute_perform_with_var(value, placeholder_id),
+            target: substitute_susp_with_var(target, placeholder_id, k),
+            value: substitute_susp_with_var(value, placeholder_id, k),
         },
         TypedStmtKind::While { cond, body } => TypedStmtKind::While {
-            cond: substitute_perform_with_var(cond, placeholder_id),
-            body: Box::new(substitute_block(body, placeholder_id)),
+            cond: substitute_susp_with_var(cond, placeholder_id, k),
+            body: Box::new(substitute_block(body, placeholder_id, k)),
         },
         // D.5 (2/N): payload-free loop control — identity substitution.
         TypedStmtKind::Break => TypedStmtKind::Break,
         TypedStmtKind::Continue => TypedStmtKind::Continue,
-        TypedStmtKind::Expr(e) => TypedStmtKind::Expr(substitute_perform_with_var(
-            e,
-            placeholder_id,
-        )),
+        TypedStmtKind::Expr(e) => {
+            TypedStmtKind::Expr(substitute_susp_with_var(e, placeholder_id, k))
+        }
     }
 }
 
-fn substitute_block(b: &TypedBlock, placeholder_id: VarId) -> TypedBlock {
+fn substitute_block(b: &TypedBlock, placeholder_id: VarId, k: Susp) -> TypedBlock {
     TypedBlock {
         stmts: b
             .stmts
             .iter()
             .map(|s| TypedStmt {
-                kind: substitute_perform_with_var_stmt(&s.kind, placeholder_id),
+                kind: substitute_susp_with_var_stmt(&s.kind, placeholder_id, k),
                 span: s.span.clone(),
             })
             .collect(),
-        tail: substitute_perform_with_var(&b.tail, placeholder_id),
+        tail: substitute_susp_with_var(&b.tail, placeholder_id, k),
         span: b.span.clone(),
         ty: b.ty,
     }
@@ -11764,7 +12532,7 @@ fn embedded_perform_verdict(
     })
 }
 
-impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
+impl<'ctx, 'plan, 'm> CodegenCtx<'ctx, 'plan, 'm> {
 
     /// Look up a binding's source name for use as an LLVM SSA debug
     /// name. See C1.1.2 commit 9374edf for the rationale.
@@ -12603,24 +13371,7 @@ fn drains() -> i64 {
     r + outer[0] - 9
 }
 
-// A `while` written INSIDE the arm: the branch out of it to the dispatch loop skips the
-// body's per-iteration drops too, so `w` is at or above the arm floor as well.
-fn looped() -> i64 {
-    handle two() with {
-        Io.read(k) => {
-            let mut i: i64 = 0;
-            let mut r: i64 = 0;
-            while i < 1 {
-                let w: [i64] = [3, 4];
-                r = k(w[0] + 18);
-                i = i + 1;
-            }
-            r
-        }
-    }
-}
-
-fn main() -> i64 { drains() + looped() - 42 }
+fn main() -> i64 { drains() }
 "#;
 
     /// Walk a freed pointer back to the alloca it came out of, and name that slot.
@@ -12760,23 +13511,137 @@ fn main() -> i64 { drains() + looped() - 42 }
 {drains}"
         );
 
-        let looped = ir_fn_body(&ir, "looped");
-        assert!(
-            builds_slot(looped, "w"),
-            "@looped no longer binds `w`, so this pin proves nothing:
-{looped}"
+    }
+
+    /// Type-check `src` and classify the arm bodies of the FIRST `handle` in fn `name`.
+    fn arm_classes(src: &str, name: &str) -> Vec<Option<ArmResumeClass>> {
+        let prog = parse(src).expect("parse");
+        let resolved = resolve(&prog).expect("resolve");
+        let typed = check(&resolved).expect("check");
+        let f = typed
+            .fns
+            .iter()
+            .find(|f| f.name == name)
+            .unwrap_or_else(|| panic!("no fn {name}"));
+        fn find(e: &TypedExpr) -> Option<&[TypedHandlerArm]> {
+            match &e.kind {
+                TypedExprKind::Handle { arms, .. } => Some(&arms[..]),
+                TypedExprKind::Block(b) | TypedExprKind::Scope { body: b, .. } => b
+                    .stmts
+                    .iter()
+                    .find_map(|s| match &s.kind {
+                        TypedStmtKind::Let { value, .. } => find(value),
+                        TypedStmtKind::Expr(e) => find(e),
+                        _ => None,
+                    })
+                    .or_else(|| find(&b.tail)),
+                TypedExprKind::Binary(_, l, r) => find(l).or_else(|| find(r)),
+                TypedExprKind::Return(inner) => find(inner),
+                _ => None,
+            }
+        }
+        let arms = find(&f.body.tail)
+            .or_else(|| {
+                f.body.stmts.iter().find_map(|s| match &s.kind {
+                    TypedStmtKind::Let { value, .. } => find(value),
+                    TypedStmtKind::Expr(e) => find(e),
+                    _ => None,
+                })
+            })
+            .unwrap_or_else(|| panic!("no handle in {name}"));
+        arms.iter()
+            .map(|a| {
+                let kont = *a.param_var_ids.last().expect("the kont VarId");
+                arm_resume_class(&a.body, kont)
+            })
+            .collect()
+    }
+
+    const D87_TWO: &str = "effect Io { read() -> i64; }\n\
+        fn two() -> i64 ! { Io } {\n\
+        \x20   let a: i64 = perform Io.read();\n\
+        \x20   let b: i64 = perform Io.read();\n\
+        \x20   a + b\n\
+        }\n\
+        effect Log { get() -> i64; }\n\
+        enum E { A, B(i64) }\n";
+
+    fn class_of(arm: &str) -> Option<ArmResumeClass> {
+        let src = format!(
+            "{D87_TWO}fn probe() -> i64 {{ handle two() with {{ Io.read(k) => {arm} }} }}\n\
+             fn main() -> i64 {{ probe() }}"
         );
+        arm_classes(&src, "probe").into_iter().next().expect("one arm")
+    }
+
+    #[test]
+    fn d87_an_arms_resume_is_classified_by_where_it_sits() {
+        use ArmResumeClass::*;
+        // Tail -- the arm's value IS the resume's, through a block / `if` / `match` tail.
+        // Every one of these answers 42, which is ADR 0020 D3's answer (ADR 0075's table).
+        assert_eq!(class_of("k(21)"), Some(Tail));
+        assert_eq!(class_of("if 1 > 0 { k(21) } else { 0 }"), Some(Tail));
+        assert_eq!(class_of("match E::B(21) { E::A => 0, E::B(x) => k(x) }"), Some(Tail));
+        assert_eq!(class_of("{ let v: [i64] = [1, 2, 3, 4]; k(v[0] + 20) }"), Some(Tail));
+        // A statement before the resume does not move it out of tail position: the block
+        // still evaluates TO the resume.
+        assert_eq!(class_of("{ let t: i64 = 1; k(20 + t) }"), Some(Tail));
+
+        // Diverging -- the arm returns, so the entry that re-enters it returns first and
+        // the remainder is unreachable under D3 too. `return k(21)` answers 42 and
+        // `return k(1) + 10` answers 12, both D3's answers.
+        assert_eq!(class_of("return k(21)"), Some(Diverging));
+        assert_eq!(class_of("return k(1) + 10"), Some(Diverging));
+        assert_eq!(class_of("{ let a: i64 = k(1); return a + 1 }"), Some(Diverging));
+
+        // Observable -- the branch drops something. `k(1) + 10` answers 12 for D3's 22,
+        // and `{ let r = k(1); r * 3 }` answers 6 for 18.
+        assert_eq!(class_of("k(1) + 10"), Some(Observable));
+        assert_eq!(class_of("{ let r: i64 = k(1); r * 3 }"), Some(Observable));
+        assert_eq!(class_of("{ let v: [i64] = [1, 2, 3, 4]; k(1) + v[0] }"), Some(Observable));
+        // An identity remainder is still a remainder: it is Observable even though its
+        // answer happens to agree today, because nothing here reads the remainder's VALUE.
+        assert_eq!(class_of("{ let r: i64 = k(21); r }"), Some(Observable));
+        // A conditional `return` after the resume does not diverge on every path.
         assert_eq!(
-            bubble_frees(looped),
-            vec!["w".to_string()],
-            "a `while` body inside the arm is at or above the arm floor, so the bubble              out of the loop drains it too:
-{looped}"
+            class_of("{ let a: i64 = k(1); if a > 100 { return 7 } else { a + 10 } }"),
+            Some(Observable)
         );
+        // Two resumes: the remainder of one is not the remainder of the other, whatever
+        // their positions. (ADR 0074 D3 refuses the second at run time; both still lower.)
+        assert_eq!(class_of("k(1) + k(2)"), Some(Observable));
+
+        // No resume at all -- ADR 0020 D4's abort. There is no bubble to classify.
+        assert_eq!(class_of("5"), None);
+
+        // ⚠ A `handle` written INSIDE an arm puts the INNER arm's `k2(v)` in this arm's
+        // subtree, and it is not this arm's suspension point -- the inner handle
+        // dispatches it. Counting it made this outer arm, whose tail is a plain `k(1)`,
+        // look like two resumes, so it fell to (A) and its bubble aborted. The codegen
+        // differential caught it on `c74_two_open_arms`; the classification is keyed on
+        // the arm's OWN continuation binding, which is what makes it right.
         assert_eq!(
-            non_bubble_frees(looped),
-            vec!["w".to_string()],
-            "the pure path stopped freeing `w` — the drops were moved, not added:
-{looped}"
+            class_of(
+                "{ handle perform Log.get() with { Log.get(k2) => k2(3) }; k(1) }"
+            ),
+            Some(Tail),
+            "an inner arm's resume is not this arm's"
+        );
+        // The inner arm, classified on its own kont, is Tail as well.
+        assert_eq!(
+            arm_classes(
+                &format!(
+                    "{D87_TWO}fn probe() -> i64 {{\n\
+                     \x20   handle two() with {{\n\
+                     \x20       Io.read(k) => {{ handle perform Log.get() with {{ Log.get(k2) => \
+                     k2(3) }}; k(1) }}\n\
+                     \x20   }}\n\
+                     }}\n\
+                     fn main() -> i64 {{ probe() }}"
+                ),
+                "probe"
+            ),
+            vec![Some(Tail)]
         );
     }
 

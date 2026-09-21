@@ -1007,7 +1007,27 @@ fn dump_te_call(out: &mut Vec<u8>, cn: [u8], ca: Args, exp: i64, src: &[u8], c: 
             // `k(arg)` (vars shadow fns) → `(resume-kont #vid <args> :T)`, T = the
             // resume value's type; else a free-fn call.
             let kid: i64 = sc_lookup(c, &cn);
-            if kid >= 0 {
+            if cg_arm_ph_is(c, &cn) {
+                // (ADR 0075 D6) inside an arm-remainder RESUMER, the arm's own `k(v)` IS
+                // the resumed value: it lowers as a load of `%arg0`'s slot, and the
+                // argument is not lowered at all. The PARENT already evaluated that
+                // argument and handed it to `sentinel_kont_resume`; the resumer replays
+                // only what comes after. Mirrors the oracle's
+                // `substitute_susp_with_var`, which replaces the whole `k(v)` NODE.
+                //
+                // This buffer is thrown away by `cg_ar_drain`, so the dump text is a
+                // marker rather than the usual `(resume-kont …)`; the args are dropped
+                // rather than walked, which is what NOT re-evaluating them means.
+                sink_name(gb, cn);
+                let _phca: Args = ca;
+                append_str(out, "(armrem-resumed)");
+                let phld: i64 = cg_dst(c);
+                cgo_str(c, "load i64, ptr %v");
+                cgo_int(c, (*c).cg_arm_ph);
+                cg_putc(c, '\n');
+                cg_reg(c, phld);
+                0
+            } else if kid >= 0 {
                 sink_name(gb, cn);
                 let kty: i64 = env_get(c, kid);
                 // (Bar B / effects) cg: collect the resume arg FIRST, then load + clear the

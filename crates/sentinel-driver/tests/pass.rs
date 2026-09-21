@@ -301,6 +301,29 @@ fn pass_c14_struct_bool_field() {
 }
 
 #[test]
+fn pass_c14_struct_field_order() {
+    // A literal written OUT of declaration order still lands each value in its declared
+    // slot, and evaluates the values in declaration order. STDOUT carries the
+    // discrimination, not the exit code: `status.code()` is `WEXITSTATUS` on POSIX, the
+    // LOW 8 BITS, so a value large enough to separate a transposition does not survive
+    // the trip (13568, an earlier draft's answer, is 53*256 and arrives as 0).
+    //   tick(1), tick(2)                      -> 1, 2   the EVALUATION order: `lo` is
+    //                                                   declared first though the literal
+    //                                                   writes `hi` first
+    //   Mixed { count: 9, value: 5, .. }      -> 509     transposed: 905
+    //   Pair  { hi: 30, lo: 2 }               -> 50      transposed: 302
+    //   Pack  { second: 7, first: 3 }         -> 3007    transposed: 7003
+    //   Holder { tail: [40,41], head: [10,11] } -> 1040  transposed: 4010
+    //   Pair  { hi: tick(2), lo: tick(1) }    -> 12      transposed: 21
+    // Within each literal the two observable fields carry different weights, so a
+    // transposition changes that literal's own line. `Mixed.flag` is unweighted because
+    // it cannot transpose silently — its slot is an `i1`. Exit 42 gates on `m.flag`.
+    let r = build_and_run("c14_struct_field_order.sentinel");
+    assert_eq!(r.stdout, "1\n2\n509\n50\n3007\n1040\n12\n");
+    assert_eq!(r.exit, 42);
+}
+
+#[test]
 fn pass_c14_go_no_go() {
     // ADR 0013 D12 phase-go program: Point { x: 3, y: 4 } ->
     // manhattan returns 7 -> print produces stdout "7\n", exit 0.
@@ -1816,6 +1839,18 @@ fn pass_c75_bubble_drains_the_arm() {
     // Measured on `simple`'s shape in a helper fn called from a loop: 36.5 MB at 600,000
     // calls and 147.2 MB at 3,000,000 before, 8.8 and 9.0 after. Exit = 42.
     assert_eq!(run_exit("c75_bubble_drains_the_arm.sentinel"), 42);
+}
+
+#[test]
+fn pass_c75_bubble_replays_the_remainder() {
+    // ADR 0075 D6 (register D87): a bubbling `k(v)` reifies the rest of its arm onto the
+    // bubbled continuation instead of abandoning it. Unlike slice 1, the exit code IS the
+    // evidence here: before this slice `replayed` answered 12 for 22 and `captured` 102
+    // for 202, so 42 is reachable only when both remainders are replayed. `conditional`
+    // is class (A) — its resume sits inside an `if`, so the bubble emits an abort rather
+    // than a wrong answer; `one()` performs once, so that path is not taken at run time
+    // and only its emitted form is under test, through the differentials. Exit = 42.
+    assert_eq!(run_exit("c75_bubble_replays_the_remainder.sentinel"), 42);
 }
 
 #[test]

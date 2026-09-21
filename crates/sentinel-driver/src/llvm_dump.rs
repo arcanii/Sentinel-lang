@@ -40,7 +40,10 @@ use sentinel_ast::{BinOp, CmpOp, LogicOp, UnaryOp};
 use sentinel_borrow_check::{DropPlan, MethodKey};
 // Bar B / generics: reuse the inkwell backend's monomorphic-instance discovery so the
 // oracle monomorphizes the same set, in the same order, as the production codegen.
-use sentinel_codegen::collect_mono_instantiations;
+use sentinel_codegen::{
+    arm_remainder_verdict, arm_resume_class, collect_mono_instantiations, ArmRemainderInfo,
+    ArmResumeClass,
+};
 use sentinel_resolve::{
     EffectId, EnumId, FnId, StructId, VarId, APPLY_FN_ID, ARG_COUNT_FN_ID, ARG_FN_ID,
     I64_TO_U8_FN_ID,
@@ -105,6 +108,9 @@ struct RuntimeSyms {
     /// Pairs with alloc/realloc, so declares right after them.
     free: bool,
     panic_oob: bool,
+    /// ADR 0075 D6: `sentinel_kont_panic_remainder` — the class (A) abort, called on the
+    /// bubble path of a `k(v)` whose remainder cannot be replayed.
+    kont_panic_remainder: bool,
     str_eq: bool,
     read_file: bool,
     write_file: bool,
@@ -208,6 +214,7 @@ impl RuntimeSyms {
         self.realloc |= other.realloc;
         self.free |= other.free;
         self.panic_oob |= other.panic_oob;
+        self.kont_panic_remainder |= other.kont_panic_remainder;
         self.str_eq |= other.str_eq;
         self.read_file |= other.read_file;
         self.write_file |= other.write_file;
@@ -266,6 +273,9 @@ impl RuntimeSyms {
         }
         if self.free {
             writeln!(out, "declare void @sentinel_free(ptr)").unwrap();
+        }
+        if self.kont_panic_remainder {
+            writeln!(out, "declare void @sentinel_kont_panic_remainder()").unwrap();
         }
         if self.panic_oob {
             writeln!(out, "declare void @sentinel_panic_oob(i64, i64)").unwrap();
@@ -414,6 +424,7 @@ impl RuntimeSyms {
             || self.realloc
             || self.free
             || self.panic_oob
+            || self.kont_panic_remainder
             || self.str_eq
             || self.read_file
             || self.write_file
@@ -1018,6 +1029,8 @@ fn dump_fn_named(
         used: RuntimeSyms::default(),
         self_var: None,
         handle_stack: Vec::new(),
+        extra_defines: String::new(),
+        armrem_seq: 0,
         arm_kslots: Vec::new(),
         embed_ph: None,
         handle_depth: 0,
@@ -1081,6 +1094,7 @@ fn dump_fn_named(
     out.push_str(&e.allocas);
     out.push_str(&e.body);
     out.push_str("}\n");
+    out.push_str(&e.extra_defines);
     used.merge(e.used);
     Ok(())
 }
@@ -1135,6 +1149,8 @@ fn dump_let_shape_fn(
             used: RuntimeSyms::default(),
             self_var: None,
             handle_stack: Vec::new(),
+            extra_defines: String::new(),
+            armrem_seq: 0,
             arm_kslots: Vec::new(),
             embed_ph: None,
         handle_depth: 0,
@@ -1192,6 +1208,7 @@ fn dump_let_shape_fn(
         out.push_str(&e.allocas);
         out.push_str(&e.body);
         out.push_str("}\n");
+        out.push_str(&e.extra_defines);
         used.merge(e.used);
     }
     out.push('\n');
@@ -1214,6 +1231,8 @@ fn dump_let_shape_fn(
             used: RuntimeSyms::default(),
             self_var: None,
             handle_stack: Vec::new(),
+            extra_defines: String::new(),
+            armrem_seq: 0,
             arm_kslots: Vec::new(),
             embed_ph: None,
         handle_depth: 0,
@@ -1247,6 +1266,7 @@ fn dump_let_shape_fn(
         out.push_str(&e.allocas);
         out.push_str(&e.body);
         out.push_str("}\n");
+        out.push_str(&e.extra_defines);
         used.merge(e.used);
     }
     Ok(())
@@ -1305,6 +1325,8 @@ fn dump_embedded_shape_fn(
             used: RuntimeSyms::default(),
             self_var: None,
             handle_stack: Vec::new(),
+            extra_defines: String::new(),
+            armrem_seq: 0,
             arm_kslots: Vec::new(),
             embed_ph: None,
         handle_depth: 0,
@@ -1363,6 +1385,7 @@ fn dump_embedded_shape_fn(
         out.push_str(&e.allocas);
         out.push_str(&e.body);
         out.push_str("}\n");
+        out.push_str(&e.extra_defines);
         used.merge(e.used);
     }
     out.push('\n');
@@ -1385,6 +1408,8 @@ fn dump_embedded_shape_fn(
             used: RuntimeSyms::default(),
             self_var: None,
             handle_stack: Vec::new(),
+            extra_defines: String::new(),
+            armrem_seq: 0,
             arm_kslots: Vec::new(),
             embed_ph: None,
         handle_depth: 0,
@@ -1418,6 +1443,7 @@ fn dump_embedded_shape_fn(
         out.push_str(&e.allocas);
         out.push_str(&e.body);
         out.push_str("}\n");
+        out.push_str(&e.extra_defines);
         used.merge(e.used);
     }
     Ok(())
@@ -1497,6 +1523,8 @@ fn dump_chained_lets_fn(
             used: RuntimeSyms::default(),
             self_var: None,
             handle_stack: Vec::new(),
+            extra_defines: String::new(),
+            armrem_seq: 0,
             arm_kslots: Vec::new(),
             embed_ph: None,
         handle_depth: 0,
@@ -1531,6 +1559,7 @@ fn dump_chained_lets_fn(
         out.push_str(&e.allocas);
         out.push_str(&e.body);
         out.push_str("}\n");
+        out.push_str(&e.extra_defines);
         used.merge(e.used);
     }
 
@@ -1553,6 +1582,8 @@ fn dump_chained_lets_fn(
             used: RuntimeSyms::default(),
             self_var: None,
             handle_stack: Vec::new(),
+            extra_defines: String::new(),
+            armrem_seq: 0,
             arm_kslots: Vec::new(),
             embed_ph: None,
         handle_depth: 0,
@@ -1604,6 +1635,7 @@ fn dump_chained_lets_fn(
         out.push_str(&e.allocas);
         out.push_str(&e.body);
         out.push_str("}\n");
+        out.push_str(&e.extra_defines);
         used.merge(e.used);
     }
     Ok(())
@@ -1664,6 +1696,8 @@ fn dump_method(
         used: RuntimeSyms::default(),
         self_var: Some(self_var_id),
         handle_stack: Vec::new(),
+        extra_defines: String::new(),
+        armrem_seq: 0,
         arm_kslots: Vec::new(),
         embed_ph: None,
         handle_depth: 0,
@@ -1718,6 +1752,7 @@ fn dump_method(
     out.push_str(&e.allocas);
     out.push_str(&e.body);
     out.push_str("}\n");
+    out.push_str(&e.extra_defines);
     used.merge(e.used);
     Ok(())
 }
@@ -1725,6 +1760,21 @@ fn dump_method(
 /// Per-fn emission state: the SSA value counter, the block-label counter, the
 /// `VarId → alloca-slot` map (the slot's `%vN` number), the hoisted-alloca buffer,
 /// and the instruction buffer.
+/// Bar B / effects (ADR 0020) + ADR 0075: one enclosing `handle` ARM's dispatch context —
+/// `(loop_block, current_kont_slot, return_arm, scope_floor, remainder)`. The last is ADR
+/// 0075 D6's plan for a bubbling `k(v)` in THAT arm: `None` when the arm is `Tail` or
+/// `Diverging` and the bubble may branch away, `Some(Ok(_))` when its remainder is reified
+/// onto the bubbled kont, and `Some(Err(_))` for class (A), where the bubble aborts. The
+/// verdict itself is `sentinel_codegen`'s, shared with inkwell, so the two back ends cannot
+/// disagree about which arms are which -- only about how each is emitted.
+type HandleFrame = (
+    u32,
+    u32,
+    Option<TypedReturnArm>,
+    usize,
+    Option<Result<ArmRemainderInfo, String>>,
+);
+
 struct Emit<'a> {
     program: &'a TypedProgram,
     next: u32,
@@ -1772,7 +1822,7 @@ struct Emit<'a> {
     /// re-wrap. ADR 0075 D2: `scope_floor` is `scopes.len()` the instant before the arm's
     /// body is lowered — the branch LEAVES the arm, so it drains every frame at or above
     /// it first, exactly as `break` / `continue` drain to a loop's floor (register D87).
-    handle_stack: Vec<(u32, u32, Option<TypedReturnArm>, usize)>,
+    handle_stack: Vec<HandleFrame>,
     /// ADR 0074 D1/D2: the continuation slot of every handler arm whose body is being
     /// lowered, innermost last — the arm's ownership record for its kont. `k(v)` clears
     /// it before resuming, so on any exit a non-null slot is a kont the arm still owns:
@@ -1784,6 +1834,15 @@ struct Emit<'a> {
     /// lowers as a `load` from this slot (the parent already lowered the real
     /// perform + its args); `None` everywhere else.
     embed_ph: Option<u32>,
+    /// ADR 0075 D6: top-level `define`s discovered while lowering this one — the resumer
+    /// that replays a handler arm's remainder. Nothing about it is known before the arm is
+    /// reached, so it is accumulated here and appended to the module text beside the
+    /// parent's `define`. `dump` checks that every resumer a body REFERENCES has a
+    /// definition, so a site that forgets to append cannot pass silently.
+    extra_defines: String,
+    /// ADR 0075 D6: names the arm-remainder resumers of THIS `define`. Lowering order is
+    /// deterministic, so `scg` reproduces the same names.
+    armrem_seq: u32,
     /// Bar B / effects (c36b): the dynamic `handle` nesting depth. Incremented on entry
     /// to `lower_handle`, decremented on exit; `> 1` means this handle is nested (its
     /// body is reached from an enclosing handle), so it lowers to a Kont*-typed result
@@ -3372,8 +3431,32 @@ impl Emit<'_> {
             // ADR 0075 D2: the arm floor, captured NOW — before the arm's body pushes
             // its block frame, and after every frame belonging to the function around
             // the `handle`, which a bubble does not leave.
-            self.handle_stack
-                .push((loop_b, cks, return_arm.cloned(), self.scopes.len()));
+            // ADR 0075 D6: what THIS arm's bubble does with the rest of the arm. The
+            // verdict is `sentinel-codegen`'s, so inkwell and this back end classify
+            // every arm identically; only the emission below is this one's own.
+            let arm_kont = *arm
+                .param_var_ids
+                .last()
+                .ok_or("type-check guarantees the kont VarId is present")?;
+            let remainder = match arm_resume_class(&arm.body, arm_kont) {
+                Some(ArmResumeClass::Tail) | Some(ArmResumeClass::Diverging) | None => None,
+                Some(ArmResumeClass::Observable) => {
+                    let var_ty = self.var_ty.clone();
+                    Some(arm_remainder_verdict(
+                        &arm.body,
+                        arm_kont,
+                        &move |id| var_ty.get(&id).copied(),
+                        self.program,
+                    ))
+                }
+            };
+            self.handle_stack.push((
+                loop_b,
+                cks,
+                return_arm.cloned(),
+                self.scopes.len(),
+                remainder,
+            ));
             let av = self.lower_expr(&arm.body)?;
             self.handle_stack.pop();
             // ADR 0074 D2: the fall-through leaves the arm with its value. Release the
@@ -3554,8 +3637,42 @@ impl Emit<'_> {
             .last()
             .ok_or("ResumeKont must be lowered inside a handle arm")?
             .clone();
-        let (loop_b, cks, ret_arm, arm_floor) = frame;
+        let (loop_b, cks, ret_arm, arm_floor, remainder) = frame;
         writeln!(self.body, "bb{bubble_b}:").unwrap();
+        // ADR 0075 D6: the rest of THIS arm does not run after the branch. Reify it onto
+        // the bubbled kont when the verdict allows, so the inner dispatch replays it when
+        // the chain drains (ADR 0020 D3's re-wrap); abort when it does not, rather than
+        // drop it silently.
+        let abort_bubble = match &remainder {
+            None => false,
+            Some(Ok(info)) => {
+                let info = info.clone();
+                let sym = self.emit_arm_remainder_resumer(&info)?;
+                let captured_op = self.build_captured_state(&info.captured)?;
+                writeln!(
+                    self.body,
+                    "  call void @sentinel_kont_push(ptr %v{kr}, ptr @{sym}, ptr {captured_op})"
+                )
+                .unwrap();
+                self.used.kont_push = true;
+                false
+            }
+            Some(Err(_why)) => {
+                writeln!(self.body, "  call void @sentinel_kont_panic_remainder()").unwrap();
+                writeln!(self.body, "  unreachable").unwrap();
+                self.used.kont_panic_remainder = true;
+                true
+            }
+        };
+        if abort_bubble {
+            // The pure path is still the value of `k(v)`; emit it and stop.
+            writeln!(self.body, "bb{pure_b}:").unwrap();
+            let pv = self.fresh();
+            writeln!(self.body, "  %v{pv} = call i64 @sentinel_kont_consume_pure(ptr %v{kr})")
+                .unwrap();
+            self.used.kont_consume_pure = true;
+            return self.apply_return_arm(ret_arm.as_ref(), &format!("%v{pv}"));
+        }
         // ADR 0075 D1 (register D87): this branch leaves the arm's ENTRY, so it drains
         // the arm's scopes first — every frame at or above the arm floor, innermost
         // first, covering a nested block and the body of a `while` written inside the
@@ -3581,6 +3698,128 @@ impl Emit<'_> {
         writeln!(self.body, "  %v{pv} = call i64 @sentinel_kont_consume_pure(ptr %v{kr})").unwrap();
         self.used.kont_consume_pure = true;
         self.apply_return_arm(ret_arm.as_ref(), &format!("%v{pv}"))
+    }
+
+    /// ADR 0075 D6: allocate and fill the `i64[N]` captured-state struct a continuation
+    /// frame carries, and answer the operand to hand `sentinel_kont_push`. `null` when
+    /// nothing is captured, as the other frame shapes emit. Ownership passes to the push,
+    /// which frees it after the resumer runs.
+    fn build_captured_state(&mut self, captured: &[VarId]) -> Result<String, String> {
+        if captured.is_empty() {
+            return Ok("null".to_string());
+        }
+        let size = captured.len() * 8;
+        let a = self.fresh();
+        writeln!(self.body, "  %v{a} = call ptr @sentinel_alloc(i64 {size})").unwrap();
+        self.used.alloc = true;
+        for (i, cap_id) in captured.iter().enumerate() {
+            let off = i * 8;
+            let gp = self.fresh();
+            writeln!(self.body, "  %v{gp} = getelementptr i8, ptr %v{a}, i64 {off}").unwrap();
+            let slot = *self
+                .slots
+                .get(cap_id)
+                .ok_or("ADR 0075 D6: the verdict captured only names in scope")?;
+            let ld = self.fresh();
+            writeln!(self.body, "  %v{ld} = load i64, ptr %v{slot}").unwrap();
+            writeln!(self.body, "  store i64 %v{ld}, ptr %v{gp}").unwrap();
+        }
+        Ok(format!("%v{a}"))
+    }
+
+    /// ADR 0075 D6: emit the free function that replays a handler arm's remainder, into
+    /// [`Self::extra_defines`], and answer its symbol. Mirrors the resumer half of
+    /// `dump_let_shape_fn` and inkwell's `emit_arm_remainder_resumer`: the resumed value
+    /// binds the placeholder, each capture is loaded out of the `i64[N]` struct, the
+    /// remainder is lowered as plain code, and its value returns through
+    /// `sentinel_kont_pure`.
+    ///
+    /// The symbol is derived from the parent's identity and a per-`define` counter, and
+    /// lowering order is deterministic, so `scg` reproduces the same name. The resumer's
+    /// own `Emit` starts with an EMPTY handle stack and arm-slot stack: it runs outside
+    /// the arm, with no `k` and no enclosing `handle`, which is also why the verdict
+    /// refuses a remainder that resumes or leaves the arm.
+    fn emit_arm_remainder_resumer(&mut self, info: &ArmRemainderInfo) -> Result<String, String> {
+        // The parent's SOURCE NAME, not its `FnId`: `scg` numbers functions differently
+        // (its builtins start at 3/5/6/14 where this back end's `main` was 43), and the
+        // two must emit the same symbol. This is the convention the embedded-perform
+        // resumer already uses on both sides -- `__resume_{sym}` here,
+        // `__resume_<name slice>` there -- and for a non-generic fn the symbol IS the
+        // source name. A method has no `FnId`; a handler arm in one is register D13's
+        // territory, so it falls back to the method key rather than pretending.
+        let sym = match self.current_method {
+            Some(MethodKey::ClassInit(c)) => format!("__armrem_ci{}_{}", c.0, self.armrem_seq),
+            Some(MethodKey::ClassMethod(c, i)) => {
+                format!("__armrem_cm{}_{}_{}", c.0, i, self.armrem_seq)
+            }
+            Some(MethodKey::ImplMethod(im, i)) => {
+                format!("__armrem_im{}_{}_{}", im.0, i, self.armrem_seq)
+            }
+            None => {
+                let name = self
+                    .program
+                    .fns
+                    .iter()
+                    .find(|f| f.id == self.current_fn)
+                    .map(|f| f.name.as_str())
+                    .unwrap_or("fn");
+                format!("__armrem_{name}_{}", self.armrem_seq)
+            }
+        };
+        self.armrem_seq += 1;
+        let mut e = Emit {
+            program: self.program,
+            next: 0,
+            block: 0,
+            slots: HashMap::new(),
+            var_ty: HashMap::new(),
+            scopes: Vec::new(),
+            drop_plan: self.drop_plan,
+            current_fn: self.current_fn,
+            current_method: None,
+            allocas: String::new(),
+            body: String::new(),
+            loops: Vec::new(),
+            used: RuntimeSyms::default(),
+            self_var: None,
+            handle_stack: Vec::new(),
+            extra_defines: String::new(),
+            armrem_seq: 0,
+            arm_kslots: Vec::new(),
+            embed_ph: None,
+            handle_depth: 0,
+            current_scope: None,
+        };
+        e.scopes.push(Vec::new());
+        let v_slot = e.alloca("i64");
+        writeln!(e.body, "  store i64 %arg0, ptr %v{v_slot}").unwrap();
+        e.slots.insert(info.placeholder_id, v_slot);
+        e.var_ty.insert(info.placeholder_id, Type::I64);
+        for (i, cap_id) in info.captured.iter().enumerate() {
+            let off = i * 8;
+            let gp = e.fresh();
+            writeln!(e.body, "  %v{gp} = getelementptr i8, ptr %arg1, i64 {off}").unwrap();
+            let ld = e.fresh();
+            writeln!(e.body, "  %v{ld} = load i64, ptr %v{gp}").unwrap();
+            let slot = e.alloca("i64");
+            writeln!(e.body, "  store i64 %v{ld}, ptr %v{slot}").unwrap();
+            e.slots.insert(*cap_id, slot);
+            e.var_ty.insert(*cap_id, Type::I64);
+        }
+        let val = e.lower_expr(&info.remainder)?;
+        let kp = e.fresh();
+        writeln!(e.body, "  %v{kp} = call ptr @sentinel_kont_pure(i64 {val})").unwrap();
+        e.used.kont_pure = true;
+        writeln!(e.body, "  ret ptr %v{kp}").unwrap();
+        let mut def = String::new();
+        write!(def, "define ptr @{sym}(i64 %arg0, ptr %arg1) {{\nentry:\n").unwrap();
+        def.push_str(&e.allocas);
+        def.push_str(&e.body);
+        def.push_str("}\n\n");
+        def.push_str(&e.extra_defines);
+        self.extra_defines.push_str(&def);
+        self.used.merge(e.used);
+        Ok(sym)
     }
 
     /// Lower a slice of argument expressions to `(ll-type, operand)` pairs, in order —

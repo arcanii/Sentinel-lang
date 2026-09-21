@@ -165,7 +165,12 @@ pub enum Expr {
 // last, regardless of source order), filled via a `&mut Ret` out-param.
 pub enum HArms {
     HEnd,
-    HCell([u8], [u8], Binds, Expr, HArms),
+    // (ADR 0075 D6) the 5th field is the arm BODY's first token index. `scg` classifies
+    // a bubbling `k(v)` by re-parsing a disposable copy of the body (move semantics bar
+    // inspecting the one it lowers), and that needs somewhere to start; the return arm
+    // already carries the same thing as `cg_ret_tok0`. Nothing dumps it, so the AST,
+    // resolve and merge differentials do not move.
+    HCell([u8], [u8], Binds, Expr, i64, HArms),
 }
 
 pub enum Ret {

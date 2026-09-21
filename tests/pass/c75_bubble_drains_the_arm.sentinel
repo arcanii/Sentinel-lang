@@ -18,11 +18,11 @@
 //
 //   - `simple`  — one frame, the arm's block;
 //   - `nested`  — a block inside the arm, so two frames are open at the `k(v)`;
-//   - `looped`  — a `while` written inside the arm, whose body frame the branch out of
-//                 the loop would otherwise skip as well. Its `k(v)` is also the one
-//                 shape here that is not in tail position; its value is unchanged
-//                 because the abandoned remainder happens to be the identity on the
-//                 resumed value (ADR 0075 D5 (R), which is a later slice);
+//   - (a `while` written INSIDE the arm, around the `k(v)`, would open a body frame at
+//     the bubble too. It is not here: ADR 0075 D6 classifies such a `k(v)` (A), because
+//     replaying its remainder would re-run the loop from the top, so its bubble aborts
+//     and that drain is unreachable. The frames a bubble can actually be holding are the
+//     arm's own and any nested block's, which is what `nested` pins.)
 //   - `enclosing` — the other end of the floor: `below` belongs to the FUNCTION around
 //                 the `handle`, which a bubble does not leave, so it must NOT be drained
 //                 here. A floor set any lower frees it on the bubble path and again at
@@ -45,7 +45,7 @@
 // unfixed rate. `scg` is held to the oracle byte-for-byte on this file by the codegen
 // differential's corpus sweep.
 //
-// Exits 42: 42 + 42 + 42 + 42 - 126.
+// Exits 42: 42 + 42 + 42 - 84.
 
 effect Io { read() -> i64; }
 
@@ -70,21 +70,6 @@ fn nested() -> i64 {
     }
 }
 
-fn looped() -> i64 {
-    handle two() with {
-        Io.read(k) => {
-            let mut i: i64 = 0;
-            let mut r: i64 = 0;
-            while i < 1 {
-                let w: [i64] = [3, 4];
-                r = k(w[0] + 18);
-                i = i + 1;
-            }
-            r
-        }
-    }
-}
-
 fn enclosing() -> i64 {
     let below: [i64] = [9, 9];
     let r: i64 = handle two() with {
@@ -94,5 +79,5 @@ fn enclosing() -> i64 {
 }
 
 fn main() -> i64 {
-    simple() + nested() + looped() + enclosing() - 126
+    simple() + nested() + enclosing() - 84
 }

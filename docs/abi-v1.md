@@ -379,6 +379,7 @@ Codegen declares these as external; `sentinel-runtime` defines them
 | `sentinel_kont_pure` | `(i64 value) -> ptr` | handlers |
 | `sentinel_kont_consume_pure` | `(ptr kont) -> i64` | handlers |
 | `sentinel_kont_push` | `(ptr kont, ptr resumer, ptr captured) -> void` | handlers |
+| `sentinel_kont_panic_remainder` | `() -> void` (never returns) | handlers — ADR 0075 D6 class (A): a bubbling `k(v)` whose remainder cannot be replayed as a continuation frame. Emitted on the bubble path with `unreachable` after it, so it is reached only where the program's answer would otherwise be silently wrong |
 | `sentinel_kont_free` | `(ptr kont) -> void` | handlers — free an abandoned kont (+ its captured frame chain) on every exit that leaves a handler arm without resuming `k`: the fall-through, `return`, `break` / `continue` (ADR 0074 D2; `return` since ADR 0065 D6). Emitted code loads the kont from the arm's continuation slot and calls this only when it is not `null` (a `k(v)` clears the slot); the runtime accepts `null` anyway, as a no-op (ADR 0074 D4) |
 | `sentinel_task_spawn` | `(ptr wrapper, ptr args, i64 args_size) -> ptr` | concurrency (ADR 0024) |
 | `sentinel_task_await` | `(ptr task) -> i64` | concurrency |

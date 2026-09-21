@@ -1,6 +1,6 @@
 # ADR 0075: A bubbling resume leaves the arm's entry, and must drain it
 
-Status: **ACCEPTED for slice 1** (D1–D5, 2026-09-21), **PROPOSED for slice 2** (D6).
+Status: **ACCEPTED** (D1–D5 2026-09-21, D6 2026-09-22).
 Addresses register item **D87**, whose leak half slice 1 closes.
 Amends [ADR 0074](0074-handler-arm-owns-its-continuation.md) D2, whose bubble bullet
 settles what the bubble does with the arm's *continuation* and is silent on the arm's
@@ -130,10 +130,11 @@ no frames, so its resume always drains pure and the bubble path is unreachable �
 program is correct today and would stay correct under (2) unfixed.
 
 So the leak, (1), is live in the shape every program in the tree uses, and the wrong value,
-(2), is not reachable from any of them. (Slice 1 adds a second non-tail resume, `looped` in
-`tests/pass/c75_bubble_drains_the_arm.sentinel`, deliberately: it pins the drain of a
-`while` body inside an arm. Its remainder is the identity on the resumed value, so its
-answer does not move when slice 2 lands.)
+(2), is not reachable from any of them. (Slice 1 added a second non-tail resume, `looped` in
+`tests/pass/c75_bubble_drains_the_arm.sentinel`, to pin the drain of a `while` body inside
+an arm. Slice 2 REMOVED it: a `k(v)` inside a loop is (A), so its bubble aborts and that
+drain is unreachable. The frames a bubble can actually hold are the arm's own and a nested
+block's, which `nested` pins.)
 
 ## Decisions
 
@@ -264,6 +265,86 @@ preserves every exit, but what is live across the branch includes the SSA operan
 expression the `k(v)` sits in (the left operand of `lhs + k(v)`), which no back end reifies;
 reaching it means A-normalising every arm body, in all three.
 
+#### What slice 2 built, and where it stands
+
+The route is validated at the runtime level before any of it:
+`a_frame_pushed_onto_a_bubbled_kont_is_the_arms_remainder` in `sentinel-runtime` runs one
+dispatch loop twice over the `k(1) + 10` shape, once pushing the remainder onto the bubbled
+kont and once not, and gets **22 and 12**. So "no runtime change is needed" is established
+by construction rather than by reading.
+
+**The verdict is ONE implementation, shared by two back ends.** The embedded-perform
+shape's walkers -- `count`, `find_unique`, `unconditional`, `pure_before`, `substitute` --
+are now keyed on WHICH suspension point (`Susp::Perform` / `Susp::Resume`) rather than
+duplicated, with `Susp::Perform` wrappers so no existing call site moved. `llvm_dump.rs`
+already imports from `sentinel-codegen` (`collect_mono_instantiations`), so the text oracle
+calls `arm_resume_class` / `arm_remainder_verdict` directly instead of growing a third
+detector. That matters: the analogous embedded-perform shape is NOT mirrored today --
+inkwell has the full verdict, the oracle has a narrower `detect_embedded_shape`, and `scg`
+has a third narrower one "over the emitted-corpus shapes" -- and they agree only because
+the corpus contains none of the disagreements. Sharing the arm verdict removes that failure
+mode for two of the three.
+
+Measured, inkwell and the text oracle independently (the oracle's IR through `llc` and
+`link.exe`), both agreeing: `k(1) + 10` answers **22** where it answered 12,
+`{ let r: i64 = k(1); r * 3 }` answers **18** where it answered 6, and
+`{ let v: [i64] = [1,2,3,4]; k(1) + v[0] }` answers **4** where it answered 3. Every `Tail`
+and `Diverging` shape is unchanged. A `k(v)` inside a loop is (A) and aborts.
+
+⚠ `{ let v: [i64] = … }` reified under the ADR's first, operator-level prefix rule — `v` is
+bound INSIDE the arm, so it was a local of the remainder rather than a capture, and the
+replay re-ran the pure array literal. Under the narrowed rule above it is **(A)**: the
+`let` is evaluated before the resume and an array literal is not a literal scalar or a
+name. That is the whole of what narrowing cost, and it was measured both ways.
+
+**`scg` is mirrored.** It was the largest single piece of the slice, and the one this
+repo's mirror defects (D17, D29, D34) come from. Three things about it are worth carrying
+forward:
+
+- **The verdict re-parses, six times.** `cg_ar_classify` asks each question of its own
+  disposable copy of the arm body, parsed from the token stream at `cg_h_btok`, because an
+  `Expr` is consumed by its walk. That is `cg_chained.sentinel`'s classification-copy
+  idiom. Keeping the token arrays for EVERY cg run, not only one with a `return` arm, was
+  the enabling change; with the old gate they were empty and `scg` emitted nothing at all
+  for all 29 handle fixtures.
+- **The resumer define is DEFERRED, not nested.** Building one needs `cg_reset`, which
+  clears about twenty pools and ten scalars with no save/restore, so it cannot run in the
+  middle of the parent's body the way the text oracle's `extra_defines` buffer does.
+  Instead the bubble records a worklist entry and `cg_ar_drain` emits the defines once the
+  enclosing one is assembled — which is also where the oracle flushes that buffer, so the
+  two agree on define ORDER without either side sorting. The drain takes back the blank
+  line the enclosing define already wrote and re-emits it after the last resumer, because
+  the oracle closes the parent with `}
+` and the separator comes later.
+- **Two things had to be keyed differently from the oracle.** The resumer SYMBOL is
+  `__armrem_<parent source name>_<seq>` on both sides, not the oracle's `FnId`, because
+  `scg` numbers functions differently (its builtins start at 3/5/6/14 where the oracle's
+  `main` was 43). And the placeholder that makes the arm's own `k(v)` lower as a load of
+  `%arg0` is keyed by NAME, not by VarId: the drain runs after the arm's `truncate_scope`,
+  so `sc_lookup` no longer answers for `k`. The sequence number is taken at BUBBLE time
+  rather than at classification time, because the oracle advances its counter inside
+  `emit_arm_remainder_resumer` and for a `handle` nested in an arm the two orders differ.
+
+Pinned by `tests/pass/c75_bubble_replays_the_remainder` — (R) with no captures, (R) with an
+`i64[1]` capture frame, (A) from something evaluated before the resume, and (A) from a
+resume inside a struct literal — which the corpus differentials compare byte for byte and
+which runs to 42 under inkwell and under the oracle's own IR. Unlike slice 1 the exit code
+IS the evidence: before the slice `replayed` answered 12 for 22 and `captured` 102 for 202.
+Five mutations were caught: `scg`'s reify, `scg`'s drain, `scg`'s (A) abort, inkwell's
+verdict and the oracle's verdict, each naming that fixture or its test.
+
+⚠ One narrowing was added during the mirror. A resume INSIDE a struct literal is now (A)
+on all three back ends. A literal does evaluate its fields in a straight line, but only in
+DECLARATION order, and `scg` asks the prefix question of raw tokens in SOURCE order with no
+struct id at that point to reorder by. Before the narrowing that gap DUPLICATED a side
+effect: `S { b: k(1), a: g() }.a` had the oracle refuse the arm while `scg` called `g()`
+three times where two is the honest count, because `scg` emitted `g()` before the resume
+and again inside the replayed remainder. Refusing is the safe direction and removes the
+question rather than answering it twice. (The same source-order/declaration-order gap in
+the CAPTURE walk is fixed rather than narrowed, by ordering the literal's fields before
+collecting: the capture order is the `i64[N]` frame's layout, and the oracle reads it off
+the typed tree.)
+
 #### The classification, as an explicit list
 
 A `k(v)` in an arm is exactly one of these, and the list is closed by construction — a
@@ -287,7 +368,24 @@ shape not matched is (R), and a (R) the gates refuse is (A):
 
 #### The gates on (R)
 
-Two, both fail-closed, and both already load-bearing elsewhere:
+Three, all fail-closed:
+
+- **Nothing but a literal or a name may be evaluated before the `k(v)`.** The remainder is
+  replayed from the top of the arm, so everything ahead of the resume runs a second time;
+  a literal or a name cannot be observed twice, and nothing else is allowed to try.
+
+  ⚠ **This is deliberately narrower than "pure", and the reason is the third
+  implementation.** The faithful rule is the embedded-perform shape's `pure_before_susp`,
+  which asks an operator-level question — division traps, `&mut` and a deref are impure,
+  the rest are not. Mirroring that into `scg` means mirroring an OPERATOR TABLE into a
+  second implementation, where one wrong constant is a silent classification divergence
+  that no corpus program can catch, because none is class (R). A rule with no operator in
+  it cannot drift that way. The cost is specific and measured:
+  `{ let v: [i64] = [1,2,3,4]; k(1) + v[0] }` is **(A)** under this rule, where the
+  operator-level one reified it to 4 — the `let` is evaluated before the resume and an
+  array literal is neither a literal scalar nor a name. `k(1) + 10` and
+  `{ let r: i64 = k(1); r * 3 }` are unaffected, because a literal may precede a resume and
+  a `let` whose own value is one is still trivial.
 
 - **The captures cross the `i64[N]` seam**, so ADR 0072 D3/D4's `FITS` allow-list governs
   them unchanged: `i64` and `secret i64` only. A remainder that reads a `[i64]`, a `bool`,
@@ -302,13 +400,20 @@ Two, both fail-closed, and both already load-bearing elsewhere:
 
 #### The (A) diagnostic
 
-A new runtime symbol, aborting the way `sentinel_kont_panic_resumed` does, called on the
-bubble path with `unreachable` after it. It is an `abi-v1` **addition** — no existing
-symbol, signature or layout moves — and it is reached only where the program's answer is
-wrong today, so nothing that works now regresses: `after`'s `handle` body is a bare
-`perform`, whose kont carries no frames, so its bubble path is emitted and never taken.
-Reusing an existing abort was rejected: both `sentinel_kont_panic_resumed` and
+`sentinel_kont_panic_remainder()`, aborting the way `sentinel_kont_panic_resumed` does,
+called on the bubble path with `unreachable` after it. It is an `abi-v1` **addition** — no
+existing symbol, signature or layout moves — and it is reached only where the program's
+answer is wrong today, so nothing that works now regresses: `after`'s `handle` body is a
+bare `perform`, whose kont carries no frames, so its bubble path is emitted and never
+taken. Reusing an existing abort was rejected: both `sentinel_kont_panic_resumed` and
 `sentinel_panic_oob` would print a diagnostic naming the wrong fault.
+
+Unlike `sentinel_kont_panic_resumed`, which is runtime-internal, this one is
+codegen-declared, so it has the full set of sites a declared symbol has: the runtime's
+definition, inkwell's `add_function` and its `CodegenCtx` field, the oracle's `RuntimeSyms`
+flag — **including `merge`**, which is where a missed thread once made the oracle emit calls
+to an undeclared symbol — its `declare` line and its any-used test, `scg`'s declare flag,
+and `docs/abi-v1.md`.
 
 ## Slices
 
@@ -319,7 +424,10 @@ is the memory leak, it reaches the idiom every tracked program uses, and D6 depe
 - **Slice 1 — D1–D5.** The bubble drains the arm's scopes in all three back ends (D1, D2),
   under the borrow rule that makes the drain sound (D3). Not `abi`-moving. Status below.
 - **Slice 2 — D6.** The remainder reification, its two gates and the (A) abort, in all three
-  back ends, plus the runtime symbol.
+  back ends, plus the runtime symbol. **Landed 2026-09-22.** The ordering that mattered:
+  until `scg` was mirrored the differential could not see the divergence, because no
+  tracked program was class (R) — so the fixture that makes one had to arrive WITH the
+  mirror, not before it.
 
 ## Consequences
 
@@ -368,8 +476,10 @@ is the memory leak, it reaches the idiom every tracked program uses, and D6 depe
   control measured in the same batch: the tail shape 36.5 → 8.8 MB at 600,000 calls and
   147.2 → 9.0 at 3,000,000, the non-tail one 147.2 → 8.9 at 3,000,000, and the control
   unmoved at 9.0.
-- **Values**: every row of the Measured table answers exactly what it answered before.
-  D6 is a later slice, so the three that disagree with ADR 0020 D3 still do.
+- **Values**: at slice 1 every row of the Measured table answered exactly what it answered
+  before, and the three that disagreed with ADR 0020 D3 still did, D6 being a later slice.
+  Slice 2 is what moved them: `k(1) + 10` now answers 22, `{ let r = k(1); r * 3 }` 18, and
+  `{ let v: [i64] = …; k(1) + v[0] }` is refused as (A) rather than answering 3.
 - **The gate (D3)**: `tests/ui/c75_move_into_handler_arm.sentinel` is rejected with
   `sentinel::borrow::moved_in_handler_arm`, snapshotted whole. Five spellings of the move
   were built and all five are refused — a whole binding from a fn-local `let`, a by-value
@@ -383,14 +493,14 @@ is the memory leak, it reaches the idiom every tracked program uses, and D6 depe
   through the `extractvalue` / `load` to the alloca it came out of; it must NOT contain a
   `sentinel_arena_exit`, which is how a floor set any lower reaches `outer`, the array
   belonging to the function around the `handle`; and the blocks that are NOT the bubble
-  must still free the same two. In `looped`, the same for the `while` body's binding. Each
+  must still free the same two. Each
   assertion is guarded by a non-vacuity check — that the probe still builds the slot it
   names, and that `drains` really does route `outer` through an arena, without which the
   arena assertion could not see a floor set too low.
 - **Text oracle**: `llvm_a_bubbling_resume_drains_the_arms_scopes` in `tests/llvm.rs`
   finds each fn's dispatch slot, then its one reachable bubble block — the block that ends
   by storing a kont into that slot and branching back — and counts the frees inside it and
-  outside it: (1,1), (2,2), (1,1) and (1,2) over `simple`, `nested`, `looped` and
+  outside it: (1,1), (2,2) and (1,2) over `simple`, `nested` and
   `enclosing`. `enclosing` is the floor's other end: it holds an array below the arm floor,
   so a floor at the function makes its first number 2.
   ⚠ **The second number is not decoration.** A first draft checked only the bubble block,
@@ -439,17 +549,21 @@ is the memory leak, it reaches the idiom every tracked program uses, and D6 depe
 
 **Slice 2.**
 
-- **Value**: every row of the Measured table, re-run; the three that disagree with D3 must
-  answer 22, 18 and 4, and the seven that agree must not move.
-- **Classification**: a fixture per class — (T), (X) in both its `return k(v)` and
-  `return k(v) + n` forms, (R) with a capture and without, (A) for a refused capture and
-  for a conditional `return` in the remainder — each mutated into the neighbouring class and
-  caught.
+- **Value**: every row of the Measured table, re-run; the seven that agree with D3 must not
+  move. Of the three that disagreed, `k(1) + 10` answers 22 and `{ let r = k(1); r * 3 }`
+  answers 18; the third, `{ let v: [i64] = …; k(1) + v[0] }`, is (A) under the narrowed
+  prefix rule and is refused rather than answering 4.
+- **Classification**: `tests/pass/c75_bubble_replays_the_remainder` carries (R) without a
+  capture, (R) with an `i64[1]` capture frame, (A) from something evaluated before the
+  resume, and (A) from a resume inside a struct literal; (T) and (X) are already carried by
+  `c75_bubble_drains_the_arm` and `c74_arm_return_leaves_the_arm`. Mutation: `scg`'s reify,
+  `scg`'s drain, `scg`'s abort, inkwell's verdict and the oracle's verdict each reverted in
+  turn, each caught, each naming that fixture or its test.
 - **`abi-v1`**: the new symbol added to `docs/abi-v1.md` §5, declared by all three back
   ends and threaded through `RuntimeSyms::merge` — a symbol called but not declared is
   invalid IR the oracle emits silently (the M1.4c-1 finding), so the pin is a build of a
   program that reaches it, not a reading.
 - **Corpus**: as slice 1. Every tracked arm is (T) but `c74_arm_return_leaves_the_arm`'s
-  `after`, which is (X), and `c75_bubble_drains_the_arm`'s `looped`, which is (R) — so
-  `looped` is the one file whose IR is expected to move, and every other is expected
-  byte-identical.
+  `after`, which is (X) — so NO tracked file's IR is expected to move, and the new fixture
+  is the only one that exercises (R) at all. (`c75_bubble_drains_the_arm`'s `looped` was
+  going to be the exception, being (R); it is (A) under the loop rule, and was removed.)
