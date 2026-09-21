@@ -124,7 +124,7 @@ reference as you work through the milestones.
 > confirming nothing pre-existing is newly refused; oracle-vs-scg byte-equality on the new
 > fixture at types, mir and llvm; and the secret-taint check in both directions.
 
-### ▶ RESUME HERE (2026-09-21b — `origin/main` is `1485f02`, which carries D88, D90 and the D90 review corrections; the ONE local, unpushed commit is this slice. ⚠ `origin/main` moved three times during the previous session and once more DURING this one — the three commits this slice's own STATE/HANDOVER text called local were pushed while it was being written, so that text was stale in the commit that introduced it. Read `git reflog show refs/remotes/origin/main` and `git log --oneline origin/main..HEAD` at the START and again before writing either down; never a hash written in a file, including this one. This session: **D87's leak half closed** by [ADR 0075](decisions/0075-a-bubbling-resume-leaves-its-arm.md) slice 1 (D1–D5) — a bubbling `k(v)` drains the arm's scopes, in all three back ends, under a new borrow rule (D3) that makes the per-entry drain sound — and **D93** and **D94** filed. Register: **94 items, 41 done**. Four-check: 2,005 passed with exactly the 18 known Windows failures, doctests and clippy clean, every `selfhost_*` differential green, both bootstrap fixed points byte-identical; corpus byte-identical over all 466 tracked files and identical `snc build` acceptance over the 393 with a `main`.
+### ▶ RESUME HERE (2026-09-22 — `origin/main` was `4ac159a` when this was written; it moved three times during the previous session and once more DURING the one before that, so read `git reflog show refs/remotes/origin/main` and `git log --oneline origin/main..HEAD` at the START and AGAIN before writing either down — never a hash written in a file, including this one. This session: **register D87 CLOSED, both halves** — [ADR 0075](decisions/0075-a-bubbling-resume-leaves-its-arm.md) slice 2 (D6) reifies a bubbling `k(v)`'s remainder onto the bubbled continuation in all three back ends, with `scg` byte-identical to the oracle, so `k(1) + 10` answers 22 where it answered 12; a remainder that cannot be replayed aborts through the new `sentinel_kont_panic_remainder` rather than answering wrongly. ADR 0075 is **ACCEPTED**. The same session closed **D95** (`scg` placed struct-literal values by SOURCE position, not declared field index) and filed **D96**, **D97** and **D98**. Register: **98 distinct ids, 41 whose heading opens `**D<n> — DONE`** (D87 and D95 are the two that changed). ⚠ That rule is not the one earlier blocks used: a looser grep for DONE or CLOSED anywhere in a heading line answers 46, because several headings say a HALF is done or mention it in passing. Count the same way twice before reporting a movement. Four-check: **2,009 passed with exactly the 18 known Windows failures**, doctests and clippy clean, every `selfhost_*` differential green including both bootstrap fixed points. Two MATCHED pre/post sweeps over all **470** tracked and untracked `.sentinel` files, each binary smoke-tested to discriminate first: the ORACLE differs on exactly one file (the new slice-2 fixture) and `scg` on exactly two (that one and the new D95 fixture). Five mutations caught. ⚠ Build both sweep binaries `--profile test`: a `cargo build` snc STACK-OVERFLOWS on three corpus files and reports itself as three false differences.)
 
 > **What the 2026-09-21b slice did — [ADR 0075](decisions/0075-a-bubbling-resume-leaves-its-arm.md) slice 1.**
 > ADR 0074 D2 lists four paths out of a handler arm. Three drain the arm's scopes; the
@@ -1344,10 +1344,15 @@ reference as you work through the milestones.
 >      `c22_ref_receiver_method_call` (oracle 1966 bytes vs sentinel 1862), so the fixture
 >      is load-bearing rather than decorative. Both bootstrap fixed points green.
 >
->      **D87 — a `k(v)` whose resume BUBBLES abandons the rest of its arm: the remainder never
->      runs, and the arm's scope bindings are never dropped. The DROPS half is DONE
->      (2026-09-21, [ADR 0075](decisions/0075-a-bubbling-resume-leaves-its-arm.md) slice 1,
->      D1–D5); the remainder is open, and ADR 0075 D6 decides its route.** ⚠ The drops half
+>      **D87 — DONE, both halves. A `k(v)` whose resume BUBBLES abandoned the rest of its
+>      arm: the remainder never ran, and the arm's scope bindings were never dropped.** The
+>      DROPS half landed 2026-09-21 with
+>      [ADR 0075](decisions/0075-a-bubbling-resume-leaves-its-arm.md) slice 1 (D1–D5), the
+>      REMAINDER half 2026-09-22 with slice 2 (D6): the bubble reifies the remainder onto the
+>      bubbled continuation, so `k(1) + 10` answers 22 where it answered 12, and a remainder
+>      that cannot be replayed aborts through `sentinel_kont_panic_remainder` instead of
+>      answering wrongly. All three back ends; `scg` byte-identical to the oracle, pinned by
+>      `tests/pass/c75_bubble_replays_the_remainder`. ⚠ The drops half
 >      reaches further than this entry reads: the leak is not a property of the NON-tail shape
 >      below, but of the branch, so the TAIL idiom — which is what every handler arm in the
 >      tree is written in, and whose answer is correct — leaks identically (36.5 MB at 600,000
@@ -1561,6 +1566,107 @@ reference as you work through the milestones.
 >      the same way it bites: the new fixture sat unregistered until the four-check's total
 >      came back +2 rather than +3.) The fix is either six tests or a registration guard like
 >      `examples.rs`'s `every_example_is_registered`.
+>
+>      **D95 — DONE (2026-09-22). `scg` placed a struct literal's values by their SOURCE
+>      position instead of their declared field index, so a literal written out of declaration
+>      order was transposed.** Found 2026-09-22 while wiring ADR 0075 slice 2; pre-existing and
+>      deliberately deferred — `dump_sfields` in `selfhost/types/infer.sentinel` said "Source
+>      order", and the dump site in `selfhost/types/borrow.sentinel` carried the reasoning:
+>      "the corpus writes fields in decl order, so source order = decl order; a reorder is a
+>      follow-up if a fixture needs it". [ADR 0041](decisions/0041-self-host-port-types.md)
+>      carried the same sentence. That was a property of the corpus, not of the compiler, and
+>      it held right up to the moment a literal was written any other way. The Rust side has
+>      always ordered, with `provided.sort_by_key(|(idx, _)| *idx)` in
+>      `crates/sentinel-types/src/lib.rs`; `snc` and inkwell were never affected.
+>
+>      One walk writes the typed DUMP, collects the MIR args, and collects the codegen
+>      operands the `insertvalue` chain consumes positionally, so all three moved together.
+>      Constructed three ways on the pre-fix `scg`: with `struct S { a: i64, b: bool, c: i64 }`,
+>      `S { c: 7, a: 5, b: true }` emitted `i64 7, 0 / i64 5, 1 / i1 1, 2` against a correct
+>      `%Struct.0 = type { i64, i1, i64 }`, which `llc` rejects — "insertvalue operand and
+>      field disagree in type: 'i64' instead of 'i1'"; with `struct P { lo: i64, hi: i64 }`,
+>      `P { hi: 9, lo: 4 }` stayed well-typed and silently answered `p.lo` = 9 where the oracle
+>      and inkwell answer 4; and the typed dump diverged too, `(struct-lit #0 S (int 7) (int 5)
+>      (bool true))` against the oracle's `(int 5) (bool true) (int 7)`. It surfaced by
+>      accident: a new `TyCtx` field added after `cg_used_free` in the declaration but before
+>      `cg_used_kontfree` in the initializer failed the bootstrap fixed point with EQUAL byte
+>      counts, 5245694 against 5245694, and transposed `insertvalue` operands.
+>
+>      Fix: `sort_fields` runs once per literal, ahead of `dump_sfields`, and answers the
+>      cells in declared order — which also makes `scg` evaluate the field values in
+>      declaration order, as the oracle does by lowering the sorted typed node. It walks the
+>      list once to read each cell's `field_index` and rebuild it, and stops there when those
+>      keys are already ascending, which every literal in the corpus is; only a literal
+>      actually written out of order reaches the selection sort. That split is not cosmetic:
+>      the first draft asked `field_index` once per cell PER STEP, and `field_index` scans
+>      every field of every struct in the program, so `scg` compiling the merged compiler went
+>      from 616 ms to 722 ms, +17%. With the one-shot pass it is 629 ms against 630 for the
+>      same binary with the ordering removed entirely — the pass itself is no longer
+>      measurable. (Those two are the matched pair; the 616 ms build predates ADR 0075 slice 2
+>      and is not directly comparable to either.)
+>
+>      Pinned by `tests/pass/c14_struct_field_order`, covering a heterogeneous literal, a
+>      same-width one whose transposition would be silent, a generic instance, an OWNING
+>      `[i64]` field, and — through `print` — the evaluation order. The discrimination is on
+>      STDOUT: `status.code()` is `WEXITSTATUS` on POSIX, so an earlier draft's exit code of
+>      13568 would have arrived as 0 (13568 = 53*256) and the test would have passed only on
+>      Windows. Within each literal the two observable fields carry different weights, so a
+>      transposition changes that literal's own printed line; `Mixed.flag` carries none
+>      because its slot is an `i1` and a transposition into it is not well-typed IR.
+>      Mutation-verified: with the ordering reverted to the identity, both the codegen and the
+>      types corpus differentials fail and name that fixture. No other emitted byte moved, in
+>      the corpus or in either bootstrap fixed point — a matched pre/post sweep of all 469
+>      tracked and untracked `.sentinel` files reports exactly one difference, that fixture.
+>      (The first run of that sweep reported ZERO, because `git ls-files` lists only TRACKED
+>      files and the new fixture was not yet added; `--cached --others --exclude-standard` is
+>      what makes a new-file sweep mean anything.)
+>
+>      **D96 — the Rust type checker PANICS on a struct literal that names a field twice.**
+>      Found 2026-09-22 by D95's review; pre-existing, and independent of D95.
+>      `crates/sentinel-types/src/lib.rs:10107` builds `by_index` and then
+>      `.expect("every field was provided")`: a duplicate fills one slot twice and leaves
+>      another `None`, so the count check above it passes and the `expect` fires.
+>      `struct P { lo: i64, hi: i64 }` + `let p = P { lo: 1, lo: 2 };` panics all three entry
+>      points — `snc types`, `snc llvm` and `snc build` — with exit 101 and a Rust backtrace
+>      rather than a `miette` diagnostic, which the project's own rule against `unwrap` /
+>      `panic!` on user-program input forbids. `scg` does not panic; it emits IR. The fix is a
+>      `DuplicateField` diagnostic where the missing-field check already is, plus a
+>      `tests/ui` fixture.
+>
+>      **D97 — `scg` ACCEPTS a struct literal naming a field the struct does not declare,
+>      where the oracle rejects it.** Found 2026-09-22 by D95's review; pre-existing.
+>      `struct P { lo: i64, hi: i64 }` + `P { zzz: 1, lo: 2, hi: 3 }`: `snc llvm` and
+>      `snc types` exit 1 with "struct `P` has no field `zzz`", while `scg` exits 0 and emits
+>      403 bytes. `field_type` answers -1 for the unknown name and nothing acts on it. The
+>      differentials do not see this because the oracle Errs, so the fixture is SKIPPED — the
+>      same blind spot that hid D95. It is a missing REJECTION rather than a wrong answer, and
+>      the compiler that ships is the one that rejects, so it is a divergence and not a
+>      miscompile. The fix is a `field_type` / `field_index` -1 check at the `dump_sfields`
+>      call site.
+>
+>      **D98 — an `if` written inside a handler ARM diverges in the MIR stage: the
+>      self-hosted lowerer descends into the arm and emits its branch blocks, the Rust oracle
+>      treats the whole `handle` as one opaque node.** Found 2026-09-22 by ADR 0075 slice 2's
+>      new fixture, which used an `if` for its class (A) shape and failed
+>      `sentinel_mir_matches_oracle_on_corpus` at 1/252. Pre-existing and independent of
+>      everything in that slice — reduced to a program with no resume, no struct literal
+>      and no class question at all:
+>
+>          effect Io { read() -> i64; }
+>          fn one() -> i64 ! { Io } { let a: i64 = perform Io.read(); a }
+>          fn main() -> i64 {
+>              handle one() with { Io.read(k) => if 1 > 0 { 7 } else { 0 }, return v => v }
+>          }
+>
+>      `snc mir` gives `(fn main i64 (block b0 (params) (v0:i64 call one) (v1:i64 opaque v0)
+>      (term return v1)))`; the self-hosted lowerer adds `(term branch v (b1) (b2))` and three
+>      more blocks. Note the operand in that terminator is a bare `v` with no id, which looks
+>      like a second defect in the same place. No corpus fixture had an `if` inside an arm
+>      before, which is why it has never been seen. It is a DUMP divergence in a verification
+>      stage, not emitted code: MIR is lowered only for `secret_leak` and friends, and both
+>      bootstrap fixed points are byte-identical. The slice-2 fixture works around it by using
+>      the other class (A) shape (`side() + k(5)`, something evaluated before the resume), so
+>      the workaround is what currently keeps the differential green.
 >
 >      **D78 — stale corpus fixture counts in `llvm.rs` and `README.md`, at six sites, stale
 >      before this change.** Found by D74's reviews. `crates/sentinel-driver/tests/llvm.rs`

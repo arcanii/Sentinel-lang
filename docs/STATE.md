@@ -5,7 +5,7 @@ HANDOVER.md, STATE.md is the source of truth. New contributors (or
 new chat sessions) should be able to read this file and understand
 the current state of the workspace without re-reading every commit.
 
-## Current State (2026-07-01)
+## Current State (2026-09-22)
 
 > **Phase C closed at Sentinel 1.0 (2026-05-30); Phase D self-hosts; the
 > per-unit separate-compilation back end is functionally complete.**
@@ -14,11 +14,23 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
-**Latest (2026-09-21b) — the leak half of register **D87** closed by
+**Latest (2026-09-22) — register **D87** is CLOSED, both halves, by
+[ADR 0075](decisions/0075-a-bubbling-resume-leaves-its-arm.md) slice 2 (D6): a bubbling
+`k(v)` now REIFIES the rest of its arm onto the bubbled continuation, so the inner dispatch
+replays it when the chain drains. `k(1) + 10` answers 22 where it answered 12, which is
+ADR 0020 D3's answer. Where the remainder cannot be replayed — it is guarded, something
+observable runs before it, it suspends, it leaves the arm, or a name it reads does not fit a
+continuation slot — the bubble aborts through the new `sentinel_kont_panic_remainder`
+instead of answering wrongly. All three back ends, `scg` byte-identical to the oracle, both
+bootstrap fixed points green. The same slice found and closed **D95**: `scg` placed a struct
+literal's values by their SOURCE position rather than their declared field index, so a
+literal written out of declaration order was transposed. `snc` and inkwell were never
+affected. **D96, D97 and D98 filed.**
+
+**Previously (2026-09-21b) — the leak half of register **D87** closed by
 [ADR 0075](decisions/0075-a-bubbling-resume-leaves-its-arm.md) slice 1 (D1–D5): a bubbling
 `k(v)` leaves the arm's ENTRY, so it drains the arm's scopes on the way. All three back
-ends; committed, not pushed (`origin/main` is `1485f02`, which carries D88, D90 and the D90
-review corrections — read the reflog, not this line).** ADR 0074 D2 enumerates four paths out of a handler arm and settles what
+ends.** ADR 0074 D2 enumerates four paths out of a handler arm and settles what
 each does with the arm's *continuation*. Three of them also drain the arm's scopes — the
 fall-through at its block's end, a `return` to the function floor, a `break` / `continue` to
 its loop's. The bubble, taken when `k(v)`'s resume returns a kont that is not `PURE_RETURN`
