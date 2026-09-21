@@ -15,7 +15,8 @@ the current state of the workspace without re-reading every commit.
 > overview.
 
 **Latest (2026-09-21) — D90 closed by [ADR 0036](decisions/0036-loops.md) A4: a loop's
-CONDITION allocates its slots once too. inkwell-only, NOT oracle-moving, NOT PUSHED.** A2 and A3
+CONDITION allocates its slots once too. inkwell-only, NOT oracle-moving; the fix is pushed
+(`a498e74`), its review corrections are not.** A2 and A3
 raised `loop_depth` around the loop BODY alone, so the slots a `while` condition allocates were
 hoisted only when the loop sat inside another one. For an outermost loop they were built inline
 in `loop_cond` — the block the back-edge re-enters — and grew the stack every iteration exactly
@@ -55,7 +56,7 @@ second. **D91 filed**, split out of D90: `lower_handle` emits its own dispatch l
 
 **Previously (2026-09-20) — D88 closed by [ADR 0036](decisions/0036-loops.md) A3, and D62 and D77
 with it: every slot a loop body reaches is allocated once, in the entry block. inkwell-only,
-NOT oracle-moving, NOT PUSHED.** ADR 0036 D4 says a loop body's slot is allocated once and
+NOT oracle-moving; pushed 2026-09-21 as part of `a498e74`'s push.** ADR 0036 D4 says a loop body's slot is allocated once and
 reused each iteration, and A2 made that true for a body `let`, an `if`-result and a
 `match`-result by hoisting them to the function's entry block. Fifteen other slots stayed on
 `builder.build_alloca` at the insertion point: the handle lowering's five (`current_kont_slot`,
