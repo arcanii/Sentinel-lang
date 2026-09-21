@@ -130,8 +130,9 @@ reference as you work through the milestones.
 > `loop_depth` around the loop BODY alone, so a `while` CONDITION's slots hoisted only when the
 > loop was nested inside another one; for an outermost loop they stayed inline in `loop_cond`,
 > which the back-edge re-enters, and grew the stack every iteration. `while i < (match E::B(n)
-> { … })` overflowed at 560,000 iterations, `while i < (if n > 0 { n } else { 0 })` by
-> 1,200,000. The bump now brackets the condition as well, with an unconditional decrement.
+> { … })` overflowed at 560,000 iterations, and `while i < (if n > 0 { n } else { 0 })`
+> completes at 1,040,000 and overflows at 1,060,000. The bump now brackets the condition as
+> well, with an unconditional decrement.
 > Inkwell-only and not oracle-moving. What is still open is D91: `lower_handle`'s dispatch loop
 > is a loop `loop_depth` cannot see, bounded today only by ADR 0072's tail-position gate.
 >
@@ -1416,7 +1417,16 @@ reference as you work through the milestones.
 >      claim true — and end to end by `tests/pass/c5d5_loop_cond_slot_reuse.sentinel`. Both
 >      mutations were caught: reverting the bump fails the first pin (and the D88 pin does NOT
 >      see it, which is why this one exists), and dropping the decrement — which would silently
->      hoist every later binding in the module — fails the second.
+>      hoist every later binding in the module — fails the second. **The cost, measured by the
+>      review:** a condition is evaluated at least once per call, so hoisting a slot it reaches
+>      is free or better (an always-evaluated allocating condition GAINED headroom, ~11,600 to
+>      ~12,900 frames). The exception is a slot in a branch the condition does NOT take — a
+>      short-circuited `&&` RHS, an untaken `if` arm — which was never allocated before and is
+>      now reserved on every call: with four 16-field class constructions in such a branch,
+>      around a zero-trip loop in a recursive fn, the frame goes from 376 to 1,240 bytes and the
+>      recursion depth from about 38,700 to about 12,900. No corpus program changes and seven
+>      self-host module objects are byte-identical, so the bootstrap is untouched; a per-branch
+>      hoist is the fix if a real program meets it. See ADR 0036 A4.
 >
 >      **D91 — `lower_handle`'s dispatch loop is invisible to `loop_depth`, so a `handle` with
 >      no enclosing `while` builds its arm slots inside that loop.** Split out of D90 on
@@ -1425,7 +1435,8 @@ reference as you work through the milestones.
 >      `handle_arm` → `kv_bubble` → back. The arm's slots (`arm_param`, `kont_var`, and the
 >      return-arm slot the resume path builds) are emitted while that arm is lowered, so a
 >      bubble re-enters their allocas. Measured: a single `handle` in `main`, with no `while`
->      anywhere in the source, compiles to four dynamic allocas (`subq %rax, %rsp` sites). It is bounded today only because ADR 0072 refuses a `perform` or an
+>      anywhere in the source, compiles to four dynamic allocas (`subq %rax, %rsp` sites) when
+>      its op takes a parameter and it has a `return` arm; a barer one has fewer. It is bounded today only because ADR 0072 refuses a `perform` or an
 >      effecting call outside tail position: a performing computation can therefore neither loop
 >      nor recurse, so the number of bubbles is the number of syntactic `perform`s on the path,
 >      a small constant. Widening that gate must come with hoisting these slots — and with a

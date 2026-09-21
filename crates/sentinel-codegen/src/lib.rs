@@ -2096,12 +2096,13 @@ struct CodegenCtx<'ctx, 'plan> {
     /// `lower_array_lit` before it lowers the elements, so a nested array
     /// literal in an element does not inherit the routing.
     array_route_active: bool,
-    /// Phase D.5 / ADR 0036 D4: how many `while` bodies enclose the
-    /// current lowering point. When > 0, per-binding allocas are placed
-    /// in the function **entry block** (executed once) rather than inline
-    /// in the loop body (where they would run — and grow the stack — every
-    /// iteration, overflowing at large iteration counts). Bumped around
-    /// `lower_block(while-body)`. Zero for non-loop code, so that codegen
+    /// Phase D.5 / ADR 0036 D4: how many `while` conditions or bodies
+    /// enclose the current lowering point. When > 0, per-binding allocas
+    /// are placed in the function **entry block** (executed once) rather
+    /// than inline, where they would run — and grow the stack — every
+    /// iteration, overflowing at large iteration counts. Bumped around the
+    /// condition (A4) and around `lower_block(while-body)` (A2); the
+    /// back-edge re-enters both. Zero for non-loop code, so that codegen
     /// is byte-identical to pre-D.5 (the c51 repro bar).
     loop_depth: u32,
     /// Phase D.5 (2/N) / ADR 0036 D9: stack of enclosing `while` loops'
@@ -4711,7 +4712,8 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
 
     /// Phase D.5 / ADR 0036 D4 (A2, widened by A3): allocate a stack slot —
     /// a binding, a result value, or any other slot a loop body can reach.
-    /// Inside a `while` body (`loop_depth > 0`) the alloca is placed at the
+    /// Inside a `while` (`loop_depth > 0` — its condition as well as its body,
+    /// A4) the alloca is placed at the
     /// TOP of the function's entry block — executed once, the slot reused
     /// each iteration — so the stack does not grow per iteration (a loop
     /// body's inline alloca would, overflowing at large counts: registers
@@ -12481,11 +12483,12 @@ fn main() -> i64 { conds(2) }
     fn d90_a_loop_condition_allocates_in_the_entry_block_too() {
         let ir = compile_src_ir(D90_CONDS);
         let body = ir_fn_body(&ir, "conds");
-        // The slots the two conditions allocate: the `match` payload binding, and the
-        // handle's dispatch slot, kont slot, op-param slot and both return-arm value
-        // slots. Naming them keeps the stray check below honest — `conds` takes a
+        // The slots the two conditions allocate: the `match` result and its payload
+        // binding, and the handle's dispatch slot, kont slot, op-param slot and both
+        // return-arm value slots. Naming them keeps the stray check below honest — `conds` takes a
         // parameter, whose slot is in the entry block either way.
         for (slot, n) in [
+            ("matchresult", 1),
             ("x", 1),
             ("current_kont_slot", 1),
             ("kont_var", 1),

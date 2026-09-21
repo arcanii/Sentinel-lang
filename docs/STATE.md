@@ -26,7 +26,14 @@ stack at 560,000, and `while i < (if n > 0 { n } else { 0 })`, one 16-byte slot,
 (the result is captured and `?`-ed after it, as the body's already was).
 
 Soundness is A2's argument unchanged: the condition runs once per iteration and its slots are
-consumed inside that evaluation. Measured with a matched pre/post pair, each smoke-tested before
+consumed inside that evaluation. The cost is narrower than A3's but real, and the review
+measured it: a condition is evaluated at least once per call, so hoisting a slot it reaches is
+free or better (an always-evaluated allocating condition GAINED recursion headroom, about
+11,600 → 12,900 frames), but a slot in a branch the condition does NOT take — a short-circuited
+`&&` RHS, an untaken `if` arm — was never allocated before and is now reserved on every call:
+four 16-field class constructions in such a branch take a recursive fn's frame from 376 to
+1,240 bytes and its depth from about 38,700 to about 12,900. No corpus program changes and
+seven self-host module objects are byte-identical, so the bootstrap is untouched. Measured with a matched pre/post pair, each smoke-tested before
 use: the match-condition loop at 560,000 and 3,000,000, a handle-valued condition at 3,000,000,
 and a loop whose condition AND body both allocate at 600,000 each overflowed before and exit 0
 after; the nested control is unchanged either way. Over the 465 tracked `.sentinel` files the

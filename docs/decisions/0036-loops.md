@@ -373,8 +373,8 @@ the deepest user of this compiler — `scg` compiling the whole merged compiler,
 bootstrap fixed points — stays green.
 
 **One position was still outside the hoist**, and this amendment did not change it: a
-`while` CONDITION is lowered before `loop_depth` is bumped (the increment brackets
-`lower_block(body)` only), so for an OUTERMOST loop every slot the condition allocates —
+`while` CONDITION was lowered before `loop_depth` was bumped (the increment bracketed
+`lower_block(body)` only), so for an OUTERMOST loop every slot the condition allocated —
 A3's fifteen and A2's three alike — was still built inline in `loop_cond`, which the
 back-edge re-enters. Measured on a matched pre/post pair: `while i < (match E::B(n) { … })`
 completes at 500,000 iterations and overflows at 560,000, identically before and after this
@@ -412,6 +412,21 @@ and `d90_a_binding_after_a_loop_is_not_hoisted`, and end to end by
 dropping the decrement — which would silently hoist every later binding in the module —
 fails the second.
 
+The trade-off is narrower than A3's but real. A condition is evaluated at least once per
+call, so for a slot the condition actually reaches the hoist is free or better — measured,
+an always-evaluated allocating condition gives MORE recursion headroom after it (about
+12,900 frames against 11,600), because the dynamic-alloca bookkeeping goes away. The
+exception is a slot inside a branch of the condition that is not taken: the RHS of a
+short-circuited `&&` or `||`, an untaken `if` arm, an unreached `match` arm. Before, that
+alloca never executed; now its slot is reserved in the entry block of every call. Measured
+with four 16-field class constructions in a short-circuited RHS, around a zero-trip loop in
+a recursive fn: the frame goes from 376 to 1,240 bytes and the recursion depth from about
+38,700 to about 12,900 — a legal program that completed before can overflow. Its reach is
+small: no corpus program changes, and seven self-host module objects (`lexer`, `parser`,
+`codegen`, `borrow`, `mir`, `effects`, `ctverify`) are byte-identical before and after, so
+the bootstrap is untouched. A per-branch hoist would avoid it and is not worth the
+machinery today; if a real program meets it, that is the fix to reach for.
+
 inkwell-only again, and the oracle's IR does not move: over the 465 tracked `.sentinel`
 files, `snc llvm` output is byte-identical and all 286 programs that build run the same.
 What A3 left open and A4 does not close is the other invisible loop: `lower_handle` emits
@@ -419,7 +434,7 @@ its own dispatch loop, which `loop_depth` — a count of SOURCE `while` nesting 
 so a `handle` with no enclosing `while` still builds its arm slots inside that loop. It is
 bounded today only because ADR 0072 refuses a `perform` outside tail position, so the
 number of bubbles is the number of syntactic `perform`s on the path; widening that gate
-must come with hoisting those slots. Register D90 keeps that half.
+must come with hoisting those slots. Register D91 keeps that half.
 
 ## Revisit
 
