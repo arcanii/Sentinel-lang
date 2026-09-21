@@ -17,7 +17,8 @@ the current state of the workspace without re-reading every commit.
 **Latest (2026-09-21b) — the leak half of register **D87** closed by
 [ADR 0075](decisions/0075-a-bubbling-resume-leaves-its-arm.md) slice 1 (D1–D5): a bubbling
 `k(v)` leaves the arm's ENTRY, so it drains the arm's scopes on the way. All three back
-ends; NOT PUSHED.** ADR 0074 D2 enumerates four paths out of a handler arm and settles what
+ends; committed, not pushed (`origin/main` is `1485f02`, which carries D88, D90 and the D90
+review corrections — read the reflog, not this line).** ADR 0074 D2 enumerates four paths out of a handler arm and settles what
 each does with the arm's *continuation*. Three of them also drain the arm's scopes — the
 fall-through at its block's end, a `return` to the function floor, a `break` / `continue` to
 its loop's. The bubble, taken when `k(v)`'s resume returns a kont that is not `PURE_RETURN`
