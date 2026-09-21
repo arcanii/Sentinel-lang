@@ -124,7 +124,7 @@ reference as you work through the milestones.
 > confirming nothing pre-existing is newly refused; oracle-vs-scg byte-equality on the new
 > fixture at types, mir and llvm; and the secret-taint check in both directions.
 
-### ▶ RESUME HERE (2026-09-21 — `origin/main` is `2f9afd8`; `cf8e6ef` (D88) is committed on top of it and NOT pushed, and this slice is UNCOMMITTED on top of that — run `git log --oneline origin/main..HEAD` for the live list. This session: **D90 closed** — a loop's CONDITION now hoists its slots too ([ADR 0036](decisions/0036-loops.md) A4) — and **D91 filed** (`lower_handle`'s own dispatch loop is invisible to `loop_depth`). Register: **91 items, 41 done**. Four-check: 2,001 passed with exactly the 18 known Windows failures (9 in `examples`, 4 in `export`, 1 in `llvm`, 4 in `modules`), doctests and clippy clean, every `selfhost_*` differential green with both new fixtures in the corpus, and both bootstrap fixed points byte-identical.
+### ▶ RESUME HERE (2026-09-21 — `origin/main` is `2f9afd8`; THREE commits sit on top of it, all LOCAL and NOT PUSHED: `cf8e6ef` (D88), `a498e74` (D90) and `e77b913` (the D90 review's corrections). Run `git log --oneline origin/main..HEAD` for the live list. This session: **D88 closed** (the fifteen loop-BODY allocas hoist, closing **D62** and **D77**), **D90 closed** (a loop's CONDITION hoists too — [ADR 0036](decisions/0036-loops.md) A3 and A4), and **D91 filed** (`lower_handle`'s own dispatch loop is invisible to `loop_depth`). Register: **91 items, 41 done**. Four-check: 2,001 passed with exactly the 18 known Windows failures (9 in `examples`, 4 in `export`, 1 in `llvm`, 4 in `modules`), doctests and clippy clean, every `selfhost_*` differential green with both new fixtures in the corpus, and both bootstrap fixed points byte-identical.
 
 > **What the 2026-09-21 slice did — [ADR 0036](decisions/0036-loops.md) A4.** A2 and A3 raised
 > `loop_depth` around the loop BODY alone, so a `while` CONDITION's slots hoisted only when the
@@ -145,6 +145,23 @@ reference as you work through the milestones.
 >
 > ⚠ **MUTATE BOTH HALVES OF A PAIR.** Reverting the increment is the obvious mutation and the
 > new pin catches it; dropping the DECREMENT passed every pin until the twin above existed.
+>
+> **The D90 review (`wf_c26d5f5a-a8d`) found no wrong value, no changed output and no changed
+> evaluation order** across 119 constructed programs — 32 of the 36 differences are
+> PRE-overflow → POST-success — and confirmed the change is not oracle-moving: every stage dump
+> is byte-identical and all TEN self-host module objects compile identically, so the bootstrap
+> is untouched. What it did find was the frame cost now written into A4, and text: A4 handing
+> the dispatch-loop half to the wrong register number, A3's paragraph half-converted to past
+> tense, a pin that named six of the seven slots its probe allocates, and a threshold left as a
+> bound (`e77b913`).
+>
+> ⚠ **THE REMEDY FOR A FINDING IS ITSELF A CLAIM.** The trade-off paragraph added before
+> committing named ONE shape — a slot in an untaken branch of the condition. The verifier
+> constructed the missing one and it is the commoner idiom: `if c { while … { … } }`, where the
+> condition is unconditional but the whole loop is unreached. Same measurements, and the
+> paragraph's premise ("evaluated at least once per call") was false for exactly that case. Both
+> shapes are in A4 now. **Fix a finding and you have written new text; it earns the same
+> scrutiny as what it replaced.**
 
 ### ▶ Earlier RESUME (2026-09-20 — `origin/main` is `2f9afd8` (the ADR 0074 / D79 commit, pushed 2026-09-20 08:45), and `git log --oneline origin/main..HEAD` is EMPTY: nothing is committed ahead of it, and this slice is UNCOMMITTED in the working tree. This session: **D88 closed** — inkwell's fifteen loop-BODY allocas now hoist to the entry block ([ADR 0036](decisions/0036-loops.md) A3) — which closes **D62** and **D77** with it; **D90 filed** (the `while` CONDITION is still outside the hoist). Register: **90 items, 40 done**. Four-check: 1,998 passed with exactly the 18 known Windows failures (9 in `examples`, 4 in `export`, 1 in `llvm`, 4 in `modules`), doctests and clippy clean, every `selfhost_*` differential green with the new fixture in the corpus, and both bootstrap fixed points byte-identical.
 
@@ -590,7 +607,7 @@ reference as you work through the milestones.
 >      scalar-4 arm, which it now has. Also worth doing with it: `examples/math/quadratic.sentinel` and
 >      `sentinel_library/std/math/float.sentinel` currently reach only lex/ast, because
 >      `snc merge`'s Bar-A printer rejects both a float literal and `sqrt` (menu item 5).
->   4. **THE FILED-DEFECT REGISTER — NINETY-ONE items (D1-D91); **D1, D2, D3, D4, D5, D8, D9, D10, D15, D16, D17, D24, D25, D26, D29, D31, D34, D37, D39, D42, D43, D44, D47(option A), D51, D54, D55, D56, D58, D59, D60, D61, D62, D66, D74, D76, D77, D79, D85, D86, D88 and D90 are DONE (41 of 91)**, the rest verified against a pre-slice binary. MOST are
+>   4. **THE FILED-DEFECT REGISTER — NINETY-TWO items (D1-D92); **D1, D2, D3, D4, D5, D8, D9, D10, D15, D16, D17, D24, D25, D26, D29, D31, D34, D37, D39, D42, D43, D44, D47(option A), D51, D54, D55, D56, D58, D59, D60, D61, D62, D66, D74, D76, D77, D79, D85, D86, D88 and D90 are DONE (41 of 92)**, the rest verified against a pre-slice binary. MOST are
 >      unregistered in any `DEFERRED_PROGRAMS` / `KNOWN_SCG_BUGS` list because no corpus program
 >      reaches them — but FOUR are, and the blanket "NONE" that stood here was falsified by
 >      this register's own new entries: D24/D25/D26 share the
@@ -1418,15 +1435,19 @@ reference as you work through the milestones.
 >      mutations were caught: reverting the bump fails the first pin (and the D88 pin does NOT
 >      see it, which is why this one exists), and dropping the decrement — which would silently
 >      hoist every later binding in the module — fails the second. **The cost, measured by the
->      review:** a condition is evaluated at least once per call, so hoisting a slot it reaches
->      is free or better (an always-evaluated allocating condition GAINED headroom, ~11,600 to
->      ~12,900 frames). The exception is a slot in a branch the condition does NOT take — a
->      short-circuited `&&` RHS, an untaken `if` arm — which was never allocated before and is
->      now reserved on every call: with four 16-field class constructions in such a branch,
->      around a zero-trip loop in a recursive fn, the frame goes from 376 to 1,240 bytes and the
->      recursion depth from about 38,700 to about 12,900. No corpus program changes and seven
->      self-host module objects are byte-identical, so the bootstrap is untouched; a per-branch
->      hoist is the fix if a real program meets it. See ADR 0036 A4.
+>      review:** a condition is evaluated at least once on every call that REACHES its loop, so
+>      hoisting a slot on its unconditional path is free or better (such a condition GAINED
+>      headroom, ~11,600 → ~12,900 frames). The exception is a slot the condition allocates on a
+>      path a call does not execute, in TWO shapes: a branch of the condition that is not taken
+>      (a short-circuited `&&` RHS, an untaken `if` arm, an unreached `match` arm), and a loop
+>      that is not reached at all — the ordinary `if c { while … { … } }`, the commoner of the
+>      two. Both measure the same: four 16-field class constructions in either take a recursive
+>      fn's frame from 376 to 1,240 bytes and its depth from ~38,700 to ~12,900. Neither is new
+>      in kind — A3 already reserves an untaken BODY's slots, and that half is unchanged here.
+>      Reach: no corpus program changes (the only `while` condition in the repo whose
+>      sub-expression allocates is this slice's own fixture) and every self-host top-level module
+>      object is byte-identical, so the bootstrap is untouched. A per-branch hoist would fix (a);
+>      (b) wants the loop's preheader, which is not a drop-in. See ADR 0036 A4.
 >
 >      **D91 — `lower_handle`'s dispatch loop is invisible to `loop_depth`, so a `handle` with
 >      no enclosing `while` builds its arm slots inside that loop.** Split out of D90 on
@@ -1442,6 +1463,21 @@ reference as you work through the milestones.
 >      a small constant. Widening that gate must come with hoisting these slots — and with a
 >      probe in the D88/D90 pins that reaches a handler arm with no enclosing `while`, which no
 >      current probe does.
+>
+>      **D92 — an UNBOUND `match` scrutinee is never dropped, so a `match` on a temporary
+>      retains about 18 bytes per evaluation.** Found 2026-09-21 by D90's review; pre-existing
+>      and orthogonal to it — the same spelling in a loop BODY retains identically before and
+>      after A4 (measured at 300,000 / 600,000 / 1,200,000 evaluations: 7.62 / 12.69 / 23.10 MB
+>      peak commit, both binaries), and binding the scrutinee first (`let e = E::B(n); match e
+>      { … }`) is flat at the 3.05 MB floor. What D90 changed is only reachability: the
+>      outermost-loop CONDITION form used to die on the stack before the heap mattered.
+>      `tests/pass/c5d5_loop_cond_slot_reuse.sentinel` carries the unbound spelling on purpose
+>      (binding it outside the loop is not equivalent, and binding it inside would move the
+>      allocation out of the condition), so that fixture holds about 11 MB by the time it ends;
+>      its header says so. No leak check runs in `tests/pass` today, so nothing fails. The fix is
+>      a drop for the scrutinee temporary, which is the same seam as the other undropped
+>      temporaries (a `?T` payload, a call result discarded in statement position) — worth doing
+>      as one slice rather than piecemeal.
 >
 >      **D78 — stale corpus fixture counts in `llvm.rs` and `README.md`, at six sites, stale
 >      before this change.** Found by D74's reviews. `crates/sentinel-driver/tests/llvm.rs`

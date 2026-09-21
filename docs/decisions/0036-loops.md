@@ -412,20 +412,31 @@ and `d90_a_binding_after_a_loop_is_not_hoisted`, and end to end by
 dropping the decrement — which would silently hoist every later binding in the module —
 fails the second.
 
-The trade-off is narrower than A3's but real. A condition is evaluated at least once per
-call, so for a slot the condition actually reaches the hoist is free or better — measured,
-an always-evaluated allocating condition gives MORE recursion headroom after it (about
-12,900 frames against 11,600), because the dynamic-alloca bookkeeping goes away. The
-exception is a slot inside a branch of the condition that is not taken: the RHS of a
-short-circuited `&&` or `||`, an untaken `if` arm, an unreached `match` arm. Before, that
-alloca never executed; now its slot is reserved in the entry block of every call. Measured
-with four 16-field class constructions in a short-circuited RHS, around a zero-trip loop in
-a recursive fn: the frame goes from 376 to 1,240 bytes and the recursion depth from about
-38,700 to about 12,900 — a legal program that completed before can overflow. Its reach is
-small: no corpus program changes, and seven self-host module objects (`lexer`, `parser`,
-`codegen`, `borrow`, `mir`, `effects`, `ctverify`) are byte-identical before and after, so
-the bootstrap is untouched. A per-branch hoist would avoid it and is not worth the
-machinery today; if a real program meets it, that is the fix to reach for.
+The trade-off is narrower than A3's but real. A condition is evaluated at least once on
+every call that REACHES its loop, so for a slot on the condition's unconditional path the
+hoist is free or better — measured, an always-evaluated allocating condition gives MORE
+recursion headroom after it (about 12,900 frames against 11,600), because the
+dynamic-alloca bookkeeping goes away. The exception is any slot the condition allocates on
+a path a given call does not execute, and there are TWO shapes of that: (a) a branch of the
+condition that is not taken — the RHS of a short-circuited `&&` or `||`, an untaken `if`
+arm, an unreached `match` arm; and (b) a loop that is not reached at all, whose condition is
+unconditional but whose enclosing arm is not taken — the ordinary `if c { while … { … } }`.
+Before, those allocas never executed; now their slots are reserved in the entry block of
+every call. Both shapes measure the same: four 16-field class constructions in a
+short-circuited RHS take a recursive frame from 376 to 1,240 bytes and the recursion depth
+from about 38,700 to about 12,900, and four 32-field ones give 888 → 2,776 bytes and
+15,000–18,000 → 3,000–6,000 frames for the short-circuited RHS and the unreached loop
+alike — a legal program that completed before can overflow. Neither shape is new in kind:
+A3 already reserves an untaken loop BODY's slots the same way, and that half measures
+identically before and after this amendment; what A4 adds is the condition's slots. The
+reach is small: no corpus program changes — the only `while` condition in the repo whose
+sub-expression allocates is this amendment's own fixture — and every self-host top-level
+module object (`lexer`, `parser`, `codegen`, `borrow`, `mir`, `effects`, `ctverify`,
+`types`, `resolve`, `merge`) is byte-identical before and after, so the bootstrap is
+untouched. A per-branch hoist would avoid shape (a) and is not worth the machinery today;
+shape (b) would want the loop's preheader instead, which is not a drop-in — an inner loop's
+preheader is re-executed by the outer loop. If a real program meets either, those are the
+fixes to reach for.
 
 inkwell-only again, and the oracle's IR does not move: over the 465 tracked `.sentinel`
 files, `snc llvm` output is byte-identical and all 286 programs that build run the same.

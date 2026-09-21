@@ -27,13 +27,16 @@ stack at 560,000, and `while i < (if n > 0 { n } else { 0 })`, one 16-byte slot,
 
 Soundness is A2's argument unchanged: the condition runs once per iteration and its slots are
 consumed inside that evaluation. The cost is narrower than A3's but real, and the review
-measured it: a condition is evaluated at least once per call, so hoisting a slot it reaches is
-free or better (an always-evaluated allocating condition GAINED recursion headroom, about
-11,600 → 12,900 frames), but a slot in a branch the condition does NOT take — a short-circuited
-`&&` RHS, an untaken `if` arm — was never allocated before and is now reserved on every call:
-four 16-field class constructions in such a branch take a recursive fn's frame from 376 to
-1,240 bytes and its depth from about 38,700 to about 12,900. No corpus program changes and
-seven self-host module objects are byte-identical, so the bootstrap is untouched. Measured with a matched pre/post pair, each smoke-tested before
+measured it: a condition is evaluated at least once on every call that REACHES its loop, so
+hoisting a slot on its unconditional path is free or better (such a condition GAINED recursion
+headroom, about 11,600 → 12,900 frames). The exception is a slot the condition allocates on a
+path a call does not execute, in two shapes — a branch of the condition that is not taken (a
+short-circuited `&&` RHS, an untaken `if` arm, an unreached `match` arm) and a loop that is not
+reached at all, the ordinary `if c { while … { … } }` — whose slots are now reserved on every
+call: four 16-field class constructions in either take a recursive fn's frame from 376 to 1,240
+bytes and its depth from about 38,700 to about 12,900. Neither is new in kind, since A3 already
+reserves an untaken BODY's slots. No corpus program changes and every self-host top-level module
+object is byte-identical, so the bootstrap is untouched. Measured with a matched pre/post pair, each smoke-tested before
 use: the match-condition loop at 560,000 and 3,000,000, a handle-valued condition at 3,000,000,
 and a loop whose condition AND body both allocate at 600,000 each overflowed before and exit 0
 after; the nested control is unchanged either way. Over the 465 tracked `.sentinel` files the
