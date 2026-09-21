@@ -1,0 +1,98 @@
+// ADR 0075 D1 (register D87): a `k(v)` whose resume BUBBLES leaves the arm, so it
+// drains the arm's scopes before branching back to the dispatch loop.
+//
+// `two()` performs twice, so the first resume of every `handle` below bubbles: the
+// resumed computation performs again, `k(v)` stores the new kont into the dispatch slot
+// and branches to the top of the loop. That branch leaves the arm's block without
+// reaching its end-of-block drops, and before this ADR nothing else drained them — so
+// every heap binding the arm held was abandoned, once per bubble. The exit code is the
+// cheap half and does not move: each arm below answered 42 before the fix too. What
+// changed is memory. Measured with `simple`'s shape in a helper fn called from a loop,
+// kernel peak working set read after exit: 36.5 MB at 600,000 calls and 147.2 MB at
+// 3,000,000 before, 8.8 and 9.0 after — level with the same arm holding an `i64`
+// instead. That is about 48 bytes a call: one four-element array, plus allocator
+// overhead, for each of the two arm activations that bubbles.
+//
+// The four shapes pin the floor's reach — every frame at or above the arm's, innermost
+// first, and nothing below it:
+//
+//   - `simple`  — one frame, the arm's block;
+//   - `nested`  — a block inside the arm, so two frames are open at the `k(v)`;
+//   - `looped`  — a `while` written inside the arm, whose body frame the branch out of
+//                 the loop would otherwise skip as well. Its `k(v)` is also the one
+//                 shape here that is not in tail position; its value is unchanged
+//                 because the abandoned remainder happens to be the identity on the
+//                 resumed value (ADR 0075 D5 (R), which is a later slice);
+//   - `enclosing` — the other end of the floor: `below` belongs to the FUNCTION around
+//                 the `handle`, which a bubble does not leave, so it must NOT be drained
+//                 here. A floor set any lower frees it on the bubble path and again at
+//                 the end of `enclosing`.
+//
+// The same drop is emitted a second time on the pure path. Unlike `break` / `continue`,
+// the two blocks are NOT mutually exclusive — the bubble branches back to the dispatch
+// loop, which re-enters the arm and can reach the pure path's drop. What is exclusive is
+// the two paths through one ENTRY of the arm: an entry either bubbles and drains here, or
+// completes and drops at its block's end, never both. So an entry frees exactly what it
+// allocated, which holds only because ADR 0075 D3 refuses an arm binding that takes over
+// an allocation made outside the arm (`sentinel::borrow::moved_in_handler_arm`,
+// `tests/ui/c75_move_into_handler_arm.sentinel`).
+//
+// The IR is pinned twice — `d87_a_bubbling_resume_drains_the_arms_scopes` in
+// `sentinel-codegen` reads inkwell's, `llvm_a_bubbling_resume_drains_the_arms_scopes` in
+// `crates/sentinel-driver/tests/llvm.rs` reads the text oracle's over THIS file — and both
+// count the frees on the pure path as well, because an implementation that MOVED the drops
+// onto the bubble instead of adding them passes a bubble-only check and leaks at the
+// unfixed rate. `scg` is held to the oracle byte-for-byte on this file by the codegen
+// differential's corpus sweep.
+//
+// Exits 42: 42 + 42 + 42 + 42 - 126.
+
+effect Io { read() -> i64; }
+
+fn two() -> i64 ! { Io } {
+    let a: i64 = perform Io.read();
+    let b: i64 = perform Io.read();
+    a + b
+}
+
+fn simple() -> i64 {
+    handle two() with {
+        Io.read(k) => { let v: [i64] = [1, 2, 3, 4]; k(v[0] + 20) }
+    }
+}
+
+fn nested() -> i64 {
+    handle two() with {
+        Io.read(k) => {
+            let outer: [i64] = [5, 6];
+            { let inner: [i64] = [7, 8]; k(outer[0] + inner[0] + 9) }
+        }
+    }
+}
+
+fn looped() -> i64 {
+    handle two() with {
+        Io.read(k) => {
+            let mut i: i64 = 0;
+            let mut r: i64 = 0;
+            while i < 1 {
+                let w: [i64] = [3, 4];
+                r = k(w[0] + 18);
+                i = i + 1;
+            }
+            r
+        }
+    }
+}
+
+fn enclosing() -> i64 {
+    let below: [i64] = [9, 9];
+    let r: i64 = handle two() with {
+        Io.read(k) => { let v: [i64] = [1, 2, 3, 4]; k(v[0] + 20) }
+    };
+    r + below[0] - 9
+}
+
+fn main() -> i64 {
+    simple() + nested() + looped() + enclosing() - 126
+}

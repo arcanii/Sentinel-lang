@@ -1738,6 +1738,16 @@ struct HandleContext<'ctx> {
     loop_block: inkwell::basic_block::BasicBlock<'ctx>,
     current_kont_slot: PointerValue<'ctx>,
     return_arm: Option<TypedReturnArm>,
+    /// ADR 0075 D2: `scope_stack.len()` the instant before an arm's body is
+    /// lowered — the index the arm's own block frame takes. A bubbling `k(v)`
+    /// leaves the arm's ENTRY (ADR 0075 D1), so it drains every frame at index
+    /// `>= scope_floor` before branching — the same drain `break` / `continue`
+    /// make to [`LoopTarget::scope_floor`], for the same reason an arm is a
+    /// loop body (ADR 0075 D3). Without it a heap binding in the arm's scope
+    /// is abandoned on every bubble (register D87). One value serves every arm
+    /// of the handle: each is lowered from the same scope stack, and
+    /// `bind_handler_arm_params` pushes no frame.
+    scope_floor: usize,
 }
 
 /// C2.4 / ADR 0017 D8: one lexical scope's drop state. `vars` is the
@@ -9468,6 +9478,25 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
         // Bubble path: the enclosing handle's dispatch loop owns
         // re-dispatching the new kont. Store + branch.
         self.builder.position_at_end(bubble_block);
+        // ADR 0075 D1 (register D87): this branch leaves the arm's ENTRY, so it
+        // drains the arm's scopes first — every frame at or above the arm floor,
+        // innermost first, which covers a nested block and the body of a `while`
+        // written inside the arm. Without it the arm's heap bindings are abandoned
+        // on every bubble: an arm-scope `[i64]` grew 36.5 MB at 600,000 calls to
+        // 147.2 MB at 3,000,000, in the TAIL idiom as much as in a non-tail one.
+        //
+        // ⚠ This is NOT `break`'s situation, and the difference is the soundness
+        // argument. A `break` never comes back, so its drain and the body's
+        // end-of-block drops are mutually exclusive BLOCKS. This branch goes to the
+        // top of the dispatch loop, which RE-ENTERS the arm, so from here the pure
+        // path's drops are reachable. What is mutually exclusive is the two paths
+        // through one entry: an entry either bubbles and drains here, or completes
+        // and drops at its block's end. So an entry frees exactly what it
+        // allocated — which holds only because ADR 0075 D3 refuses an arm binding
+        // that takes over an allocation made outside the arm
+        // (`MovedInHandlerArm`). The frames are not popped (`emit_loop_exit_drops`
+        // does not truncate), so the pure path still emits its own.
+        self.emit_loop_exit_drops(handle_ctx.scope_floor, program)?;
         self.builder
             .build_store(handle_ctx.current_kont_slot, result_kont)
             .map_err(|e| CodegenError::Builder(e.to_string()))?;
@@ -9761,6 +9790,10 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
             loop_block,
             current_kont_slot,
             return_arm: return_arm.cloned(),
+            // ADR 0075 D2: the arm floor, captured NOW — before the first arm's
+            // body pushes its block frame, and after every frame that belongs to
+            // the function around the `handle` (a bubble does not leave those).
+            scope_floor: self.scope_stack.len(),
         });
 
         // Lower each arm: bind op-params + kont, lower the
@@ -12535,6 +12568,215 @@ fn main() -> i64 { conds(2) }
         assert!(
             stray.iter().any(|l| l.contains("%tail = alloca")),
             "`tail`'s slot is nowhere outside the entry block — where was it built?\n{body}"
+        );
+    }
+
+    // ===== Register D87 / ADR 0075 D1: a bubbling resume drains its arm =====
+    //
+    // A `k(v)` whose resume BUBBLES — the resumed computation performed again — stores
+    // the new kont into the handle's dispatch slot and branches to the top of the
+    // dispatch loop. That branch LEAVES the arm, so it is an exit of it and must drain
+    // the arm's scopes first, exactly as `break` / `continue` drain to a loop's floor.
+    // Before ADR 0075 nothing did, and every heap binding the arm held was abandoned on
+    // every bubble (36.5 MB at 600,000 calls, 147.2 MB at 3,000,000). The drops are
+    // memory, not an exit code, so this reads the IR the shipping back end emitted.
+
+    const D87_BUBBLE: &str = r#"
+effect Io { read() -> i64; }
+
+fn two() -> i64 ! { Io } {
+    let a: i64 = perform Io.read();
+    let b: i64 = perform Io.read();
+    a + b
+}
+
+// `outer` belongs to the FUNCTION around the `handle`, which a bubble does not leave;
+// `v` and `inner` are two frames of the arm's own, open at the `k(v)`.
+fn drains() -> i64 {
+    let outer: [i64] = [9, 9];
+    let r: i64 = handle two() with {
+        Io.read(k) => {
+            let v: [i64] = [1, 2, 3, 4];
+            { let inner: [i64] = [7, 8]; k(v[0] + inner[0] + 13) }
+        }
+    };
+    r + outer[0] - 9
+}
+
+// A `while` written INSIDE the arm: the branch out of it to the dispatch loop skips the
+// body's per-iteration drops too, so `w` is at or above the arm floor as well.
+fn looped() -> i64 {
+    handle two() with {
+        Io.read(k) => {
+            let mut i: i64 = 0;
+            let mut r: i64 = 0;
+            while i < 1 {
+                let w: [i64] = [3, 4];
+                r = k(w[0] + 18);
+                i = i + 1;
+            }
+            r
+        }
+    }
+}
+
+fn main() -> i64 { drains() + looped() - 42 }
+"#;
+
+    /// Walk a freed pointer back to the alloca it came out of, and name that slot.
+    /// Each step takes the defining instruction's LAST `%` operand (`extractvalue …
+    /// %agg, 1`, `load …, ptr %slot`) until an `alloca` defines it.
+    fn trace_to_slot(all: &[&str], operand: &str) -> String {
+        let mut reg = operand.to_string();
+        loop {
+            let head = format!("{reg} = ");
+            let Some(def) = all.iter().copied().find(|d| d.starts_with(&head)) else {
+                break;
+            };
+            if def[head.len()..].starts_with("alloca") {
+                break;
+            }
+            let last = def.rsplit('%').next().expect("an operand");
+            reg = format!("%{}", last.split([',', ' ', ')']).next().expect("a name"));
+        }
+        reg.trim_start_matches('%').to_string()
+    }
+
+    /// The binding slots whose heap is freed in `body`'s reachable `kv_bubble` blocks —
+    /// a `k(v)`'s bubble path (ADR 0075 D1). For each `@sentinel_free` there, walk the
+    /// freed pointer back through the `extractvalue` / `load` an array drop emits, to
+    /// the alloca it came out of, and name that slot. In emission order, which is
+    /// innermost frame first.
+    fn bubble_frees(body: &str) -> Vec<String> {
+        let blocks = ir_blocks(body);
+        let live = reachable_blocks(&blocks);
+        let all: Vec<&str> = blocks.iter().flat_map(|(_, ls)| ls.iter().copied()).collect();
+        let mut out = Vec::new();
+        for (label, lines) in &blocks {
+            if !label.starts_with("kv_bubble") || !live.contains(label) {
+                continue;
+            }
+            for l in lines {
+                let Some(rest) = l.split("@sentinel_free(ptr ").nth(1) else {
+                    continue;
+                };
+                out.push(trace_to_slot(&all, rest.split(')').next().expect("a free operand")));
+            }
+        }
+        out
+    }
+
+    /// Does `body` build a slot named `name`? The arm's own bindings are NOT hoisted
+    /// (ADR 0036 hoists only inside a loop), so this asks the whole body, not `entry`.
+    fn builds_slot(body: &str, name: &str) -> bool {
+        body.contains(&format!("%{name} = alloca "))
+    }
+
+    /// The instruction lines of `body`'s reachable `kv_bubble` blocks.
+    fn bubble_lines(body: &str) -> Vec<String> {
+        let blocks = ir_blocks(body);
+        let live = reachable_blocks(&blocks);
+        blocks
+            .iter()
+            .filter(|(l, _)| l.starts_with("kv_bubble") && live.contains(l))
+            .flat_map(|(_, ls)| ls.iter().map(|l| l.to_string()))
+            .collect()
+    }
+
+    /// Like [`bubble_frees`], but over the blocks that are NOT a `kv_bubble` — the
+    /// arm's own end-of-block drops on the pure path, and any other exit's. The
+    /// bubble's drain is an ADDITION, not a relocation: the pure path must keep
+    /// freeing what it freed before. Without this half, an implementation that MOVES
+    /// the drops onto the bubble passes every other check in the tree and leaks at the
+    /// unfixed rate on the pure path.
+    fn non_bubble_frees(body: &str) -> Vec<String> {
+        let blocks = ir_blocks(body);
+        let live = reachable_blocks(&blocks);
+        let all: Vec<&str> = blocks.iter().flat_map(|(_, ls)| ls.iter().copied()).collect();
+        let mut out = Vec::new();
+        for (label, lines) in &blocks {
+            if label.starts_with("kv_bubble") || !live.contains(label) {
+                continue;
+            }
+            for l in lines {
+                if let Some(rest) = l.split("@sentinel_free(ptr ").nth(1) {
+                    out.push(trace_to_slot(&all, rest.split(')').next().expect("a free operand")));
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn d87_a_bubbling_resume_drains_the_arms_scopes() {
+        let ir = compile_src_ir(D87_BUBBLE);
+
+        let drains = ir_fn_body(&ir, "drains");
+        // Non-vacuity: the probe must still BUILD all three arrays, or the assertions
+        // below would pass on a program that reaches none of the sites.
+        for slot in ["outer", "v", "inner"] {
+            assert!(
+                builds_slot(drains, slot),
+                "@drains no longer binds `{slot}`, so this pin proves nothing:
+{drains}"
+            );
+        }
+        // Both of the arm's frames drain, innermost first.
+        assert_eq!(
+            bubble_frees(drains),
+            vec!["inner".to_string(), "v".to_string()],
+            "the bubble must drain the arm's frames, innermost first:
+{drains}"
+        );
+        // And nothing BELOW the arm floor: `outer` belongs to the function around the
+        // `handle`, which a bubble does not leave. It is arena-routed (ADR 0028), so a
+        // floor set any lower reaches it as a `sentinel_arena_exit` rather than a
+        // `sentinel_free` — which would free it here AND again at `drains`'s own exit.
+        // This assertion is NOT vacuous: `D87_BUBBLE` really does emit the arena
+        // symbols (`arena_enter` / `arena_alloc` / `arena_exit`) for `outer`, and the
+        // `builds_slot` check above is what keeps it that way.
+        let bubble = bubble_lines(drains);
+        assert!(
+            drains.contains("@sentinel_arena_exit("),
+            "@drains no longer routes `outer` through an arena, so the check below              cannot see a floor set too low:
+{drains}"
+        );
+        assert!(
+            !bubble.iter().any(|l| l.contains("@sentinel_arena_exit(")),
+            "the bubble drained a scope below the arm floor:
+{}
+
+{drains}",
+            bubble.join("
+")
+        );
+        // The drain is an ADDITION: the pure path must still free the same two, at its
+        // own end-of-block. An implementation that MOVED the drops rather than adding
+        // them passes every check above and leaks on the pure path at the unfixed rate.
+        assert_eq!(
+            non_bubble_frees(drains),
+            vec!["inner".to_string(), "v".to_string()],
+            "the pure path stopped freeing what the bubble drains — the drops were              moved, not added:
+{drains}"
+        );
+
+        let looped = ir_fn_body(&ir, "looped");
+        assert!(
+            builds_slot(looped, "w"),
+            "@looped no longer binds `w`, so this pin proves nothing:
+{looped}"
+        );
+        assert_eq!(
+            bubble_frees(looped),
+            vec!["w".to_string()],
+            "a `while` body inside the arm is at or above the arm floor, so the bubble              out of the loop drains it too:
+{looped}"
+        );
+        assert_eq!(
+            non_bubble_frees(looped),
+            vec!["w".to_string()],
+            "the pure path stopped freeing `w` — the drops were moved, not added:
+{looped}"
         );
     }
 

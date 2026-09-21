@@ -1805,6 +1805,20 @@ fn pass_c5d5_loop_cond_slot_reuse() {
 }
 
 #[test]
+fn pass_c75_bubble_drains_the_arm() {
+    // ADR 0075 D1 (register D87): a `k(v)` whose resume BUBBLES leaves the arm, so it
+    // drains the arm's scopes before branching back to the dispatch loop. The exit code
+    // is the cheap half — every arm in the fixture answered 42 before the fix too, since
+    // the drops are memory. What it does pin end to end is that adding them breaks
+    // nothing: the IR is pinned by `d87_a_bubbling_resume_drains_the_arms_scopes` in
+    // `sentinel-codegen` and `llvm_a_bubbling_resume_drains_the_arms_scopes` in
+    // `tests/llvm.rs`, and `scg` by the codegen differential's corpus sweep of this file.
+    // Measured on `simple`'s shape in a helper fn called from a loop: 36.5 MB at 600,000
+    // calls and 147.2 MB at 3,000,000 before, 8.8 and 9.0 after. Exit = 42.
+    assert_eq!(run_exit("c75_bubble_drains_the_arm.sentinel"), 42);
+}
+
+#[test]
 fn pass_selfhost_ast_drop() {
     // ADR 0039 D4: the self-host parser's recursive-AST drop gate. A
     // recursive-enum `Node` (i64 + `[u8]` + recursive payloads) built, walked

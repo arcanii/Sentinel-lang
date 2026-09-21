@@ -323,6 +323,31 @@ pub enum BorrowError {
         move_span: miette::SourceSpan,
     },
 
+    /// ADR 0075 D3 (register D87): the loop-carried move rule of ADR 0036 D8, for a
+    /// HANDLER ARM. An arm is not walked once and run once: the `handle`'s dispatch
+    /// loop re-enters it for every operation the handled computation performs, and a
+    /// `k(v)` whose resume bubbles branches straight back into it. So an arm body is a
+    /// loop body the borrow checker had no rule for, and a Move-classified binding
+    /// declared OUTSIDE the arm that the arm moves is consumed on the next dispatch —
+    /// the same use-after-move `MovedInLoopBody` rejects, one construct over. Covers a
+    /// whole binding and a field of one (ADR 0046's partial moves), by the ROOT of the
+    /// moved place. A binding declared INSIDE the arm is fresh on each entry and may be
+    /// moved freely. This is also what lets the bubble drain the arm's scopes at all
+    /// (ADR 0075 D1): the drain is per-entry, so it is only sound while nothing an arm
+    /// binding owns outlives the entry that bound it.
+    #[error("cannot move out of `{binding_name}` inside a handler arm")]
+    #[diagnostic(
+        code(sentinel::borrow::moved_in_handler_arm),
+        help("`{binding_name}` is declared outside the arm, and the handle's dispatch loop re-enters the arm for every operation performed, so moving it leaves it consumed on the next dispatch; move a binding declared inside the arm, or borrow (`&{binding_name}`) instead")
+    )]
+    MovedInHandlerArm {
+        binding_name: String,
+        #[label("`{binding_name}` declared here, outside the arm")]
+        decl_span: miette::SourceSpan,
+        #[label("moved here inside the arm")]
+        move_span: miette::SourceSpan,
+    },
+
     /// Register D61: a Move-typed value is moved OUT of `self`. A method's `self` is
     /// ALWAYS a borrow — `SelfKind` has exactly two variants, `&Self` and `&mut Self`,
     /// and an `init`'s `self` is the caller's object under construction — so the value
@@ -1758,12 +1783,53 @@ fn walk_expr_inner(
             // op param is left UNSEEDED → fails closed (its referent is in the
             // performing frame, which is gone once `k` has run).
             for arm in arms {
+                // ADR 0075 D3 (register D87): an arm body is a LOOP BODY. The dispatch
+                // loop re-enters it for every operation the handled computation
+                // performs, and a bubbling `k(v)` branches back into it — but the
+                // borrow checker walks it once. Snapshot the in-scope bindings and the
+                // already-moved sets exactly as `While` above does, and afterwards flag
+                // any OUTER binding the arm newly moved: it is consumed on the next
+                // dispatch. Partial moves (ADR 0046) are flagged by the ROOT of the
+                // moved place, because the root is what the outer scope still owns.
+                let outer_vars: std::collections::HashSet<VarId> =
+                    ctx.var_in_scope.keys().copied().collect();
+                let moved_before: std::collections::HashSet<VarId> =
+                    ctx.moved.keys().copied().collect();
+                let fields_before: std::collections::HashSet<(VarId, u32)> =
+                    ctx.moved_fields.keys().copied().collect();
                 ctx.push_scope();
                 for (vid, nm) in arm.param_var_ids.iter().zip(arm.param_names.iter()) {
                     ctx.declare(*vid, nm.kind.clone(), nm.span.clone());
                 }
                 walk_expr(&arm.body, ctx, errors, program);
                 ctx.pop_scope_yield(yields_ref);
+                let mut carried: Vec<(VarId, Span)> = ctx
+                    .moved
+                    .iter()
+                    .filter(|(id, _)| !moved_before.contains(id) && outer_vars.contains(id))
+                    .map(|(id, span)| (*id, span.clone()))
+                    .collect();
+                for ((root, fi), span) in ctx.moved_fields.iter() {
+                    if !fields_before.contains(&(*root, *fi))
+                        && outer_vars.contains(root)
+                        && !carried.iter().any(|(id, _)| id == root)
+                    {
+                        carried.push((*root, span.clone()));
+                    }
+                }
+                carried.sort_by_key(|(id, _)| id.0);
+                for (id, move_span) in carried {
+                    let decl_span = ctx
+                        .var_info
+                        .get(&id)
+                        .map(|vi| vi.span.clone())
+                        .unwrap_or_else(|| move_span.clone());
+                    errors.push(BorrowError::MovedInHandlerArm {
+                        binding_name: place_name(ctx, id),
+                        decl_span: to_source_span(&decl_span),
+                        move_span: to_source_span(&move_span),
+                    });
+                }
             }
             if let Some(ra) = return_arm {
                 ctx.push_scope();
@@ -2842,6 +2908,11 @@ fn borrow_error_to_diagnostic(err: &BorrowError) -> Diagnostic {
         BorrowError::MovedInLoopBody { binding_name, move_span, .. } => (
             "sentinel::borrow::moved_in_loop_body",
             format!("cannot move out of `{binding_name}` inside a `while` loop"),
+            move_span.offset()..(move_span.offset() + move_span.len()),
+        ),
+        BorrowError::MovedInHandlerArm { binding_name, move_span, .. } => (
+            "sentinel::borrow::moved_in_handler_arm",
+            format!("cannot move out of `{binding_name}` inside a handler arm"),
             move_span.offset()..(move_span.offset() + move_span.len()),
         ),
         BorrowError::MoveOutOfSelf { place, move_span } => (

@@ -251,5 +251,6 @@ fn new_tyctx(mode: i64) -> TyCtx {
         cg_h_rslot: 0,
         cg_h_merge: 0,
         cg_h_depth: 0,
+        cg_h_floor: 0,
     }
 }

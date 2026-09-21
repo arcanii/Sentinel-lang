@@ -498,6 +498,9 @@ struct TyCtx {
     cg_h_merge: i64,  // the merge block (each arm / pure branches here; the load follows)
     cg_h_depth: i64,  // (c36b) dynamic handle nesting depth; `> 1` ⇒ this handle is nested
                       //   (its result is a Kont* the enclosing handle dispatches on)
+    cg_h_floor: i64,  // (ADR 0075 D2) the ARM floor: `len(cgdv)` before the arm's body is
+                      //   lowered. A `k(v)` bubble LEAVES the arm, so it drains the drop
+                      //   records at or above it before branching (register D87).
 }
 
 fn tbase() -> i64 { 100 }

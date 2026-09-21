@@ -453,6 +453,19 @@ fn cg_emit_resume_tail(c: &mut TyCtx, kreg: i64, snap: i64, src: &[u8], gb: &mut
     cgo_str(c, "bb");
     cgo_int(c, bubble_b);
     cgo_str(c, ":\n");
+    // (ADR 0075 D1 / register D87) this branch leaves the arm's ENTRY, so it drains the
+    // arm's scopes first — the drop records at or above the arm floor, in reverse,
+    // covering a nested block and the body of a `while` written inside the arm. Without
+    // it the arm's heap bindings are abandoned on every bubble, in the TAIL idiom as much
+    // as in a non-tail one.
+    // Unlike `break`/`continue` this branch COMES BACK: it re-enters the dispatch loop,
+    // which re-enters the arm, so the pure block's drops below are reachable from here.
+    // What is exclusive is the two paths through one ENTRY — it either bubbles and drains
+    // here, or completes and drops at its block's end — so an entry frees exactly what it
+    // allocated, which holds only because ADR 0075 D3 refuses an arm binding that takes
+    // over an allocation made outside the arm. `cg_drop_range` does NOT truncate, so the
+    // pure block still emits its own. Mirrors the oracle's `emit_loop_exit_drops`.
+    cg_drop_range(c, (*c).cg_h_floor);
     cgo_str(c, "  store ptr %v");
     cgo_int(c, kr);
     cgo_str(c, ", ptr %v");

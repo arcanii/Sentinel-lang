@@ -1764,12 +1764,15 @@ struct Emit<'a> {
     /// `self.f` GEPs from it. `None` for a free fn.
     self_var: Option<VarId>,
     /// Bar B / effects (ADR 0020): the enclosing `handle`s' dispatch context —
-    /// `(loop_block, current_kont_slot, return_arm)`. A `k(v)` (`ResumeKont`) inside an
-    /// arm whose resume BUBBLES (a resumer performed) stores the bubble kont into the
-    /// innermost handle's `current_kont_slot` and branches to its `loop_block` to
-    /// re-dispatch. c36a: the optional `return v => body` arm is carried (owned clone) so
-    /// `k(v)`'s pure-drain path applies it per Phase B's deep-handler re-wrap.
-    handle_stack: Vec<(u32, u32, Option<TypedReturnArm>)>,
+    /// `(loop_block, current_kont_slot, return_arm, scope_floor)`. A `k(v)`
+    /// (`ResumeKont`) inside an arm whose resume BUBBLES (a resumer performed) stores the
+    /// bubble kont into the innermost handle's `current_kont_slot` and branches to its
+    /// `loop_block` to re-dispatch. c36a: the optional `return v => body` arm is carried
+    /// (owned clone) so `k(v)`'s pure-drain path applies it per Phase B's deep-handler
+    /// re-wrap. ADR 0075 D2: `scope_floor` is `scopes.len()` the instant before the arm's
+    /// body is lowered — the branch LEAVES the arm, so it drains every frame at or above
+    /// it first, exactly as `break` / `continue` drain to a loop's floor (register D87).
+    handle_stack: Vec<(u32, u32, Option<TypedReturnArm>, usize)>,
     /// ADR 0074 D1/D2: the continuation slot of every handler arm whose body is being
     /// lowered, innermost last — the arm's ownership record for its kont. `k(v)` clears
     /// it before resuming, so on any exit a non-null slot is a kont the arm still owns:
@@ -3366,7 +3369,11 @@ impl Emit<'_> {
             writeln!(self.body, "  br i1 %v{cmp}, label %bb{arm_b}, label %bb{next_b}").unwrap();
             writeln!(self.body, "bb{arm_b}:").unwrap();
             self.bind_handler_arm_params(arm, ck)?;
-            self.handle_stack.push((loop_b, cks, return_arm.cloned()));
+            // ADR 0075 D2: the arm floor, captured NOW — before the arm's body pushes
+            // its block frame, and after every frame belonging to the function around
+            // the `handle`, which a bubble does not leave.
+            self.handle_stack
+                .push((loop_b, cks, return_arm.cloned(), self.scopes.len()));
             let av = self.lower_expr(&arm.body)?;
             self.handle_stack.pop();
             // ADR 0074 D2: the fall-through leaves the arm with its value. Release the
@@ -3547,8 +3554,23 @@ impl Emit<'_> {
             .last()
             .ok_or("ResumeKont must be lowered inside a handle arm")?
             .clone();
-        let (loop_b, cks, ret_arm) = frame;
+        let (loop_b, cks, ret_arm, arm_floor) = frame;
         writeln!(self.body, "bb{bubble_b}:").unwrap();
+        // ADR 0075 D1 (register D87): this branch leaves the arm's ENTRY, so it drains
+        // the arm's scopes first — every frame at or above the arm floor, innermost
+        // first, covering a nested block and the body of a `while` written inside the
+        // arm. Without it the arm's heap bindings are abandoned on every bubble, in the
+        // TAIL idiom as much as in a non-tail one.
+        //
+        // ⚠ Unlike `break` / `continue`, this branch COMES BACK: it re-enters the
+        // dispatch loop, which re-enters the arm, so the pure block's drops below are
+        // reachable from here. What is mutually exclusive is the two paths through one
+        // ENTRY of the arm — it either bubbles and drains here, or completes and drops
+        // at its block's end. An entry therefore frees exactly what it allocated, which
+        // holds only because ADR 0075 D3 refuses an arm binding that takes over an
+        // allocation made outside the arm (`moved_in_handler_arm`). The frames are not
+        // popped, so the pure block still emits its own.
+        self.emit_loop_exit_drops(arm_floor)?;
         writeln!(self.body, "  store ptr %v{kr}, ptr %v{cks}").unwrap();
         writeln!(self.body, "  br label %bb{loop_b}").unwrap();
         // Pure: unwrap. c36a — `k := \v. handle (kont.resume v) with H` (Phase B), so a

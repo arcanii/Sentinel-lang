@@ -1,0 +1,14 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c75_move_into_handler_arm.sentinel\")"
+---
+sentinel::borrow::moved_in_handler_arm
+
+  × cannot move out of `outer` inside a handler arm
+    ╭─[tests/ui/c75_move_into_handler_arm.sentinel:37:44]
+ 36 │     handle two() with {
+ 37 │         Io.read(k) => { let inner: [i64] = outer; k(inner[0]) }
+    ·                                            ──┬──
+    ·                                              ╰── 
+ 38 │     }
+    ╰────

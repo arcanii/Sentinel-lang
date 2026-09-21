@@ -347,7 +347,14 @@ fn dump_tharms(out: &mut Vec<u8>, a: HArms, src: &[u8], c: &mut TyCtx, gb: &mut 
             } else {
                 0
             };
+            // (ADR 0075 D2) the ARM floor: the drop-record length NOW, before the body
+            // lowers. A `k(v)` bubble inside it drains cgdv[floor..] before branching to
+            // the dispatch loop (register D87). Saved/restored because a handle written
+            // inside this arm sets its own floor for ITS arms.
+            let sv_hfloor: i64 = (*c).cg_h_floor;
+            (*c).cg_h_floor = len((*c).cgdv);
             dump_texpr(out, hbody, 0 - 1, src, c, gb);
+            (*c).cg_h_floor = sv_hfloor;
             truncate_scope(c, mark);
             push(out, ')');
             // (cg) store the arm value to the result cell + branch to merge; open the next

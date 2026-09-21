@@ -1,0 +1,43 @@
+// ADR 0075 D3 (register D87): a handler arm is a LOOP BODY, so ADR 0036 D8's
+// loop-carried move rule applies to it.
+//
+// The `handle`'s dispatch loop re-enters an arm for every operation the handled
+// computation performs, and a `k(v)` whose resume bubbles branches straight back into
+// it — but the borrow checker walks the arm once, exactly as it walks a `while` body
+// once. `two()` performs twice, so this arm runs twice: the first entry moves `outer`
+// into `inner`, and the second reads `outer` again, after it was consumed.
+//
+// `MovedInLoopBody` has rejected the same shape around a `while` since ADR 0036 D8;
+// this is that rule one construct over, and it is what makes ADR 0075 D1's per-entry
+// drain of the arm's scopes sound — the drain is only correct while nothing an arm
+// binding owns outlives the entry that bound it.
+//
+// Conservative in the same way the loop rule is: it does not ask whether the arm is
+// in fact entered twice, because that is a property of the handled computation at run
+// time. An arm that resumes a `handle` body performing exactly once is rejected here
+// too. The fix is the same as for a loop — bind inside the arm, or borrow.
+//
+// The field spelling (`bag.items`, ADR 0046's partial move) is rejected by the ROOT of
+// the moved place, so it is covered as well; this fixture pins the whole-binding form,
+// and `sentinel-borrow-check`'s unit tests cover the field one.
+
+effect Io {
+    read() -> i64;
+}
+
+fn two() -> i64 ! { Io } {
+    let a: i64 = perform Io.read();
+    let b: i64 = perform Io.read();
+    a + b
+}
+
+fn f() -> i64 {
+    let outer: [i64] = [21, 1, 2];
+    handle two() with {
+        Io.read(k) => { let inner: [i64] = outer; k(inner[0]) }
+    }
+}
+
+fn main() -> i64 {
+    f()
+}

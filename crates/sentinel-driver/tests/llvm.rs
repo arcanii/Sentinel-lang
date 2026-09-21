@@ -1459,6 +1459,121 @@ fn reachable_labels<'a>(body: &[&'a str]) -> Vec<&'a str> {
     seen
 }
 
+/// ADR 0075 D1 (register D87) in the TEXT oracle: a `k(v)` whose resume bubbles drains
+/// the arm's scopes before it stores the new kont and branches back to the dispatch
+/// loop. The codegen differential holds `scg` to this output byte-for-byte, so it
+/// catches the two text back ends DIVERGING — not both of them regressing together,
+/// which is what this pins. Memory only: every fn below exits the same either way.
+#[test]
+fn llvm_a_bubbling_resume_drains_the_arms_scopes() {
+    // (fn, frees on its bubble path, frees everywhere else) over
+    // `tests/pass/c75_bubble_drains_the_arm.sentinel`. `simple` holds one array in the
+    // arm, `nested` two frames' worth, `looped` one in a `while` body inside the arm,
+    // and `enclosing` one in the arm plus a SECOND array below the arm floor, in the fn
+    // around the `handle`, which must not be drained here — so a floor at the function
+    // makes its bubble count 2.
+    //
+    // The second number is the half a bubble-only check cannot see: the drain is an
+    // ADDITION, so the pure path must keep freeing what it freed before. An
+    // implementation that MOVED the drops onto the bubble passes a bubble-only pin,
+    // the fixture, the corpus differential and both bootstrap fixed points, and leaks
+    // on the pure path at exactly the unfixed rate.
+    let cases: &[(&str, usize, usize)] =
+        &[("simple", 1, 1), ("nested", 2, 2), ("looped", 1, 1), ("enclosing", 1, 2)];
+    let src = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/pass/c75_bubble_drains_the_arm.sentinel");
+    let out = Command::new(env!("CARGO_BIN_EXE_snc"))
+        .arg("llvm")
+        .arg(&src)
+        .output()
+        .expect("run snc llvm");
+    assert!(
+        out.status.success(),
+        "snc llvm failed:
+{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let ll = String::from_utf8(out.stdout).expect("utf-8 dump");
+    let lines: Vec<&str> = ll.lines().collect();
+    for (name, want, want_elsewhere) in cases {
+        let head = format!("@{name}(");
+        let def = lines
+            .iter()
+            .position(|l| l.starts_with("define ") && l.contains(&head))
+            .unwrap_or_else(|| panic!("no `define` for {name} in:
+{ll}"));
+        let body: Vec<&str> = lines[def..].iter().take_while(|l| **l != "}").copied().collect();
+        let live = reachable_labels(&body);
+        // The dispatch loop reads its slot and then that kont's op id; a BUBBLE block is
+        // any later block that ends by storing a kont into that slot and branching back.
+        // `entry:` ends the same way — the body's kont is stored into the dispatch slot
+        // before the branch into the loop — so it is skipped explicitly. (It is not
+        // excluded "by construction": `blocks` below begins AT `entry:`, and a first
+        // draft of this pin found two bubbles in every fn for that reason.)
+        let dispatch_slots: Vec<&str> = body
+            .windows(2)
+            .filter_map(|w| {
+                let (kont, slot) = w[0].trim().split_once(" = load ptr, ptr ")?;
+                w[1].trim().ends_with(&format!(" = load i32, ptr {kont}")).then_some(slot)
+            })
+            .collect();
+        assert!(!dispatch_slots.is_empty(), "@{name} has no dispatch loop:
+{}", body.join("
+"));
+        let mut blocks: Vec<(&str, Vec<&str>)> = Vec::new();
+        for l in body.iter().skip(1) {
+            if !l.starts_with(' ') {
+                blocks.push((l.trim_end_matches(':'), Vec::new()));
+            } else if let Some((_, ls)) = blocks.last_mut() {
+                ls.push(l.trim());
+            }
+        }
+        let bubbles: Vec<&(&str, Vec<&str>)> = blocks
+            .iter()
+            .skip(1)
+            .filter(|(label, ls)| {
+                live.contains(label)
+                    && ls.len() >= 2
+                    && ls[ls.len() - 1].starts_with("br label %")
+                    && dispatch_slots.iter().any(|slot| {
+                        ls[ls.len() - 2].starts_with("store ptr ")
+                            && ls[ls.len() - 2].ends_with(&format!(", ptr {slot}"))
+                    })
+            })
+            .collect();
+        assert_eq!(
+            bubbles.len(),
+            1,
+            "@{name}: expected one reachable bubble block, found {} — this pin proves              nothing about a fn whose `k(v)` site it cannot find:
+{}",
+            bubbles.len(),
+            body.join("
+")
+        );
+        let (label, ls) = bubbles[0];
+        let frees = ls.iter().filter(|l| l.contains("@sentinel_free(")).count();
+        assert_eq!(
+            frees, *want,
+            "@{name}: the bubble at {label} frees {frees} of the arm's bindings, not              {want} — a floor below the arm reaches the function's own, and one above              misses the arm's outermost frame:
+{}",
+            ls.join("
+")
+        );
+        let elsewhere: usize = blocks
+            .iter()
+            .filter(|(l, _)| *l != *label && live.contains(l))
+            .map(|(_, ls)| ls.iter().filter(|l| l.contains("@sentinel_free(")).count())
+            .sum();
+        assert_eq!(
+            elsewhere, *want_elsewhere,
+            "@{name}: {elsewhere} frees outside the bubble, not {want_elsewhere} — the              drops were moved onto the bubble rather than added to it:
+{}",
+            body.join("
+")
+        );
+    }
+}
+
 /// ADR 0074 D2 over `tests/fixtures/handler_arm_exits/`: each fn's count of
 /// `sentinel_kont_free` calls that can run — in a block reachable from `entry:` — is
 /// its number of (exit, open arm) pairs: the fall-through, a `return`, a `break` /

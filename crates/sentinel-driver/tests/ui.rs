@@ -340,3 +340,9 @@ ui_snapshot!(c21_extern_ref_param, "c21_extern_ref_param.sentinel");
 // reached codegen and aborted inkwell on a perfectly live reference.
 ui_snapshot!(c21_ref_in_effect_op_param, "c21_ref_in_effect_op_param.sentinel");
 ui_snapshot!(c21_ref_in_effect_op_return, "c21_ref_in_effect_op_return.sentinel");
+
+// ADR 0075 D3 (register D87): a handler arm is a loop body — the dispatch loop
+// re-enters it per performed operation — so ADR 0036 D8's loop-carried move rule
+// applies to it. This is what makes ADR 0075 D1's per-entry drain of the arm's
+// scopes sound.
+ui_snapshot!(c75_move_into_handler_arm, "c75_move_into_handler_arm.sentinel");

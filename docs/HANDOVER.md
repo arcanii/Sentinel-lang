@@ -124,7 +124,52 @@ reference as you work through the milestones.
 > confirming nothing pre-existing is newly refused; oracle-vs-scg byte-equality on the new
 > fixture at types, mir and llvm; and the secret-taint check in both directions.
 
-### ▶ RESUME HERE (2026-09-21 — `origin/main` is `a498e74` (pushed 2026-09-21 10:07, carrying `cf8e6ef` D88 and `a498e74` D90); the two review-correction commits on top of it, `e77b913` and `d0db362`, are LOCAL and NOT PUSHED. ⚠ `origin/main` moved three times during this session — read `git reflog show refs/remotes/origin/main` and `git log --oneline origin/main..HEAD`, never a hash written in a file. This session: **D88 closed** (the fifteen loop-BODY allocas hoist, closing **D62** and **D77**), **D90 closed** (a loop's CONDITION hoists too — [ADR 0036](decisions/0036-loops.md) A3 and A4), and **D91 filed** (`lower_handle`'s own dispatch loop is invisible to `loop_depth`). Register: **91 items, 41 done**. Four-check: 2,001 passed with exactly the 18 known Windows failures (9 in `examples`, 4 in `export`, 1 in `llvm`, 4 in `modules`), doctests and clippy clean, every `selfhost_*` differential green with both new fixtures in the corpus, and both bootstrap fixed points byte-identical.
+### ▶ RESUME HERE (2026-09-21b — `origin/main` is `a498e74`; the two D90 review-correction commits, a docs commit, and THIS SLICE are LOCAL. ⚠ `origin/main` moved three times during the previous session — read `git reflog show refs/remotes/origin/main` and `git log --oneline origin/main..HEAD`, never a hash written in a file. This session: **D87's leak half closed** by [ADR 0075](decisions/0075-a-bubbling-resume-leaves-its-arm.md) slice 1 (D1–D5) — a bubbling `k(v)` drains the arm's scopes, in all three back ends, under a new borrow rule (D3) that makes the per-entry drain sound — and **D93** and **D94** filed. Register: **94 items, 41 done**. Four-check: 2,005 passed with exactly the 18 known Windows failures, doctests and clippy clean, every `selfhost_*` differential green, both bootstrap fixed points byte-identical; corpus byte-identical over all 466 tracked files and identical `snc build` acceptance over the 393 with a `main`.
+
+> **What the 2026-09-21b slice did — [ADR 0075](decisions/0075-a-bubbling-resume-leaves-its-arm.md) slice 1.**
+> ADR 0074 D2 lists four paths out of a handler arm. Three drain the arm's scopes; the
+> bubble — taken when `k(v)`'s resume comes back non-`PURE_RETURN` — did not, so every
+> bubble abandoned what the arm's scopes held. It now drains to the ARM FLOOR, which is
+> ADR 0036 D9's `break` / `continue` drain with a different floor.
+>
+> ⚠ **THE BUBBLE IS A `continue`, NOT A `break`, AND THE DIFFERENCE IS THE WHOLE SOUNDNESS
+> ARGUMENT.** The first draft of this slice reasoned, in three back ends and the ADR, that
+> the drain and the block's own drops are "mutually exclusive blocks, so each runtime path
+> frees once" — copied from `break`. A verifier walked the CFG and falsified it: the bubble
+> branches to the dispatch loop, which RE-ENTERS the arm, so it reaches the pure path's
+> drops. What is exclusive is the two paths through one ENTRY. The companion claim, "the
+> re-entered arm binds fresh slots of its own", was false too — the slot is a single
+> `entry:` alloca every entry reuses. **A rationale copied across constructs is a claim
+> about the new construct, not the old one.**
+>
+> ⚠ **THE REVIEW FOUND A PIN THAT PASSED A BROKEN IMPLEMENTATION.** Both new IR pins read
+> only the bubble block, so an implementation that MOVED the drops onto it rather than
+> ADDING them passed both pins, the fixture, the corpus differential and BOTH bootstrap
+> fixed points — while leaking on the pure path at exactly the unfixed rate. Both now count
+> the frees outside the bubble as well, and that mutation was built in inkwell and the
+> oracle and is caught in each. A second pin was VACUOUS: the text oracle has no arena
+> machinery at all, so `no sentinel_arena_exit in the bubble` was true on every input it
+> can produce. **Ask of every new assertion which inputs could make it fail.**
+>
+> ⚠ **A ZERO-DIFFERENCE SWEEP AND A 202-DIFFERENCE SWEEP ARE BOTH CLAIMS ABOUT THE TOOL.**
+> This slice's first corpus sweep reported 202 IR differences and every one was the tool:
+> it compared `& $exe … 2>&1 | Out-String`, and Windows PowerShell renders a stderr record
+> PREFIXED WITH THE COMMAND NAME, so `snc_pre.exe : …` differed from `snc_post.exe : …` for
+> every file that writes to stderr — and the same binary run twice compared unequal too,
+> because the rendering carries the call site. Redirect both streams to FILES and compare
+> hashes, and smoke-test the comparison in BOTH directions (a file that must differ, and
+> one binary twice) before believing either answer.
+>
+> **NEXT:** **ADR 0075 slice 2 (D6)** — reify a non-tail `k(v)`'s remainder as a frame
+> pushed onto the bubbled kont, which is C3.5(c)/(d)/(e)'s existing resumer machinery at a
+> new site and needs no runtime change; the ADR has the classification, both gates and the
+> residue worked out. Then the list below: **D91** (the dispatch loop `loop_depth` cannot
+> see — the same "an arm is a loop body" fact D3 acts on, one layer down), **D92**, D69's
+> remainder, D68(c), D13 fail-closed, D73, D78, D80, D81, D89, D93, D94; D75 needs the
+> maintainer's call; lower: D82, D83, D84 and the two `borrow-check-limitations.md`
+> over-rejections that wait on ADR 0018's provenance.
+
+### ▶ Earlier RESUME (2026-09-21 — `origin/main` is `a498e74` (pushed 2026-09-21 10:07, carrying `cf8e6ef` D88 and `a498e74` D90); the two review-correction commits on top of it, `e77b913` and `d0db362`, are LOCAL and NOT PUSHED. ⚠ `origin/main` moved three times during this session — read `git reflog show refs/remotes/origin/main` and `git log --oneline origin/main..HEAD`, never a hash written in a file. This session: **D88 closed** (the fifteen loop-BODY allocas hoist, closing **D62** and **D77**), **D90 closed** (a loop's CONDITION hoists too — [ADR 0036](decisions/0036-loops.md) A3 and A4), and **D91 filed** (`lower_handle`'s own dispatch loop is invisible to `loop_depth`). Register: **91 items, 41 done**. Four-check: 2,001 passed with exactly the 18 known Windows failures (9 in `examples`, 4 in `export`, 1 in `llvm`, 4 in `modules`), doctests and clippy clean, every `selfhost_*` differential green with both new fixtures in the corpus, and both bootstrap fixed points byte-identical.
 
 > **What the 2026-09-21 slice did — [ADR 0036](decisions/0036-loops.md) A4.** A2 and A3 raised
 > `loop_depth` around the loop BODY alone, so a `while` CONDITION's slots hoisted only when the
@@ -1300,8 +1345,18 @@ reference as you work through the milestones.
 >      is load-bearing rather than decorative. Both bootstrap fixed points green.
 >
 >      **D87 — a `k(v)` whose resume BUBBLES abandons the rest of its arm: the remainder never
->      runs, and the arm's scope bindings are never dropped.** Found 2026-09-19 while closing
->      D79; pre-existing — the same values and the same memory before and after ADR 0074.
+>      runs, and the arm's scope bindings are never dropped. The DROPS half is DONE
+>      (2026-09-21, [ADR 0075](decisions/0075-a-bubbling-resume-leaves-its-arm.md) slice 1,
+>      D1–D5); the remainder is open, and ADR 0075 D6 decides its route.** ⚠ The drops half
+>      reaches further than this entry reads: the leak is not a property of the NON-tail shape
+>      below, but of the branch, so the TAIL idiom — which is what every handler arm in the
+>      tree is written in, and whose answer is correct — leaks identically (36.5 MB at 600,000
+>      calls, 147.2 at 3,000,000, the same numbers, against 8.8 / 9.0 for the same arm holding
+>      an `i64`). Slice 1 drains the arm's scopes on the bubble in all three back ends, under
+>      a new borrow rule (D3) that makes the per-entry drain sound: an arm body is a LOOP BODY
+>      — the dispatch loop re-enters it per performed operation — so ADR 0036 D8's
+>      loop-carried move rule applies to it (`sentinel::borrow::moved_in_handler_arm`).
+>      Found 2026-09-19 while closing D79; pre-existing — the same values and the same memory before and after ADR 0074.
 >      When the resumed computation performs again, `k(v)` stores the new kont into the
 >      dispatch slot and branches back to the dispatch loop (C3.5(e)'s bubble). That is ADR
 >      0020 D3's deep re-wrap only when `k(v)` IS the arm's value. Anywhere else the arm's
@@ -1478,6 +1533,34 @@ reference as you work through the milestones.
 >      a drop for the scrutinee temporary, which is the same seam as the other undropped
 >      temporaries (a `?T` payload, a call result discarded in statement position) — worth doing
 >      as one slice rather than piecemeal.
+>
+>      **D93 — a drain's skip list is the drop plan's PER-FUNCTION moved-source set, so a
+>      binding whose only move lies AFTER the drain is skipped at it.** Found 2026-09-21 by
+>      ADR 0075 slice 1's review; PRE-EXISTING and shared by every drain site, not a property
+>      of the new one. `emit_frame_drops` / `cg_drop_frame` skip a binding in
+>      `moved_sources_for(fn)`, which is computed over the whole function body — so an arm (or
+>      loop body) that allocates a binding, leaves early, and would have moved it only on the
+>      path it did not take, frees nothing on the early path. Measured on an arm whose heap
+>      binding's only move site is after the `k(v)`: about 36.5 MB at 600,000 calls both
+>      before and after ADR 0075 slice 1, against a control at 8.8; and the identical hazard
+>      at the PRE-EXISTING `break` drain (ADR 0036 D9), the mechanism slice 1 copies, leaks
+>      the same 36.5 either way. The oracle's IR of both shapes is byte-identical before and
+>      after. The fix is a per-exit moved set rather than a per-function one, which is a drop
+>      plan change, not a codegen one.
+>
+>      **D94 — six `tests/pass` fixtures are named by no test, so they are swept by the
+>      differentials but never built or run.** Found 2026-09-21 by ADR 0075 slice 1's review;
+>      pre-existing. `crates/sentinel-driver/tests/pass.rs` is a list of hand-written tests,
+>      one per fixture, with no directory sweep to notice a missing one. `tests/pass/` holds
+>      **211** `.sentinel` files; 205 are named by a test (204 through `run_exit`, plus
+>      `pass_c5d4_file_io`, which builds its fixture by path). The six that are not:
+>      `c55_index_assign`, `c56_operand_widen`, `c57_secret_vec`, `c58_secret_vec_to_array`,
+>      `c59_borrow_index`, `c67_module_decl`. They are still swept by the MIR and codegen
+>      differentials and by `llvm.rs`'s corpus passes, so their IR is compared — what no test
+>      does is build and RUN them, so a wrong VALUE in one is invisible. (The gap was found
+>      the same way it bites: the new fixture sat unregistered until the four-check's total
+>      came back +2 rather than +3.) The fix is either six tests or a registration guard like
+>      `examples.rs`'s `every_example_is_registered`.
 >
 >      **D78 — stale corpus fixture counts in `llvm.rs` and `README.md`, at six sites, stale
 >      before this change.** Found by D74's reviews. `crates/sentinel-driver/tests/llvm.rs`

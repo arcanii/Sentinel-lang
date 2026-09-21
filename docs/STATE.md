@@ -14,7 +14,83 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
-**Latest (2026-09-21) — D90 closed by [ADR 0036](decisions/0036-loops.md) A4: a loop's
+**Latest (2026-09-21b) — the leak half of register **D87** closed by
+[ADR 0075](decisions/0075-a-bubbling-resume-leaves-its-arm.md) slice 1 (D1–D5): a bubbling
+`k(v)` leaves the arm's ENTRY, so it drains the arm's scopes on the way. All three back
+ends; NOT PUSHED.** ADR 0074 D2 enumerates four paths out of a handler arm and settles what
+each does with the arm's *continuation*. Three of them also drain the arm's scopes — the
+fall-through at its block's end, a `return` to the function floor, a `break` / `continue` to
+its loop's. The bubble, taken when `k(v)`'s resume returns a kont that is not `PURE_RETURN`
+because the resumed computation performed again, did neither: all three back ends stored the
+new kont into the handle's dispatch slot and branched to the top of the dispatch loop, and
+nothing else. So every bubble abandoned whatever the arm's scopes held.
+
+**The register entry's reach was wider than it read.** D87 illustrates the leak with a
+NON-tail `k(v)`, alongside the wrong value that shape also produces. The mechanism it names
+— the branch skips the arm's scope drops — is not confined to it: the TAIL idiom, which is
+what every handler arm in the tree is written in, leaks identically. Measured with the
+`handle` in a helper fn called from a loop, kernel peak working set read after exit:
+`{ let v: [i64] = [1,2,3,4]; k(v[0] + 20) }`, whose answer is correct, grew 36.5 MB at
+600,000 calls and 147.2 MB at 3,000,000, exactly as the non-tail shape does, against 8.8 and
+9.0 for the same arm holding an `i64`. About 48 bytes a call — one four-element array, for
+whichever of the two arm entries per call bubbles. After the change every one is flat: 8.8,
+9.0 and 8.9.
+
+**The bubble is a `continue`, not a `break`, and that is the whole soundness argument.** The
+other three paths leave the arm for good, so their drains and the block's own drops sit in
+mutually exclusive blocks. The bubble branches back to the dispatch loop, which RE-ENTERS
+the arm — the bubble block reaches the pure path's drops, by a path through the loop. What is
+exclusive is the two paths through ONE ENTRY of the arm: an entry either bubbles and drains,
+or completes and drops at its block's end. An entry therefore frees exactly what it
+allocated, which holds only while nothing an arm binding owns outlives the entry that bound
+it. **D3 is what makes that true.** A `while` body is walked once by the borrow checker and
+run many times, which is why ADR 0036 D8 (`MovedInLoopBody`) refuses a move out of a binding
+declared outside the loop; a handler arm has exactly that shape — the dispatch loop re-enters
+it per performed operation — and had no such rule. It does now, as
+`sentinel::borrow::moved_in_handler_arm`, flagged by the ROOT of the moved place so ADR
+0046's partial moves (`bag.items`) are covered as well as whole bindings. Conservative in the
+same way the loop rule is: it does not ask whether the arm is entered twice, because that is
+a run-time property, so an arm over a body performing exactly once is refused too. Nothing in
+the tree is affected — no arm in it moves anything.
+
+Pinned in `sentinel-codegen` by `d87_a_bubbling_resume_drains_the_arms_scopes`, which reads
+the IR inkwell verified and traces each `@sentinel_free` on the bubble path back to the
+alloca it came out of, and in `tests/llvm.rs` by
+`llvm_a_bubbling_resume_drains_the_arms_scopes` over `tests/pass/c75_bubble_drains_the_arm.sentinel`,
+which finds each fn's bubble block by its dispatch-slot store. **Both count the frees OUTSIDE
+the bubble as well**: the drain is an ADDITION, and an implementation that MOVED the drops
+onto it passes a bubble-only check, the fixture, the corpus differential and both bootstrap
+fixed points while leaking at the unfixed rate. `scg` is held to the oracle byte-for-byte on
+that fixture by the codegen differential's corpus sweep, and D3 by
+`tests/ui/c75_move_into_handler_arm.sentinel`. Ten mutations, each caught: the drain removed
+and the floor moved to the function in each of the three back ends, the floor moved one frame
+too high in inkwell, the drops moved rather than added in inkwell and the oracle, and the
+gate removed.
+
+What slice 1 does NOT close is D87's other half — the arm's remainder after a bubbling
+`k(v)` is still abandoned, so `k(1) + 10` answers 12 where ADR 0020 D3 gives 22. It needs a
+non-tail `k(v)`, which no program in the tree has. ADR 0075 **D6** decides the route —
+reify the remainder as a frame pushed onto the bubbled kont, which is C3.5(c)/(d)/(e)'s
+existing resumer machinery at a new site and needs no runtime change — and is slice 2.
+Registered, not fixed: the skip list at every drain site is the drop plan's PER-FUNCTION
+moved-source set, so a binding whose only move lies after the drain is skipped there too;
+measured identical before and after, and identical at the `break` drain this one is modelled
+on.
+
+Four-check: 2,005 passed with exactly the 18 known Windows failures (9 in `examples`, 4 in
+`export`, 1 in `llvm`, 4 in `modules`), doctests and clippy clean, every `selfhost_*`
+differential green and both bootstrap fixed points byte-identical. Corpus, matched pre/post
+binaries each smoke-tested on a shape whose answer differs before anything was measured with
+it: all 466 tracked `.sentinel` files give byte-identical stdout, stderr and exit code
+through `snc llvm`, and all 393 with a `main` are accepted or refused identically by `snc
+build` — the path the borrow checker actually runs on. ⚠ The first version of that sweep
+reported 202 IR differences and every one was the TOOL: it compared `2>&1 | Out-String`, and
+Windows PowerShell renders a stderr record prefixed with the command name, so the two
+binaries differed by filename alone; the same binary twice compared unequal too. Both halves
+are now smoke-tested in both directions before the result is believed. **Register: 94 items,
+41 done.**
+
+**Previously (2026-09-21) — D90 closed by [ADR 0036](decisions/0036-loops.md) A4: a loop's
 CONDITION allocates its slots once too. inkwell-only, NOT oracle-moving; the fix is pushed
 (`a498e74`), its review corrections are not.** A2 and A3
 raised `loop_depth` around the loop BODY alone, so the slots a `while` condition allocates were
