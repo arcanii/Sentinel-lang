@@ -14,7 +14,36 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
-**Latest (2026-09-20) — D88 closed by [ADR 0036](decisions/0036-loops.md) A3, and D62 and D77
+**Latest (2026-09-21) — D90 closed by [ADR 0036](decisions/0036-loops.md) A4: a loop's
+CONDITION allocates its slots once too. inkwell-only, NOT oracle-moving, NOT PUSHED.** A2 and A3
+raised `loop_depth` around the loop BODY alone, so the slots a `while` condition allocates were
+hoisted only when the loop sat inside another one. For an outermost loop they were built inline
+in `loop_cond` — the block the back-edge re-enters — and grew the stack every iteration exactly
+as a body slot did: `while i < (match E::B(n) { E::A => 0, E::B(x) => x })`, a match result plus a
+payload binding at 32 bytes an iteration, completes at 500,000 iterations and overflows the 16 MB
+stack at 560,000, and `while i < (if n > 0 { n } else { 0 })`, one 16-byte slot, completes at
+1,040,000 and overflows at 1,060,000. `loop_depth` is now raised around the condition too, with the decrement unconditional
+(the result is captured and `?`-ed after it, as the body's already was).
+
+Soundness is A2's argument unchanged: the condition runs once per iteration and its slots are
+consumed inside that evaluation. Measured with a matched pre/post pair, each smoke-tested before
+use: the match-condition loop at 560,000 and 3,000,000, a handle-valued condition at 3,000,000,
+and a loop whose condition AND body both allocate at 600,000 each overflowed before and exit 0
+after; the nested control is unchanged either way. Over the 465 tracked `.sentinel` files the
+oracle's IR is byte-identical, no program changes whether it is accepted or builds, and all 286
+that build run the same. Pinned in `sentinel-codegen` by
+`d90_a_loop_condition_allocates_in_the_entry_block_too` and its twin
+`d90_a_binding_after_a_loop_is_not_hoisted` — a binding written after a loop must still be built
+where it stands, which is what keeps A2's "outside any loop, byte-identical to pre-D.5 codegen"
+claim true — and end to end by `tests/pass/c5d5_loop_cond_slot_reuse.sentinel`. Both mutations
+were caught: reverting the bump fails the first pin (the D88 pin does not see that position), and
+dropping the decrement, which would silently hoist every later binding in the module, fails the
+second. **D91 filed**, split out of D90: `lower_handle` emits its own dispatch loop, which
+`loop_depth` — a count of SOURCE `while` nesting — cannot see, so a `handle` with no enclosing
+`while` still builds its arm slots inside it; bounded today only because ADR 0072 refuses a
+`perform` outside tail position. Four-check: 2,001 passed with exactly the 18 known Windows failures (9 in `examples`, 4 in `export`, 1 in `llvm`, 4 in `modules`), doctests and clippy clean, every `selfhost_*` differential green with both new fixtures in the corpus, and both bootstrap fixed points byte-identical. **Register: 91 items, 41 done.**
+
+**Previously (2026-09-20) — D88 closed by [ADR 0036](decisions/0036-loops.md) A3, and D62 and D77
 with it: every slot a loop body reaches is allocated once, in the entry block. inkwell-only,
 NOT oracle-moving, NOT PUSHED.** ADR 0036 D4 says a loop body's slot is allocated once and
 reused each iteration, and A2 made that true for a body `let`, an `if`-result and a

@@ -124,7 +124,28 @@ reference as you work through the milestones.
 > confirming nothing pre-existing is newly refused; oracle-vs-scg byte-equality on the new
 > fixture at types, mir and llvm; and the secret-taint check in both directions.
 
-### ▶ RESUME HERE (2026-09-20 — `origin/main` is `2f9afd8` (the ADR 0074 / D79 commit, pushed 2026-09-20 08:45), and `git log --oneline origin/main..HEAD` is EMPTY: nothing is committed ahead of it, and this slice is UNCOMMITTED in the working tree. This session: **D88 closed** — inkwell's fifteen loop-BODY allocas now hoist to the entry block ([ADR 0036](decisions/0036-loops.md) A3) — which closes **D62** and **D77** with it; **D90 filed** (the `while` CONDITION is still outside the hoist). Register: **90 items, 40 done**. Four-check: 1,998 passed with exactly the 18 known Windows failures (9 in `examples`, 4 in `export`, 1 in `llvm`, 4 in `modules`), doctests and clippy clean, every `selfhost_*` differential green with the new fixture in the corpus, and both bootstrap fixed points byte-identical.
+### ▶ RESUME HERE (2026-09-21 — `origin/main` is `2f9afd8`; `cf8e6ef` (D88) is committed on top of it and NOT pushed, and this slice is UNCOMMITTED on top of that — run `git log --oneline origin/main..HEAD` for the live list. This session: **D90 closed** — a loop's CONDITION now hoists its slots too ([ADR 0036](decisions/0036-loops.md) A4) — and **D91 filed** (`lower_handle`'s own dispatch loop is invisible to `loop_depth`). Register: **91 items, 41 done**. Four-check: 2,001 passed with exactly the 18 known Windows failures (9 in `examples`, 4 in `export`, 1 in `llvm`, 4 in `modules`), doctests and clippy clean, every `selfhost_*` differential green with both new fixtures in the corpus, and both bootstrap fixed points byte-identical.
+
+> **What the 2026-09-21 slice did — [ADR 0036](decisions/0036-loops.md) A4.** A2 and A3 raised
+> `loop_depth` around the loop BODY alone, so a `while` CONDITION's slots hoisted only when the
+> loop was nested inside another one; for an outermost loop they stayed inline in `loop_cond`,
+> which the back-edge re-enters, and grew the stack every iteration. `while i < (match E::B(n)
+> { … })` overflowed at 560,000 iterations, `while i < (if n > 0 { n } else { 0 })` by
+> 1,200,000. The bump now brackets the condition as well, with an unconditional decrement.
+> Inkwell-only and not oracle-moving. What is still open is D91: `lower_handle`'s dispatch loop
+> is a loop `loop_depth` cannot see, bounded today only by ADR 0072's tail-position gate.
+>
+> ⚠ **A PIN'S OWN PROBE CAN FAIL FOR THE RIGHT REASON.** The first draft of the condition pin
+> asserted "no `alloca` outside the entry block" over a probe whose second counter was declared
+> AFTER the first loop — and a `let` written after a loop is not in one, so its slot belongs in
+> that loop's `loop_after` block. The assertion was right and the probe was wrong. That same
+> fact is now a pin of its own (`d90_a_binding_after_a_loop_is_not_hoisted`), because dropping
+> the decrement hoists every later binding in the module and nothing else notices.
+>
+> ⚠ **MUTATE BOTH HALVES OF A PAIR.** Reverting the increment is the obvious mutation and the
+> new pin catches it; dropping the DECREMENT passed every pin until the twin above existed.
+
+### ▶ Earlier RESUME (2026-09-20 — `origin/main` is `2f9afd8` (the ADR 0074 / D79 commit, pushed 2026-09-20 08:45), and `git log --oneline origin/main..HEAD` is EMPTY: nothing is committed ahead of it, and this slice is UNCOMMITTED in the working tree. This session: **D88 closed** — inkwell's fifteen loop-BODY allocas now hoist to the entry block ([ADR 0036](decisions/0036-loops.md) A3) — which closes **D62** and **D77** with it; **D90 filed** (the `while` CONDITION is still outside the hoist). Register: **90 items, 40 done**. Four-check: 1,998 passed with exactly the 18 known Windows failures (9 in `examples`, 4 in `export`, 1 in `llvm`, 4 in `modules`), doctests and clippy clean, every `selfhost_*` differential green with the new fixture in the corpus, and both bootstrap fixed points byte-identical.
 
 > **What the 2026-09-20 slice did — [ADR 0036](decisions/0036-loops.md) A3.** inkwell built
 > fifteen slots with `builder.build_alloca` at the insertion point, so inside a loop body each
@@ -568,7 +589,7 @@ reference as you work through the milestones.
 >      scalar-4 arm, which it now has. Also worth doing with it: `examples/math/quadratic.sentinel` and
 >      `sentinel_library/std/math/float.sentinel` currently reach only lex/ast, because
 >      `snc merge`'s Bar-A printer rejects both a float literal and `sqrt` (menu item 5).
->   4. **THE FILED-DEFECT REGISTER — NINETY items (D1-D90); **D1, D2, D3, D4, D5, D8, D9, D10, D15, D16, D17, D24, D25, D26, D29, D31, D34, D37, D39, D42, D43, D44, D47(option A), D51, D54, D55, D56, D58, D59, D60, D61, D62, D66, D74, D76, D77, D79, D85, D86 and D88 are DONE (40 of 90)**, the rest verified against a pre-slice binary. MOST are
+>   4. **THE FILED-DEFECT REGISTER — NINETY-ONE items (D1-D91); **D1, D2, D3, D4, D5, D8, D9, D10, D15, D16, D17, D24, D25, D26, D29, D31, D34, D37, D39, D42, D43, D44, D47(option A), D51, D54, D55, D56, D58, D59, D60, D61, D62, D66, D74, D76, D77, D79, D85, D86, D88 and D90 are DONE (41 of 91)**, the rest verified against a pre-slice binary. MOST are
 >      unregistered in any `DEFERRED_PROGRAMS` / `KNOWN_SCG_BUGS` list because no corpus program
 >      reaches them — but FOUR are, and the blanket "NONE" that stood here was falsified by
 >      this register's own new entries: D24/D25/D26 share the
@@ -1366,9 +1387,10 @@ reference as you work through the milestones.
 >      the type checker refuses a non-`i64` `handle` result, or all three back ends widen and
 >      narrow around `sentinel_kont_pure` / `sentinel_kont_consume_pure`.
 >
->      **D90 — a `while` CONDITION's slots are still allocated inline when the loop is
->      OUTERMOST, so a condition that allocates grows the stack per iteration.** Found
->      2026-09-20 by D88's review; pre-existing, and identical before and after ADR 0036 A3.
+>      **D90 — DONE (2026-09-21, [ADR 0036](decisions/0036-loops.md) A4). A `while` CONDITION's
+>      slots were allocated inline when the loop was OUTERMOST, so a condition that allocates
+>      grew the stack per iteration.** Found 2026-09-20 by D88's review; pre-existing, and
+>      identical before and after ADR 0036 A3.
 >      `lower_stmt`'s `While` arm lowers the condition BEFORE it bumps `loop_depth` — the
 >      increment brackets `lower_block(body)` only — so for an outermost loop every slot the
 >      condition allocates, A3's fifteen and A2's `let` / `if`-result / `match`-result alike, is
@@ -1376,16 +1398,39 @@ reference as you work through the milestones.
 >      pre/post pair: `while i < (match E::B(n) { E::A => 0, E::B(x) => x })` completes at
 >      500,000 iterations and overflows the 16 MB stack at 560,000 (two slots, 32 B per
 >      iteration), the same before and after A3, while the SAME loop nested inside another loop
->      completes — the inner condition is then lowered at depth ≥ 1. A second member, same root:
->      `lower_handle` emits its own dispatch loop, which `loop_depth` (a count of SOURCE `while`
->      nesting) cannot see, so a `handle` with no enclosing `while` builds its arm slots inline
->      inside that loop; a single `handle` in `main` disassembles to four dynamic allocas. That
->      one is bounded today only because ADR 0072 refuses a `perform` outside tail position, so
->      the number of bubbles is the number of syntactic `perform`s on the path. The fix for the
->      first is to bump `loop_depth` around the condition as well as the body — it moves inkwell
->      IR for condition-allocating programs, so it wants its own sweep. Widening ADR 0072's gate
->      must come with hoisting the dispatch-loop slots, and with a probe in the D88 pin that
->      reaches a handler arm with no enclosing `while`.
+>      completes — the inner condition is then lowered at depth ≥ 1. (The entry as filed carried
+>      a second member, `lower_handle`'s own dispatch loop; it is its own defect and is now
+>      **D91**.)
+>
+>      **Fixed 2026-09-21** by raising `loop_depth` around the condition as well as the body,
+>      with the decrement unconditional — the result is captured and `?`-ed after it, as the
+>      body's already was. Measured on a matched pre/post pair, each smoke-tested first: the
+>      `match`-condition loop at 560,000 and 3,000,000, a `handle`-valued condition at
+>      3,000,000, and a condition plus body both allocating at 600,000 all overflowed before and
+>      exit 0 after; the nested control is unchanged. Inkwell-only and not oracle-moving — over
+>      the 465 tracked `.sentinel` files the oracle's IR is byte-identical, no program changes
+>      whether it is accepted or builds, and all 286 that build run the same. Pinned by
+>      `d90_a_loop_condition_allocates_in_the_entry_block_too`, by its twin
+>      `d90_a_binding_after_a_loop_is_not_hoisted` — a binding written after a loop must still
+>      be built where it stands, which is what keeps A2's "outside any loop, byte-identical"
+>      claim true — and end to end by `tests/pass/c5d5_loop_cond_slot_reuse.sentinel`. Both
+>      mutations were caught: reverting the bump fails the first pin (and the D88 pin does NOT
+>      see it, which is why this one exists), and dropping the decrement — which would silently
+>      hoist every later binding in the module — fails the second.
+>
+>      **D91 — `lower_handle`'s dispatch loop is invisible to `loop_depth`, so a `handle` with
+>      no enclosing `while` builds its arm slots inside that loop.** Split out of D90 on
+>      2026-09-21; pre-existing, and untouched by ADR 0036 A3 or A4. `loop_depth` counts SOURCE
+>      `while` nesting, but `lower_handle` emits a real loop — `handle_loop` → switch →
+>      `handle_arm` → `kv_bubble` → back. The arm's slots (`arm_param`, `kont_var`, and the
+>      return-arm slot the resume path builds) are emitted while that arm is lowered, so a
+>      bubble re-enters their allocas. Measured: a single `handle` in `main`, with no `while`
+>      anywhere in the source, compiles to four dynamic allocas (`subq %rax, %rsp` sites). It is bounded today only because ADR 0072 refuses a `perform` or an
+>      effecting call outside tail position: a performing computation can therefore neither loop
+>      nor recurse, so the number of bubbles is the number of syntactic `perform`s on the path,
+>      a small constant. Widening that gate must come with hoisting these slots — and with a
+>      probe in the D88/D90 pins that reaches a handler arm with no enclosing `while`, which no
+>      current probe does.
 >
 >      **D78 — stale corpus fixture counts in `llvm.rs` and `README.md`, at six sites, stale
 >      before this change.** Found by D74's reviews. `crates/sentinel-driver/tests/llvm.rs`

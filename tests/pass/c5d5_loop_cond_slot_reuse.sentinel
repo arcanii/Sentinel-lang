@@ -1,0 +1,40 @@
+// ADR 0036 A4 (register D90): a loop CONDITION allocates its slots once too.
+//
+// The back-edge re-enters the condition block, so a slot the condition allocates grows
+// the stack every iteration exactly as a body slot does. A2 and A3 both missed it for an
+// OUTERMOST loop, because `loop_depth` was raised around the body alone; nested one loop
+// deeper, the same condition already hoisted, which is what located the gap.
+//
+//   - an `if`-result in the condition (A2's slot): 16 bytes an iteration, so it overflowed
+//     the 16 MB stack by about 1,050,000 — this loop runs 1,200,000;
+//   - a `match` payload binding and its result (A3's slot and A2's): 32 bytes an iteration,
+//     overflowing by about 524,000 — this loop runs 600,000.
+//
+// Measured: each loop ALONE crashes a compiler that hoists only the body, and both complete
+// once the condition is hoisted too. So this fixture CRASHES (stack overflow, no output)
+// against such a compiler and exits 42 with A4. The IR shape is pinned by
+// `d90_a_loop_condition_allocates_in_the_entry_block_too` in `sentinel-codegen`, and its
+// twin `d90_a_binding_after_a_loop_is_not_hoisted` pins the other half — a binding OUTSIDE
+// a loop still allocates where it is written. About a third of a second.
+
+enum E { A, B(i64) }
+
+fn if_cond(n: i64) -> i64 {
+    let mut i: i64 = 0;
+    while i < (if n > 0 { n } else { 0 }) {
+        i = i + 1;
+    }
+    i
+}
+
+fn match_cond(n: i64) -> i64 {
+    let mut i: i64 = 0;
+    while i < (match E::B(n) { E::A => 0, E::B(x) => x }) {
+        i = i + 1;
+    }
+    i
+}
+
+fn main() -> i64 {
+    if_cond(1200000) + match_cond(600000) - 1800000 + 42
+}

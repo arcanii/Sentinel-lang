@@ -372,15 +372,15 @@ the hoist and overflows after it). From one iteration on, the hoist is the cheap
 the deepest user of this compiler — `scg` compiling the whole merged compiler, in both
 bootstrap fixed points — stays green.
 
-**One position is still outside the hoist**, and this amendment does not change it: a
+**One position was still outside the hoist**, and this amendment did not change it: a
 `while` CONDITION is lowered before `loop_depth` is bumped (the increment brackets
 `lower_block(body)` only), so for an OUTERMOST loop every slot the condition allocates —
-A3's fifteen and A2's three alike — is still built inline in `loop_cond`, which the
+A3's fifteen and A2's three alike — was still built inline in `loop_cond`, which the
 back-edge re-enters. Measured on a matched pre/post pair: `while i < (match E::B(n) { … })`
 completes at 500,000 iterations and overflows at 560,000, identically before and after this
 amendment, while the same loop nested inside another loop (so the condition is lowered at
-depth ≥ 1) completes. `lower_handle`'s own dispatch loop is invisible to `loop_depth` the
-same way. Register D90.
+depth ≥ 1) completes. That was register D90, **closed by A4 below**. `lower_handle`'s own
+dispatch loop is invisible to `loop_depth` in the same way and is not; see A4.
 
 The fix is inkwell-only and **not oracle-moving**: the `snc llvm` oracle and `scg` already
 hoist every alloca to `entry:`, so no stage dump, differential or `selfhost/` file moves.
@@ -389,6 +389,37 @@ inkwell verified for a program whose loops reach all fifteen and asserts that no
 sits outside the entry block; every site was mutated back to prove the pin sees it. A slot
 added later belongs on `binding_alloca` too, and in that probe: the pin sees only the sites
 the probe's loops reach, so a sixteenth slot left inline is invisible until it is added.
+
+### A4 (2026-09-21) — the CONDITION is part of the loop (register D90)
+
+A2 and A3 raised `loop_depth` around `lower_block(body)` alone, so the slots a `while`
+CONDITION allocates were hoisted only when the loop was nested inside another one. For an
+OUTERMOST loop they were built inline in `loop_cond` — the block the back-edge re-enters —
+and grew the stack every iteration exactly as a body slot did: `while i < (match E::B(n) {
+… })` (a `match`-result and a payload binding, 32 bytes an iteration) completes at 500,000
+iterations and overflows the 16 MB stack at 560,000, while `while i < (if n > 0 { n } else
+{ 0 })` (one 16-byte slot) completes at 1,040,000 and overflows at 1,060,000. `loop_depth` is now raised around the
+condition too, and the decrement is unconditional: the result is captured and `?`-ed after
+it, as the body's already was.
+
+Soundness is A2's argument unchanged — the condition runs once per iteration and its slots
+are consumed inside that evaluation, so one slot per site is enough. The hoist stays
+confined to loops: a binding written after a loop is still built where it stands, which
+keeps A2's "outside any loop, byte-identical to pre-D.5 codegen" true. Both halves are
+pinned, in `sentinel-codegen` by `d90_a_loop_condition_allocates_in_the_entry_block_too`
+and `d90_a_binding_after_a_loop_is_not_hoisted`, and end to end by
+`tests/pass/c5d5_loop_cond_slot_reuse.sentinel`; reverting the bump fails the first, and
+dropping the decrement — which would silently hoist every later binding in the module —
+fails the second.
+
+inkwell-only again, and the oracle's IR does not move: over the 465 tracked `.sentinel`
+files, `snc llvm` output is byte-identical and all 286 programs that build run the same.
+What A3 left open and A4 does not close is the other invisible loop: `lower_handle` emits
+its own dispatch loop, which `loop_depth` — a count of SOURCE `while` nesting — cannot see,
+so a `handle` with no enclosing `while` still builds its arm slots inside that loop. It is
+bounded today only because ADR 0072 refuses a `perform` outside tail position, so the
+number of bubbles is the number of syntactic `perform`s on the path; widening that gate
+must come with hoisting those slots. Register D90 keeps that half.
 
 ## Revisit
 

@@ -1795,6 +1795,16 @@ fn pass_c5d5_loop_slot_reuse() {
 }
 
 #[test]
+fn pass_c5d5_loop_cond_slot_reuse() {
+    // ADR 0036 A4 (register D90): the same for a loop's CONDITION, which the
+    // back-edge re-enters. An `if`-result condition (16 bytes an iteration,
+    // overflowing by about 1,050,000) runs 1,200,000 times, and a `match`
+    // payload condition (32 bytes, overflowing by about 524,000) runs 600,000.
+    // Against a compiler that hoists only the body this CRASHES. Exit = 42.
+    assert_eq!(run_exit("c5d5_loop_cond_slot_reuse.sentinel"), 42);
+}
+
+#[test]
 fn pass_selfhost_ast_drop() {
     // ADR 0039 D4: the self-host parser's recursive-AST drop gate. A
     // recursive-enum `Node` (i64 + `[u8]` + recursive payloads) built, walked

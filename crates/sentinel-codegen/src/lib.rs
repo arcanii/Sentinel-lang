@@ -4870,9 +4870,17 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                     .build_unconditional_branch(cond_bb)
                     .map_err(|e| CodegenError::Builder(e.to_string()))?;
 
-                // Condition block.
+                // Condition block. The back-edge re-enters it, so a slot the
+                // condition allocates would be allocated again every iteration
+                // just as a body slot would: raise `loop_depth` here too, so
+                // those hoist to the entry block (ADR 0036 A4, register D90).
+                // The decrement is unconditional — the result is captured and
+                // `?`-ed after it, as the body's is below.
                 self.builder.position_at_end(cond_bb);
-                let cond_i1 = self.lower_expr(cond, program)?.into_int_value();
+                self.loop_depth += 1;
+                let cond_result = self.lower_expr(cond, program);
+                self.loop_depth -= 1;
+                let cond_i1 = cond_result?.into_int_value();
                 self.builder
                     .build_conditional_branch(cond_i1, body_bb, after_bb)
                     .map_err(|e| CodegenError::Builder(e.to_string()))?;
@@ -12436,6 +12444,95 @@ fn main() -> i64 { handles(2) + matches(2) + classes(2) + conc(2) + io(0, false)
                 stray.join("\n")
             );
         }
+    }
+
+    // ===== Register D90 / ADR 0036 A4: the CONDITION allocates once too =====
+    //
+    // A3 hoisted what a loop BODY allocates. The condition is re-entered by the same
+    // back-edge, so a slot it allocates grew the stack per iteration just as a body
+    // slot did — and for an OUTERMOST loop it did, because `loop_depth` was raised
+    // around the body only. `while i < (match E::B(n) { … })` overflowed the 16 MB
+    // stack between 500,000 and 560,000 iterations; nested one loop deeper, the same
+    // condition was already hoisted, which is what located the gap.
+
+    const D90_CONDS: &str = r#"
+enum E { A, B(i64) }
+effect Io { put(x: i64) -> i64; }
+
+fn conds(n: i64) -> i64 {
+    // Both counters are declared before the loops: a `let` written AFTER a loop is
+    // not in one, so its slot belongs in that loop's `loop_after` block and would
+    // fail the stray check below for the right reason.
+    let mut i: i64 = 0;
+    let mut j: i64 = 0;
+    while i < (match E::B(n) { E::A => 0, E::B(x) => x }) {
+        i = i + 1;
+    }
+    while j < (handle perform Io.put(n) with { Io.put(p, k) => k(p), return v => v }) {
+        j = j + 1;
+    }
+    i + j
+}
+
+fn main() -> i64 { conds(2) }
+"#;
+
+    #[test]
+    fn d90_a_loop_condition_allocates_in_the_entry_block_too() {
+        let ir = compile_src_ir(D90_CONDS);
+        let body = ir_fn_body(&ir, "conds");
+        // The slots the two conditions allocate: the `match` payload binding, and the
+        // handle's dispatch slot, kont slot, op-param slot and both return-arm value
+        // slots. Naming them keeps the stray check below honest — `conds` takes a
+        // parameter, whose slot is in the entry block either way.
+        for (slot, n) in [
+            ("x", 1),
+            ("current_kont_slot", 1),
+            ("kont_var", 1),
+            ("arm_param", 1),
+            ("v", 2),
+        ] {
+            assert_eq!(
+                entry_slots(body, slot),
+                n,
+                "@conds: expected {n} `{slot}` slot(s) in the entry block — the probe no \
+                 longer reaches that site:\n{body}"
+            );
+        }
+        let stray = allocas_outside_entry(body);
+        assert!(
+            stray.is_empty(),
+            "@conds allocates {} slot(s) outside the entry block; a `while` CONDITION is \
+             re-entered by the back-edge, so those grow the stack every iteration:\n{}\n\n{body}",
+            stray.len(),
+            stray.join("\n")
+        );
+    }
+
+    #[test]
+    fn d90_a_binding_after_a_loop_is_not_hoisted() {
+        // The other half of the pair: `loop_depth` comes back DOWN, so A2's "outside
+        // any loop it is built inline, byte-identical to pre-D.5 codegen" still holds.
+        // A `let` written after a loop is not in one, so its slot belongs where it is
+        // built — the loop's `loop_after` block — and must NOT move to the entry block.
+        // Without this, dropping either decrement leaks the depth and silently hoists
+        // every later binding in the module, which no other pin sees.
+        let ir = compile_src_ir(
+            "fn after_loop(n: i64) -> i64 {\n\
+             \x20   let mut i: i64 = 0;\n\
+             \x20   while i < n { i = i + 1; }\n\
+             \x20   let tail: i64 = i + 1;\n\
+             \x20   tail\n\
+             }\n\
+             fn main() -> i64 { after_loop(2) }",
+        );
+        let body = ir_fn_body(&ir, "after_loop");
+        assert_eq!(entry_slots(body, "tail"), 0, "`tail` was hoisted out of its block:\n{body}");
+        let stray = allocas_outside_entry(body);
+        assert!(
+            stray.iter().any(|l| l.contains("%tail = alloca")),
+            "`tail`'s slot is nowhere outside the entry block — where was it built?\n{body}"
+        );
     }
 
     #[test]
