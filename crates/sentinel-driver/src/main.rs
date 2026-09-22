@@ -130,6 +130,13 @@ fn main() -> ExitCode {
             print_usage();
             ExitCode::SUCCESS
         }
+        // ADR 0076 D4: a version QUERY is not a usage error — stdout, exit 0. The usage
+        // banner keeps going to stderr with exit 2, which is right for a bad invocation
+        // and wrong for this.
+        [_, cmd] if matches!(cmd.as_str(), "-V" | "--version" | "version") => {
+            println!("{}", version_line());
+            ExitCode::SUCCESS
+        }
         _ => {
             print_usage();
             ExitCode::from(2)
@@ -137,8 +144,81 @@ fn main() -> ExitCode {
     }
 }
 
+/// ADR 0076 D5: this build's identity — the executable's own size and mtime, hashed.
+///
+/// It answers "is this the same compiler that produced that object?", which the semver
+/// cannot: the version does not move between releases, so a compiler rebuilt while being
+/// worked on carries the same one. Size and mtime move on every rebuild, which is exactly
+/// the signal `unit_fingerprint` needs (register D73). A commit SHA was considered and
+/// rejected for the same reason in reverse — it does not move across an UNCOMMITTED change,
+/// which is when the stale-object bug actually bites.
+///
+/// This is a build-INSTANCE id, not a build-CONTENT one: the same binary copied elsewhere
+/// gets a different id. That over-invalidates, never under-invalidates, which is the safe
+/// direction for a cache key.
+enum BuildId {
+    /// The lookup worked: 16 hex digits, stable for this executable.
+    Known(String),
+    /// It did not. Carries a per-PROCESS nonce, never a constant.
+    ///
+    /// ⚠ The constant is the trap. A first implementation hashed the error's MESSAGE, which
+    /// is fixed per platform — so every `snc` on a box where `current_exe()` fails would
+    /// share one id, `unit_fingerprint` would match a stored one, and D73 would be silently
+    /// back on exactly the platforms where the lookup is flaky. D5 requires the opposite:
+    /// on error the value must ALWAYS invalidate. A spurious rebuild is the acceptable
+    /// failure; a stale object is not. (A mutation test forces this arm — see
+    /// `separate_rebuild_by_another_compiler_is_not_fresh`.)
+    Unknown(String),
+}
+
+fn build_id() -> &'static BuildId {
+    static ID: std::sync::OnceLock<BuildId> = std::sync::OnceLock::new();
+    ID.get_or_init(|| {
+        use std::hash::{Hash, Hasher};
+        let Ok(meta) = std::env::current_exe().and_then(std::fs::metadata) else {
+            return BuildId::Unknown(nonce());
+        };
+        let Ok(modified) = meta.modified() else {
+            // `modified()` is unsupported on a few exotic filesystems. Size alone is not
+            // enough of a signal to rely on, so this is the Unknown arm too.
+            return BuildId::Unknown(nonce());
+        };
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        meta.len().hash(&mut h);
+        modified.hash(&mut h);
+        BuildId::Known(format!("{:016x}", h.finish()))
+    })
+}
+
+/// A value no other process will produce: this process's id, plus the wall clock at first
+/// use. Only ever reached from [`BuildId::Unknown`].
+fn nonce() -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    std::process::id().hash(&mut h);
+    if let Ok(d) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        d.as_nanos().hash(&mut h);
+    }
+    format!("{:016x}", h.finish())
+}
+
+/// ADR 0076 D4: the two-part version — a hand-maintained semver and a computed build id.
+/// The semver encodes a judgement (what changed, and how much), so a human keeps it; the
+/// build id encodes a fact, so it is computed.
+///
+/// The DISPLAY of an unknown id is `unknown`, not the nonce: a number that changed on every
+/// invocation would read as meaningful and be noise. The cache still gets the nonce — the
+/// two readers want different things from the same failure.
+fn version_line() -> String {
+    let id = match build_id() {
+        BuildId::Known(h) => format!("0x{h}"),
+        BuildId::Unknown(_) => "unknown".to_string(),
+    };
+    format!("snc {} ({id})", env!("CARGO_PKG_VERSION"))
+}
+
 fn print_usage() {
-    eprintln!("snc — Sentinel compiler (C1.0b)");
+    eprintln!("{}", version_line());
     eprintln!();
     eprintln!("usage:");
     eprintln!("    snc lex <file>                   lex and dump the token stream (self-host oracle)");
@@ -2160,6 +2240,14 @@ fn unit_fingerprint(
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     env!("CARGO_PKG_VERSION").hash(&mut h);
+    // ADR 0076 D5 (register D73): the version alone is not compiler identity — it does not
+    // move between releases, so a `--separate` rebuild used to reuse objects an OLDER `snc`
+    // had written, keeping whatever that compiler got wrong. The build id moves on every
+    // rebuild.
+    match build_id() {
+        BuildId::Known(id) => id.hash(&mut h),
+        BuildId::Unknown(n) => n.hash(&mut h),
+    }
     m.path.hash(&mut h);
     m.source.hash(&mut h);
     // Each imported item, keyed `(origin_module, item)`, sorted for a stable

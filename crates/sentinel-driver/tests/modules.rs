@@ -631,6 +631,93 @@ fn separate_incremental_unchanged_rebuild_is_all_fresh() {
 }
 
 #[test]
+fn separate_rebuild_by_another_compiler_is_not_fresh() {
+    // ADR 0076 D5, closing register D73. The incremental cache's only compiler identity
+    // used to be `CARGO_PKG_VERSION`, which never moved, so a `--separate` rebuild into a
+    // directory holding objects an OLDER `snc` wrote printed `fresh` and linked them —
+    // keeping whatever that compiler got wrong. The build id (the executable's own size and
+    // mtime, hashed) moves on every rebuild, so a different compiler now invalidates.
+    //
+    // "A different compiler" is simulated by a COPY of `snc` whose mtime differs. That is
+    // the same signal a real rebuild produces, and it is the one the fingerprint reads.
+    let dir = temp_project("separate_other_compiler");
+    write(dir.join("util/math.sentinel"), "pub fn add(a: i64, b: i64) -> i64 { a + b }
+");
+    write(dir.join("main.sentinel"), "use util::math::add;
+fn main() -> i64 { add(40, 2) }
+");
+    let entry = dir.join("main.sentinel");
+
+    let (ok1, err1) = build_separate(entry.clone());
+    assert!(ok1, "cold build failed:
+{err1}");
+
+    // CONTROL: the same binary twice IS fresh. Without this the test could pass because
+    // nothing is ever cached, which is the degenerate way to satisfy it.
+    let (ok2, err2) = build_separate(entry.clone());
+    assert!(ok2, "warm build failed:
+{err2}");
+    assert!(
+        err2.contains("fresh `util::math`"),
+        "the control must cache — without it this test proves nothing:
+{err2}"
+    );
+
+    // A copy of `snc`, beside a copy of the runtime it links, with a different mtime.
+    let real = std::path::Path::new(env!("CARGO_BIN_EXE_snc"));
+    let bin_dir = dir.join("bin");
+    std::fs::create_dir_all(&bin_dir).expect("create bin dir");
+    let other = bin_dir.join(format!("snc{}", std::env::consts::EXE_SUFFIX));
+    std::fs::copy(real, &other).expect("copy snc");
+    // `snc` finds its runtime beside itself (`current_exe().parent()`), so the copy needs
+    // one too. Both names are tried: the Windows `.lib` and the Unix `.a`.
+    for lib in ["sentinel_runtime.lib", "libsentinel_runtime.a"] {
+        let src = real.parent().expect("snc has a parent").join(lib);
+        if src.is_file() {
+            std::fs::copy(&src, bin_dir.join(lib)).expect("copy the runtime");
+        }
+    }
+    // A fresh copy can land in the same filesystem timestamp tick as the original, which
+    // would make the two ids equal and the assertion below vacuous. Push it forward.
+    let bump = std::time::SystemTime::now() + std::time::Duration::from_secs(60);
+    filetime_set(&other, bump);
+
+    let ids_differ = {
+        let a = std::process::Command::new(real).arg("--version").output().expect("snc --version");
+        let b = std::process::Command::new(&other).arg("--version").output().expect("copy --version");
+        a.stdout != b.stdout
+    };
+    assert!(
+        ids_differ,
+        "the copy must report a different build id, or this test cannot see the mechanism"
+    );
+
+    let out = std::process::Command::new(&other)
+        .arg("build")
+        .arg(&entry)
+        .arg("--separate")
+        .arg("-o")
+        .arg(entry.with_extension(""))
+        .output()
+        .expect("run the copied snc");
+    let err3 = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(out.status.success(), "the copy's build failed:
+{err3}");
+    assert!(
+        !err3.contains("fresh"),
+        "a DIFFERENT compiler reused cached objects (register D73):
+{err3}"
+    );
+}
+
+/// Set a file's mtime without a dependency. `std::fs` has no setter, so this goes through
+/// the platform call the same way the rest of the driver reaches the OS.
+fn filetime_set(path: &std::path::Path, t: std::time::SystemTime) {
+    let f = std::fs::OpenOptions::new().write(true).open(path).expect("open for mtime");
+    f.set_modified(t).expect("set mtime");
+}
+
+#[test]
 fn separate_incremental_edit_recompiles_only_affected_units() {
     // ADR 0037 (3/N) — the incremental payoff + the ITEM-GRANULAR fingerprint.
     // `main` imports `a` and `b`. Editing `a`'s fn BODY (not its signature)

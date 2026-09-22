@@ -1111,7 +1111,7 @@ checksum = "8a7852d02fc848982e0c167ef163aaff9cd91dc640ba85e263cb1ce46fae51cd"
 
 [[package]]
 name = "sentinel-ast"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "thiserror",
  "tracing",
@@ -1119,7 +1119,7 @@ dependencies = [
 
 [[package]]
 name = "sentinel-base"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "salsa",
  "thiserror",
@@ -1128,7 +1128,7 @@ dependencies = [
 
 [[package]]
 name = "sentinel-borrow-check"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "miette",
  "salsa",
@@ -1144,7 +1144,7 @@ dependencies = [
 
 [[package]]
 name = "sentinel-broker"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "criterion",
  "parking_lot",
@@ -1157,7 +1157,7 @@ dependencies = [
 
 [[package]]
 name = "sentinel-codegen"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "inkwell",
  "miette",
@@ -1173,7 +1173,7 @@ dependencies = [
 
 [[package]]
 name = "sentinel-driver"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "insta",
  "miette",
@@ -1195,7 +1195,7 @@ dependencies = [
 
 [[package]]
 name = "sentinel-effect-check"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "miette",
  "salsa",
@@ -1210,7 +1210,7 @@ dependencies = [
 
 [[package]]
 name = "sentinel-effects-proto"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "logos",
  "thiserror",
@@ -1219,7 +1219,7 @@ dependencies = [
 
 [[package]]
 name = "sentinel-hir"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "sentinel-borrow-check",
  "sentinel-resolve",
@@ -1229,7 +1229,7 @@ dependencies = [
 
 [[package]]
 name = "sentinel-lsp"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "thiserror",
  "tracing",
@@ -1237,7 +1237,7 @@ dependencies = [
 
 [[package]]
 name = "sentinel-mir"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "miette",
  "sentinel-ast",
@@ -1249,7 +1249,7 @@ dependencies = [
 
 [[package]]
 name = "sentinel-resolve"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "miette",
  "salsa",
@@ -1262,7 +1262,7 @@ dependencies = [
 
 [[package]]
 name = "sentinel-runtime"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "libc",
  "parking_lot",
@@ -1273,7 +1273,7 @@ dependencies = [
 
 [[package]]
 name = "sentinel-syntax"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "insta",
  "logos",
@@ -1287,7 +1287,7 @@ dependencies = [
 
 [[package]]
 name = "sentinel-trust"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "serde",
  "toml",
@@ -1295,7 +1295,7 @@ dependencies = [
 
 [[package]]
 name = "sentinel-types"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "miette",
  "salsa",
