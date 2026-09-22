@@ -13,14 +13,14 @@ optimized_for_llm: true
 
 _This file contains critical rules and patterns that AI agents must follow when implementing code in this project. Focus on unobvious details that agents might otherwise miss._
 
-Sentinel is a security-focused language whose compiler is a 15-crate Rust workspace. Its reason to exist is **machine-verified constant-time `secret`** handling. Most rules below exist to protect that guarantee or the self-hosting bootstrap — breaking either is a serious regression, not a style nit.
+Sentinel is a security-focused language whose compiler is a 16-crate Rust workspace. Its reason to exist is **machine-verified constant-time `secret`** handling. Most rules below exist to protect that guarantee or the self-hosting bootstrap — breaking either is a serious regression, not a style nit.
 
 ---
 
 ## Technology Stack & Versions
 
 - **Language:** Rust **2021 edition**, `rust-version = 1.80`, **stable channel only** — pinned in `rust-toolchain.toml`. No nightly features. Components: rustfmt, clippy, rust-analyzer, rust-src.
-- **Workspace:** 15 crates; dependency versions are inherited via `package.workspace = true` from root `[workspace.dependencies]`. **Never pin a dependency version inside a member crate** — add/bump it in the root `Cargo.toml` only (stated reason: prevent version drift).
+- **Workspace:** 16 crates; dependency versions are inherited via `package.workspace = true` from root `[workspace.dependencies]`. **Never pin a dependency version inside a member crate** — add/bump it in the root `Cargo.toml` only (stated reason: prevent version drift).
 - **Codegen back ends:** LLVM **18** via `inkwell 0.5` (feature `llvm18-0`) for release; **Cranelift 0.111** for fast debug builds. LLVM 18 is a hard requirement.
 - **Query engine:** `salsa 0.18`. **Lexer:** `logos 0.14`.
 - **Arenas / interners:** `bumpalo 3.16`, `typed-arena 2.0`, `rustc-hash` (FxHashMap), `indexmap`, `smallvec`.

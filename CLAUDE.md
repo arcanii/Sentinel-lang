@@ -1,6 +1,6 @@
 # Sentinel — Claude Code guide
 
-Sentinel is a security-focused language; its compiler is a 15-crate Rust workspace
+Sentinel is a security-focused language; its compiler is a 16-crate Rust workspace
 whose reason to exist is **machine-verified constant-time `secret`** handling. Most
 rules exist to protect that guarantee or the self-hosting bootstrap — treat breaking
 either as a serious regression, not a style nit.

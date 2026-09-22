@@ -12,7 +12,7 @@ superseded original vision, kept for provenance).
 [Programming Guide](docs/PROGRAMMING_GUIDE.md).**
 
 > **Is the compiler written in Sentinel?** **Now yes — it self-hosts.** The
-> original compiler (`snc`) is a **Rust** bootstrap compiler (~15 crates) that
+> original compiler (`snc`) is a **Rust** bootstrap compiler (16 crates) that
 > lowers Sentinel to native code via LLVM. In **Phase D** the entire compiler
 > pipeline — lexer → parser → resolve → type-check → effect-check →
 > borrow-check → MIR + constant-time verify → codegen — has been **rewritten in
