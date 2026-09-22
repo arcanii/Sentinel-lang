@@ -7,14 +7,24 @@ the current state of the workspace without re-reading every commit.
 
 ## Current State (2026-09-22)
 
-> **Phase C closed at Sentinel 1.0 (2026-05-30); Phase D self-hosts; the
+> **Phase C closed at the bootstrap milestone (2026-05-30); Phase D self-hosts; the
 > per-unit separate-compilation back end is functionally complete.**
 > The milestone-by-milestone chronology that used to live here has been
 > archived to [`HISTORY.md`](HISTORY.md) (P3.2 cleanup). Sections A/B/C below
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
-**Latest (2026-09-22) — register **D87** is CLOSED, both halves, by
+**Latest (2026-09-22b) — the compiler carries a semantic version:
+[ADR 0076](decisions/0076-compiler-versioning.md) is ACCEPTED and landed.** `snc --version`
+answers "what version of Sentinel do I have?" in two parts — a hand-maintained semver and a
+computed build id, `snc 0.1.0 (0x8a33152df5471198)`. The placeholder `0.0.1` and the stale
+`C1.0b` banner are gone. **1.0.0 is now a destination, not a past milestone**: the Phase C
+close was the bootstrap proof of concept, and the name "Sentinel 1.0" is retired across the
+docs. The build id also closes register **D73** — `unit_fingerprint` now has a compiler
+identity that MOVES, so `snc build --separate` stops reusing objects an older `snc` wrote.
+The version never enters emitted IR, by decision (D6) and by test.
+
+**Previously (2026-09-22) — register **D87** is CLOSED, both halves, by
 [ADR 0075](decisions/0075-a-bubbling-resume-leaves-its-arm.md) slice 2 (D6): a bubbling
 `k(v)` now REIFIES the rest of its arm onto the bubbled continuation, so the inner dispatch
 replays it when the chain drains. `k(1) + 10` answers 22 where it answered 12, which is
@@ -3056,7 +3066,7 @@ resolution; no lex/parse/IR change) → no re-bless / `selfhost` mirror. Item-le
   interpreter: Hindley-Milner inference, row-polymorphic effect tracking, deep
   handlers, `secret T` constant-time check. Validated the design. See
   **Section B**.
-- **Phase C — the bootstrap compiler** ✅ complete, **closed at Sentinel 1.0**
+- **Phase C — the bootstrap compiler** ✅ complete, **closed at the bootstrap milestone**
   (ADR 0025 + 0030 ACCEPTED). Every `sentinel-*` crate (syntax/ast/resolve/
   types/borrow-check/effect-check/hir/mir/codegen/runtime/driver) lowers the
   full language to native code via LLVM 18. Headline: **machine-verified

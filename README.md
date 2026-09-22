@@ -35,13 +35,13 @@ Sentinel is in active development. This is a multi-year research project; nothin
   - Generational arenas, two allocation strategies (bump + slab), scoped budgets, stats and diagnostics, recording mode, secret-memory policy (mlock + zero-on-free).
 - ✅ **Phase B — Sentinel-Mini effects prototype** (tree-walking interpreter, complete)
   - Hindley-Milner inference, row-polymorphic effect tracking, deep effect handlers, `secret T` with a constant-time check. Validates the design before the production compiler commits.
-- ✅ **Phase C — Bootstrap compiler** (production Rust implementation, targets LLVM) — **complete; closed at Sentinel 1.0 (2026-05-30).** C0–C4 + C5 (productionization):
+- ✅ **Phase C — Bootstrap compiler** (production Rust implementation, targets LLVM) — **complete; closed at the Phase C bootstrap milestone (2026-05-30).** C0–C4 + C5 (productionization):
   - ✅ **C0** — end-to-end pipeline: lex → parse → AST → two-pass LLVM IR → object → linked executable.
   - ✅ **C1** — type system + name resolution + Salsa retrofit + witness-table generics (generic fns + structs + monomorphisation).
   - ✅ **C2** — references + mutability + lexical borrow checker (shared-XOR-mutable, move semantics) + RAII drop.
   - ✅ **C3** — `secret` typing + effect rows + the algebraic-effect **handler runtime** (`effect` / `perform` / `handle … with`, deep handlers, continuations).
   - ✅ **C4** — classes + methods + `init` + traits + impls + **delegation** auto-forwarders + **structured concurrency** (`scope`/`spawn`/`await`).
-  - 🟢 **C5 — productionization toward 1.0:** an HIR/MIR analysis pipeline; **constant-time `secret` verification, delivered and *machine-checked on the MIR*** (a MIR pass rejects any `secret` reaching a branch, a memory index, or a division divisor — `sentinel::mir::secret_leak`; the type system is the taint oracle and the check runs pre-LLVM — see the headline section for the precise property + its boundaries); bitwise operators `& | ^`; the **Phase A broker wired into compiled programs** as per-scope bump arenas (scope-exit bulk free); a **defined, frozen, layout-tested ABI** (`abi-v1`); and the **1.0 acceptance program — a constant-time TLS-1.3-handshake-shaped go/no-go that passes the verification** (the close bar). **Sentinel 1.0 is declared** (ADR 0025 + 0030 → ACCEPTED) — the bootstrap-compiler milestone, *not* a production release (still single-process, single-file, research-stage).
+  - 🟢 **C5 — productionization toward the bootstrap close:** an HIR/MIR analysis pipeline; **constant-time `secret` verification, delivered and *machine-checked on the MIR*** (a MIR pass rejects any `secret` reaching a branch, a memory index, or a division divisor — `sentinel::mir::secret_leak`; the type system is the taint oracle and the check runs pre-LLVM — see the headline section for the precise property + its boundaries); bitwise operators `& | ^`; the **Phase A broker wired into compiled programs** as per-scope bump arenas (scope-exit bulk free); a **defined, frozen, layout-tested ABI** (`abi-v1`); and the **1.0 acceptance program — a constant-time TLS-1.3-handshake-shaped go/no-go that passes the verification** (the close bar). **Sentinel 1.0 is declared** (ADR 0025 + 0030 → ACCEPTED) — the bootstrap-compiler milestone, *not* a production release (still single-process, single-file, research-stage).
 - 🟢 **Phase D — Self-hosting** (the Sentinel compiler rewritten in Sentinel) — **the bootstrap fixed point is reached; the Sentinel compiler compiles itself.** Two movements, then the separate-compilation back end:
   - ✅ **Movement 1 — language + stdlib build-out** (ADR 0031–0037): the 1.0 language couldn't self-host (no sum types/`match`, strings, growable collections, file I/O, loops, or modules — all of which a compiler needs), so Phase D first grew the language. **D.1** sum types + `match`, **D.2** strings + `u8`, **D.3** growable `Vec<T>`, **D.4** file I/O, **D.5** `while`/`break`/`continue`, **D.6** modules / multi-file (`use`) — all landed.
   - 🟢 **Movement 2 — the port** (ADR 0038–0045): every stage of `snc` is reimplemented in Sentinel (`selfhost/*.sentinel`) and validated **byte-for-byte** against the Rust `snc` via a per-stage dump oracle (`snc lex`/`ast`/`resolve`/`types`/`effects`/`borrow`/`mir`/`ctverify`/`llvm`) over the whole corpus. The whole pipeline through codegen is ported, and **`scg` (the Sentinel-built compiler) discovers, merges, and lowers its own multi-module source to LLVM IR byte-identical to the Rust oracle — then `cc`-ing that IR yields a binary that re-emits the same IR (a true fixed point), leak-free.** Full-corpus codegen parity is **reached** — all 177 of the 227 `tests/pass` + `tests/ui` fixtures that the oracle emits IR for are byte-identical (the exotic constructs the corpus exercises but the self-hosting compiler doesn't itself use — effects/handlers, generics, classes, nullable, concurrency — were covered slice by slice), so **ADR 0045 is ACCEPTED-WITH-AMENDMENTS**. The Rust bootstrap stays as the seed + oracle.
@@ -192,9 +192,33 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 Sentinel is being built by [Anie Ltd.](https://aniesolutions.ai) as the language substrate for security-critical products targeting banks, governments, and regulated industries. Sentinel is open-source; the products built on top of it are Anie's commercial work.
 
+## Versioning
+
+`snc --version` answers **"what version of Sentinel do I have?"** in two parts:
+
+```
+snc 0.1.0 (0x8a33152df5471198)
+```
+
+- **`0.1.0`** is the semantic version of the compiler and the language it accepts. Pre-1.0,
+  so the MINOR is the breaking slot: a new feature, a changed flag, a new runtime symbol or a
+  rule that now rejects a program that used to compile all bump the minor; a fix with no
+  user-visible surface change bumps the patch.
+- **`0x8a33…`** identifies the build. It is not a commit hash: it is derived from the
+  compiler binary itself, so it moves whenever `snc` is rebuilt, which is what the
+  separate-compilation cache needs in order to not reuse an older compiler's objects.
+
+**`1.0.0` is a destination, not a past milestone.** The Phase C close in 2026-05-30 was the
+bootstrap proof of concept; `1.0.0` is reserved for the production bar, which is the section
+below. Two other versions in the system move on their own clocks and are deliberately not
+tied to this one: **`abi-v1`**, the compiled-artifact contract, frozen and layout-tested; and
+**`sentinel-interface v1`**, the `.sif` descriptor format.
+
+See [ADR 0076](docs/decisions/0076-compiler-versioning.md).
+
 ## What this is not
 
-- **Not production-ready.** "Sentinel 1.0" is the *bootstrap-compiler* milestone (Phase C close): the full language — types, generics, borrow check + RAII, secret + effect typing, the handler runtime, classes/traits/delegation, structured concurrency — compiles and runs, with machine-verified constant-time `secret`. It was **not** a production release: single-process, single-file, loop-free-by-design, no standard library at the 1.0 close. **Phase D has since grown the language (sum types, strings, `Vec`, I/O, loops, modules) and ported the compiler to Sentinel — it now self-hosts** (see Status above); production-hardening and tooling (LSP) remain pending.
+- **Not production-ready.** The Phase C close (2026-05-30) was the *bootstrap-compiler* milestone — the proof the design works. It was called "Sentinel 1.0" at the time, which was aggressive for what it was; [ADR 0076](docs/decisions/0076-compiler-versioning.md) retired that name and reserved `1.0.0` for the production bar, which is the list below. At that close: the full language — types, generics, borrow check + RAII, secret + effect typing, the handler runtime, classes/traits/delegation, structured concurrency — compiles and runs, with machine-verified constant-time `secret`. It was **not** a production release: single-process, single-file, loop-free-by-design, no standard library at the 1.0 close. **Phase D has since grown the language (sum types, strings, `Vec`, I/O, loops, modules) and ported the compiler to Sentinel — it now self-hosts** (see Status above); production-hardening and tooling (LSP) remain pending.
 - **Not stable.** Every API can change. The `abi-v1` *compiled-artifact* contract is frozen and layout-tested; the Rust crate APIs are not.
 - **Constant-time `secret` is delivered and machine-checked** — the compiler statically rejects secret-dependent control flow, memory indexing, and division, verified on the MIR with the type system as the taint oracle (the headline section above states the precise property and its two boundaries). It is *not* a proof about the optimized machine code: the check runs before LLVM optimization and does not yet *force* constant-time emission. What remains future/ecosystem work: explicit speculation-barrier / `cmov` *emission* and post-codegen assembly verification (a branch-free program already passes verification, so this was scoped out of the 1.0 minimum), an independent secret-dataflow oracle, `[secret T]` arrays, and real cipher suites (libraries belong in the ecosystem, not the language).
 - **The borrow checker is conservative, not yet flow-precise.** It is lexical (pre-Polonius), so it *over-rejects* some safe programs — a borrow held past its last use, a field-disjoint borrow through a parent — each with a documented workaround in [`docs/borrow-check-limitations.md`](docs/borrow-check-limitations.md). The one historical *under*-rejection (a Move-typed struct field passed by value could double-free at drop) is **closed** — ADR 0046, in both the Rust `snc` and the self-hosted `scg`. The remaining limitations are all over-rejections (ergonomics, deferred to the Polonius migration), which are sound by construction.

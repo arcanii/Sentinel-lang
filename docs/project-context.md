@@ -34,7 +34,7 @@ Sentinel is a security-focused language whose compiler is a 16-crate Rust worksp
 
 - **`docs/STATE.md` is the source of truth** for current status. When STATE.md, `docs/HANDOVER.md`, or `CONTRIBUTING.md` disagree, STATE.md wins. Read it first.
 - The architecture is governed by an **ADR trail** in `docs/decisions/`. The "why" of any non-obvious decision is an ADR — find and read it before changing the behavior it ratifies.
-- Current status: **Sentinel 1.0 reached** (Phase C closed 2026-05-30); the compiler **self-hosts** (Phase D bootstrap fixed point reached); per-unit separate compilation is functionally complete. `sentinel-lsp` is a post-1.0 stub.
+- Current status: **the Phase C bootstrap milestone reached** (closed 2026-05-30; it was called "Sentinel 1.0" until ADR 0076 reserved that number for the production bar); the compiler **self-hosts** (Phase D bootstrap fixed point reached); per-unit separate compilation is functionally complete. `sentinel-lsp` is a post-1.0 stub.
 
 ### Compiler pipeline & crate architecture
 
@@ -83,6 +83,11 @@ The **type system is the taint oracle**: a value is secret iff its `Type` is `Se
 ### Critical don't-miss footguns
 
 - Don't pin dep versions in member crates — use root `[workspace.dependencies]`.
+- **Never put the compiler VERSION (or its build id) into emitted LLVM IR** (ADR 0076 D6).
+  `scg` has no access to a Rust crate's `CARGO_PKG_VERSION`, and the codegen differential
+  compares the oracle against it byte for byte, so a stamp there breaks both bootstrap fixed
+  points. The `.sif` header, `unit_fingerprint`, `--version` and the `--emit-header` comment
+  are the places it MAY go.
 - Don't add a feature only to Rust `snc` and forget `selfhost/` — it breaks the self-host fixed point.
 - The borrow checker is **lexical at 1.0 and over-rejects** safe programs (`docs/borrow-check-limitations.md`). Fix a false rejection by scoping the borrow in an inner block — **not** by weakening the checker. Polonius migration is post-1.0.
 - Don't route new work through `sentinel-effects-proto` (frozen) or assume `sentinel-lsp` is functional (stub).

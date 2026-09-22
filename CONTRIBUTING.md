@@ -65,6 +65,26 @@ guarantee *as stated* is a security bug.
   [`docs/HANDOVER.md`](docs/HANDOVER.md) for the method.
 - Match the surrounding code's style; no new dependencies without discussion.
 
+## Versioning a change
+
+The compiler carries a semantic version ([ADR 0076](docs/decisions/0076-compiler-versioning.md)),
+currently pre-1.0, so the MINOR is the breaking slot.
+
+- **patch** — a fix with no user-visible surface change, and no emitted-IR change for a
+  program that already compiled.
+- **minor** — anything user-visible: a language feature, a new or changed CLI flag, a new
+  runtime symbol, an `abi-v1` amendment, or a rule that now REJECTS a program that used to
+  compile. A rejection that is a FIX is still a minor — the program stopping to build is
+  what the user experiences.
+- **major** — reserved for the production bar. `1.0.0` has not happened.
+
+The shortcut: **an oracle-moving change is at least a minor.** If it alters `snc`'s stage
+dumps or emitted IR, what a user's program compiles to has changed, so the same test that
+triggers the mirror-and-re-bless rhythm also triggers the bump.
+
+`abi-v1` and the `.sif` format version are separate contracts with their own numbers. Do not
+bump the compiler version for them, or them for it.
+
 ## Where to look first
 
 - [`docs/STATE.md`](docs/STATE.md) — authoritative current status.

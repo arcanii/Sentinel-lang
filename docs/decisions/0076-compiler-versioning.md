@@ -1,9 +1,9 @@
 # ADR 0076: The compiler carries a semantic version, starting at 0.1.0
 
-Status: **APPROVED** (2026-09-22) — all six decisions ratified by the maintainer, D1 with
-the clarification that the number is for public communication. Moves to **ACCEPTED** when the
-Implementation list lands, which is this repo's convention for what ACCEPTED means.
-Closes register item **D73** (D5).
+Status: **ACCEPTED** (2026-09-22; approved the same day). Closes register item **D73** (D5).
+Landed with its tests and mutations: four-check green — 2,013 passed with exactly the 18
+known Windows failures, doctests and clippy clean, every `selfhost_*` differential green and
+both bootstrap fixed points byte-identical, which D6 predicts and requires.
 
 Nothing in the tree is a release version today. `snc` identifies itself as `C1.0b`, a Phase
 C sub-slice code from [ADR 0011](0011-phase-c1-kickoff-and-type-system-plan.md), in a
@@ -225,6 +225,15 @@ proves "same build", while "different id" does not prove "different compiler". I
 identity is ever wanted, hashing the executable's bytes slots in behind the same interface
 — a localized change, at the cost of hashing 36 MB per invocation with an in-tree SHA-512
 written for ed25519 rather than for throughput.
+
+⚠ **What implementing this corrected.** The first draft of the error path hashed the
+error's MESSAGE, which is fixed per platform — so the "fail-closed" fallback produced a
+CONSTANT id, which is the fail-OPEN behaviour this decision forbids, on exactly the platforms
+where the lookup is flaky. The mutation that forces the error arm caught it. The landed shape
+splits the two readers: `BuildId::Unknown` carries a per-PROCESS nonce for the fingerprint, so
+caching turns off rather than silently reverting, while `--version` displays `unknown` rather
+than a number that changes every invocation and reads as meaningful. One failure, two correct
+answers, because the cache and the display want different things from it.
 
 **This closes register D73**, and is that entry's own stated fix direction: "fold the
 compiler's own identity (a build id, or the executable's size and modification time) into the

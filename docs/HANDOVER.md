@@ -22,7 +22,7 @@ reference as you work through the milestones.
 
 **Done**
 
-- **Phases A–C** complete; **Sentinel 1.0** closed (2026-05-30) with
+- **Phases A–C** complete; the **Phase C bootstrap milestone** closed (2026-05-30) with
   machine-verified constant-time `secret` (`sentinel::mir::secret_leak`).
 - **Phase D self-hosts** (ADR 0031–0045). The language build-out — sum types +
   `match`, strings + `u8`, growable `Vec<T>`, file I/O, `while`/`break`/
@@ -123,6 +123,10 @@ reference as you work through the milestones.
 > failures); both bootstrap fixed points green; a sweep of every effect-bearing corpus program
 > confirming nothing pre-existing is newly refused; oracle-vs-scg byte-equality on the new
 > fixture at types, mir and llvm; and the secret-taint check in both directions.
+
+### ▶ RESUME HERE (2026-09-22b — `origin/main` was `12cca65` when this was written, and the ADR 0076 work sits on top of it; read `git reflog show refs/remotes/origin/main` and `git log --oneline origin/main..HEAD` at the START and AGAIN before writing either down. This session: **[ADR 0076](decisions/0076-compiler-versioning.md) ACCEPTED and LANDED** — the compiler carries a semantic version, `snc 0.1.0 (0x8a33152df5471198)`, a hand-maintained semver plus a computed build id; `0.0.1` and the `C1.0b` banner are gone; "Sentinel 1.0" is retired as a milestone name and **1.0.0 is reserved for the production bar**. The build id closes register **D73**. Four-check: **2,013 passed with exactly the 18 known Windows failures**, doctests and clippy clean, every `selfhost_*` differential green including both fixed points — which is the point of D6: the version never enters emitted IR, so `scg` needs no knowledge of it. ⚠ **Two traps this session hit, both worth knowing.** A "fail-closed" fallback that hashes an ERROR MESSAGE is a CONSTANT, so it fails OPEN — the mutation that forces the error arm is what caught it. And after restoring a mutated source, `./target/debug/snc.exe` is still the MUTATED binary until something rebuilds it: running it directly produced a confident, wrong diagnosis for several minutes. Rebuild before believing a binary.)
+
+> **What the 2026-09-22b slice did.** Steps 1-7 of ADR 0076's own Implementation list: the semver in `Cargo.toml`, `build_id()` behind a `OnceLock`, the `--version` / `-V` arm (stdout, exit 0), the banner, the fingerprint, the docs (a Versioning section in `README.md` and `CONTRIBUTING.md`, D6's rule among `project-context.md`'s footguns, D2's bump rule on `CLAUDE.md`'s oracle-moving line, and the seven milestone renames), and D73 marked DONE. New tests: `crates/sentinel-driver/tests/version.rs` (the shape, stdout, exit 0, and a guard that the version never reaches emitted IR) and `separate_rebuild_by_another_compiler_is_not_fresh` in `modules.rs`, which carries its own non-vacuity control.
 
 ### ▶ RESUME HERE (2026-09-22 — `origin/main` was `4ac159a` when this was written; it moved three times during the previous session and once more DURING the one before that, so read `git reflog show refs/remotes/origin/main` and `git log --oneline origin/main..HEAD` at the START and AGAIN before writing either down — never a hash written in a file, including this one. This session: **register D87 CLOSED, both halves** — [ADR 0075](decisions/0075-a-bubbling-resume-leaves-its-arm.md) slice 2 (D6) reifies a bubbling `k(v)`'s remainder onto the bubbled continuation in all three back ends, with `scg` byte-identical to the oracle, so `k(1) + 10` answers 22 where it answered 12; a remainder that cannot be replayed aborts through the new `sentinel_kont_panic_remainder` rather than answering wrongly. ADR 0075 is **ACCEPTED**. The same session closed **D95** (`scg` placed struct-literal values by SOURCE position, not declared field index) and filed **D96**, **D97** and **D98**. Register: **98 distinct ids, 41 whose heading opens `**D<n> — DONE`** (D87 and D95 are the two that changed). ⚠ That rule is not the one earlier blocks used: a looser grep for DONE or CLOSED anywhere in a heading line answers 46, because several headings say a HALF is done or mention it in passing. Count the same way twice before reporting a movement. Four-check: **2,009 passed with exactly the 18 known Windows failures**, doctests and clippy clean, every `selfhost_*` differential green including both bootstrap fixed points. Two MATCHED pre/post sweeps over all **470** tracked and untracked `.sentinel` files, each binary smoke-tested to discriminate first: the ORACLE differs on exactly one file (the new slice-2 fixture) and `scg` on exactly two (that one and the new D95 fixture). Five mutations caught. ⚠ Build both sweep binaries `--profile test`: a `cargo build` snc STACK-OVERFLOWS on three corpus files and reports itself as three false differences.)
 
@@ -1811,15 +1815,28 @@ reference as you work through the milestones.
 >      says each evaluation frame "prepends itself to `kont`", and the code appends. Whether a
 >      frozen research artifact should be corrected at all is a maintainer call.
 >
->      **D73 — `snc build --separate` reuses per-unit objects an OLDER `snc` compiled.** Found
->      by D59/D60's seventh review; pre-existing (ADR 0037 (3/N)). `unit_fingerprint` hashes the
->      module path, its source and its imported items, plus `CARGO_PKG_VERSION`, which has been
->      `0.0.1` in every build. So a `--separate` rebuild into a directory holding a `<unit>.o` /
->      `.o.fp` pair from an earlier `snc` prints `snc: fresh` and links the old object, keeping
->      whatever that compiler got wrong — after this commit, D59's miscompile and the effecting-
->      fn lowerings ADR 0072 A1 refuses. Fix direction: fold the compiler's own identity (a
->      build id, or the executable's size and modification time) into the fingerprint. Until
->      then, build `--separate` into a fresh directory after upgrading `snc`.
+>      **D73 — DONE (2026-09-22). `snc build --separate` reused per-unit objects an OLDER
+>      `snc` compiled.** Found by D59/D60's seventh review; pre-existing (ADR 0037 (3/N)).
+>      `unit_fingerprint` hashes the module path, its source and its imported items, plus
+>      `CARGO_PKG_VERSION` — which had been `0.0.1` in every build. So a `--separate` rebuild
+>      into a directory holding a `<unit>.o` / `.o.fp` pair from an earlier `snc` printed
+>      `snc: fresh` and linked the old object, keeping whatever that compiler got wrong.
+>
+>      Fixed by [ADR 0076](decisions/0076-compiler-versioning.md) D5: the fingerprint now also
+>      hashes a BUILD ID — the executable's own size and mtime — which moves on every rebuild.
+>      That is this entry's own stated fix direction. A commit SHA was considered and rejected
+>      on SIGNAL, not cost: it does not move across an UNCOMMITTED change, which is exactly when
+>      this bites. The id fails CLOSED: if the lookup errors it becomes a per-process nonce, so
+>      caching turns off rather than silently reverting — a first draft hashed the error
+>      MESSAGE, which is constant per platform, and a mutation test caught that it would have
+>      restored the bug on exactly the platforms where the lookup is flaky.
+>
+>      Pinned by `separate_rebuild_by_another_compiler_is_not_fresh` in
+>      `crates/sentinel-driver/tests/modules.rs`, which builds `--separate`, asserts the
+>      same-binary control DOES cache (without it the test would pass vacuously), then rebuilds
+>      with a copy of `snc` whose mtime differs and asserts nothing is `fresh`. Mutation-
+>      verified twice: removing the build id from the fingerprint, and forcing the
+>      `current_exe()` lookup to fail.
 >
 >      **D72 — a fn or method body that diverges by a STATEMENT returns its dead TAIL in the
 >      epilogue.** Found by D59/D60's second review: another reader of a divergent block's own

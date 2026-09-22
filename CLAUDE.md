@@ -29,4 +29,6 @@ rules (edit it there, not here):
 
 > Oracle-moving changes (anything altering `snc`'s stage dumps or emitted IR) must keep
 > both bootstrap fixed points green — mirror Rust `snc` changes into `selfhost/*.sentinel`.
+> They are also at least a MINOR version bump (ADR 0076 D2): if the emitted IR moved, what
+> a user's program compiles to moved.
 > See `docs/project-context.md` and `CONTRIBUTING.md` for the full rhythm.
