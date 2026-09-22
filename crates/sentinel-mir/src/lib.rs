@@ -7,7 +7,7 @@
 //! branch, a memory index, or a variable-latency operation.
 //!
 //! Under the C5.1 escape hatch (ADR 0026 D1/D3 amendment) codegen stays
-//! on the typed program; MIR is therefore **analysis-only** at 1.0 — it
+//! on the typed program; MIR is therefore **analysis-only** — it
 //! is lowered from the typed program purely to host that verification
 //! (and a future bounds-check elision), not to feed codegen.
 //!
@@ -838,7 +838,7 @@ fn secret_leak(sink: SinkKind, span: &Span) -> SecretLeak {
 /// def-use propagation is needed here. (That standalone forward
 /// propagation only becomes necessary once MIR is lowered from
 /// *post-optimisation* code, where the optimiser may have produced a
-/// secret-derived value the type no longer marks — a **post-1.0** form,
+/// secret-derived value the type no longer marks — a **post-bootstrap** form,
 /// recorded as an amendment to ADR 0026 D5. At 1.0 the additional leak
 /// this pass catches over the C3.1 source rejections is the
 /// `secret bool && secret bool` short-circuit, which type-checks because

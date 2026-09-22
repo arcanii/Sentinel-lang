@@ -4555,7 +4555,7 @@ for a process. It provides:
 
 What to *defer*: cross-process shared memory (hard, do it in Phase C
 when you have the full language to express it). Memory-hard secret
-storage (research, post-1.0). Argon2id integration (use the `argon2`
+storage (research, post-bootstrap). Argon2id integration (use the `argon2`
 crate as a separate library, not part of the broker yet).
 
 ### 4.2 API Sketch

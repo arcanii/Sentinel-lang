@@ -5,8 +5,8 @@ This document captures capabilities and tracked items in two layers:
 - **Section 0 (Phase A carry-over)**: short-term, tactical items
   deferred from the broker implementation. Address before the broker
   is considered 1.0-stable.
-- **Sections 1+ (post-1.0 research)**: long-term strategic directions
-  that are not part of Sentinel 1.0 but should remain visible.
+- **Sections 1+ (post-bootstrap research)**: long-term strategic directions
+  that are not part of the bootstrap close but should remain visible.
 
 ---
 

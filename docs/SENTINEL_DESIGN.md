@@ -346,7 +346,7 @@ linked into emitted programs.
 
 ### 10.2 Path to Self-Hosting
 
-Stage zero: bootstrap reaches feature completeness for Sentinel 1.0.
+Stage zero: bootstrap reaches feature completeness for the bootstrap close.
 
 Stage one: lexer and parser ported to Sentinel, output fed into the
 remaining Rust pipeline.

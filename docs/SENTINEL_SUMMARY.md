@@ -109,7 +109,7 @@ prototype (a research interpreter) validated the design, and the
 **Phase C bootstrap compiler** then lowered the full language —
 types, generics, borrow check + RAII, `secret` + effect typing, the
 algebraic-effect handler runtime, classes/traits/delegation, structured
-concurrency — to native code via LLVM, closing at **Sentinel 1.0**
+concurrency — to native code via LLVM, closing at the **bootstrap milestone**
 (2026-05-30) with **machine-verified constant-time `secret`**.
 
 **Phase D self-hosts.** The language grew the features a compiler needs

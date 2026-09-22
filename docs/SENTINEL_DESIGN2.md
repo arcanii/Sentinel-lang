@@ -113,7 +113,7 @@ which is part of the type:
   - **Nullability**: `T` for non-nullable, `?T` for optional.
   - **Secrecy**: `secret T` for values that must not leak.
   - **Integrity**: `authenticated T` for values whose origin is
-    cryptographically verified (post-1.0, see Section 11).
+    cryptographically verified (post-bootstrap, see Section 11).
 
 Effects appear in function signatures rather than as type qualifiers,
 because they describe what a function *does* rather than what its values
@@ -451,7 +451,7 @@ This is opt-in for regulated domains (healthcare, financial services,
 multi-tenant SaaS) rather than mandatory, because the ergonomics
 require careful design. The 1.0 language reserves the syntax and
 defines the semantic skeleton; full information-flow checking is a
-post-1.0 deliverable.
+post-bootstrap deliverable.
 
 ---
 
@@ -538,7 +538,7 @@ academically correct but practically forbidding. The 1.0 language is
 deliberately restricted to a subset that composes cleanly and ships in
 a reasonable timeframe.
 
-### 15.1 In 1.0
+### 15.1 In the bootstrap close
 
 Core type system (regions, ownership, nullability, bounds safety).
 The memory broker with arenas, generational handles, budgets, and
@@ -553,7 +553,7 @@ cryptographic primitives.
 ⚠ **(register D55) This clause read "…including Argon2id", and 1.0 has since
 shipped, so it was a claim about the delivered product rather than a plan.**
 There is no Argon2 implementation anywhere in the tree. §9.3 above lists what the
-crypto library actually contains. The rest of this section is the pre-1.0 scope
+crypto library actually contains. The rest of this section is the pre-bootstrap-close scope
 plan as written and has not been re-audited against the shipped compiler — read
 [`STATE.md`](STATE.md) for delivered status, not this list.
 
@@ -588,7 +588,7 @@ programs.
 
 ### 16.2 Path to Self-Hosting
 
-Stage zero: bootstrap reaches feature completeness for Sentinel 1.0.
+Stage zero: bootstrap reaches feature completeness for the bootstrap close.
 Stage one: lexer and parser ported to Sentinel.
 Stage two: type checker and HIR ported.
 Stage three: back end and broker bindings ported.

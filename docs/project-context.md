@@ -34,7 +34,7 @@ Sentinel is a security-focused language whose compiler is a 16-crate Rust worksp
 
 - **`docs/STATE.md` is the source of truth** for current status. When STATE.md, `docs/HANDOVER.md`, or `CONTRIBUTING.md` disagree, STATE.md wins. Read it first.
 - The architecture is governed by an **ADR trail** in `docs/decisions/`. The "why" of any non-obvious decision is an ADR — find and read it before changing the behavior it ratifies.
-- Current status: **the Phase C bootstrap milestone reached** (closed 2026-05-30; it was called "Sentinel 1.0" until ADR 0076 reserved that number for the production bar); the compiler **self-hosts** (Phase D bootstrap fixed point reached); per-unit separate compilation is functionally complete. `sentinel-lsp` is a post-1.0 stub.
+- Current status: **the Phase C bootstrap milestone reached** (closed 2026-05-30; it was called "Sentinel 1.0" until ADR 0076 reserved that number for the production bar); the compiler **self-hosts** (Phase D bootstrap fixed point reached); per-unit separate compilation is functionally complete. `sentinel-lsp` is a post-bootstrap stub.
 
 ### Compiler pipeline & crate architecture
 
@@ -42,7 +42,7 @@ Sentinel is a security-focused language whose compiler is a 16-crate Rust worksp
 - `sentinel-broker` is the memory subsystem (generational arenas; secret-memory policy: `mlock` + zero-on-free). `sentinel-effects-proto` is a **frozen Phase-B research interpreter — do NOT wire new features through it.**
 - Phases are **salsa queries** that chain by passing one query's output into the next. Keep query functions pure — emit diagnostics through the accumulator, don't mutate shared state.
 - **Codegen lives outside salsa** (LLVM `'ctx` lifetimes are incompatible with salsa storage). Don't try to make LLVM IR generation a tracked query.
-- **HIR is a thin seam, not a full desugar.** Codegen consumes the *typed program* directly; MIR is lowered from the typed program **only for verification**. Do NOT assume HIR performs monomorphization, dispatch resolution, or explicit-drop rewriting — those are deferred post-1.0.
+- **HIR is a thin seam, not a full desugar.** Codegen consumes the *typed program* directly; MIR is lowered from the typed program **only for verification**. Do NOT assume HIR performs monomorphization, dispatch resolution, or explicit-drop rewriting — those are deferred post-bootstrap.
 - `Type` is **`Copy + Hash`**, and that is load-bearing (interners are value tables, not Arc-wrapped). Keep `Type` Copy; don't add non-Copy fields.
 
 ### The `secret` / constant-time discipline (highest-stakes rules)
@@ -57,9 +57,9 @@ The **type system is the taint oracle**: a value is secret iff its `Type` is `Se
 
 ### Effect handlers, runtime & FFI/ABI
 
-- Effects are reified (free-monad style) into continuations. **Continuations are one-shot** — resuming a `kont` twice panics by design (multi-shot is a deferred post-1.0 upgrade). Handlers are **deep** (the handler re-wraps the tail).
+- Effects are reified (free-monad style) into continuations. **Continuations are one-shot** — resuming a `kont` twice panics by design (multi-shot is a deferred post-bootstrap upgrade). Handlers are **deep** (the handler re-wraps the tail).
 - Runtime symbols are crate-prefixed C-ABI (`sentinel_perform_op`, `sentinel_kont_resume`, …). Frame chains are heap (malloc) linked lists, not arena-allocated.
-- The callable ABI is **`abi-v1`** and is **stable at 1.0** — no breaking changes to emitted symbol names/shapes. Cross-module / separate-compilation linking relies on module-qualified `abi-v1` symbols. The **type-tag table** (`docs/abi-v1.md` §4) is complete over every `Type` variant and every tag is **structural** — derived from the type's shape, never from an interner index, because three independent back ends must derive the same name. A new `Type` variant needs a tag in all three (`mangle_type` in `sentinel-codegen` and in `sentinel-driver/src/llvm_dump.rs`, `cg_mangle_to` in `selfhost/types/cg.sentinel`); both Rust matches are exhaustive on purpose, so **never add a `_ =>` arm** (ADR 0016 A1).
+- The callable ABI is **`abi-v1`** and has been **frozen since the bootstrap close** — no breaking changes to emitted symbol names/shapes. Cross-module / separate-compilation linking relies on module-qualified `abi-v1` symbols. The **type-tag table** (`docs/abi-v1.md` §4) is complete over every `Type` variant and every tag is **structural** — derived from the type's shape, never from an interner index, because three independent back ends must derive the same name. A new `Type` variant needs a tag in all three (`mangle_type` in `sentinel-codegen` and in `sentinel-driver/src/llvm_dump.rs`, `cg_mangle_to` in `selfhost/types/cg.sentinel`); both Rust matches are exhaustive on purpose, so **never add a `_ =>` arm** (ADR 0016 A1).
   - ADR 0016 A1 did move some inkwell tags (`shared0` → `shared_i64`, …). That is an amendment rather than an `abi-v2` bump on one evidenced ground, not on principle: those tags are reachable only through a phantom generic argument or a generic fn's mono key, and **sweeping all 339 corpus programs showed zero emitted names change**. A tag change with any corpus reach would be an `abi-v2` matter — run that sweep before claiming otherwise.
 - `extern "C"` import and `export "C"` export resolve by **symbol name**; the value ABI is public scalars (`i64`/`f64`) only. A **secret fence** rejects `secret` arguments crossing FFI — keep it.
 - Driver build modes: `snc build --separate` (per-unit objects), `--lib` (static archive), `--shared` (`.dylib`/`.so`), `--emit-header` (C header).
@@ -89,7 +89,7 @@ The **type system is the taint oracle**: a value is secret iff its `Type` is `Se
   points. The `.sif` header, `unit_fingerprint`, `--version` and the `--emit-header` comment
   are the places it MAY go.
 - Don't add a feature only to Rust `snc` and forget `selfhost/` — it breaks the self-host fixed point.
-- The borrow checker is **lexical at 1.0 and over-rejects** safe programs (`docs/borrow-check-limitations.md`). Fix a false rejection by scoping the borrow in an inner block — **not** by weakening the checker. Polonius migration is post-1.0.
+- The borrow checker is **lexical and over-rejects** safe programs (`docs/borrow-check-limitations.md`). Fix a false rejection by scoping the borrow in an inner block — **not** by weakening the checker. Polonius migration is post-bootstrap.
 - Don't route new work through `sentinel-effects-proto` (frozen) or assume `sentinel-lsp` is functional (stub).
 - Don't introduce nightly Rust features — stable 1.80 only.
 - Don't `unwrap()` / `panic!` on user-program input — surface a `miette` diagnostic through the accumulator.

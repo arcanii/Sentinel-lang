@@ -416,9 +416,9 @@ log of the lifecycle log) needs a defined terminator.
 
 This work depends on several 1.0 features being complete: the `secret`
 qualifier, the broker, the effect system, and the signature
-infrastructure. It is therefore post-1.0 work.
+infrastructure. It is therefore post-bootstrap work.
 
-Within post-1.0, the implementation phases are:
+Within post-bootstrap, the implementation phases are:
 
 **Phase L1**: Type system extensions and broker registration. The
 `@lifecycle` and `@origin` qualifiers are added to the type system.

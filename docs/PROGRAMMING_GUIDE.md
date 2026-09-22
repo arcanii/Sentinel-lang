@@ -609,7 +609,7 @@ Two fixtures are worth reading in full as end-to-end tours:
 - [`tests/pass/c44_go_no_go.sentinel`](../tests/pass/c44_go_no_go.sentinel) —
   the structured-concurrency example above, complete.
 - [`tests/pass/c5_go_no_go.sentinel`](../tests/pass/c5_go_no_go.sentinel) — the
-  **1.0 acceptance program**: a TLS-1.3-handshake-*shaped* program combining a
+  **bootstrap acceptance program**: a TLS-1.3-handshake-*shaped* program combining a
   state-machine class, a cipher-suite trait, I/O-as-effects, and a constant-time
   `Finished`-MAC verify — compiled, run, and passing the constant-time check
   end to end.
@@ -622,7 +622,8 @@ tested against.
 
 ## What isn't here yet
 
-Sentinel 1.0 was the *bootstrap-compiler* milestone, and Phase D has since grown
+The Phase C close was the *bootstrap-compiler* milestone — it was called "Sentinel 1.0"
+until ADR 0076 reserved that number for the production bar — and Phase D has since grown
 the language to self-host. What remains pending:
 
 - **Not production-ready, not stable.** Every API can change; only the

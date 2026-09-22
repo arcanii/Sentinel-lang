@@ -50,7 +50,7 @@ asserting the value is safe to treat as public).
    emission (no `cmov` forcing, no speculation barriers, no post-codegen
    assembly verification — all future work). A standalone forward taint
    propagation only becomes necessary once MIR is lowered from
-   *post-optimization* code; that is a recorded post-1.0 amendment to ADR 0026
+   *post-optimization* code; that is a recorded post-bootstrap amendment to ADR 0026
    D5.
 
 ## Per-construct modeling
@@ -122,7 +122,7 @@ reader of a verdict computed elsewhere.
 - **The type checker is the single point of trust.** Per the boundary above, a
   secret-propagation bug in the type checker would false-negative this pass. The
   conformance suite is the mitigation; an independent secret-dataflow oracle is
-  post-1.0 work.
+  post-bootstrap work.
 - **Pre-optimization.** The check constrains the program, not the optimized
   machine code; constant-time *emission* is future work (README, ADR 0026 D5).
 - **No `secret enum` at the MVP.** `[secret T]` arrays now exist (ADR 0047) and

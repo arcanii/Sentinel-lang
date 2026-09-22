@@ -923,7 +923,7 @@ deferred" list instead of re-deriving it, so one true sentence propagated forwar
 amendments and outlived what it described — then reached STATE.md, which outranks every other
 doc here. Both listed items ship: `&mut [u8]` export params (D54 exists *because* they work) and
 the Linux `cc -shared` path. Separately, `SENTINEL_DESIGN2.md` §9.3 advertised Argon2id, P-256
-and post-quantum primitives that exist nowhere in the tree, and its §15.1 "In 1.0" list repeated
+and post-quantum primitives that exist nowhere in the tree, and its §15.1 list (then titled "In 1.0") repeated
 the Argon2id claim — the filer designed a password-KDF around that sentence before checking.
 §9.3 now lists what actually ships and says plainly that array-shaped secrets are neither
 mlock'd nor scrubbed. **When an amendment carries a capability list, re-measure it; do not copy
@@ -3099,7 +3099,7 @@ resolution; no lex/parse/IR change) → no re-bless / `selfhost` mirror. Item-le
   (`snc merge` / `snc build`, both still green). Remaining tail (lower value):
   class / generic-instance type-arg dedup, trait/class-method dedup. Full
   detail in the `sentinel_separate_compilation` auto-memory + ADR 0037.
-- **`sentinel-lsp`** — stub (post-1.0, ADR 0025 D10).
+- **`sentinel-lsp`** — stub (post-bootstrap, ADR 0025 D10).
 - **Core libraries + examples-as-tests** 🟢 **underway** (the active track). A
   top-level `std/` (functional categories) + `examples/` corpus of real,
   idiomatic Sentinel programs that double as feature tests — each built BOTH via

@@ -277,7 +277,7 @@ tooling. **P4** = outreach + deferred ergonomics.
 - **Cross-process capabilities / actors** — stays deferred
   (post-Phase-D, as already documented).
 - **Thick-HIR migration / codegen-consumes-MIR** — unchanged
-  post-1.0 stance; not raised as a risk by any reviewer.
+  post-bootstrap stance; not raised as a risk by any reviewer.
 
 ---
 

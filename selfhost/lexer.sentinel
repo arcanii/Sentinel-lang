@@ -7,7 +7,7 @@
 // value-bearing variants Ident/IntLit/FloatLit/StringLit/CharLit), then `EOF`.
 //
 // The differential test diffs this output against `snc lex` over the
-// fixture corpus. This dogfoods the post-1.0 language: `[u8]`/`u8` (D.2),
+// fixture corpus. This dogfoods the post-bootstrap language: `[u8]`/`u8` (D.2),
 // `Vec` (D.3), `read_file`/`print_bytes` (D.4), `while` (D.5). It emits
 // directly into an output `Vec<u8>` (no Token enum / Vec<Token> yet — the
 // parser sub-phase (2/N) will have the lexer return a token list).

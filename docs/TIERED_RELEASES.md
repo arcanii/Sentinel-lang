@@ -639,7 +639,7 @@ carries full runtime checks. Tier D enables recording mode by default.
 
 Belongs in 1.0 because it shapes how all subsequent work fits.
 
-### Phase T2 — Hardened Releases (post-1.0)
+### Phase T2 — Hardened Releases (post-bootstrap)
 
 Add Tier H, building on the runtime integrity features from
 BACKLOG2.md Section 3. Straightforward extension: more checks, not
@@ -649,7 +649,7 @@ hardening modes.
 Probably the second item promoted from BACKLOG2.md after the
 signature infrastructure stabilizes.
 
-### Phase T3 — Trust Profile Infrastructure (post-1.0)
+### Phase T3 — Trust Profile Infrastructure (post-bootstrap)
 
 Build the trust profile data structures, signature integration,
 aggregation tooling, and profile inspection tools. Tier S exists as a

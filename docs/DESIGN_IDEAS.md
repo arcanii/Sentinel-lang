@@ -425,7 +425,7 @@ already has the necessary infrastructure.
 **Hard parts.** False positives are expensive in terms of developer
 trust. The signal must be precise.
 
-**Assessment.** Worth doing as tooling polish, probably post-1.0.
+**Assessment.** Worth doing as tooling polish, probably post-bootstrap.
 
 ---
 

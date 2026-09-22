@@ -1,7 +1,8 @@
 # SESSION_PREP.md — Paste-ready prompt for the next chat session
 
 > **⚠ HISTORICAL — do not use as current state.** This boot prompt is frozen at
-> the **C3.5(d)** milestone (pre-1.0). The language has since reached 1.0 and
+> the **C3.5(d)** milestone (before the bootstrap close). The language has since reached
+> that close and
 > self-hosts. To resume work, use **[`HANDOVER.md`](HANDOVER.md) §0** +
 > **[`STATE.md`](STATE.md)** (the source of truth); this file is kept only for
 > provenance and may be deleted.

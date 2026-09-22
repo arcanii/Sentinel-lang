@@ -5670,8 +5670,9 @@ fn needs_drop(ty: Type, program: &TypedProgram) -> bool {
         | Type::Process
         | Type::SealedChannel
         | Type::Kont(_)
-        //   - a class instance boxes nothing droppable at 1.0 (explicit-drop
-        //     rewriting is deferred post-1.0; unchanged from the prior `_ => false`).
+        //   - a class instance boxes nothing droppable as of the bootstrap close
+        //     (explicit-drop rewriting is deferred post-bootstrap; unchanged from the
+        //     prior `_ => false`).
         | Type::Class(_)
         //   - abstract types are monomorphized/substituted away before codegen.
         | Type::TypeParam(_)

@@ -454,7 +454,7 @@ A drift in any layout / mangling / symbol must turn a test **red**:
 
 ---
 
-## 8. Out of scope (`abi-v2` / post-1.0)
+## 8. Out of scope (`abi-v2` / post-bootstrap)
 
 - The separate-compilation **linker** for true per-unit objects — **in
   progress** (ADR 0037 (a)). The `use`/`pub` module **surface** shipped
