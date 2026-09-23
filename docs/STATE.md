@@ -5,7 +5,7 @@ HANDOVER.md, STATE.md is the source of truth. New contributors (or
 new chat sessions) should be able to read this file and understand
 the current state of the workspace without re-reading every commit.
 
-## Current State (2026-09-22)
+## Current State (2026-09-23)
 
 > **Phase C closed at the bootstrap milestone (2026-05-30); Phase D self-hosts; the
 > per-unit separate-compilation back end is functionally complete.**
@@ -14,7 +14,24 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
-**Latest (2026-09-22b) — the compiler carries a semantic version:
+**Latest (2026-09-23) — ADR 0075 A1: an arm-remainder resumer takes its identity from its
+parent definition (register D99).** It is named after the parent's EMITTED symbol with one
+sequence per definition, consults and records into the parent's drop plan, and is emitted
+after the definition's last define, into its own buffer. The first landing broke each rule
+somewhere: the NAME in both text back ends for a `handle` in a method or a generic fn, and
+in the oracle for a `handle` in each of two frames of an effecting fn; the DROP PLAN in the
+oracle for a method, and in `scg` for any free fn whose replayed remainder moved a heap
+value; the PLACE in `scg` for a method or a mono instance, and in the oracle for an
+effecting fn. inkwell got the name and the drop plan right (it has no text to place), and no
+corpus program reached any of them. Landed with it: `scg` looked a capture's type up by
+scope position rather than by VarId. This moves the oracle (`snc llvm`), so under ADR 0076
+D2 the next version is at least 0.2.0; `snc build`'s output does not move. The review that
+checked it also filed D100-D109, two of them wrong answers with no diagnostic in all three
+back ends from ADR 0075 slice 2 (D102, D103), so D87's closure below does not hold in
+general: replayed remainders run in the reverse of ADR 0020 D3's order and can be lost, and
+a replayed remainder works on copies of the outer variables it reads.
+
+**Previously (2026-09-22b) — the compiler carries a semantic version:
 [ADR 0076](decisions/0076-compiler-versioning.md) is ACCEPTED and landed.** `snc --version`
 answers "what version of Sentinel do I have?" in two parts — a hand-maintained semver and a
 computed build id, `snc 0.1.0 (0x8a33152df5471198)`. The placeholder `0.0.1` and the stale

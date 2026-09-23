@@ -124,6 +124,10 @@ reference as you work through the milestones.
 > confirming nothing pre-existing is newly refused; oracle-vs-scg byte-equality on the new
 > fixture at types, mir and llvm; and the secret-taint check in both directions.
 
+### ▶ RESUME HERE (2026-09-23 — `origin/main` was `8a79339` when this was written, and this session's two commits sit on top of it, unpushed; read `git reflog show refs/remotes/origin/main` and `git log --oneline origin/main..HEAD` at the START and AGAIN before writing either down. This session: **register D99 CLOSED** — [ADR 0075](decisions/0075-a-bubbling-resume-leaves-its-arm.md) **A1**: an arm-remainder resumer takes its name, its drop plan and its place in the output from its parent definition, in the oracle and `scg`. Slice 2 had each of the three wrong somewhere (methods, class inits, generic fns, an effecting fn's frames); inkwell was right on the name and the drop plan. Landed with it: `scg` looks a capture's type up by VarId. **This moves the oracle, so ADR 0076 D2 makes the next version at least 0.2.0; `Cargo.toml` is still 0.1.0, the maintainer's call.** Three review rounds plus a narrow fourth on the remedies filed **D100—D109**; two of them, **D102** and **D103**, are wrong answers with no diagnostic in all three back ends from slice 2, so D87's closure does not hold in general, and each needs a design call. Register: **109 distinct ids, 43 whose heading opens `**D<n> — DONE`** (the rule the 2026-09-22 block states). Four-check: **2,018 passed with exactly the 18 known Windows failures**, doctests and clippy clean, every `selfhost_*` differential green. A matched pre/post sweep over all **473** tracked and untracked `.sentinel` files, each binary smoke-tested first: the oracle differs on exactly two files and `scg` on exactly two, all new fixtures. Sixteen mutations caught. ⚠ **Two traps this session:** the first remedy for a review finding (restore the old parent name in an effecting fn's frames) would have brought back invalid IR, and only a verifier that CONSTRUCTED the input caught it; and each review round found false claims in the prose written to fix the round before, until claims were cut rather than refined. Also: Python embedded in a Bash heredoc loses its backslashes in the tool layer (`\n` becomes a newline) — write edit scripts with the Write tool.)
+
+> **NEXT:** the approved order continues — **item 2**, the loop partial-move rule (snc-only, neutral public text once fixed); then ADR 0077 for D93; then D92, D96 + D97, and the four new leaks. Design calls owed to the maintainer from this session: D102 (narrow class (R), or keep pending remainders per activation) and D103 (class (A) for a remainder that writes outside the arm).
+
 ### ▶ RESUME HERE (2026-09-22b — `origin/main` was `12cca65` when this was written, and the ADR 0076 work sits on top of it; read `git reflog show refs/remotes/origin/main` and `git log --oneline origin/main..HEAD` at the START and AGAIN before writing either down. This session: **[ADR 0076](decisions/0076-compiler-versioning.md) ACCEPTED and LANDED** — the compiler carries a semantic version, `snc 0.1.0 (0x8a33152df5471198)`, a hand-maintained semver plus a computed build id; `0.0.1` and the `C1.0b` banner are gone; "Sentinel 1.0" is retired as a milestone name and **1.0.0 is reserved for the production bar**. The build id closes register **D73**. Four-check: **2,013 passed with exactly the 18 known Windows failures**, doctests and clippy clean, every `selfhost_*` differential green including both fixed points — which is the point of D6: the version never enters emitted IR, so `scg` needs no knowledge of it. ⚠ **Two traps this session hit, both worth knowing.** A "fail-closed" fallback that hashes an ERROR MESSAGE is a CONSTANT, so it fails OPEN — the mutation that forces the error arm is what caught it. And after restoring a mutated source, `./target/debug/snc.exe` is still the MUTATED binary until something rebuilds it: running it directly produced a confident, wrong diagnosis for several minutes. Rebuild before believing a binary.)
 
 > **What the 2026-09-22b slice did.** Steps 1-7 of ADR 0076's own Implementation list: the semver in `Cargo.toml`, `build_id()` behind a `OnceLock`, the `--version` / `-V` arm (stdout, exit 0), the banner, the fingerprint, the docs (a Versioning section in `README.md` and `CONTRIBUTING.md`, D6's rule among `project-context.md`'s footguns, D2's bump rule on `CLAUDE.md`'s oracle-moving line, and the seven milestone renames), and D73 marked DONE. New tests: `crates/sentinel-driver/tests/version.rs` (the shape, stdout, exit 0, and a guard that the version never reaches emitted IR) and `separate_rebuild_by_another_compiler_is_not_fresh` in `modules.rs`, which carries its own non-vacuity control.
@@ -1672,6 +1676,210 @@ reference as you work through the milestones.
 >      the other class (A) shape (`side() + k(5)`, something evaluated before the resume), so
 >      the workaround is what currently keeps the differential green.
 >
+>      **D99 — DONE (2026-09-23). An arm-remainder resumer did not take its name, its drop plan
+>      and its place in the output from its parent definition.** Found 2026-09-23 by D93's
+>      investigation; introduced by ADR 0075 slice 2 (`e22a050`). inkwell got the name and the
+>      drop plan right (it has no text to place). Each departure was invisible to the corpus: no
+>      fixture put a `handle` in a method, a generic fn, a class init or an effecting fn, and
+>      every replayed remainder was pure arithmetic:
+>
+>      - **Name.** `__armrem_<source name>_<seq>` is not unique per define. A generic fn's two
+>        instances each defined `@__armrem_g_0`, which `llc` rejects; a method, having no
+>        `FnId`, was named from its method key in the oracle and from whichever free fn had last
+>        set the name span in `scg`, so `scg` referenced a resumer it never defined or, when that
+>        fn had a resumer of its own at the same number, ran that one instead (a wrong answer with
+>        no diagnostic); and the oracle numbered each frame of an effecting fn from 0, so two
+>        frames holding a `handle` defined the same symbol.
+>      - **Drop plan.** The oracle built the resumer's `Emit` with `current_method: None`, so in a
+>        method it looked its moves up under the placeholder `FnId(u32::MAX)`, which keys no
+>        plan, and found none. `scg`'s drain ran after `type_fn` had reset `curfn` to -1, and
+>        `record_move` records nothing under -1, so none of a free fn's remainder's own moves were
+>        recorded. Either way the resumer's scope-exit drops disagreed with inkwell's for a value
+>        the remainder moves.
+>      - **Placement.** `scg` drained its worklist only after free fns, and under `cg_mute` (the
+>        mono discovery pass) the drain still took back a separator byte from `cgout`. In an
+>        effecting fn the oracle emitted each frame's resumers after that frame, `scg` after the
+>        last one.
+>
+>      Fixed by [ADR 0075](decisions/0075-a-bubbling-resume-leaves-its-arm.md) A1: a resumer is
+>      part of its parent definition — named after the parent's EMITTED symbol with one
+>      sequence per definition (an effecting fn's frames included), consulting and recording
+>      into the parent's drop plan, and emitted after the definition's last define, into its
+>      own buffer. On the 22 effecting-fn probes the review built that the oracle lowers, the
+>      oracle and `scg` now agree byte for byte on all but two, which are D100's.
+>
+>      Landed with it: `scg`'s capture check read a capture's type by its POSITION in the scope
+>      stack rather than by its VarId (`cg_vid_ty`), so after a truncated arm its (R)/(A) verdict
+>      could disagree with the oracle's in either direction. It now reads `env[vid]`.
+>
+>      Pinned by `tests/pass/c75_remainder_moves_a_local` (a moving remainder in a free fn, a
+>      generic fn at two instances, an impl method, a class method and a class init; exit 42),
+>      `tests/ui/c75_effecting_frames_share_resumers` (refused by `snc build`; the text back
+>      ends lower it and the differential compares them),
+>      `oracle_ir_of_an_embedded_shape_with_a_handle_in_each_define_runs` (the embedded shape,
+>      which D100 keeps out of the corpus), and `oracle_ir_of_the_arm_remainder_programs_runs`,
+>      which RUNS the oracle's IR of `c75_bubble_replays_the_remainder` and both pass fixtures
+>      — the byte-for-byte differential shows the text back ends agree, not that either is
+>      right, and the corpus-wide behaviour check cannot run on a box without a
+>      `libsentinel_runtime.a`. `tests/pass/c75_remainder_capture_types` (exit 42) pins the
+>      `cg_vid_ty` change. Sixteen mutations, one per correction, each caught. A matched pre/post
+>      sweep of all 473 tracked and untracked `.sentinel` files moves the oracle on exactly two
+>      files and `scg` on exactly two, all of them new fixtures; inkwell's only change is a
+>      comment.
+>
+>      **D100 — `scg`'s embedded-shape resumer lowers the `perform`'s ARGUMENT a second
+>      time.** Found 2026-09-23 by the D99 review; pre-existing. For the c35d embedded shape
+>      (`perform Op(arg) + ...`) the oracle's `@__resume_<f>` loads the placeholder in place of
+>      the whole `perform`. `scg`'s `cg_embed_emit` walks the tail again with `cg_ph` armed, and
+>      the Perform arm of `dump_texpr` lowers the arguments before it checks `cg_ph`, so the
+>      argument's instructions are emitted again in the resumer. `fn eff() -> i64 ! { Io } {
+>      perform Io.write(side()) + 1 }` prints `S` under `snc build` and under the oracle's IR,
+>      and `SS` under `scg`'s; an argument that holds a `handle` gets a second resumer. `snc
+>      build` is correct. No corpus program has an embedded `perform` with a non-literal
+>      argument, which is why the differential is green; the older note on double evaluation in
+>      this shape covered only the extra arguments of multi-parameter operations. Likely fix:
+>      check `cg_ph` before lowering the arguments.
+>
+>      **D101 — `scg`'s arm-remainder drain resolves a remainder's names against the
+>      scope stack as it stands at DRAIN time.** Found 2026-09-23 by the D99 review; from ADR
+>      0075 slice 2 (`e22a050`). The drain re-parses and lowers each remainder after the parent
+>      define is assembled. By then the arm's own bindings have been truncated away, and a later
+>      worklist entry can still see an earlier entry's arm-locals. Every manifestation found is
+>      loud — `scg` aborts with `index out of bounds: idx=-43`, or emits IR `llc` rejects:
+>
+>      - a remainder that reads a name bound inside an enclosing `match` arm
+>        (`E::B(m) => handle two() with { Io.read(k) => k(1) + m }`), in a fn or a method;
+>      - one that reads its own arm's operation parameter (`Io.read(x, k) => k(x) + x`);
+>      - a later entry capturing a name that an earlier entry's arm also bound (`ptr %v-1`).
+>
+>      `snc build` and the oracle are correct, and no corpus program has these shapes. A
+>      truncate between entries would fix only the last; the first two need each capture's name
+>      bound to its `arwc` VarId at the start of every entry.
+>
+>      **D102 — replayed arm remainders run in the REVERSE of ADR 0020 D3's order, and can be
+>      lost: a wrong answer with no diagnostic, in all three back ends.** Found 2026-09-23 by the
+>      D99 review; introduced by ADR 0075 slice 2 (`e22a050`), whose text claimed D3's answer.
+>      The bubble pushes the arm's remainder onto the tail of the bubbled kont, so it runs inside
+>      a LATER entry's `k(v)` — the one whose resume runs that chain to completion — before that
+>      entry's own code after it; a remainder whose chain no later `k(v)` completes is released
+>      with it and never runs. D3 (`k := \v. handle (kont.resume v) with H`) finishes the inner
+>      entry first and applies the outer remainder to its value. Over a `two()` that reads and
+>      then writes, `handle two() with { Io.read(k) => k(1) * 10, Io.write(k) => k(2) + 5 }`
+>      answers 35 in every back end where D3 answers (1 + 2 + 5) * 10 = 80; with a third
+>      operation (`* 10`, `+ 5`, `* 2`) it answers 130 for 170; `Io.read(k) => k(1) * 10,
+>      Io.write(k) => 7` answers 7 for 70, and `Io.read(k) => k(1) + 10, Io.write(k) => 7` 7 for
+>      17. No c75 fixture shows either effect: each bubbling `handle` there has one arm, whose
+>      entries all run the same remainder and all resume. No memory-safety or secret-flow
+>      consequence was found: captures are `i64` / `secret i64` values, and only which remainders
+>      run, and in what order, changes. The fix is a design choice — narrow class (R) to arms
+>      whose replay cannot be observed, or keep pending remainders per activation — so it is the
+>      maintainer's.
+>
+>      **D103 — a replayed remainder works on COPIES of the outer variables it reads, taken at
+>      the bubble: its own writes are lost, and writes made after the bubble are not seen. A
+>      wrong answer with no diagnostic, in all three back ends.** Found 2026-09-23 by the D99
+>      review; from ADR 0075 slice 2 (`e22a050`). `arm_remainder_verdict` captures each outer
+>      name the remainder reads BY VALUE into the `i64[N]` frame when the arm bubbles, and never
+>      asks whether the remainder assigns it, takes `&mut` of it, or reads a `let mut` that other
+>      code may write. So `let mut base: i64 = 100; let x: i64 = handle three() with { Io.read(k)
+>      => { let r: i64 = k(1); base = base + 1; r } }; base` answers 101 where D3 answers 103 (of
+>      N arm entries, the N-1 whose remainders are replayed lose their write), and with `let mut
+>      base: i64 = 0;`, `handle two() with { Io.read(k) => k(1) + base, Io.write(k) => { base =
+>      100; k(2) } }` over a `two()` that reads and then writes answers 3 where D3 answers 103
+>      (the replayed `+ base` reads the copy taken before the write arm ran). A write BEFORE the
+>      resume (class T) is unaffected. Likely fix: class (A) for an arm whose remainder captures
+>      a `let mut` binding at all, in the shared verdict and in `scg`'s `cg_ar_classify`.
+>
+>      **D104 — the back ends disagree on whether an arm-remainder resumer inherits the
+>      enclosing `scope concurrent`.** Found 2026-09-23 by the D99 review; from ADR 0075 slice 2.
+>      inkwell's `emit_arm_remainder_resumer` saves and clears its builder state but not
+>      `current_scope`, so a replayed remainder that `spawn`s under an enclosing scope refers to
+>      the PARENT's `%scope_enter` from inside the resumer, and LLVM verification fails
+>      ("Instruction does not dominate all uses"). The oracle and `scg` build the resumer with
+>      no scope, so the task is never registered with the scope and is not awaited at its exit.
+>      No corpus program spawns in a remainder. ADR 0075 A1 settles what a resumer takes from its
+>      parent — name, drop plan, place — and scope membership is the open fourth.
+>
+>      **D105 — the oracle's spawn-target walk skips handler bodies and arms, `match`
+>      arms and most operand positions, so a `spawn` there calls an undefined
+>      `@__spawn_wrapper_<n>`.** Found 2026-09-23 by the D99 review; pre-existing.
+>      `collect_spawn_targets_expr` in `llvm_dump.rs` recurses into `Spawn`, `Scope`, `Await`,
+>      `Block`, `If` and `Call` and ends in `_ => {}`; inkwell's collector is exhaustive, and
+>      `scg` defines the wrapper. For a `spawn` in a handler arm, in a `match` arm or in a binary
+>      operand of an ordinary free fn, `snc llvm` exits 0 with IR that `llc` rejects ("use of
+>      undefined value '@__spawn_wrapper_43'"), while `snc build` and `scg` run the program. This
+>      widens D27, which is about the walk's ROOTS (methods, generic fns), not the walk. Its
+>      comment, "a missed nesting would surface loudly", holds only once the IR is assembled.
+>      Fix: make the walk total over `TypedExprKind`, as `expr_suspends` is.
+>
+>      **D106 — `scg`'s arm-remainder verdict lacks four of the shared verdict's refusals, so
+>      `scg` replays remainders the oracle and `snc build` refuse.** Found 2026-09-23 by the D99
+>      review; from ADR 0075 slice 2 (`e22a050`). The Rust `arm_remainder_verdict`, which the
+>      oracle and inkwell share, refuses a remainder that leaves the arm (`return`, `break` or
+>      `continue`: `remainder_leaves_the_arm`), one that suspends (`expr_suspends`: a `handle`, a
+>      `perform`, an effecting call), and an arm whose `k(v)` or whose own value is not an `i64`
+>      / `secret i64` (`fits_kont_slot`). `scg`'s `cg_ar_classify` checks none of the four (it
+>      does check the captures), so where the other two emit the ADR 0075 D6 abort, `scg` emits a
+>      resumer:
+>
+>      - a `break` out of a `while` inside the remainder: `scg` replays it, the other two abort;
+>      - a conditional `return` in the remainder: `scg` puts the parent's `ret` in the resumer
+>        (`llvm-as`: "value doesn't match function result type 'ptr'");
+>      - a `break` or `continue` in the remainder of a `handle` inside a loop: `scg` itself
+>        aborts (`index out of bounds: idx=-1`);
+>      - a `handle` statement with a bubbling arm inside the remainder: the drain creates a
+>        resumer while it drains and never emits it (`use of undefined value '@__armrem_rh_2'`),
+>        because `cg_ar_drain` fixes its loop bound before it starts (where the inner `handle`'s
+>        value is used, D81 fails first);
+>      - a `bool`-typed `handle` whose arm binds `k(1)`: the oracle emits the abort, `scg` a
+>        resumer.
+>
+>      No corpus program has these shapes. Fix: mirror all four refusals into `cg_ar_classify`.
+>
+>      **D107 — `scg` leaves the mono suffix off a generic effecting fn's multi-define
+>      shapes.** Found 2026-09-23 by the D99 review; pre-existing. `cg_letshape_emit`
+>      (`cg_effects.sentinel`) and the embedded and chained emitters (`cg_chained.sentinel`) write
+>      the parent's `define ptr @<name>` and its `__resume_` frame headers without
+>      `cg_emit_mono_suffix`, which `cg_emit_fn` applies. So for an instance of a generic effecting
+>      fn in the let, let-bound call, embedded or chained shape, `scg` defines `@g` and unsuffixed
+>      frames (`@__resume_g`, or `@__resume_g_<i>` when chained) where its callers and the oracle
+>      use `@g__i64`: one instance gives "use of undefined value '@g__i64'", two give
+>      "invalid redefinition of function 'g'". The shapes `cg_emit_fn` lowers (a `perform` tail, a
+>      pure tail, a tail call) are named correctly, and since ADR 0075 A1 so are the arm-remainder
+>      resumers inside such an instance (`__armrem_g__i64_0`). `snc build` refuses every generic
+>      effecting fn (D70) and no corpus program has one. Fix: apply the suffix in the three
+>      emitters' frame headers.
+>
+>      **D108 — the oracle cannot lower an effecting fn's frame whose `handle` reads a name
+>      the frame did not capture.** Found 2026-09-23 by the D99 review; pre-existing. `fn ch(p:
+>      i64) -> i64 ! { Ask } { let a: i64 = perform Ask.get(1); let b: i64 = perform
+>      Ask.get(handle two() with { Io.read(k) => { let r: i64 = k(1); r + p } }); a + b }` makes
+>      `snc llvm` fail with "read of an unbound var", and so does the embedded spelling
+>      (`perform Ask.get(1) + handle two() with { ... r + p ... }`): the oracle's capture walk,
+>      `walk_collect_var_refs` in `llvm_dump.rs`, ends in `_ => {}` with no `Handle` arm, so a name
+>      read only inside a `handle` is never captured into the frame. `scg` emits the chained one as
+>      IR `llvm-as` rejects (`%v-1`) and the embedded one as valid IR. `snc build` refuses both (a
+>      `handle` in a `perform`'s argument or an effecting fn's tail). No corpus program has either.
+>
+>      **D109 — an effecting fn whose frame returns a computed `bool` does not compile in any
+>      back end, and the text back ends cannot lower a `bool`-typed `handle` whose value is
+>      used.** Found 2026-09-23 by the D99 review; pre-existing. The last frame of `fn twob() ->
+>      bool ! { Io } { let a: i64 = perform Io.read(); let b: i64 = perform Io.read(); a + b > 1
+>      }` hands its `bool` to `sentinel_kont_pure`, which takes an `i64`. So even under an arm
+>      that never resumes (`handle twob() with { Io.read(k) => false }`), `snc build` fails LLVM
+>      verification (`sentinel::codegen::verify_failed`, at `call ptr @sentinel_kont_pure(i1
+>      %cmp)`), and the oracle and `scg` emit IR `llvm-as` rejects inside `@__resume_twob_1`
+>      ("'%v7' defined with type 'i1' but expected 'i64'"). Not every `bool`-returning effecting
+>      fn fails: a `perform` tail (`fn pt() -> bool ! { Q } { perform Q.ask() }`) compiles in all
+>      three, and a literal tail (`{ true }`) in the text back ends, where `scg` then calls a
+>      `bool`-parameter fn with an `i64` argument (`call i64 @pick(i64 ...)` against `define i64
+>      @pick(i1 ...)`), which `llvm-as` accepts. Separately, where a `bool`-typed `handle`'s
+>      value is used, the oracle and `scg` store it into an `i64` slot, which `llvm-as` rejects,
+>      while `snc build` compiles such a program when the handled body is a direct `perform`
+>      (`let x: bool = handle perform Io.read() with { Io.read(k) => { let r: bool = k(1); r },
+>      return v => v > 0 }; if x { 42 } else { 7 }` exits 42). No corpus program has a
+>      `bool`-returning fn with a non-`Async` effect row, or a non-`i64` `handle`.
+>
 >      **D78 — stale corpus fixture counts in `llvm.rs` and `README.md`, at six sites, stale
 >      before this change.** Found by D74's reviews. `crates/sentinel-driver/tests/llvm.rs`
 >      carries them three times: a comment at line 1214 saying a `tests/pass` substring filter
@@ -1879,7 +2087,8 @@ reference as you work through the milestones.
 >      (`effecting_fn_body_not_direct`, pinned in `tests/embedded_perform.rs`, the let-bound
 >      caller included). Still open, the feature: the oracle and scg give the
 >      instance the `Kont*` ABI and run it (`fn g<T>(x: T) -> i64 ! { Io } { perform Io.read()
->      }` handled with `k(42)` gives 42), and `snc build` should too. No corpus program has a
+>      }` handled with `k(42)` gives 42) — `scg` only in the single-define shapes, see D107 — and
+>      `snc build` should too. No corpus program has a
 >      generic effecting fn.
 >
 >      **D69 — the embedded-perform shape runs a tail's one `perform` FIRST. CLOSED in `snc
