@@ -346,3 +346,12 @@ ui_snapshot!(c21_ref_in_effect_op_return, "c21_ref_in_effect_op_return.sentinel"
 // applies to it. This is what makes ADR 0075 D1's per-entry drain of the arm's
 // scopes sound.
 ui_snapshot!(c75_move_into_handler_arm, "c75_move_into_handler_arm.sentinel");
+
+// ADR 0075 A1 (register D99): refused by `snc build`, and its real job is the corpus
+// differential -- the text back ends number an effecting fn's arm-remainder resumers in
+// one sequence across its frames and emit them after its last frame, and `scg` is held
+// to the oracle's bytes on this file.
+ui_snapshot!(
+    c75_effecting_frames_share_resumers,
+    "c75_effecting_frames_share_resumers.sentinel"
+);

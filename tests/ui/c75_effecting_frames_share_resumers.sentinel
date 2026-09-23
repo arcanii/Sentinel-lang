@@ -1,0 +1,59 @@
+// ADR 0075 A1 (negative for `snc build`; a differential input for the text back ends).
+//
+// `snc build` refuses this program: each `handle` below sits in a `perform`'s argument,
+// so the argument suspends, and every ADR 0072 body shape lowers arguments as plain
+// values. The snapshot pins that. `snc llvm` and `scg` lower it anyway, and the corpus
+// differential holds the two to the same bytes, so this file is where their naming and
+// placement of arm-remainder resumers inside an effecting fn is pinned. (Built and run,
+// `main` returns 2231 under both IRs.)
+//
+// An effecting fn is lowered as several defines: `@ls` and its frame `@__resume_ls`;
+// `@ch` and its frames `@__resume_ch_0` .. `@__resume_ch_2`. Every `handle` below has an
+// arm whose `k(1)` bubbles (`two()` performs twice), so each one gets a resumer. The
+// resumers of one fn are numbered in ONE sequence and emitted after the fn's LAST frame:
+//
+//   - `ls` holds its `handle` in the perform's argument, which the PARENT frame lowers,
+//     so its resumer `__armrem_ls_0` still comes after `@__resume_ls`.
+//   - `ch` holds one in each of three frames -- `@ch` itself, `@__resume_ch_0` and
+//     `@__resume_ch_1` -- which name their resumers `__armrem_ch_0`, `_1` and `_2`.
+//     Numbering from 0 in every frame gave them all the same name, a redefinition that
+//     `llc` rejects.
+//
+// (A let shape's own frame cannot hold such a `handle` -- its tail must not suspend --
+// and an embedded shape's `handle` in the perform's argument is lowered differently by
+// `scg`, register D100, so neither appears here.)
+
+effect Io { read() -> i64; }
+effect Ask { get(x: i64) -> i64; }
+
+fn two() -> i64 ! { Io } {
+    let a: i64 = perform Io.read();
+    let b: i64 = perform Io.read();
+    a + b
+}
+
+fn ls() -> i64 ! { Ask } {
+    let a: i64 = perform Ask.get(handle two() with {
+        Io.read(k) => { let r: i64 = k(1); r + 1000 }
+    });
+    a + 1
+}
+
+fn ch() -> i64 ! { Ask } {
+    let a: i64 = perform Ask.get(handle two() with {
+        Io.read(k) => { let r: i64 = k(1); r + 1 }
+    });
+    let b: i64 = perform Ask.get(handle two() with {
+        Io.read(k) => { let r: i64 = k(1); r + 10 }
+    });
+    let c: i64 = perform Ask.get(handle two() with {
+        Io.read(k) => { let r: i64 = k(1); r + 100 }
+    });
+    a + b + c
+}
+
+fn main() -> i64 {
+    let x: i64 = handle ls() with { Ask.get(x, k) => k(x) };
+    let y: i64 = handle ch() with { Ask.get(x, k) => k(x) };
+    x + y
+}

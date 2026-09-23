@@ -79,8 +79,8 @@ fn build_sentinel_codegen(tmp: &Path) -> PathBuf {
     bin
 }
 
-/// Compile the scg-emitted `.ll` (capstone 2's L1) into a runnable executable,
-/// returning its path. On Unix this is one `cc` invocation. Windows has no
+/// Compile an emitted `.ll` -- `scg`'s (capstone 2's L1), or the oracle's -- into a
+/// runnable executable, returning its path. On Unix this is one `cc` invocation. Windows has no
 /// `cc`/clang DRIVER (the from-source LLVM at `$LLVM_SYS_180_PREFIX` ships the
 /// `llvm-*` tools but not the clang driver), so we go `llc` (`.ll` -> `.obj`) +
 /// the MSVC `link.exe` with the SAME runtime + native libs + 16 MB stack snc's
@@ -114,10 +114,11 @@ fn compile_ll_to_exe(ll_path: &Path, out_stem: &Path) -> PathBuf {
             .arg("-o")
             .arg(&obj)
             .output()
-            .expect("run llc on the scg-emitted .ll");
+            .expect("run llc on the emitted .ll");
         assert!(
             llc_out.status.success(),
-            "llc of the scg-emitted .ll failed:\n{}",
+            "llc of {} failed:\n{}",
+            ll_path.display(),
             String::from_utf8_lossy(&llc_out.stderr)
         );
         // Mirror sentinel-driver's `link_exe` (ADR 0060): the runtime `.lib` +
@@ -142,10 +143,11 @@ fn compile_ll_to_exe(ll_path: &Path, out_stem: &Path) -> PathBuf {
             link.arg(lib);
         }
         link.arg("/DEFAULTLIB:msvcrt");
-        let link_out = link.output().expect("run link.exe on the scg .obj");
+        let link_out = link.output().expect("run link.exe on the .obj");
         assert!(
             link_out.status.success(),
-            "link.exe of the scg .obj failed:\nstdout:\n{}\nstderr:\n{}",
+            "link.exe of the .obj built from {} failed:\nstdout:\n{}\nstderr:\n{}",
+            ll_path.display(),
             String::from_utf8_lossy(&link_out.stdout),
             String::from_utf8_lossy(&link_out.stderr)
         );
@@ -158,10 +160,11 @@ fn compile_ll_to_exe(ll_path: &Path, out_stem: &Path) -> PathBuf {
             .arg("-o")
             .arg(out_stem)
             .output()
-            .expect("run cc on the scg-emitted .ll");
+            .expect("run cc on the emitted .ll");
         assert!(
             cc.status.success(),
-            "cc of the scg-emitted .ll failed:\n{}",
+            "cc of {} failed:\n{}",
+            ll_path.display(),
             String::from_utf8_lossy(&cc.stderr)
         );
         out_stem.to_path_buf()
@@ -350,6 +353,133 @@ fn oracle_ir_of_the_handler_arm_exit_programs_runs() {
             String::from_utf8_lossy(&run.stderr)
         );
     }
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// ADR 0075 D6 / A1: the arm-remainder programs, built from the `snc llvm` oracle's IR and
+/// RUN.
+///
+/// The codegen differential holds `scg` to the oracle byte for byte, which proves they AGREE
+/// — not that either is right. If both emit the same wrong IR the differential stays green,
+/// and the corpus-wide behaviour check (`llvm_behaviour_matches_inkwell_over_emitted_subset`
+/// in `tests/llvm.rs`) cannot run on a box without a `libsentinel_runtime.a`. So run these
+/// directly. Each misses 42 if the oracle drops a remainder instead of replaying it. Beyond
+/// that, in the ORACLE's output:
+///
+/// - `c75_remainder_moves_a_local` misses it if a resumer is named after a symbol two
+///   defines share (`llc` rejects the redefinition), or if a resumer's drops disagree with
+///   its parent's drop plan for a value the remainder moves.
+/// - `c75_remainder_capture_types` misses it if a remainder whose only capture is an `i64`
+///   is refused rather than replayed (its bubble then aborts).
+///
+/// Whether `scg` RECORDS a remainder's moves is `scg`'s mechanism, not the oracle's; the
+/// corpus differential is what catches that.
+#[test]
+fn oracle_ir_of_the_arm_remainder_programs_runs() {
+    let tmp = std::env::temp_dir().join(format!("snc_armrem_oracle_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).expect("create temp dir");
+    let dir = workspace_root().join("tests/pass");
+    for (stem, want) in [
+        ("c75_bubble_replays_the_remainder", 42),
+        ("c75_remainder_moves_a_local", 42),
+        ("c75_remainder_capture_types", 42),
+    ] {
+        let oracle = Command::new(env!("CARGO_BIN_EXE_snc"))
+            .arg("llvm")
+            .arg(dir.join(format!("{stem}.sentinel")))
+            .output()
+            .expect("run snc llvm");
+        assert!(
+            oracle.status.success(),
+            "snc llvm failed on {stem}:\n{}",
+            String::from_utf8_lossy(&oracle.stderr)
+        );
+        let ll = tmp.join(format!("{stem}.ll"));
+        std::fs::write(&ll, &oracle.stdout).expect("write the oracle's IR");
+        let exe = compile_ll_to_exe(&ll, &tmp.join(stem));
+        let run = Command::new(&exe).output().expect("run the program built from the oracle's IR");
+        assert_eq!(
+            run.status.code(),
+            Some(want),
+            "{stem}: built from the oracle's IR it exits {:?}; stderr:\n{}",
+            run.status,
+            String::from_utf8_lossy(&run.stderr)
+        );
+    }
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// ADR 0075 A1, for the one effecting-fn shape the corpus differential cannot hold: an
+/// EMBEDDED shape (`perform Op(arg) + rest`) with a bubbling `handle` in each of its two
+/// defines -- one in the perform's argument, which the parent lowers, and one in the rest
+/// of the tail, which the `__resume_` frame lowers. Each define is its own `Emit`, so the
+/// two must continue ONE arm-remainder sequence (numbering each from 0 defines
+/// `@__armrem_emb_0` twice) and emit their resumers after the LAST define, in the order they
+/// were lowered (flushing each define's own puts the parent's between `@emb` and
+/// `@__resume_emb`). `snc build`
+/// refuses the program, and `scg` lowers a perform's argument a second time (register
+/// D100), so it cannot sit in the corpus the differential compares: this pins the oracle
+/// alone, and runs what it emits.
+#[test]
+fn oracle_ir_of_an_embedded_shape_with_a_handle_in_each_define_runs() {
+    let src = concat!(
+        "effect Io { read() -> i64; }\n",
+        "effect Ask { get(x: i64) -> i64; }\n",
+        "fn two() -> i64 ! { Io } {\n",
+        "    let a: i64 = perform Io.read();\n",
+        "    let b: i64 = perform Io.read();\n",
+        "    a + b\n",
+        "}\n",
+        "fn emb() -> i64 ! { Ask } {\n",
+        "    perform Ask.get(handle two() with { Io.read(k) => { let r: i64 = k(1); r + 1 } })\n",
+        "        + (handle two() with { Io.read(k) => { let r: i64 = k(1); r + 10 } })\n",
+        "}\n",
+        "fn main() -> i64 { handle emb() with { Ask.get(x, k) => k(x) } }\n",
+    );
+    let tmp = std::env::temp_dir().join(format!("snc_armrem_embedded_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).expect("create temp dir");
+    let input = tmp.join("input.sentinel");
+    std::fs::write(&input, src).expect("write the program");
+    let oracle = Command::new(env!("CARGO_BIN_EXE_snc"))
+        .arg("llvm")
+        .arg(&input)
+        .output()
+        .expect("run snc llvm");
+    assert!(
+        oracle.status.success(),
+        "snc llvm failed:\n{}",
+        String::from_utf8_lossy(&oracle.stderr)
+    );
+    let text = String::from_utf8(oracle.stdout).expect("utf-8 IR");
+    let defines: Vec<&str> = text.lines().filter(|l| l.starts_with("define ")).collect();
+    let at = |sym: &str| {
+        let head = format!("@{sym}(");
+        let found: Vec<usize> = (0..defines.len()).filter(|&i| defines[i].contains(&head)).collect();
+        assert_eq!(found.len(), 1, "@{sym} is defined {} times in:\n{text}", found.len());
+        found[0]
+    };
+    let last_frame = at("__resume_emb");
+    for sym in ["__armrem_emb_0", "__armrem_emb_1"] {
+        assert!(at(sym) > last_frame, "@{sym} is emitted before the fn's last define:\n{text}");
+    }
+    assert!(
+        at("__armrem_emb_0") < at("__armrem_emb_1"),
+        "the resumers are out of lowering order:\n{text}"
+    );
+    let ll = tmp.join("emb.ll");
+    std::fs::write(&ll, &text).expect("write the oracle's IR");
+    let exe = compile_ll_to_exe(&ll, &tmp.join("emb"));
+    let run = Command::new(&exe).output().expect("run the program built from the oracle's IR");
+    // 4 + 22: the argument's `handle` answers 2 + 1 + 1, the tail's 2 + 10 + 10.
+    assert_eq!(
+        run.status.code(),
+        Some(26),
+        "built from the oracle's IR it exits {:?}; stderr:\n{}",
+        run.status,
+        String::from_utf8_lossy(&run.stderr)
+    );
     let _ = std::fs::remove_dir_all(&tmp);
 }
 

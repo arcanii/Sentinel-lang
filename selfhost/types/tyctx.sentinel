@@ -255,6 +255,8 @@ fn new_tyctx(mode: i64) -> TyCtx {
         cg_h_rcls: 0,
         cg_h_cbase: 0,
         cg_armseq: 0,
+        cg_pkind: 0,
+        cg_pinit: false,
         cg_fn_s: 0,
         cg_fn_e: 0,
         arwb: vec_new(),

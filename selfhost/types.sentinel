@@ -508,20 +508,30 @@ struct TyCtx {
     cg_h_cbase: i64,  // (ADR 0075 D6) where THIS arm's captures start in `arcaps`. The
                       //   list is a STACK, not a scratch buffer: a `handle` nested inside
                       //   an arm classifies while the outer arm's entry is still live.
-    cg_armseq: i64,   // (ADR 0075 D6) the per-fn counter each resumer's name is drawn
-                      //   from. Taken at BUBBLE time, not at classification time — the
+    cg_armseq: i64,   // (ADR 0075 D6 / A1) the counter each resumer's name is drawn
+                      //   from, one per SOURCE definition (a fn or mono instance, every
+                      //   frame of an effecting fn's shape included; a class init or
+                      //   method; an impl method); `cg_ar_drain` resets it. Taken at
+                      //   BUBBLE time, not at classification time — the
                       //   text oracle's `armrem_seq` advances inside
                       //   `emit_arm_remainder_resumer`, and for a `handle` nested in an
                       //   arm the two orders differ.
-    cg_fn_s: i64,     // (ADR 0075 D6) the enclosing fn's source-NAME span. The resumer
-    cg_fn_e: i64,     //   symbol is `__armrem_<that name>_<seq>` on both sides, because
-                      //   `scg` numbers FnIds differently from the Rust back ends.
+    cg_pkind: i64,    // (ADR 0075 D6) what kind of `define` encloses the current lowering:
+                      //   0 = a fn (a mono instance too, via `cg_mono_on`), 1 = a class
+                      //   init / class method / impl method. `cg_emit_psym` dispatches on it
+                      //   to write the parent's EMITTED symbol.
+    cg_pinit: bool,   // (ADR 0075 D6) with `cg_pkind == 1`: the parent is a class `init`.
+    cg_fn_s: i64,     // (ADR 0075 D6) the enclosing definition's source-NAME span (a fn's
+    cg_fn_e: i64,     //   or method's name; 0..0 for a class init), from which
+                      //   `cg_emit_psym` writes the parent's emitted symbol. Resumers are
+                      //   named from symbols, not FnIds, because `scg` numbers FnIds
+                      //   differently from the Rust back ends.
     // (ADR 0075 D6) the DEFERRED arm-remainder worklist, drained once the enclosing
     // define is assembled. A resumer is a whole second `define`, and building one needs
     // `cg_reset` — which clears about twenty pools and ten scalars with no save/restore,
     // so it cannot run in the middle of the parent's body the way the text oracle's
-    // `extra_defines` does. Emitting after the parent also matches where the oracle
-    // flushes that buffer, so the two agree on define ORDER for free.
+    // `extra_defines` does. Emitting after the parent's last define also matches where
+    // the oracle emits that buffer, so the two agree on define ORDER for free.
     arwb: Vec<i64>,   // the arm BODY's first token, for the resumer's own re-parse
     arwq: Vec<i64>,   // the sequence number in this resumer's symbol
     arwk: Vec<i64>,   // the arm's continuation VarId (what the remainder resumes)

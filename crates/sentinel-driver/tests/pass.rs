@@ -1854,6 +1854,28 @@ fn pass_c75_bubble_replays_the_remainder() {
 }
 
 #[test]
+fn pass_c75_remainder_moves_a_local() {
+    // ADR 0075 D6 / A1: a replayed remainder that MOVES a heap local, in a free fn, a
+    // generic fn at two instances, an impl method, a class method and a class init. Each
+    // `handle` answers 22, so 6 * 22 - 90 = 42; a remainder dropped instead of replayed
+    // would answer 12 per `handle`. This test runs inkwell's build; the text oracle's IR of
+    // the same file is run by `oracle_ir_of_the_arm_remainder_programs_runs` in
+    // `selfhost_codegen.rs`, and `scg` is held to that IR byte for byte by the corpus
+    // differential. Exit = 42.
+    assert_eq!(run_exit("c75_remainder_moves_a_local.sentinel"), 42);
+}
+
+#[test]
+fn pass_c75_remainder_capture_types() {
+    // ADR 0075 D6: a remainder is replayed only if every capture crosses the `i64[N]` seam,
+    // decided from the capture's type. `fits` captures an `i64` (replayed, answers 8);
+    // `refuses` captures a `bool` (class A; `one()` performs once, so its bubble is not
+    // taken at run time and only its emitted form is under test, through the differential).
+    // Both captures follow an arm that binds a `bool`. Exit = 42.
+    assert_eq!(run_exit("c75_remainder_capture_types.sentinel"), 42);
+}
+
+#[test]
 fn pass_selfhost_ast_drop() {
     // ADR 0039 D4: the self-host parser's recursive-AST drop gate. A
     // recursive-enum `Node` (i64 + `[u8]` + recursive payloads) built, walked

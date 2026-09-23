@@ -1,6 +1,6 @@
 # ADR 0075: A bubbling resume leaves the arm's entry, and must drain it
 
-Status: **ACCEPTED** (D1–D5 2026-09-21, D6 2026-09-22).
+Status: **ACCEPTED** (D1–D5 2026-09-21, D6 2026-09-22), **amended by A1** (2026-09-23).
 Addresses register item **D87**, whose leak half slice 1 closes.
 Amends [ADR 0074](0074-handler-arm-owns-its-continuation.md) D2, whose bubble bullet
 settles what the bubble does with the arm's *continuation* and is silent on the arm's
@@ -235,20 +235,25 @@ that D3 says must still run, is a `sentinel_kont_push` of a resumer for that rem
 the bubbled kont *before* the store. The runtime already does the rest:
 `sentinel_kont_push` appends at the chain's tail, and `sentinel_kont_resume` splices the
 frames that survive a bubble onto the next one's tail, so the remainder replays after the
-computation under it drains — which is exactly ADR 0020 D3's re-wrap.
+computation under it drains. That is ADR 0020 D3's re-wrap in the worked example below, and not
+in general: a replayed remainder runs inside a LATER entry's `k(v)` — the one that runs the
+chain to completion — before that entry's own code after it, so remainders run in the reverse
+of D3's order, and one whose chain no later `k(v)` completes never runs (register D102).
 
 Worked over `handle two() with { Io.read(k) => k(1) + 10 }`:
 
 1. the body performs; `K1` carries `two`'s own resumer frame `Ra`;
 2. the arm runs with `k = K1`; `k(1)` resumes, `Ra` sets `a = 1` and performs again,
    yielding `K2` with `two`'s second frame `Rb`;
-3. **the bubble pushes `Rrem: 	. t + 10` onto `K2`**, so `K2` carries `[Rb, Rrem]`, and
+3. **the bubble pushes `Rrem: \t. t + 10` onto `K2`**, so `K2` carries `[Rb, Rrem]`, and
    stores and branches as today;
 4. the loop dispatches `K2`; that arm's `k(1)` resumes it — `Rb` gives `b = 1`, `a + b = 2`
    drains pure, and `Rrem` then runs on 2, giving 12;
 5. so the inner `k(1)` is 12, that arm's value is `12 + 10 = 22`, and the `handle`'s is 22.
 
-Which is D3's answer. No runtime change, no new resumer *mechanism* — the capture struct,
+Which is D3's answer here: both entries resume, and they run the same remainder — the
+first entry's replayed, the second's in line — so the order cannot show (register D102 is
+where the two part). No runtime change, no new resumer *mechanism* — the capture struct,
 the `ptr fn(i64, ptr)` resumer signature and the frame chain are C3.5(c)/(d)/(e)'s, already
 emitted by all three back ends — and the arms stay inline in the enclosing function, so
 ADR 0065 D6's `return` and ADR 0074 D2's `break` / `continue` out of an arm keep working
@@ -314,12 +319,16 @@ forward:
   enclosing one is assembled — which is also where the oracle flushes that buffer, so the
   two agree on define ORDER without either side sorting. The drain takes back the blank
   line the enclosing define already wrote and re-emits it after the last resumer, because
-  the oracle closes the parent with `}
-` and the separator comes later.
+  the oracle closes the parent with `}\n` and the separator comes later. The drain runs
+  after every SOURCE definition that can hold a `handle` — a fn (all of an effecting fn's
+  frames together), each mono instance, a class init or method, an impl method — and writes
+  into that definition's own buffer (A1 made both halves of that true).
 - **Two things had to be keyed differently from the oracle.** The resumer SYMBOL is
-  `__armrem_<parent source name>_<seq>` on both sides, not the oracle's `FnId`, because
-  `scg` numbers functions differently (its builtins start at 3/5/6/14 where the oracle's
-  `main` was 43). And the placeholder that makes the arm's own `k(v)` lower as a load of
+  `__armrem_<parent definition's EMITTED symbol>_<seq>` on both sides, not the oracle's
+  `FnId`, because `scg` numbers functions differently (its builtins start at 3/5/6/14 where
+  the oracle's `main` was 43). (The first landing used the parent's SOURCE name, which is
+  not unique per define — A1.) And the placeholder that makes the arm's own `k(v)` lower
+  as a load of
   `%arg0` is keyed by NAME, not by VarId: the drain runs after the arm's `truncate_scope`,
   so `sc_lookup` no longer answers for `k`. The sequence number is taken at BUBBLE time
   rather than at classification time, because the oracle advances its counter inside
@@ -415,6 +424,81 @@ flag — **including `merge`**, which is where a missed thread once made the ora
 to an undeclared symbol — its `declare` line and its any-used test, `scg`'s declare flag,
 and `docs/abi-v1.md`.
 
+### A1 (2026-09-23). A resumer is part of its parent definition.
+
+An arm-remainder resumer replays part of its PARENT's body, so it takes three things from
+the parent definition — the free fn, mono instance, class init, class method or impl method
+whose source holds the `handle` — and from nowhere else:
+
+1. **Its name.** `__armrem_<the parent's EMITTED symbol>_<seq>` — a free fn's name, a mono
+   instance's mangled name, a class init's or method's `Class__m`, an impl method's symbol —
+   with `<seq>` counting the parent's resumers in lowering order. An effecting fn is lowered
+   as several defines, the parent and its `__resume_…` frames; every one of them takes the
+   FN's symbol and continues the one sequence. The first landing used the parent's SOURCE
+   name, and the oracle numbered from 0 in every define. A generic fn's instances share
+   their source name, so two of them defined the same resumer symbol; a method, having no
+   `FnId`, took a name derived from the method key in the oracle and from whichever free fn
+   had last set the name span in `scg`; and two frames of one effecting fn that each held a
+   `handle` defined the same symbol in the oracle. inkwell also names a resumer after its
+   parent's LLVM function, but numbers them with one counter for the whole module; its
+   names are never compared byte for byte.
+2. **Its drop plan.** The remainder's bindings, the ones it moves included, are the
+   parent's, so the resumer consults the parent's drop plan. In the oracle its `Emit` now
+   inherits the parent's `current_method`; with `None`, a method's resumer looked its moves
+   up under the placeholder `FnId(u32::MAX)`, which keys no plan, and found none. In `scg`
+   the drain RECORDS the remainder's moves into the parent's set, by lowering the
+   remainder under the parent's `curfn`: `type_fn` has already reset it to -1 by the time
+   it drains a fn, and `record_move` records nothing under -1. inkwell never cleared its key
+   across the resumer, so it already agreed.
+3. **Its place in the output.** After the parent definition's LAST define, in that
+   definition's buffer: after its one define for a fn, an instance or a method, and after
+   the last frame for an effecting fn — the oracle used to flush each frame's resumers after
+   that frame, where `scg` drains once per fn. `scg` drains after every definition that can
+   hold a `handle`, into its buffer — `cgcls` for a method, whose define is emitted after all
+   fns — and flushes the resumer body through `cg_putc`, since `cg_flush_allocas_body` copies
+   the body to `cgout` unconditionally. Under `cg_mute` (the mono discovery pass) the drain
+   emits nothing and takes nothing back.
+
+Landed with A1, and not part of it: `scg`'s capture check read each capture's type by the
+capture's POSITION in the scope stack rather than by its VarId (`cg_vid_ty`). The two part
+once an arm's bindings have been truncated away, so `scg`'s (R)/(A) verdict could disagree
+with the oracle's in either direction. It now reads `env[vid]`.
+
+Every departure was invisible to the corpus: no fixture put a `handle` in a method, a
+generic fn or a class init, none put a bubbling `handle` in an effecting fn, every
+replayed remainder in `c75_bubble_replays_the_remainder` was pure arithmetic in a free fn,
+and its one capture is placed so that looking its type up by position happens to give the
+right answer. Two fixtures and a test pin A1, and a third fixture pins the capture-type
+change:
+
+- `tests/pass/c75_remainder_moves_a_local` puts a remainder that moves a heap local in a
+  free fn, a generic fn at two instances, an impl method, a class method and a class init
+  (exit 42).
+- `tests/ui/c75_effecting_frames_share_resumers`, which `snc build` refuses, puts
+  bubbling `handle`s in three frames of a chained effecting fn and in the parent frame of
+  a let-shaped one; the text back ends lower it, and `main` returns 2231 under either IR.
+- `oracle_ir_of_an_embedded_shape_with_a_handle_in_each_define_runs` does the same for an
+  embedded shape, which cannot sit in the corpus because `scg` lowers a perform's argument
+  a second time (register D100). It holds the oracle alone, and runs what it emits.
+- `tests/pass/c75_remainder_capture_types` puts an `i64` capture and a `bool` capture after
+  an arm that binds a `bool` (exit 42). It pins `cg_vid_ty`, not A1.
+
+The corpus differential holds `scg` to the oracle on the three fixtures byte for byte, and
+`oracle_ir_of_the_arm_remainder_programs_runs` builds the oracle's IR of
+`c75_bubble_replays_the_remainder` and the two pass fixtures above and RUNS it — the
+differential proves the text back ends agree, not that either is right. Sixteen mutations,
+one per correction, are each caught by a test: in the oracle, the method key, the
+per-definition name (the pass fixtures), the sequence carried out of a chained parent and
+between chained frames, the pooled flush of a let or chained parent (the ui fixture), and
+for the embedded shape the carried sequence, the parent's pooled flush and the pool's order
+(its test); in `scg`, the drain's `curfn`, the drains
+after a class method and after a class init, the kind-blind parent symbol, a drain under
+`cg_mute` and the init flag (`c75_remainder_moves_a_local`), and the positional capture
+lookup (`c75_remainder_capture_types`). A matched pre/post sweep of all 473 tracked and
+untracked `.sentinel` files, each binary smoke-tested first, moves the oracle on exactly two
+files and `scg` on exactly two, all of them the new fixtures; inkwell's only change is a
+comment.
+
 ## Slices
 
 D1–D5 and D6 are independent changes to the same site and land separately. D1 is first: it
@@ -443,7 +527,11 @@ is the memory leak, it reaches the idiom every tracked program uses, and D6 depe
   it is inherited, not introduced. Registered, not fixed here.
 - `k(v)` means what ADR 0020 D3 says it means wherever it is written, not only in tail
   position (slice 2), and where the seam cannot carry it the program says so instead of
-  answering wrongly.
+  answering wrongly — with two exceptions found after acceptance, each a wrong answer with no
+  diagnostic in all three back ends: replayed remainders run in the reverse of D3's order and
+  can be lost (register D102), and a replayed remainder works on copies of the outer variables
+  it reads, taken at the bubble, so its writes are lost and later writes go unseen (register
+  D103).
 - Slice 1 is the `break` / `continue` drain with a different floor, and slice 2 is
   C3.5(c)/(d)/(e)'s resumer machinery at a new site: both inherit mechanisms already pinned
   in all three back ends rather than adding one.

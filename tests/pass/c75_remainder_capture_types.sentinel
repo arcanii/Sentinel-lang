@@ -1,0 +1,55 @@
+// ADR 0075 D6: whether a replayed arm remainder's captures cross the `i64[N]` seam is
+// decided from each capture's TYPE -- `i64` and `secret i64` cross (class R, the remainder
+// is replayed); anything else does not (class A, the bubble aborts instead). The type
+// consulted has to be the one the capture's VarId was bound with.
+//
+//   - `first` binds a `bool` inside its arm. In `scg` an arm's bindings leave the scope
+//     stack when the arm ends, so after it a binding's position in that stack no longer
+//     matches its VarId, and both captures below sit past that gap.
+//   - `fits` captures an `i64` param, so its remainder is replayed: `k(1) + d` answers
+//     (2 + 3) + 3 = 8.
+//   - `refuses` captures a `bool` param, so its remainder must not be replayed. `one()`
+//     performs once, so the bubble is never taken at run time; its emitted form is what
+//     is under test, through the text back ends' differential. (It reads `flag` through
+//     `pick` because an `if` inside an arm trips register D98 in the MIR stage.)
+//
+// The declaration ORDER is load-bearing: a lookup by scope position lands on whichever
+// binding happens to sit there, and this layout makes both captures land on a binding of
+// a different type. A declaration added or moved above `refuses` can quietly lose that;
+// after editing, revert `cg_vid_ty` to the positional lookup and check that the corpus
+// differential fails on this file.
+//
+// Exits 42: 22 + 8 + 11 + 1.
+effect Io { read() -> i64; }
+
+fn two() -> i64 ! { Io } {
+    let a: i64 = perform Io.read();
+    let b: i64 = perform Io.read();
+    a + b
+}
+
+fn one() -> i64 ! { Io } { perform Io.read() }
+
+fn pick(b: bool) -> i64 { if b { 10 } else { 20 } }
+
+fn first() -> i64 {
+    handle two() with {
+        Io.read(k) => { let r: i64 = k(1); let q: bool = r > 1; r + 10 }
+    }
+}
+
+fn fits(d: i64) -> i64 {
+    handle two() with {
+        Io.read(k) => k(1) + d
+    }
+}
+
+fn refuses(flag: bool) -> i64 {
+    handle one() with {
+        Io.read(k) => { let r: i64 = k(1); r + pick(flag) }
+    }
+}
+
+fn main() -> i64 {
+    first() + fits(3) + refuses(true) + 1
+}

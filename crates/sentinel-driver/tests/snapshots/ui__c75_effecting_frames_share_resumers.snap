@@ -1,0 +1,14 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c75_effecting_frames_share_resumers.sentinel\")"
+---
+sentinel::codegen::effecting_fn_body_not_direct
+
+  × effecting fn `ls` cannot be lowered: the arguments of a `perform` or of a
+  │ call to an effecting fn in it suspend themselves (a `perform`, an
+  │ effecting call or a `handle`), and every body shape lowers arguments as
+  │ plain values; bind a suspending argument with its own `let`, or compute a
+  │ locally handled one in a separate fn
+  help: an effecting fn returns a continuation, so only the shapes ADR 0072
+        enumerates can be lowered; reshape the body, or wait for the wider
+        seam that ADR 0072 defers

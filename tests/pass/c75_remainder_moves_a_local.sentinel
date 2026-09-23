@@ -1,0 +1,81 @@
+// ADR 0075 D6 / A1: a replayed arm remainder that MOVES a heap local of its own, in each
+// kind of definition that can hold a `handle` -- a free fn, a generic fn at two instances,
+// an impl method, a class method and a class init. `c75_bubble_replays_the_remainder`
+// covers the classes, but every `handle` in it sits in a plain free fn, and its
+// remainders are pure arithmetic. That left two things unexercised:
+//
+//   - what the resumer is NAMED. A resumer is `__armrem_<parent's emitted symbol>_<seq>`.
+//     A generic fn's instances are separate defines with separate symbols, and so are
+//     two methods, so the name has to come from the define being emitted, not from a
+//     source name several defines can share. For the free fns of
+//     `c75_bubble_replays_the_remainder` the two are the same string.
+//   - which DROP PLAN the resumer consults, which matters only once a remainder owns
+//     something. The remainder is part of its parent's body, so a binding it moves is in
+//     the parent's moved set, and the resumer has to consult that set -- and record the
+//     remainder's own moves in it -- for its scope-exit drops to agree with the parent's.
+//
+// Every arm below is `{ let r: i64 = k(1); let w: [i64] = [r, 2, 3, 4]; consume(w) + 10 }`.
+// `two()` performs twice, so the first `k(1)` bubbles and its remainder is replayed. Each
+// `handle` answers 22; a remainder dropped rather than replayed answers 12.
+//
+// Six handles: free_fn, generic at i64 and at bool, Job's impl method, Worker::run, and
+// Holder's init. Exits 42: 6 * 22 - 90.
+effect Io { read() -> i64; }
+
+fn two() -> i64 ! { Io } {
+    let a: i64 = perform Io.read();
+    let b: i64 = perform Io.read();
+    a + b
+}
+
+fn consume(v: [i64]) -> i64 { v[0] }
+
+fn free_fn() -> i64 {
+    handle two() with {
+        Io.read(k) => { let r: i64 = k(1); let w: [i64] = [r, 2, 3, 4]; consume(w) + 10 }
+    }
+}
+
+fn generic<T>(x: T) -> i64 {
+    handle two() with {
+        Io.read(k) => { let r: i64 = k(1); let w: [i64] = [r, 2, 3, 4]; consume(w) + 10 }
+    }
+}
+
+trait Runner { fn run(self: &Self) -> i64; }
+struct Job { n: i64 }
+impl as Runner for Job {
+    fn run(self: &Self) -> i64 {
+        handle two() with {
+            Io.read(k) => { let r: i64 = k(1); let w: [i64] = [r, 2, 3, 4]; consume(w) + 10 }
+        }
+    }
+}
+
+class Worker {
+    let n: i64;
+    pub init(n: i64) { self.n = n; 0 }
+    pub fn run(self: &Self) -> i64 {
+        handle two() with {
+            Io.read(k) => { let r: i64 = k(1); let w: [i64] = [r, 2, 3, 4]; consume(w) + 10 }
+        }
+    }
+}
+
+class Holder {
+    let n: i64;
+    pub init(n: i64) {
+        self.n = handle two() with {
+            Io.read(k) => { let r: i64 = k(1); let w: [i64] = [r, 2, 3, 4]; consume(w) + 10 }
+        };
+        0
+    }
+    pub fn get(self: &Self) -> i64 { self.n }
+}
+
+fn main() -> i64 {
+    let j: Job = Job { n: 1 };
+    let w: Worker = Worker::init(1);
+    let h: Holder = Holder::init(1);
+    free_fn() + generic(1) + generic(true) + j.run() + w.run() + h.get() - 90
+}

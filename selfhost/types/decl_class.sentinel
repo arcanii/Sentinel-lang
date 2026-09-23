@@ -293,6 +293,13 @@ fn tclass_init(buf: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src:
     // recorded nothing and `cg_is_moved` found nothing, so a heap local the body moved
     // or returned was freed at scope exit anyway, as the text oracle did. The body's
     // tail is CONSUMING, exactly as `decl_fn` sets it for a fn.
+    // (ADR 0075 D6) an arm-remainder resumer inside this body is named after THIS
+    // define's symbol, which `cg_emit_psym` writes with `cg_emit_method_sym` -- the
+    // emitter the define's own header uses.
+    (*c).cg_pkind = 1;
+    (*c).cg_pinit = true;
+    (*c).cg_fn_s = 0;
+    (*c).cg_fn_e = 0;
     let svcf_i: i64 = (*c).curfn;
     let svcons_i: bool = (*c).consuming;
     (*c).curfn = 1000000 + selfvid;
@@ -304,6 +311,10 @@ fn tclass_init(buf: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src:
     if cg_on(c) {
         cg_drop_frame(c, cg_i_pmark);
         cg_emit_method(c, src, 0 - 1, true, true, 0, 0);
+        // (ADR 0075 D6) this method's resumers, into `cgcls` right after it, under
+        // its own `curfn` (still `1000000 + selfvid` here; restored below).
+        let pcf_i: i64 = (*c).curfn;
+        cg_ar_drain(c, src, pcf_i, gb);
         0
     } else {
         0
@@ -401,6 +412,13 @@ fn tmethod(buf: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u
     // recorded nothing and `cg_is_moved` found nothing, so a heap local the body moved
     // or returned was freed at scope exit anyway, as the text oracle did. The body's
     // tail is CONSUMING, exactly as `decl_fn` sets it for a fn.
+    // (ADR 0075 D6) an arm-remainder resumer inside this body is named after THIS
+    // define's symbol, which `cg_emit_psym` writes with `cg_emit_method_sym` -- the
+    // emitter the define's own header uses.
+    (*c).cg_pkind = 1;
+    (*c).cg_pinit = false;
+    (*c).cg_fn_s = mn_s;
+    (*c).cg_fn_e = mn_e;
     let svcf_m: i64 = (*c).curfn;
     let svcons_m: bool = (*c).consuming;
     (*c).curfn = 1000000 + selfvid;
@@ -412,6 +430,10 @@ fn tmethod(buf: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u
     if cg_on(c) {
         cg_drop_frame(c, cg_m_pmark);
         cg_emit_method(c, src, mrth, false, false, mn_s, mn_e);
+        // (ADR 0075 D6) this method's resumers, into `cgcls` right after it, under
+        // its own `curfn` (still `1000000 + selfvid` here; restored below).
+        let pcf_m: i64 = (*c).curfn;
+        cg_ar_drain(c, src, pcf_m, gb);
         0
     } else {
         0

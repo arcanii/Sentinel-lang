@@ -110,12 +110,16 @@ fn type_fn(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u
     if cg_on(c) {
         cg_reset(c);
         (*c).cgmain = cg_is_main(src, name_s, name_e);
-        // (ADR 0075 D6) an arm-remainder resumer is named `__armrem_<this fn>_<seq>` on
-        // both sides. The bubble that emits the reference sits deep inside expression
-        // lowering, where the span is not a local, so publish it here -- after
-        // `cg_reset`, which does not clear it.
+        // (ADR 0075 D6 / A1) an arm-remainder resumer is named `__armrem_<this fn's
+        // emitted symbol>_<seq>` (`cg_emit_psym`). The bubble that emits the reference
+        // sits deep inside expression lowering, where the span is not a local, so publish
+        // it here -- after `cg_reset`, which does not clear it.
         (*c).cg_fn_s = name_s;
         (*c).cg_fn_e = name_e;
+        // A fn -- or a mono instance of one, which `cg_emit_psym` suffixes from
+        // `cg_mono_on` exactly as `cg_emit_fn` does.
+        (*c).cg_pkind = 0;
+        (*c).cg_pinit = false;
         // (Bar B / effects c35b) an effecting fn (non-Async row, recorded in pass-1)
         // uses the Kont* ABI — `cg_emit_fn` returns `ptr` (wrapping a pure tail).
         (*c).cg_eff = (*c).ufeff[fnidx] != 0;
@@ -238,10 +242,14 @@ fn type_fn(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u
         // class (R) bubble it contained. It has to be here rather than at the bubble:
         // building a define needs `cg_reset`, which clears the per-fn cg state with no
         // save/restore, so it cannot run in the middle of the parent's body. The text
-        // oracle flushes its `extra_defines` at the same point, so the order agrees.
-        // The fn's names are still bound -- nothing truncates the scope stack until the
-        // next decl moves `base` -- which is what lets the remainder's `Var`s resolve.
-        cg_ar_drain(c, src, name_s, name_e, k, s, e, gb);
+        // oracle emits its resumers at the same point, after the fn's last define, so the
+        // order agrees. The fn-level names are still bound -- the scope stack is not reset
+        // until the next decl moves `base` -- which lets a remainder's `Var`s resolve when
+        // they name a param or a fn-level local that no earlier worklist entry's arm also
+        // bound; a name bound inside an arm has been truncated away by now (register
+        // D101). `curfn` is already -1 here; the drain lowers the remainder under THIS
+        // fn's index so its own moves are recorded and found.
+        cg_ar_drain(c, src, fnidx, gb);
         0
     } else {
         0

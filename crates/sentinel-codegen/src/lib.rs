@@ -10054,8 +10054,10 @@ impl<'ctx, 'plan, 'm> CodegenCtx<'ctx, 'plan, 'm> {
         program: &TypedProgram,
     ) -> Result<FunctionValue<'ctx>, CodegenError> {
         let parent = self.current_fn.expect("inside compile_fn");
-        // Same spelling as the text oracle's, so the two are easy to read side by side
-        // (they are not compared byte for byte -- only `scg` and the oracle are).
+        // The text oracle's format, so the two are easy to read side by side, but not its
+        // numbering: this `<seq>` is one counter for the module, where the text back ends
+        // count per source definition (they are not compared byte for byte -- only `scg`
+        // and the oracle are).
         let name = format!(
             "__armrem_{}_{}",
             parent.get_name().to_str().unwrap_or("fn"),

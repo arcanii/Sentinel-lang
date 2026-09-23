@@ -1031,6 +1031,7 @@ fn dump_fn_named(
         handle_stack: Vec::new(),
         extra_defines: String::new(),
         armrem_seq: 0,
+        parent_sym: sym.to_string(),
         arm_kslots: Vec::new(),
         embed_ph: None,
         handle_depth: 0,
@@ -1115,7 +1116,9 @@ fn dump_fn_named(
 ///      c35c (chains land at c35e).
 ///
 /// The two share NO register counter (each is its own `Emit`, `next: 0`) — matching the
-/// Sentinel side's `cg_reset` between the two defines. Emission order: parent, resumer.
+/// Sentinel side's `cg_reset` between the two defines. Emission order: parent, resumer,
+/// then the arm-remainder resumers of both: the frames share one sequence and one list of
+/// those, emitted after the LAST frame (ADR 0075 A1).
 #[allow(clippy::too_many_arguments)]
 fn dump_let_shape_fn(
     f: &TypedFnDef,
@@ -1130,6 +1133,10 @@ fn dump_let_shape_fn(
     // resumed value), in first-reference order — the struct field layout.
     let captured = collect_captured_vars(info.tail, info.let_id);
     let resumer_sym = format!("__resume_{sym}");
+    // One arm-remainder sequence for the whole fn, carried from frame to frame, and one
+    // list of its resumers, emitted after the fn's LAST frame (ADR 0075 A1).
+    let mut armrem_seq: u32 = 0;
+    let mut armrem_defs = String::new();
 
     // --- the PARENT define: params, captured struct, RHS → kont, push, ret ptr ---
     {
@@ -1150,7 +1157,8 @@ fn dump_let_shape_fn(
             self_var: None,
             handle_stack: Vec::new(),
             extra_defines: String::new(),
-            armrem_seq: 0,
+            armrem_seq,
+            parent_sym: sym.to_string(),
             arm_kslots: Vec::new(),
             embed_ph: None,
         handle_depth: 0,
@@ -1208,7 +1216,8 @@ fn dump_let_shape_fn(
         out.push_str(&e.allocas);
         out.push_str(&e.body);
         out.push_str("}\n");
-        out.push_str(&e.extra_defines);
+        armrem_defs.push_str(&e.extra_defines);
+        armrem_seq = e.armrem_seq;
         used.merge(e.used);
     }
     out.push('\n');
@@ -1232,7 +1241,8 @@ fn dump_let_shape_fn(
             self_var: None,
             handle_stack: Vec::new(),
             extra_defines: String::new(),
-            armrem_seq: 0,
+            armrem_seq,
+            parent_sym: sym.to_string(),
             arm_kslots: Vec::new(),
             embed_ph: None,
         handle_depth: 0,
@@ -1266,9 +1276,10 @@ fn dump_let_shape_fn(
         out.push_str(&e.allocas);
         out.push_str(&e.body);
         out.push_str("}\n");
-        out.push_str(&e.extra_defines);
+        armrem_defs.push_str(&e.extra_defines);
         used.merge(e.used);
     }
+    out.push_str(&armrem_defs);
     Ok(())
 }
 
@@ -1291,7 +1302,9 @@ fn dump_let_shape_fn(
 /// The captured set is the tail's free vars EXCLUDING the perform subtree
 /// (`walk_collect_var_refs` skips `Perform`, matching inkwell's walk over the
 /// placeholder-substituted tail). The two defines share NO register counter (each its
-/// own `Emit`, `next: 0`), matching the Sentinel side's `cg_reset`.
+/// own `Emit`, `next: 0`), matching the Sentinel side's `cg_reset`. They do share one
+/// arm-remainder sequence and one list of those resumers, emitted after the LAST frame
+/// (ADR 0075 A1).
 fn dump_embedded_shape_fn(
     f: &TypedFnDef,
     perform: &TypedExpr,
@@ -1306,6 +1319,10 @@ fn dump_embedded_shape_fn(
     let mut captured: Vec<VarId> = Vec::new();
     walk_collect_var_refs(&f.body.tail, &mut captured);
     let resumer_sym = format!("__resume_{sym}");
+    // One arm-remainder sequence for the whole fn, carried from frame to frame, and one
+    // list of its resumers, emitted after the fn's LAST frame (ADR 0075 A1).
+    let mut armrem_seq: u32 = 0;
+    let mut armrem_defs = String::new();
 
     // --- the PARENT define: params, captured struct, perform → kont, push, ret ptr ---
     {
@@ -1326,7 +1343,8 @@ fn dump_embedded_shape_fn(
             self_var: None,
             handle_stack: Vec::new(),
             extra_defines: String::new(),
-            armrem_seq: 0,
+            armrem_seq,
+            parent_sym: sym.to_string(),
             arm_kslots: Vec::new(),
             embed_ph: None,
         handle_depth: 0,
@@ -1385,7 +1403,8 @@ fn dump_embedded_shape_fn(
         out.push_str(&e.allocas);
         out.push_str(&e.body);
         out.push_str("}\n");
-        out.push_str(&e.extra_defines);
+        armrem_defs.push_str(&e.extra_defines);
+        armrem_seq = e.armrem_seq;
         used.merge(e.used);
     }
     out.push('\n');
@@ -1409,7 +1428,8 @@ fn dump_embedded_shape_fn(
             self_var: None,
             handle_stack: Vec::new(),
             extra_defines: String::new(),
-            armrem_seq: 0,
+            armrem_seq,
+            parent_sym: sym.to_string(),
             arm_kslots: Vec::new(),
             embed_ph: None,
         handle_depth: 0,
@@ -1443,9 +1463,10 @@ fn dump_embedded_shape_fn(
         out.push_str(&e.allocas);
         out.push_str(&e.body);
         out.push_str("}\n");
-        out.push_str(&e.extra_defines);
+        armrem_defs.push_str(&e.extra_defines);
         used.merge(e.used);
     }
+    out.push_str(&armrem_defs);
     Ok(())
 }
 
@@ -1490,7 +1511,9 @@ fn emit_chained_captures_build(e: &mut Emit<'_>, caps: &[VarId]) -> Result<Strin
 ///   3. the LAST resumer `@__resume_<sym>_<N-1>`: bind let-(N-1) + captures[N-1],
 ///      lower the pure tail, wrap via `sentinel_kont_pure`, return.
 ///
-/// Each define is its own `Emit` (`next: 0` — no shared register counter).
+/// Each define is its own `Emit` (`next: 0` — no shared register counter). The defines
+/// do share one arm-remainder sequence and one list of those resumers, emitted after the
+/// LAST frame (ADR 0075 A1).
 #[allow(clippy::too_many_arguments)]
 fn dump_chained_lets_fn(
     f: &TypedFnDef,
@@ -1504,6 +1527,10 @@ fn dump_chained_lets_fn(
     let n = info.lets.len();
     let captures_per: Vec<Vec<VarId>> =
         (0..n).map(|i| compute_chained_captures(info, i)).collect();
+    // One arm-remainder sequence for the whole fn, carried from frame to frame, and one
+    // list of its resumers, emitted after the fn's LAST frame (ADR 0075 A1).
+    let mut armrem_seq: u32 = 0;
+    let mut armrem_defs = String::new();
 
     // --- the PARENT define: params, captures-0 struct, lets[0] RHS → kont, push ---
     {
@@ -1524,7 +1551,8 @@ fn dump_chained_lets_fn(
             self_var: None,
             handle_stack: Vec::new(),
             extra_defines: String::new(),
-            armrem_seq: 0,
+            armrem_seq,
+            parent_sym: sym.to_string(),
             arm_kslots: Vec::new(),
             embed_ph: None,
         handle_depth: 0,
@@ -1559,7 +1587,8 @@ fn dump_chained_lets_fn(
         out.push_str(&e.allocas);
         out.push_str(&e.body);
         out.push_str("}\n");
-        out.push_str(&e.extra_defines);
+        armrem_defs.push_str(&e.extra_defines);
+        armrem_seq = e.armrem_seq;
         used.merge(e.used);
     }
 
@@ -1583,7 +1612,8 @@ fn dump_chained_lets_fn(
             self_var: None,
             handle_stack: Vec::new(),
             extra_defines: String::new(),
-            armrem_seq: 0,
+            armrem_seq,
+            parent_sym: sym.to_string(),
             arm_kslots: Vec::new(),
             embed_ph: None,
         handle_depth: 0,
@@ -1635,9 +1665,11 @@ fn dump_chained_lets_fn(
         out.push_str(&e.allocas);
         out.push_str(&e.body);
         out.push_str("}\n");
-        out.push_str(&e.extra_defines);
+        armrem_defs.push_str(&e.extra_defines);
+        armrem_seq = e.armrem_seq;
         used.merge(e.used);
     }
+    out.push_str(&armrem_defs);
     Ok(())
 }
 
@@ -1698,6 +1730,7 @@ fn dump_method(
         handle_stack: Vec::new(),
         extra_defines: String::new(),
         armrem_seq: 0,
+        parent_sym: sym.to_string(),
         arm_kslots: Vec::new(),
         embed_ph: None,
         handle_depth: 0,
@@ -1836,13 +1869,27 @@ struct Emit<'a> {
     embed_ph: Option<u32>,
     /// ADR 0075 D6: top-level `define`s discovered while lowering this one — the resumer
     /// that replays a handler arm's remainder. Nothing about it is known before the arm is
-    /// reached, so it is accumulated here and appended to the module text beside the
-    /// parent's `define`. `dump` checks that every resumer a body REFERENCES has a
-    /// definition, so a site that forgets to append cannot pass silently.
+    /// reached, so it is accumulated here and appended to the module text after the
+    /// parent definition's last `define`. Nothing in `dump` checks that a referenced resumer was defined:
+    /// a site that forgets to append emits IR that only `llc` / `llvm-as` rejects, and
+    /// only for a program that reaches the site (`llvm_emitted_ir_assembles_over_corpus`
+    /// runs `llvm-as` over the corpus).
     extra_defines: String,
-    /// ADR 0075 D6: names the arm-remainder resumers of THIS `define`. Lowering order is
-    /// deterministic, so `scg` reproduces the same names.
+    /// ADR 0075 D6 / A1: numbers the arm-remainder resumers of one SOURCE definition, in
+    /// lowering order. An effecting fn's shape is several `define`s, each its own `Emit`,
+    /// so each frame starts from the count the previous frame reached: one sequence per
+    /// fn, which is also `scg`'s `cg_armseq` rule. Restarting it per frame gave two frames
+    /// of one fn the same resumer name. (The frames also pool their `extra_defines`, which
+    /// follow the fn's last frame.)
     armrem_seq: u32,
+    /// ADR 0075 D6 / A1: the EMITTED symbol of the source definition this `Emit` belongs
+    /// to — a free fn's name, a mono instance's mangled name, a class init's or method's
+    /// `Class__m`, an impl method's symbol. Every frame of an effecting fn's shape carries
+    /// the FN's symbol, not its own `__resume_…` name. An arm-remainder resumer is named
+    /// `__armrem_<this>_<seq>`. It used to be derived from `current_fn`'s SOURCE name,
+    /// which is not unique: a generic fn's mono instances all share it, so two instances
+    /// each defined `@__armrem_g_0` (invalid IR), and a method has no `FnId` at all.
+    parent_sym: String,
     /// Bar B / effects (c36b): the dynamic `handle` nesting depth. Incremented on entry
     /// to `lower_handle`, decremented on exit; `> 1` means this handle is nested (its
     /// body is reached from an enclosing handle), so it lowers to a Kont*-typed result
@@ -3734,38 +3781,18 @@ impl Emit<'_> {
     /// remainder is lowered as plain code, and its value returns through
     /// `sentinel_kont_pure`.
     ///
-    /// The symbol is derived from the parent's identity and a per-`define` counter, and
-    /// lowering order is deterministic, so `scg` reproduces the same name. The resumer's
-    /// own `Emit` starts with an EMPTY handle stack and arm-slot stack: it runs outside
-    /// the arm, with no `k` and no enclosing `handle`, which is also why the verdict
-    /// refuses a remainder that resumes or leaves the arm.
+    /// The symbol is `__armrem_<parent_sym>_<armrem_seq>` (see those fields). `scg` applies
+    /// the same rule, and the corpus differential is what holds the two to the same
+    /// bytes. The resumer's own `Emit` starts with an EMPTY handle stack and arm-slot
+    /// stack: it runs outside the arm, with no `k` and no enclosing `handle`, which is
+    /// also why the verdict refuses a remainder that resumes or leaves the arm.
     fn emit_arm_remainder_resumer(&mut self, info: &ArmRemainderInfo) -> Result<String, String> {
-        // The parent's SOURCE NAME, not its `FnId`: `scg` numbers functions differently
-        // (its builtins start at 3/5/6/14 where this back end's `main` was 43), and the
-        // two must emit the same symbol. This is the convention the embedded-perform
-        // resumer already uses on both sides -- `__resume_{sym}` here,
-        // `__resume_<name slice>` there -- and for a non-generic fn the symbol IS the
-        // source name. A method has no `FnId`; a handler arm in one is register D13's
-        // territory, so it falls back to the method key rather than pretending.
-        let sym = match self.current_method {
-            Some(MethodKey::ClassInit(c)) => format!("__armrem_ci{}_{}", c.0, self.armrem_seq),
-            Some(MethodKey::ClassMethod(c, i)) => {
-                format!("__armrem_cm{}_{}_{}", c.0, i, self.armrem_seq)
-            }
-            Some(MethodKey::ImplMethod(im, i)) => {
-                format!("__armrem_im{}_{}_{}", im.0, i, self.armrem_seq)
-            }
-            None => {
-                let name = self
-                    .program
-                    .fns
-                    .iter()
-                    .find(|f| f.id == self.current_fn)
-                    .map(|f| f.name.as_str())
-                    .unwrap_or("fn");
-                format!("__armrem_{name}_{}", self.armrem_seq)
-            }
-        };
+        // Named after the parent's EMITTED symbol, as inkwell names it after its parent's
+        // LLVM function (inkwell's `<seq>` is one module-wide counter, so only the parent
+        // half is shared). Distinct definitions have distinct symbols — two mono instances
+        // of one generic fn, two methods of one class — where the SOURCE name it replaced
+        // does not: a generic fn instantiated twice defined `@__armrem_g_0` twice.
+        let sym = format!("__armrem_{}_{}", self.parent_sym, self.armrem_seq);
         self.armrem_seq += 1;
         let mut e = Emit {
             program: self.program,
@@ -3776,7 +3803,14 @@ impl Emit<'_> {
             scopes: Vec::new(),
             drop_plan: self.drop_plan,
             current_fn: self.current_fn,
-            current_method: None,
+            // The PARENT's method key, not `None`. The remainder is part of the parent's
+            // body, so its bindings -- the ones it moves included -- are in the parent's
+            // drop plan, and the resumer consults that plan exactly as the parent would.
+            // With `None` a method's resumer looked its moves up under `current_fn`, which
+            // in a method is the placeholder `FnId(u32::MAX)` that keys no plan (see
+            // `dump_method`), so it found none. inkwell keeps its key across the resumer,
+            // and the back ends must agree on every drop.
+            current_method: self.current_method,
             allocas: String::new(),
             body: String::new(),
             loops: Vec::new(),
@@ -3784,7 +3818,12 @@ impl Emit<'_> {
             self_var: None,
             handle_stack: Vec::new(),
             extra_defines: String::new(),
-            armrem_seq: 0,
+            // The parent's symbol and the parent's sequence, continued: the resumer is part
+            // of its parent definition (A1). Nothing reaches this today: a remainder that
+            // could bubble again holds a `k(v)`, which suspends, and the verdict refuses a
+            // remainder that suspends.
+            armrem_seq: self.armrem_seq,
+            parent_sym: self.parent_sym.clone(),
             arm_kslots: Vec::new(),
             embed_ph: None,
             handle_depth: 0,
@@ -3807,6 +3846,7 @@ impl Emit<'_> {
             e.var_ty.insert(*cap_id, Type::I64);
         }
         let val = e.lower_expr(&info.remainder)?;
+        self.armrem_seq = e.armrem_seq;
         let kp = e.fresh();
         writeln!(e.body, "  %v{kp} = call ptr @sentinel_kont_pure(i64 {val})").unwrap();
         e.used.kont_pure = true;

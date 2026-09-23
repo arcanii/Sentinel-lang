@@ -177,14 +177,19 @@ fn cg_vid_name(c: &mut TyCtx, vid: i64) -> [u8] {
     vec_to_array(v)
 }
 
-// (ADR 0075 D6) the env type recorded for `vid`, or -1.
+// (ADR 0075 D6) the env type recorded for `vid` if `vid` is in scope, or -1. The scope
+// stack is scanned only to ask whether `vid` is in scope; the TYPE is `env[vid]`, since
+// `env` is indexed by VarId (see `env_get`). A scope position is not a VarId: the scope
+// stack is truncated after every handler, match and return arm and `env` never is, and
+// `env` opens with one phantom slot per effect-op parameter, so `env[<scope position>]`
+// can be some other binding's type.
 fn cg_vid_ty(c: &mut TyCtx, vid: i64) -> i64 {
     let n: i64 = len((*c).scv);
     let mut i: i64 = n - 1;
     let mut found: i64 = 0 - 1;
     while i >= 0 {
         if found == 0 - 1 {
-            if (*c).scv[i] == vid { found = (*c).env[i]; 0 } else { 0 };
+            if (*c).scv[i] == vid { found = env_get(c, vid); 0 } else { 0 };
             0
         } else {
             0
@@ -320,6 +325,31 @@ fn cg_ar_build_caps(c: &mut TyCtx, base: i64, n: i64) -> i64 {
     }
 }
 
+// (ADR 0075 D6 / A1) write the enclosing SOURCE definition's emitted symbol: for an init /
+// method / impl method, by calling `cg_emit_method_sym`, the emitter that define's own
+// header uses; for a fn, by restating `cg_emit_fn`'s header rule -- `cgo_slice` of the name,
+// plus the mono suffix for an instance. Every frame of an effecting fn's shape uses the fn's
+// symbol, as the oracle's `parent_sym` does. The corpus differential, not construction, is
+// what holds this to the oracle's `__armrem_<parent_sym>_<seq>` byte for byte.
+//
+// It used to write the fn's SOURCE name span, always. That is not unique — a generic
+// fn's instances all share it, so two instances defined the same `@__armrem_g_0` — and a
+// method is not a fn at all: its bubble named whichever free fn had last set the span.
+fn cg_emit_psym(c: &mut TyCtx, src: &[u8]) -> i64 {
+    if (*c).cg_pkind == 1 {
+        cg_emit_method_sym(c, src, (*c).cg_pinit, (*c).cg_fn_s, (*c).cg_fn_e)
+    } else {
+        cgo_slice(c, src, (*c).cg_fn_s, (*c).cg_fn_e);
+        if (*c).cg_mono_on {
+            let margs: Vec<i64> = cg_copy_targs(c, 0);
+            cg_emit_mono_suffix(c, &margs);
+            0
+        } else {
+            0
+        }
+    }
+}
+
 // (ADR 0075 D6) class (R) at the bubble: reify the rest of THIS arm onto the bubbled kont,
 // so the inner dispatch replays it when the chain drains (ADR 0020 D3's re-wrap). Emits the
 // captured state and the push, takes the resumer's sequence number, and records a WORKLIST
@@ -334,7 +364,7 @@ fn cg_ar_reify(c: &mut TyCtx, kr: i64, src: &[u8]) -> i64 {
     cgo_str(c, "  call void @sentinel_kont_push(ptr %v");
     cgo_int(c, kr);
     cgo_str(c, ", ptr @__armrem_");
-    cgo_slice(c, src, (*c).cg_fn_s, (*c).cg_fn_e);
+    cg_emit_psym(c, src);
     cg_putc(c, '_');
     cgo_int(c, seq);
     cgo_str(c, ", ptr ");
@@ -392,45 +422,90 @@ fn cg_arm_ph_is(c: &mut TyCtx, q: &[u8]) -> bool {
     }
 }
 
-// (ADR 0075 D6) drain the arm-remainder worklist: one `define` per class (R) bubble in
-// the enclosing fn, emitted AFTER that fn's own define. The text oracle buffers each
-// resumer in `extra_defines` as it lowers the bubble and flushes that buffer right after
-// the parent's closing brace, so the two agree on ORDER without either side sorting.
+// (ADR 0075 D6 / A1) drain the arm-remainder worklist: one `define` per class (R) bubble
+// in the enclosing source definition, emitted after its LAST define. Called after every
+// definition that can hold a `handle` -- a fn (`type_fn`, for each mono instance too, all of
+// an effecting fn's frames together) and a class init / class method / impl method --
+// because a method is its own define and its resumers belong after IT, in the same buffer
+// (`cgcls`), not after some later fn. The text oracle buffers each resumer and emits it
+// after the definition's last define as well, so the two agree on ORDER without either
+// side sorting.
 //
-// Each resumer is the two-define shape `cg_emit_chained` already uses for an embedded
-// perform: `cg_reset`, bind `%arg0` to a fresh slot, load each capture off `%arg1`,
-// lower the remainder with the placeholder armed, wrap in `sentinel_kont_pure`, then
-// `cg_to_body = false` and assemble the header. The lowering re-parses the arm body from
-// the token stream, as the classification did — `Expr` is consumed by its walk, so every
-// question about an arm gets its own copy.
+// The remainder's names are resolved against the scope stack as it stands at drain time.
+// A name the arm bound itself has been truncated away by then, and a later entry can find
+// an earlier entry's local under a captured name, so such a remainder fails here or at
+// `llc` (register D101).
 //
-// The resumer runs OUTSIDE the arm: no `k`, no enclosing `handle`, which is exactly why
-// the verdict refuses a remainder that resumes again or leaves the arm.
-fn cg_ar_drain(c: &mut TyCtx, src: &[u8], name_s: i64, name_e: i64, k: &Vec<i64>, ts: &Vec<i64>, te: &Vec<i64>, gb: &mut Vec<u8>) -> i64 {
+// Each resumer is the two-define shape `cg_embed_emit` already uses for an embedded
+// perform: `cg_reset`, bind `%arg0` to a fresh slot, load each capture off `%arg1`, lower
+// the remainder with the placeholder armed, wrap in `sentinel_kont_pure`, then assemble the
+// header. The lowering re-parses the arm body from the token stream, as the classification
+// did -- `Expr` is consumed by its walk, so every question about an arm gets its own copy.
+//
+// Three things this has to get right that the first version did not, each of which it got
+// wrong on a program the corpus never contained:
+//
+//   - `pcurfn` is the PARENT's `curfn`, set for the duration of the lowering. `record_move`
+//     does nothing while `curfn < 0`, and `type_fn` has already reset it to -1 by the time
+//     it drains, so none of a fn's remainder's own moves were recorded, and the resumer's
+//     scope-exit drops disagreed with the oracle's and inkwell's for any value such a
+//     remainder moves. The remainder IS part of the parent's body, so its moves belong in
+//     the parent's set, which is what the oracle and inkwell look up. (The init and method
+//     paths drain before they restore `curfn`, so there it already holds the method's key;
+//     passing it keeps the paths alike.)
+//   - A METHOD's resumer is written to `cgcls` (`cg_to_cls`; `cg_reset` clears it, so it is
+//     set again afterwards), and the body goes out through `cg_putc` rather than
+//     `cg_flush_allocas_body`, whose body copy is hard-wired to `cgout`.
+//   - Under `cg_mute` (the mono DISCOVERY pass) nothing is emitted and nothing is taken
+//     back. The blank-line pop below used to run regardless, so a muted drain deleted a
+//     real byte from whichever define was last written to `cgout`, and its replacement was
+//     muted.
+//
+// The resumer runs OUTSIDE the arm: no `k`, no enclosing `handle`, which is exactly why the
+// shared Rust verdict refuses a remainder that resumes again or leaves the arm.
+// `cg_ar_classify` does not yet refuse one that leaves the arm, that suspends, or whose
+// `k(v)` or value is not an `i64` / `secret i64` (register D106).
+fn cg_ar_drain(c: &mut TyCtx, src: &[u8], pcurfn: i64, gb: &mut Vec<u8>) -> i64 {
     let n: i64 = len((*c).arwb);
-    // The enclosing define was written with the blank line that separates it from the
-    // next one already appended. These resumers belong BEFORE that separator: the text
-    // oracle closes the parent with `}\n`, flushes `extra_defines` immediately after,
-    // and the blank between defines comes later. So take the separator back and re-emit
-    // it once the last resumer is out — which also leaves the no-resumer case untouched.
-    (*c).cg_to_body = false;
-    let m: i64 = len((*c).cgout);
-    if n > 0 {
-        if m > 0 {
-            if (*c).cgout[m - 1] == '\n' {
-                let _sep: u8 = pop(&mut (*c).cgout);
-                0
+    let to_cls: bool = (*c).cg_pkind == 1;
+    let muted: bool = (*c).cg_mute;
+    // The enclosing define was written with the blank line that separates it from the next
+    // one already appended. These resumers belong BEFORE that separator: the oracle closes
+    // the parent with `}\n`, flushes `extra_defines` immediately after, and the blank between
+    // defines comes later. So take the separator back -- from the buffer the parent went to --
+    // and re-emit it once the last resumer is out.
+    if n > 0 && !muted {
+        if to_cls {
+            let mc: i64 = len((*c).cgcls);
+            if mc > 0 {
+                if (*c).cgcls[mc - 1] == '\n' {
+                    let _sepc: u8 = pop(&mut (*c).cgcls);
+                    0
+                } else {
+                    0
+                }
             } else {
                 0
             }
         } else {
-            0
+            let mo: i64 = len((*c).cgout);
+            if mo > 0 {
+                if (*c).cgout[mo - 1] == '\n' {
+                    let _sepo: u8 = pop(&mut (*c).cgout);
+                    0
+                } else {
+                    0
+                }
+            } else {
+                0
+            }
         }
     } else {
         0
     };
+    let svcf: i64 = (*c).curfn;
     let mut i: i64 = 0;
-    while i < n {
+    while i < n && !muted {
         let btok: i64 = (*c).arwb[i];
         let seq: i64 = (*c).arwq[i];
         let _kvid: i64 = (*c).arwk[i];
@@ -439,6 +514,7 @@ fn cg_ar_drain(c: &mut TyCtx, src: &[u8], name_s: i64, name_e: i64, k: &Vec<i64>
         let cs: i64 = (*c).arwcs[i];
         let cn: i64 = (*c).arwcn[i];
         cg_reset(c);
+        (*c).curfn = pcurfn;
         let ph: i64 = cg_alloca(c, 0);
         cgo_str(c, "  store i64 %arg0, ptr %v");
         cgo_int(c, ph);
@@ -466,7 +542,7 @@ fn cg_ar_drain(c: &mut TyCtx, src: &[u8], name_s: i64, name_e: i64, k: &Vec<i64>
         (*c).cg_arm_phs = kns;
         (*c).cg_arm_phe = kne;
         let mut cur: i64 = btok;
-        let rb: Expr = parse_expr(k, ts, te, src, &mut cur);
+        let rb: Expr = parse_expr(&(*c).cgtk, &(*c).cgts, &(*c).cgte, src, &mut cur);
         let mut rbuf: Vec<u8> = vec_new();
         let _rrt: i64 = dump_texpr(&mut rbuf, rb, 0 - 1, src, c, gb);
         let _rbx: [u8] = vec_to_array(rbuf);
@@ -481,25 +557,51 @@ fn cg_ar_drain(c: &mut TyCtx, src: &[u8], name_s: i64, name_e: i64, k: &Vec<i64>
         cgo_str(c, ")\n");
         (*c).cg_used_kontpure = true;
         (*c).cg_to_body = false;
+        (*c).cg_to_cls = to_cls;
         cgo_str(c, "define ptr @__armrem_");
-        cgo_slice(c, src, name_s, name_e);
+        cg_emit_psym(c, src);
         cg_putc(c, '_');
         cgo_int(c, seq);
         cgo_str(c, "(i64 %arg0, ptr %arg1) {\nentry:\n");
-        cg_flush_allocas_body(c);
+        // The allocas, then the buffered body -- both through `cg_putc`, so a method's
+        // resumer lands in `cgcls` beside its method rather than split across two buffers.
+        let na: i64 = len((*c).cgalloca_sl);
+        let mut ai: i64 = 0;
+        while ai < na {
+            let asl: i64 = (*c).cgalloca_sl[ai];
+            let aty: i64 = (*c).cgalloca_ty[ai];
+            cgo_str(c, "  %v");
+            cgo_int(c, asl);
+            cgo_str(c, " = alloca ");
+            cgo_alloca_ty(c, aty);
+            cg_putc(c, '\n');
+            ai = ai + 1;
+        }
+        let nb: i64 = len((*c).cgbody);
+        let mut bi: i64 = 0;
+        while bi < nb {
+            let byte: u8 = (*c).cgbody[bi];
+            cg_putc(c, byte);
+            bi = bi + 1;
+        }
         cgo_str(c, "  ret ptr %v");
         cgo_int(c, kp);
         cgo_str(c, "\n}\n\n");
         i = i + 1;
     }
-    if n > 0 {
+    (*c).curfn = svcf;
+    if n > 0 && !muted {
+        (*c).cg_to_body = false;
+        (*c).cg_to_cls = to_cls;
         cg_putc(c, '\n');
         0
     } else {
         0
     };
-    // The worklist is per-fn: the next `define` starts its sequence at 0, as the oracle's
-    // per-`Emit` `armrem_seq` does.
+    (*c).cg_to_cls = false;
+    // The worklist is per SOURCE definition: the next one starts its sequence at 0, as the
+    // oracle's `armrem_seq` does (carried across an effecting fn's frames, which this
+    // drains together).
     clear_i64(&mut (*c).arwb);
     clear_i64(&mut (*c).arwq);
     clear_i64(&mut (*c).arwk);
