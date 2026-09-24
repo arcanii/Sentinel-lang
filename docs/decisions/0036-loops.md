@@ -447,6 +447,55 @@ bounded today only because ADR 0072 refuses a `perform` outside tail position, s
 number of bubbles is the number of syntactic `perform`s on the path; widening that gate
 must come with hoisting those slots. Register D91 keeps that half.
 
+
+### A5 (2026-09-24) — a FIELD moved out of an outer binding is carried too (register D110)
+
+D8's rule snapshots the outer bindings and the already-moved set, and flags a binding the body
+newly moves. A move of one FIELD of an outer binding — ADR 0046's partial move, which that ADR's
+D5 scopes to a single-level field of a directly-named binding — is recorded apart from whole
+moves, in `moved_fields`, and the rule did not read that set: a body that moved `s.a` out of an
+outer `s` was accepted, although the next iteration moves the same field again, which is the
+use-after-move D8 exists to reject. The rule now reads both sets and flags a field move by its
+ROOT, the binding the enclosing scope still owns. ADR 0075 D3's handler-arm rule already read
+both; the two now share one helper, `newly_moved_outer`. A root the body or arm newly moved whole
+is reported at that whole move's span. A root it newly moved only by fields is reported at the
+lowest-offset span among those new field moves (a field already moved before the loop or arm is
+skipped), so the diagnostic no longer depends on hash-map order, as the arm rule's did (the same
+file answered three different spans across ten runs before A5, and one after). In a straight-line
+body that is the first new field move in source order; the set keeps one span per field, so after
+a branch that moved a field on more than one path it holds only one of those paths' spans.
+
+The rule is as conservative for a field as D8 is for a whole binding. It refuses a `while` whose
+condition or body moves a field of an outer binding even where the field is moved at most once at
+run time — the move is followed by `break`, sits under a guard that fires once, or is in a
+condition that is false on its first check — and where the field is assigned before or after the
+move, since a reassignment does not un-move it. The whole-binding rule has always refused the same
+shapes. Each such field loop passed the borrow checker before A5, so A5 is at least a minor
+version (ADR 0076 D2). `docs/borrow-check-limitations.md` now lists the ones a flow-sensitive
+checker would accept (the reassignments and the `break`); how often a guard fires, or whether a
+condition holds at once, is a run-time property the rule does not ask.
+
+Pinned by `tests/ui/c5d5_move_outer_field_in_loop.sentinel` and four unit tests in
+`sentinel-borrow-check`: `while_loop_carried_field_move_rejected`,
+`while_loop_carried_field_moves_report_the_first_in_source_order`,
+`while_inner_binding_field_move_ok` and `handler_arm_field_moves_rejected_by_the_root`, the first
+test of the arm rule's field path. `tests/ui/c5d5_move_outer_in_loop.sentinel` is the
+whole-binding UI fixture D10's phase-go lists; only unit tests held D8 until now. Four mutations,
+each caught: the loop rule reverted to whole moves fails the field fixture and the first two unit
+tests; reporting the last field move instead of the first fails the source-order test and the arm
+test; the arm rule reverted to whole moves fails the arm test; and flagging field moves of
+bindings declared inside the body fails `while_inner_binding_field_move_ok`.
+
+It is an `snc` rule, and the borrow differential skips a program the oracle rejects. A matched
+in-place `snc borrow` sweep of all 475 `.sentinel` files changes one verdict, the new field
+fixture's. That single-file command does not load 141 files outside `tests/ui` — 96 with `use`
+imports, 24 with no `main`, and 21 parts of the self-hosted compiler's multi-file modules — so
+those were checked by a matched `snc build`, which does load imports: of each program or
+exporting library among them, of each self-hosted module root, and of a two-line program
+importing each remaining library module (a build checks every function of a module it imports,
+an unused private one included). No verdict changed, and every one of those builds reached the
+borrow stage; the only failures, identical on both sides, were links of POSIX and socket symbols.
+
 ## Revisit
 
 ACCEPTED-WITH-AMENDMENTS (D.5 closed). Triggers:

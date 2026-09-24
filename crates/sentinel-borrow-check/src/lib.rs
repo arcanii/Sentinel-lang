@@ -310,6 +310,8 @@ pub enum BorrowError {
     /// repeatedly — so the move is a use-after-move on the *next*
     /// iteration. Rejected conservatively; a binding declared *inside*
     /// the body is fresh each iteration and may be moved freely.
+    /// ADR 0036 A5: covers a field of such a binding too (ADR 0046's
+    /// partial moves), reported by the ROOT of the moved place.
     #[error("cannot move out of `{binding_name}` inside a `while` loop")]
     #[diagnostic(
         code(sentinel::borrow::moved_in_loop_body),
@@ -1318,10 +1320,15 @@ fn walk_stmt(
             // newly moved in the cond/body is a use-after-move on the
             // next iteration — reject it (`MovedInLoopBody`). A binding
             // declared INSIDE the body is fresh each iteration (fine).
+            // A field moved out of an outer binding (ADR 0046) is carried
+            // the same way, and is flagged by the ROOT of the moved place,
+            // as the handler-arm rule below does (ADR 0036 A5).
             let outer_vars: std::collections::HashSet<VarId> =
                 ctx.var_in_scope.keys().copied().collect();
             let moved_before: std::collections::HashSet<VarId> =
                 ctx.moved.keys().copied().collect();
+            let fields_before: std::collections::HashSet<(VarId, u32)> =
+                ctx.moved_fields.keys().copied().collect();
 
             // The condition is evaluated each iteration; its transient
             // borrows die before the body runs.
@@ -1333,15 +1340,9 @@ fn walk_stmt(
             walk_block_contents(body, ctx, errors, program);
             ctx.pop_scope();
 
-            // Flag outer bindings newly moved in the cond/body
-            // (deterministic order for stable diagnostics).
-            let mut carried: Vec<(VarId, Span)> = ctx
-                .moved
-                .iter()
-                .filter(|(id, _)| !moved_before.contains(id) && outer_vars.contains(id))
-                .map(|(id, span)| (*id, span.clone()))
-                .collect();
-            carried.sort_by_key(|(id, _)| id.0);
+            // Flag outer bindings newly moved in the cond/body, whole or
+            // by a field (deterministic order for stable diagnostics).
+            let carried = newly_moved_outer(ctx, &outer_vars, &moved_before, &fields_before);
             for (id, move_span) in carried {
                 let decl_span = ctx
                     .var_info
@@ -1803,21 +1804,7 @@ fn walk_expr_inner(
                 }
                 walk_expr(&arm.body, ctx, errors, program);
                 ctx.pop_scope_yield(yields_ref);
-                let mut carried: Vec<(VarId, Span)> = ctx
-                    .moved
-                    .iter()
-                    .filter(|(id, _)| !moved_before.contains(id) && outer_vars.contains(id))
-                    .map(|(id, span)| (*id, span.clone()))
-                    .collect();
-                for ((root, fi), span) in ctx.moved_fields.iter() {
-                    if !fields_before.contains(&(*root, *fi))
-                        && outer_vars.contains(root)
-                        && !carried.iter().any(|(id, _)| id == root)
-                    {
-                        carried.push((*root, span.clone()));
-                    }
-                }
-                carried.sort_by_key(|(id, _)| id.0);
+                let carried = newly_moved_outer(ctx, &outer_vars, &moved_before, &fields_before);
                 for (id, move_span) in carried {
                     let decl_span = ctx
                         .var_info
@@ -2183,6 +2170,44 @@ fn check_read_conflict(
             attempt_span: to_source_span(span),
         });
     }
+}
+
+/// ADR 0036 D8 / A5 and ADR 0075 D3: the OUTER bindings a loop body or a handler arm newly
+/// moved -- whole, or by a field (ADR 0046), which is flagged by its ROOT because the root is
+/// what the enclosing scope still owns -- each with one move span, sorted by binding. A root
+/// newly moved whole is reported at that whole move's span. A root newly moved only by fields
+/// is reported at the lowest-offset span among its NEW field moves (a field already moved
+/// before the loop or arm is skipped), so the diagnostic does not depend on hash-map
+/// iteration order. In a straight-line body that is its first new field move in source
+/// order; `moved_fields` keeps ONE span per field, though, so where a branch moved a field on
+/// more than one path it holds only one of those spans, not necessarily the earliest.
+fn newly_moved_outer(
+    ctx: &FnCtx,
+    outer_vars: &HashSet<VarId>,
+    moved_before: &HashSet<VarId>,
+    fields_before: &HashSet<(VarId, u32)>,
+) -> Vec<(VarId, Span)> {
+    let mut carried: BTreeMap<u32, (VarId, Span)> = BTreeMap::new();
+    for (id, span) in ctx.moved.iter() {
+        if !moved_before.contains(id) && outer_vars.contains(id) {
+            carried.insert(id.0, (*id, span.clone()));
+        }
+    }
+    let mut by_field: BTreeMap<u32, (VarId, Span)> = BTreeMap::new();
+    for ((root, fi), span) in ctx.moved_fields.iter() {
+        if fields_before.contains(&(*root, *fi))
+            || !outer_vars.contains(root)
+            || carried.contains_key(&root.0)
+        {
+            continue;
+        }
+        let first = by_field.entry(root.0).or_insert_with(|| (*root, span.clone()));
+        if (span.start, span.end) < (first.1.start, first.1.end) {
+            first.1 = span.clone();
+        }
+    }
+    carried.extend(by_field);
+    carried.into_values().collect()
 }
 
 /// Look up a place's source-level name for diagnostics. Falls
@@ -3672,6 +3697,79 @@ mod tests {
         assert!(
             matches!(&errs[0], BorrowError::MovedInLoopBody { binding_name, .. } if binding_name == "p"),
             "got {errs:?}"
+        );
+    }
+
+    #[test]
+    fn while_loop_carried_field_move_rejected() {
+        // ADR 0036 A5: moving a FIELD out of an outer binding inside a `while`
+        // body is the same use-after-move on the next iteration, flagged by the
+        // root of the moved place (the binding the outer scope still owns).
+        let errs = borrow_check_err(
+            "struct S { a: [i64], b: i64 } fn consume(v: [i64]) -> i64 { v[0] } \
+             fn main() -> i64 { let s: S = S { a: [1, 2], b: 1 }; let mut t: i64 = 0; \
+             let mut i: i64 = 0; while i < 2 { t = t + consume(s.a); i = i + 1; } t }",
+        );
+        assert!(
+            matches!(&errs[0], BorrowError::MovedInLoopBody { binding_name, .. } if binding_name == "s"),
+            "got {errs:?}"
+        );
+    }
+
+    #[test]
+    fn while_loop_carried_field_moves_report_the_first_in_source_order() {
+        // Two fields of one root moved in the body: the diagnostic names the root once
+        // and points at the FIRST move in source order -- `s.c`, although `a` is the
+        // lower field index -- rather than at whichever the moved-field map yields first.
+        let src = "struct S { a: [i64], c: [i64] } fn consume(v: [i64]) -> i64 { v[0] } \
+             fn main() -> i64 { let s: S = S { a: [1], c: [2] }; let mut t: i64 = 0; \
+             let mut i: i64 = 0; while i < 2 { t = t + consume(s.c) + consume(s.a); i = i + 1; } t }";
+        let errs = borrow_check_err(src);
+        assert_eq!(errs.len(), 1, "got {errs:?}");
+        match &errs[0] {
+            BorrowError::MovedInLoopBody { binding_name, move_span, .. } => {
+                assert_eq!(binding_name, "s");
+                assert_eq!(move_span.offset(), src.find("s.c").unwrap(), "got {errs:?}");
+            }
+            other => panic!("got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn handler_arm_field_moves_rejected_by_the_root() {
+        // ADR 0075 D3, through the helper A5 shares with the loop rule: an arm that moves
+        // two fields of an outer binding is refused once, on the root, at the FIRST move
+        // in source order -- `bag.c`, although `a` is the lower field index.
+        let src = "effect Io { read() -> i64; } \
+             fn two() -> i64 ! { Io } { let a: i64 = perform Io.read(); \
+             let b: i64 = perform Io.read(); a + b } \
+             struct B { a: [i64], c: [i64] } fn consume(v: [i64]) -> i64 { v[0] } \
+             fn f() -> i64 { let bag: B = B { a: [1], c: [2] }; handle two() with { \
+             Io.read(k) => { let n: i64 = consume(bag.c) + consume(bag.a); k(n) } } } \
+             fn main() -> i64 { f() }";
+        let errs = borrow_check_err(src);
+        let arm: Vec<_> = errs
+            .iter()
+            .filter(|e| matches!(e, BorrowError::MovedInHandlerArm { .. }))
+            .collect();
+        assert_eq!(arm.len(), 1, "got {errs:?}");
+        match arm[0] {
+            BorrowError::MovedInHandlerArm { binding_name, move_span, .. } => {
+                assert_eq!(binding_name, "bag");
+                assert_eq!(move_span.offset(), src.find("bag.c").unwrap(), "got {errs:?}");
+            }
+            other => panic!("got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn while_inner_binding_field_move_ok() {
+        // A binding declared INSIDE the body is fresh each iteration, so moving a
+        // field out of it is fine.
+        borrow_check_ok(
+            "struct S { a: [i64], b: i64 } fn consume(v: [i64]) -> i64 { v[0] } \
+             fn main() -> i64 { let mut t: i64 = 0; let mut i: i64 = 0; \
+             while i < 2 { let s: S = S { a: [1, 2], b: 1 }; t = t + consume(s.a); i = i + 1; } t }",
         );
     }
 

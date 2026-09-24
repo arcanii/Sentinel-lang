@@ -345,6 +345,55 @@ let r: &i64 = &p.x;   // accepted — `p` is a binding with a scope
 Closure: temporary lifetime extension is not specified for Sentinel; it
 would be its own ADR. Until then this errs on the side of safety.
 
+## Over-rejection: moving an outer binding, or a field of one, inside a `while`
+
+The checker walks a loop's condition and body once and flags any binding
+declared outside the loop that they move, whole or by a field. The walk does not
+follow the back edge or a `break`, and an assignment does not re-initialize a
+moved place, so it refuses some loops whose moved value is never used again.
+
+```sentinel
+struct S { a: [i64], b: i64 }
+fn consume(v: [i64]) -> i64 { v[0] }
+fn main() -> i64 {
+    let mut s: S = S { a: [1, 2], b: 1 };
+    let mut t: i64 = 0;
+    let mut i: i64 = 0;
+    while i < 2 {
+        t = t + consume(s.a);   // REJECTED: cannot move out of `s` inside a `while` loop
+        s.a = [3, 4];
+        i = i + 1;
+    }
+    t
+}
+```
+
+Diagnostic: `sentinel::borrow::moved_in_loop_body`, on the root `s`. The same
+diagnostic refuses a body that assigns the place BEFORE moving it on each
+iteration, a move followed by `break`, and each of these for a whole binding.
+(A move under a guard, or in a loop condition, is refused too, but that is not
+an over-rejection in this page's sense: how often it runs is a run-time
+property, which a flow-sensitive checker does not know either.)
+
+Cause: ADR 0036 D8 (whole bindings) and A5 (a field of one) flag any binding
+declared outside the loop that the condition or body newly moves, and a
+reassignment does not un-move a binding.
+
+Workaround: borrow instead of moving, or move a value declared inside the body.
+
+```sentinel
+fn peek(v: &[i64]) -> i64 { (*v)[0] }
+// ...
+    while i < 2 {
+        t = t + peek(&s.a);   // accepted
+        s.a = [3, 4];
+        i = i + 1;
+    }
+```
+
+Closure: ADR 0036's Revisit trigger for D8 — a move-state fixpoint over the
+body, in which an assignment re-initializes the moved place.
+
 ## Out of scope at this doc
 
 - Closures, async, traits, lifetime parameters — none of these
@@ -366,5 +415,6 @@ Each row here gets closed by a specific ADR or sub-phase:
 | Block yielding a ref keeps its borrows | ADR 0018 step .a fact generator (needs provenance) |
 | Ref-returning method's receiver moved in the same call | ADR 0018 step .b / .c (Polonius) |
 | Borrow of a field of a temporary    | Temporary-lifetime-extension ADR (unspecified for Sentinel) |
+| Move of an outer binding (or field) in a `while`, reassigned or followed by `break` | ADR 0036 Revisit (D8): a move-state fixpoint over the body, an assignment re-initializing the place |
 | Partial move + drop unsoundness     | ✅ CLOSED (ADR 0046) — `snc` + `scg` both, differentials byte-identical |
 | Reference outliving its storage     | ✅ CLOSED (ADR 0017 D7) — `snc`; rejection-only, so no `scg` mirror is needed |

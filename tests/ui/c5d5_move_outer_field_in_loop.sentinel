@@ -1,0 +1,19 @@
+// ADR 0036 A5 (negative): moving a FIELD out of an outer binding inside a `while` body.
+// It is the move D8 rejects for a whole binding: the field is moved on one iteration and
+// moved again on the next. The rule flags it by the ROOT of the moved place, `s`, which
+// is what the enclosing scope still owns.
+
+struct S { a: [i64], b: i64 }
+
+fn consume(v: [i64]) -> i64 { v[0] }
+
+fn main() -> i64 {
+    let s: S = S { a: [1, 2], b: 1 };
+    let mut t: i64 = 0;
+    let mut i: i64 = 0;
+    while i < 2 {
+        t = t + consume(s.a);
+        i = i + 1;
+    }
+    t
+}

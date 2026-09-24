@@ -355,3 +355,8 @@ ui_snapshot!(
     c75_effecting_frames_share_resumers,
     "c75_effecting_frames_share_resumers.sentinel"
 );
+
+// ADR 0036 D8 / A5: the loop-carried move rule, for a whole outer binding (the UI fixture
+// D10 asked for) and for a FIELD moved out of one, which the rule flags by its root.
+ui_snapshot!(c5d5_move_outer_in_loop, "c5d5_move_outer_in_loop.sentinel");
+ui_snapshot!(c5d5_move_outer_field_in_loop, "c5d5_move_outer_field_in_loop.sentinel");

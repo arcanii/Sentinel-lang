@@ -1,0 +1,19 @@
+// ADR 0036 D8 (negative): moving an OUTER binding inside a `while` body. The borrow
+// checker walks the body once, but the body runs repeatedly, so a move on one iteration
+// is a use of a moved value on the next. Rejected with `moved_in_loop_body`. (ADR 0036
+// D10's phase-go lists this UI fixture; until A5 only unit tests held the rule.)
+
+struct P { x: i64 }
+
+fn consume(p: P) -> i64 { p.x }
+
+fn main() -> i64 {
+    let p: P = P { x: 5 };
+    let mut t: i64 = 0;
+    let mut i: i64 = 0;
+    while i < 3 {
+        t = t + consume(p);
+        i = i + 1;
+    }
+    t
+}
