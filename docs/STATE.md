@@ -5,7 +5,7 @@ HANDOVER.md, STATE.md is the source of truth. New contributors (or
 new chat sessions) should be able to read this file and understand
 the current state of the workspace without re-reading every commit.
 
-## Current State (2026-09-23)
+## Current State (2026-09-24)
 
 > **Phase C closed at the bootstrap milestone (2026-05-30); Phase D self-hosts; the
 > per-unit separate-compilation back end is functionally complete.**
@@ -14,7 +14,18 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
-**Latest (2026-09-23) — ADR 0075 A1: an arm-remainder resumer takes its identity from its
+**Latest (2026-09-24) — ADR 0036 A5: the loop-carried move rule sees a FIELD moved out of an
+outer binding (register D110).** A `while` body that moved a field (`s.a`, ADR 0046's
+single-level partial move) out of an outer `s` passed the borrow checker; it is now refused
+like a whole-binding move, and reported against the root `s`. Like the whole-binding rule, it
+also refuses such a loop where the field is moved at most once at run time or is reassigned in
+the body, so loops that passed before no longer do; `docs/borrow-check-limitations.md` lists
+the ones a flow-sensitive checker would accept. The ADR 0075 D3 handler-arm rule shares the
+helper, so its reported span no longer varies run to run, and its field path has its first
+test. Filed D111 (a move of a binding declared outside N loop-like constructs is reported N
+times). With D99 already oracle-moving, the next version is at least 0.2.0 either way.
+
+**Previously (2026-09-23) — ADR 0075 A1: an arm-remainder resumer takes its identity from its
 parent definition (register D99).** It is named after the parent's EMITTED symbol with one
 sequence per definition, consults and records into the parent's drop plan, and is emitted
 after the definition's last define, into its own buffer. The first landing broke each rule

@@ -124,6 +124,10 @@ reference as you work through the milestones.
 > confirming nothing pre-existing is newly refused; oracle-vs-scg byte-equality on the new
 > fixture at types, mir and llvm; and the secret-taint check in both directions.
 
+### ▶ RESUME HERE (2026-09-25 — `origin/main` was `3cc3e06` when this was written, and this session's two commits sit on top of it, unpushed; read `git reflog show refs/remotes/origin/main` and `git log --oneline origin/main..HEAD` at the START and AGAIN before writing either down. This session: **item 2 of the approved order LANDED — register D110 CLOSED** by [ADR 0036](decisions/0036-loops.md) **A5** (`5c46d4c` fix, then this docs commit): the loop-carried move rule sees a FIELD moved out of an outer binding (ADR 0046's single-level partial move), flagged by its root through `newly_moved_outer`, which ADR 0075 D3's handler-arm rule shares, so the arm rule's reported span no longer follows hash-map order. Like the whole-binding rule it refuses loops that passed before (a field moved at most once at run time, or reassigned in the body); `docs/borrow-check-limitations.md` lists the ones a flow-sensitive checker would accept. Two bounded review rounds (rule soundness and prose, then the remedies) found no defect in the rule; every blocking finding was a false or over-scoped sentence, all fixed; filed **D111**. Four-check **2,024 passed with exactly the 18 known Windows failures**, every example failure a LINK failure, doctests and clippy clean. A matched `snc borrow` sweep of all 475 `.sentinel` files changes one verdict, the new field fixture's; a matched `snc build` covering the 141 files that command cannot load changes none. Four mutations caught. Register: **111 distinct ids, 44 whose heading opens `**D<n> — DONE`**. ⚠ **Two traps this session:** `snc build --lib` on a file with no `export "C"` fails with "nothing to export" BEFORE the borrow stage, so a build sweep that counts such a file as checked claims coverage it does not have — a two-line program importing one `pub` item checks the whole module, an unused private function included; and the prose written to fix the first review round was itself wrong where the second round looked — the span rule forgot the NEW-moves filter, and the over-rejection list included two shapes no flow-sensitive checker accepts. The register counts use the 2026-09-22 block's rule; it gives 109 and 43 at `3cc3e06`.)
+
+> **NEXT:** item 3, ADR 0077 for D93 (run-time drop flags where a binding is maybe-moved, a path-sensitive moved set elsewhere; the maintainer reviews the ADR before any code), then item 4: D92, then D96 + D97, then register the four new leaks. Owed by the maintainer: design calls on D102 and D103, and when to bump the version — D99 moved the oracle and A5 refuses loops that passed before, so the next version is at least 0.2.0; `Cargo.toml` still says 0.1.0.
+
 ### ▶ RESUME HERE (2026-09-23 — `origin/main` was `8a79339` when this was written, and this session's two commits sit on top of it, unpushed; read `git reflog show refs/remotes/origin/main` and `git log --oneline origin/main..HEAD` at the START and AGAIN before writing either down. This session: **register D99 CLOSED** — [ADR 0075](decisions/0075-a-bubbling-resume-leaves-its-arm.md) **A1**: an arm-remainder resumer takes its name, its drop plan and its place in the output from its parent definition, in the oracle and `scg`. Slice 2 had each of the three wrong somewhere (methods, class inits, generic fns, an effecting fn's frames); inkwell was right on the name and the drop plan. Landed with it: `scg` looks a capture's type up by VarId. **This moves the oracle, so ADR 0076 D2 makes the next version at least 0.2.0; `Cargo.toml` is still 0.1.0, the maintainer's call.** Three review rounds plus a narrow fourth on the remedies filed **D100—D109**; two of them, **D102** and **D103**, are wrong answers with no diagnostic in all three back ends from slice 2, so D87's closure does not hold in general, and each needs a design call. Register: **109 distinct ids, 43 whose heading opens `**D<n> — DONE`** (the rule the 2026-09-22 block states). Four-check: **2,018 passed with exactly the 18 known Windows failures**, doctests and clippy clean, every `selfhost_*` differential green. A matched pre/post sweep over all **473** tracked and untracked `.sentinel` files, each binary smoke-tested first: the oracle differs on exactly two files and `scg` on exactly two, all new fixtures. Sixteen mutations caught. ⚠ **Two traps this session:** the first remedy for a review finding (restore the old parent name in an effecting fn's frames) would have brought back invalid IR, and only a verifier that CONSTRUCTED the input caught it; and each review round found false claims in the prose written to fix the round before, until claims were cut rather than refined. Also: Python embedded in a Bash heredoc loses its backslashes in the tool layer (`\n` becomes a newline) — write edit scripts with the Write tool.)
 
 > **NEXT:** the approved order continues — **item 2**, the loop partial-move rule (snc-only, neutral public text once fixed); then ADR 0077 for D93; then D92, D96 + D97, and the four new leaks. Design calls owed to the maintainer from this session: D102 (narrow class (R), or keep pending remainders per activation) and D103 (class (A) for a remainder that writes outside the arm).
@@ -1879,6 +1883,37 @@ reference as you work through the milestones.
 >      (`let x: bool = handle perform Io.read() with { Io.read(k) => { let r: bool = k(1); r },
 >      return v => v > 0 }; if x { 42 } else { 7 }` exits 42). No corpus program has a
 >      `bool`-returning fn with a non-`Async` effect row, or a non-`i64` `handle`.
+>
+>      **D110 — DONE (2026-09-24). The loop-carried move rule (ADR 0036 D8) did not see a FIELD
+>      moved out of an outer binding.** Found 2026-09-23 by D93's investigation. A `while` body
+>      that moved `s.a` out of an outer `s` passed the borrow checker, although the next
+>      iteration moves the same field again, the use-after-move D8 rejects for a whole binding:
+>      D8 read the whole-move set and not ADR 0046's `moved_fields`, which ADR 0075 D3's
+>      handler-arm rule already read. Fixed by [ADR 0036](decisions/0036-loops.md) A5: the rule
+>      flags a field move by its root, through one helper both rules now share, which also makes
+>      the reported span deterministic when several fields of one root move (the arm rule's
+>      varied run to run). As the whole-binding rule always has, it refuses such a loop even
+>      where the field is moved at most once at run time or is reassigned in the body — new
+>      rejections of loops that passed before; `docs/borrow-check-limitations.md` now lists the
+>      ones a flow-sensitive checker would accept.
+>      Pinned by `tests/ui/c5d5_move_outer_field_in_loop.sentinel` and four unit tests, one of
+>      them the first test of the arm rule's field path;
+>      `tests/ui/c5d5_move_outer_in_loop.sentinel` adds the whole-binding UI fixture ADR 0036
+>      D10's phase-go lists. Four mutations, each caught. An `snc` rule: a matched `snc borrow` sweep
+>      of all 475 `.sentinel` files changes one verdict, the new field fixture's, and a matched
+>      `snc build` covering the 141 files that command cannot load (a module part through its
+>      module's root, a library module through a program importing it) changes none.
+>
+>      **D111 — a move of a binding declared outside N enclosing loop-like constructs is
+>      reported N times.** Found 2026-09-24 by D110's review; pre-existing for whole bindings
+>      since ADR 0036 D8, and A5 extends it to fields. Each `while` (and each handler arm, ADR
+>      0075 D3) runs its own check over what its body newly moved, so a move, inside a `while`
+>      inside another `while`, of a binding declared outside both prints `moved_in_loop_body`
+>      twice — at the same span when it is the only move of that binding the outer loop sees —
+>      and one inside a handler arm inside a `while` prints `moved_in_handler_arm` and
+>      `moved_in_loop_body`. A binding declared between the two loops is reported once.
+>      Diagnostic noise only: the verdict is right. The fix is for an outer construct to skip a
+>      (binding, move span) an inner one already reported.
 >
 >      **D78 — stale corpus fixture counts in `llvm.rs` and `README.md`, at six sites, stale
 >      before this change.** Found by D74's reviews. `crates/sentinel-driver/tests/llvm.rs`
