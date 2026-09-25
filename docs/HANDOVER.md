@@ -124,6 +124,14 @@ reference as you work through the milestones.
 > confirming nothing pre-existing is newly refused; oracle-vs-scg byte-equality on the new
 > fixture at types, mir and llvm; and the secret-taint check in both directions.
 
+### ▶ RESUME HERE (2026-09-25e — `origin/main` was `707c456` when this was written, and this session's commits sit on top of it, unpushed; read `git reflog show refs/remotes/origin/main` and `git log --oneline origin/main..HEAD` at the START and AGAIN before writing either down. This session's third slice (`52598ce`, `9570d7a`, `3f8b35d`, `1a5c672`, then this docs commit): **register D92 CLOSED** — [ADR 0032](decisions/0032-sum-types-and-pattern-matching.md) **A5**: a `match` on a temporary frees the temporary's payload box, in an arm for a payload-carrying variant once its bindings have copied the payload out and in a `_` arm, in all three back ends — landed after three prerequisites, each its own commit: **D124** ([ADR 0043](decisions/0043-self-host-port-borrow-check.md) **A3**: `scg` walks a block's tail and a `match` arm's body as consuming, as the oracle's checker does), **D125** ([ADR 0034](decisions/0034-growable-collections.md) **C1**: `vec_to_array` is refused unless its element is plain data) and **D129** ([ADR 0022](decisions/0022-concrete-c4-1-class-syntax.md) **A3**: a class `init`'s definite assignment is checked path by path and fail-closed, with the new errors `InitFieldReadBeforeAssign` and `InitSelfUsedBeforeAssigned`). Filed **D126–D128**; D117 and D122 updated. Five bounded review rounds: the first found C1's hole and the second D129's, the third an evaluation-order gap in the new check (`place = value` is lowered value-first by inkwell and place-first by the oracle and `scg`, so both orders are now checked), and the last two only prose, one of them a disclosure that two neutral entries made together. Register: **129 distinct ids, 54 whose heading opens `**D<n> — DONE`** (the 2026-09-22 block's rule; `3805915` gives 123 and 50). Four-check: **2,087 passed with exactly the 18 known Windows failures**, doctests and clippy clean, every `selfhost_*` differential green including both bootstrap fixed points. Sweeps, HEAD (`3805915`) against the final tree: `snc llvm` over all 498 `.sentinel` files leaves 328 programs byte-identical, changes exactly the six A5 names (`c43_block_tail_read_is_a_move`, `c5d1_match_frees_a_temporary`, `c5d5_loop_cond_slot_reuse`, `c65_match_join`, `c65_return_gaps`, and the ui program `c65_secret_join_guarded`), newly refuses only the four new refusal fixtures (160 fail under both), and leaves the ten self-hosted module roots, merged from this tree, byte-identical; a matched `scg`-driver sweep over 1,976 rows changes only the programs A3 and A5 name plus the oracle-rejected `c71_guard_deref_computed`. Mutations: A 2, B 12, C 17, D 16, all caught. A5 moves emitted IR and ADR 0022 A3 and ADR 0034 C1 refuse programs that compiled before, so the next version is at least 0.2.0 (ADR 0076 D2); `Cargo.toml` still says 0.1.0. ⚠ **Traps this session:** two of the three prerequisites were found by reviews of the fix they protect — a fix that frees memory is only as sound as every way a value can be shared or left unassigned, so ask that question of the whole checker, not of the new code; the back ends do not agree on evaluation order everywhere, so a rule that walks "in evaluation order" must name the order it assumes; and a disclosure can hide in two neutral sentences that sit next to each other.)
+
+> **NEXT:** continue the approved order:
+> 1. item 4, the rest: D96 (drafted in the scratchpad) + D97 (`scg`'s first rejection path, an ADR amendment to the types port — it now also has D125's and D129's refusals to carry); then register the leaks re-verified on 2026-09-25 — a class instance's heap fields, an enum payload's own heap, an effecting let-shape fn's heap parameter — and `==` between two arrays, which passes the checker and then fails in every back end.
+> 2. ADR 0077's implementation, with the draft's proposed answers to Q1–Q5.
+>
+> D117 is not yet scheduled; it is the maintainer's call. Owed by the maintainer: D102, D103, ADR 0077's Q6, D36's decision, and when to bump the version. ADR 0076's D2 table lists D96 as a patch, but D96's fix refuses `P { lo: 1, lo: 2, hi: 3 }`, which compiles today — correct the table when D96 lands.
+
 ### ▶ RESUME HERE (2026-09-25d — `origin/main` was `707c456` when this was written, and this session's four commits sit on top of it, unpushed; read `git reflog show refs/remotes/origin/main` and `git log --oneline origin/main..HEAD` at the START and AGAIN before writing either down. This session's second slice: **register D121 CLOSED, and D35 with it** (the fix commit, then this docs commit) by [ADR 0071](decisions/0071-shared-ownership-and-mutex.md) D2 amendment A1: a `Shared` / `Mutex` read out of a place into a new owner is cloned in all three back ends, per branch through block / `if` / `match` / `scope` tails, unless the read moves the place; `scg`'s delegate forwarder clones too, and a `secret`-qualified handle is now a type error. Fixture `c71_shared_place_duplications` (24 shapes) answers 94 in all three back ends and aborts on a missing clone; two IR tests pin the moved-place rule and two `tests/ui` fixtures the refusal. Three bounded review rounds: they found a generic-body leak the rule introduced and an `scg` forwarder that did not clone (both fixed), owners that are never dropped (registered as leaks D122 and D123), and the one generic shape where `scg` moved (recorded in D36). Filed D119 and D120 (leaks). Register: **123 distinct ids, 50 whose heading opens `**D<n> — DONE`**. Four-check: **2,073 passed with exactly the 18 known Windows failures**, doctests and clippy clean, every `selfhost_*` differential green including both bootstrap fixed points. Sweeps, each OLD (`1cd0d28`) against NEW: `snc llvm` leaves 341 programs byte-identical, the ten self-hosted module roots (merged from this tree) among them, changes only the new fixture, and newly refuses only the two new refusal fixtures; `snc build` over the 121 entries changes no verdict. Fifty-four of fifty-five mutations caught. Moves emitted IR, so at least a minor version (ADR 0076 D2); `Cargo.toml` still says 0.1.0.)
 
 > **NEXT:** continue the approved order:
@@ -1553,8 +1561,8 @@ reference as you work through the milestones.
 >      probe in the D88/D90 pins that reaches a handler arm with no enclosing `while`, which no
 >      current probe does.
 >
->      **D92 — an UNBOUND `match` scrutinee is never dropped, so a `match` on a temporary
->      retains about 18 bytes per evaluation.** Found 2026-09-21 by D90's review; pre-existing
+>      **D92 — DONE (2026-09-25). An UNBOUND `match` scrutinee was never dropped, so a
+>      `match` on a temporary retained about 18 bytes per evaluation.** Found 2026-09-21 by D90's review; pre-existing
 >      and orthogonal to it — the same spelling in a loop BODY retains identically before and
 >      after A4 (measured at 300,000 / 600,000 / 1,200,000 evaluations: 7.62 / 12.69 / 23.10 MB
 >      peak commit, both binaries), and binding the scrutinee first (`let e = E::B(n); match e
@@ -1567,6 +1575,16 @@ reference as you work through the milestones.
 >      a drop for the scrutinee temporary, which is the same seam as the other undropped
 >      temporaries (a `?T` payload, a call result discarded in statement position) — worth doing
 >      as one slice rather than piecemeal.
+>      Closed by [ADR 0032](decisions/0032-sum-types-and-pattern-matching.md) A5, for the
+>      `match` scrutinee only: each arm frees a temporary scrutinee's payload box once its
+>      bindings have copied the payload out (a unit-variant arm has none; a `_` arm frees
+>      whatever reached it). `match E::B(n)` and `match mk(n)` over 2,000,000 evaluations go
+>      from 40.3 MB to 9.2–9.3 MB in all three back ends, and `c5d5_loop_cond_slot_reuse`
+>      from 18.6 MB to 9.3 MB; its header no longer carries the warning. It depends on D124
+>      (`scg` must record a block's or an `if`'s tail binding as moved into the value, as the
+>      oracle does), on D125 (`vec_to_array` must not copy an element that owns memory) and on
+>      D129 (a class `init` must assign every field on every path). The other temporaries
+>      named above stay open, with the rest of that seam in D122.
 >
 >      **D93 — a drain's skip list is the drop plan's PER-FUNCTION moved-source set, so a
 >      binding whose only move lies AFTER the drain is skipped at it.** Found 2026-09-21 by
@@ -2025,14 +2043,17 @@ reference as you work through the milestones.
 >      `scg`'s checker records it only where the comparison's value is itself consumed (a `let`
 >      initializer, an assignment, a call argument, a struct-literal field, a function's tail)
 >      and not in an `if` or `while` condition, under `!`, or in a discarded statement, whose
->      context it treats as a read. So `scg`'s drop
+>      context it treats as a read. (Since ADR 0043 A3 `scg` also records it, as the oracle
+>      does, when the comparison or the place is a block's tail, an `if` branch's tail or a
+>      `match` arm's body, wherever that block sits.) So `scg`'s drop
 >      plan drops the place in the second kind of position and, like the oracle's, not in the
 >      first. No program the differentials compare showed it: the one with such a place in the
 >      second kind of position, the new `tests/ui/c25_payload_used_after_scrutinee_moved.sentinel`,
 >      is refused by the oracle, which the borrow differential skips, and the IR the codegen
 >      differential compares does not differ there. The fix is for a
 >      comparison and a discarded statement to read their place in every position, in both
->      checkers, including a place reached through a block's or an `if`'s tail. Tried and
+>      checkers. (A place named by a block's or an `if`'s tail is a different case: ADR 0043
+>      A3 makes it a move into the block's value in both.) Tried and
 >      withdrawn here: changing only the oracle's drop plan removed the three leaks (9.2-9.3 MB each)
 >      but made the oracle disagree with `scg` in the first kind of position.
 >
@@ -2123,7 +2144,9 @@ reference as you work through the milestones.
 >      `p.use_h(H { s: s, n: 1 })` peaks at 70.9 MB, against 9.2 before. The fix is the
 >      owners' drops: element drops for arrays and `Vec`, payload drops for enums, a drop for
 >      a temporary once its reader is done (D92's seam), drop flags for a maybe-moved binding
->      (ADR 0077), and D119.
+>      (ADR 0077), and D119. A `?Guard` moved into such a temporary — `is_some({ g })`, or
+>      `{ g };` — is never unlocked for the same reason, and the debug runtime then panics when
+>      the mutex's last handle is released; since ADR 0043 A3 all three back ends agree on it.
 >
 >      **D123 — inkwell keeps a unit counted into a block's own `let`-local when nothing
 >      receives the block's value (a leak).** Found 2026-09-25 by the review of D121's fix.
@@ -2135,6 +2158,99 @@ reference as you work through the milestones.
 >      the `let`. In an owning position (`let u = { let t = h.s; t }`) all three back ends
 >      balance. The fix is to release the block's value once its reader is done with it —
 >      D92's seam for temporaries.
+>
+>      **D124 — DONE (2026-09-25). `scg`'s move analysis diverged from the oracle's for a
+>      block's tail or a `match` arm's body in a reading position.** Found 2026-09-25 while
+>      designing D92's fix; present since ADR 0043's move analysis. The oracle's checker
+>      records a binding named by a block's tail, or by a `match` arm's body, as moved into the
+>      value wherever the block or `match` sits. `scg` inherited the context around it
+>      instead, so under a reading context (an index or field target, a builtin argument such
+>      as `len`, a comparison operand, a `match` scrutinee) its moved-sources dump and drop
+>      plan diverged from the oracle's.
+>      [ADR 0043](decisions/0043-self-host-port-borrow-check.md) A3: a block's tail and a
+>      `match` arm's body are consuming wherever they sit. The block's value is then a
+>      temporary: as a `match` scrutinee ADR 0032 A5 frees its box (D92); elsewhere nothing
+>      drops it, in `scg` as in the oracle (D122). Taking the oracle's drop plan also means
+>      `scg` now keeps a binding that such a value takes on only one path, as the oracle and
+>      inkwell already did (D93, ADR 0077): `match (if c { e } else { E::A }) { .. }` over
+>      2,000,000 evaluations peaks at 24.8 MB in all three back ends (the oracle and inkwell
+>      peaked at 40.3 MB before). Pinned by
+>      `tests/pass/c43_block_tail_read_is_a_move.sentinel` through the codegen and borrow
+>      differentials; the only other program whose `scg` output moved is the ui program
+>      `c71_guard_deref_computed`, which the oracle rejects with a pin added because of this
+>      move (`GuardDerefNotVar`). A handler's op-arm and `return`-arm bodies are the one
+>      sibling A3 leaves (D127).
+>
+>      **D125 — DONE (2026-09-25). `vec_to_array` copied an element that owns memory without
+>      moving it out of the `Vec`.** Found 2026-09-25 by the review of D92's fix;
+>      pre-existing. [ADR 0034](decisions/0034-growable-collections.md) B2 copies the live
+>      elements into a fresh array byte for byte and leaves the `Vec` holding them, which is
+>      sound only for an element that owns nothing, and nothing checked that: a `Vec<H>`
+>      whose `H` holds an array or a `Vec`, an enum with a payload, a `?Struct` or a
+>      `Shared` / `Mutex` handle was accepted. ADR 0034 C1: `vec_to_array` is refused
+>      (`VecToArrayElementNotPlain`) unless its element is plain data — scalars (secret or
+>      not) and nullable scalars, the `Copy` handles no drop frees and `?Channel`,
+>      payload-free enums, and structs and generic-struct instances built from those; an
+>      abstract `T` in a generic body is refused. **Corpus reach
+>      zero, measured:** no program in the corpus, the examples or the self-hosted compiler
+>      is refused. Pinned by the unit tests `vec_to_array_refuses_an_element_that_is_not_plain`
+>      and `vec_to_array_admits_a_plain_element` and by
+>      `tests/ui/c5d3_vec_to_array_element_not_plain.sentinel`; seventeen mutations caught. `scg`
+>      does not refuse it yet (D97). ADR 0032 A5's free relies on it, so it lands first.
+>
+>      **D126 — `scg` emits invalid IR for a `match` whose `_` arm is written before a variant
+>      arm.** Found 2026-09-25 by the review of D92's fix; pre-existing, before that fix too.
+>      `match mk(n) { _ => 0, E::B(x) => x }` is accepted; the oracle emits valid IR for it,
+>      while `scg` emits instructions after a `br` and an empty block, which `llc` refuses
+>      ("expected instruction opcode"). It fails loud rather than miscompiling. No corpus
+>      program writes a `_` arm anywhere but last. The fix is for `scg` to place the `_` arm
+>      where the oracle does.
+>
+>      **D127 — `scg` walks a handler's op-arm and `return`-arm bodies in the surrounding
+>      context, where the oracle's checker consumes them.** Found 2026-09-25 by the review of
+>      ADR 0043 A3, which made a block's tail and a `match` arm's body consuming in `scg` and
+>      left `dump_te_handle`'s arm walks as they were. For a Move-typed `handle` value read in
+>      place — `len(handle { [1, 2, 3] } with { return v => v })` — the oracle records the
+>      arm's binding as moved and `scg` does not, so their moved-sources dumps differ. Neither
+>      text back end lowers such a `handle` to valid IR today (both pass a `{ i64, ptr }`
+>      where `sentinel_kont_pure` takes an `i64`), so only the borrow differential could see
+>      it, and no corpus program has the shape. The fix is the same forced `consuming` around
+>      those walks.
+>
+>      **D128 — `snc build` panics on a `handle` whose value is not a word, and on a `match`
+>      whose scrutinee is a `perform` of an operation returning an enum.** Found 2026-09-25 by
+>      the reviews of D92's fix; pre-existing, the same before and after it.
+>      `handle { match perform Io.get() { .. } } with { .. }` with `get() -> E` panics inside
+>      inkwell ("Found PointerValue ... but expected the StructValue variant", `enums.rs:333`),
+>      and `match handle { e } with { .. } { .. }` panics at `enums.rs:309` ("Found StructValue
+>      ... but expected the IntValue variant"). Both type-check and borrow-check. The `handle`
+>      half does not need a `match`: `let a = handle { [1, 2, 3] } with { return v => v }`,
+>      the same with a struct or an enum value, and D127's `len(handle { [1, 2, 3] } with {
+>      return v => v })` panic at `enums.rs:309` too; `let e = perform Io.get(); match e { .. }`
+>      does not panic: `snc build` refuses it with a diagnostic (`handle_body_not_direct_perform`
+>      in a `handle` body, `effecting_fn_body_not_direct` in an effecting fn). A panic on a
+>      program the checker accepts breaks the project's rule against
+>      `panic!` on user input. The fix is either lowering for those shapes or a refusal in the
+>      checker.
+>
+>      **D129 — DONE (2026-09-25). A class `init`'s definite-assignment check was flat: it
+>      did not follow paths and did not check reads of `self`.** Found 2026-09-25 by the
+>      second review of D92's fix; present since
+>      [ADR 0022](decisions/0022-concrete-c4-1-class-syntax.md) A1, which shipped D4's
+>      definite-assignment check as a flat collection: a field counted as assigned if a
+>      `self.field = ..` appeared in the body, a nested block, one arm of an `if` or a
+>      `while` body, and reads of `self` inside `init` were not checked, so the check did not
+>      establish what D4 promises — that `init` hands back an instance whose every field has
+>      been assigned. ADR 0022 A3 implements D4 path by path and fail-closed: an `if` or `match` keeps
+>      what all its arms assign; a loop body, a `handle`, a `scope`, a `spawn`, the right
+>      operand of `&&` / `||` and the body's tail never count; `place = value` is
+>      checked in both orders, since the back ends do not share it; a read of `self.f` needs
+>      `f` assigned (`InitFieldReadBeforeAssign`) and any other use of `self` itself needs
+>      every field (`InitSelfUsedBeforeAssigned`). **Corpus reach zero, measured:** no program in
+>      the corpus, the examples or the self-hosted compiler is refused. Pinned by four unit
+>      tests and three ui fixtures (`c41_init_field_assigned_on_one_path`,
+>      `c41_init_field_read_before_assign`, `c41_init_self_used_before_assigned`); sixteen
+>      mutations caught. `scg` does not refuse these yet (D97). ADR 0032 A5 relies on it.
 >
 >      **D78 — stale corpus fixture counts in `llvm.rs` and `README.md`, at six sites, stale
 >      before this change.** Found by D74's reviews. `crates/sentinel-driver/tests/llvm.rs`
@@ -2403,7 +2519,7 @@ reference as you work through the milestones.
 >      tail binds (the fifth). ADR 0072 A1 gives the embedded shape the capture rule it lacked
 >      and checks the `perform`'s arguments, so each of these is now refused with a reason
 >      (`tests/embedded_perform.rs` pins the block-`let` and argument forms). (b) `spawn` inside
->      a class method, an impl method or a generic fn trips `.expect("spawn wrapper synthesized
+>      a class method or `init`, an impl method or a generic fn trips `.expect("spawn wrapper synthesized
 >      in pre-walk")`, because the pre-walk visits only non-generic `program.fns`; D27 records
 >      only the oracle's half (invalid IR). (c) Found by the sixth and seventh reviews: an
 >      effecting fn whose value is not an `i64` or `secret i64` panics `snc build` (`f64`,

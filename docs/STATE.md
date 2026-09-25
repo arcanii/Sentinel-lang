@@ -14,7 +14,29 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
-**Latest (2026-09-25, second slice) — a `Shared` / `Mutex` duplication out of a place into a
+**Latest (2026-09-25, third slice) — a `match` on a temporary frees its payload box (register
+D92); a class `init` must assign every field on every path before using it (register D129);
+`vec_to_array` is admitted only for an element that owns nothing (register D125); and `scg`
+records a block's tail as a move where the oracle does (register D124).**
+[ADR 0032](decisions/0032-sum-types-and-pattern-matching.md) A5: a scrutinee that is not a
+place — a variant built in place, a call's result or a field of one, a block's or an `if`'s
+value — is owned by no binding, so its payload box was never freed (40.3 MB against 9.2 over
+2,000,000 evaluations); an arm for a payload-carrying variant, and a `_` arm, now frees it
+once the bindings have copied the payload out, in all three back ends. Its two
+prerequisites: [ADR 0022](decisions/0022-concrete-c4-1-class-syntax.md) A3 makes a class
+`init`'s definite assignment path by path, so `snc` refuses an `init` that leaves a field
+unassigned on some path or reads one before assigning it (register D129); [ADR 0034](decisions/0034-growable-collections.md) C1 refuses
+`vec_to_array` on an element that owns memory or a refcount, because the copy is byte for
+byte and leaves the `Vec` holding its elements (register D125); neither refuses a program in
+the corpus, the examples or the self-hosted compiler; and
+[ADR 0043](decisions/0043-self-host-port-borrow-check.md) A3 has
+`scg` walk a block's tail and a `match` arm's body as consuming wherever they sit, as the
+oracle's checker does, where under a reading context its moved-sources dump and drop plan
+used to diverge from the oracle's. A5 moves the oracle's IR of four pre-existing corpus
+programs and none of the self-hosted roots, and ADR 0022 A3 and ADR 0034 C1 refuse programs
+that compiled before, so each is at least a minor version (ADR 0076 D2).
+
+**Previously (2026-09-25, second slice) — a `Shared` / `Mutex` duplication out of a place into a
 new owner is counted (register D121, closing D35).** [ADR 0071](decisions/0071-shared-ownership-and-mutex.md)
 D2 amendment A1: the clone that balances a new owner's release fired only for a named
 binding into a `let`, a user-fn argument or a spawn capture; a value read out of a field,
