@@ -266,6 +266,10 @@ struct TyCtx {
     // CANNOT make, because `mvbv` is reset per node and set by the Var arm, so any
     // compound expression whose tail happens to be a Var leaks it upward.
     ndump: i64,
+    // (ADR 0046 A4) the `ndump` number of the last COMPLETED field-access node, so the
+    // field-access arm can tell that its own target was a field access (a nested path)
+    // without peeking at the AST node.
+    lastfld: i64,
     // --- (7/N) MIR lowering (ADR 0044) — built ONLY under `mode == 2` as a guarded
     //     side-effect of the pass-2 walk; PER-FN (reset in `type_fn`). Everything is
     //     a flat append-only parallel-Vec pool tagged by block (so out-of-order block

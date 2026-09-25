@@ -788,6 +788,13 @@ fn pass_c25_field_read_no_move() {
     assert_eq!(run_exit("c25_field_read_no_move.sentinel"), 4);
 }
 
+#[test]
+fn pass_c25_compared_field_is_only_read() {
+    // ADR 0046 A4: comparing a field with `null` only reads it, so a second comparison, a
+    // method call on the node and a borrow of the node all follow it. 1 + 1 + 7 + 1 = 10.
+    assert_eq!(run_exit("c25_compared_field_is_only_read.sentinel"), 10);
+}
+
 // ---- C3.1 / ADR 0019 D5+D6: secret typing + declassify ----
 
 #[test]

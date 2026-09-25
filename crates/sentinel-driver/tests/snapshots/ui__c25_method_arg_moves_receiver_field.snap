@@ -1,0 +1,14 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c25_method_arg_moves_receiver_field.sentinel\")"
+---
+sentinel::borrow::use_after_move
+
+  × use of moved binding `s`
+    ╭─[tests/ui/c25_method_arg_moves_receiver_field.sentinel:16:5]
+ 15 │     let s: S = S { a: [11, 5], b: 3 };
+ 16 │     s.peek(consume(s.a))
+    ·     ┬
+    ·     ╰── 
+ 17 │ }
+    ╰────

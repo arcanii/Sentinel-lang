@@ -1,0 +1,36 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c25_move_under_a_computed_deref.sentinel\")"
+---
+sentinel::borrow::use_after_move
+
+  × use of moved binding `e`
+    ╭─[tests/ui/c25_move_under_a_computed_deref.sentinel:17:24]
+ 16 │     let p: i64 = match e { E::A(x) => if *pick(x, &n) == 5 { 1 } else { 0 }, E::B => 0 };
+ 17 │     let q: i64 = match e { E::A(y) => consume(y), E::B => 0 };
+    ·                        ┬
+    ·                        ╰── 
+ 18 │     p + q
+    ╰────
+
+sentinel::borrow::use_after_move
+
+  × use of moved binding `e`
+    ╭─[tests/ui/c25_move_under_a_computed_deref.sentinel:25:24]
+ 24 │     let p: i64 = match e { E::A(x) => { *{ let y: [i64] = x; &n }; 1 }, E::B => 0 };
+ 25 │     let q: i64 = match e { E::A(z) => consume(z), E::B => 0 };
+    ·                        ┬
+    ·                        ╰── 
+ 26 │     p + q
+    ╰────
+
+sentinel::borrow::move_out_of_borrow
+
+  × cannot move `*r` out: it is reached through a reference
+    ╭─[tests/ui/c25_move_under_a_computed_deref.sentinel:31:14]
+ 30 │     let n: i64 = 5;
+ 31 │     if *pick(*r, &n) == 5 { 1 } else { 0 }
+    ·              ─┬
+    ·               ╰── 
+ 32 │ }
+    ╰────

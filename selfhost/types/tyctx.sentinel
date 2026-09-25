@@ -97,6 +97,7 @@ fn new_tyctx(mode: i64) -> TyCtx {
         sdiva: false,
         smlive: 0 - 1,
         ndump: 0,
+        lastfld: 0 - 1,
         mode: mode,
         lastval: 0 - 1,
         mir_cur: 0,

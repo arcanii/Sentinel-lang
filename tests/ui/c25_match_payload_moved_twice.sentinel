@@ -1,0 +1,15 @@
+// ADR 0046 A4 (negative): a payload bound by value out of `match e` aliases `e`'s payload
+// (ADR 0046 D5's match-binding moves), so moving it moves out of `e`. The second `match e`
+// would move the same payload again, and is refused as a use of a moved binding. One
+// `match` that moves the payload, with no later use of `e`, is fine.
+
+enum E { A([i64]), B }
+
+fn consume(v: [i64]) -> i64 { v[0] }
+
+fn main() -> i64 {
+    let e: E = E::A([11, 5]);
+    let p: i64 = match e { E::A(x1) => consume(x1), E::B => 0 };
+    let q: i64 = match e { E::A(x2) => consume(x2), E::B => 0 };
+    p + q
+}

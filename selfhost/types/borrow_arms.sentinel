@@ -1231,14 +1231,23 @@ fn dump_te_field(out: &mut Vec<u8>, ft: Expr, fdn: [u8], exp: i64, src: &[u8], c
             // move `p`.
             let svc: bool = (*c).consuming;
             (*c).consuming = false;
-            // (ADR 0046) `mvbv` carries the just-dumped target's base VarId IFF the target
-            // is a DIRECT `Var` (the Var arm sets it; every other arm leaves -1 via the
-            // dump_texpr top reset + the compound-arm clears). It is the mode-independent
-            // analogue of the cg-only `cg_lastvid`, so the partial-move record fires in
-            // mode 1 (borrow) too. -1 for a nested / `*c` / call target (deep paths
-            // deferred — ADR 0046 D5). Mirrors the oracle's `if let Var(base) = &target`.
+            // (ADR 0046) `mvbv` carries the just-dumped target's base VarId when the target is
+            // a `Var`; it is a per-node tracker (reset on entry, set by the Var arm), so a
+            // compound target can leak its inner Var up. (ADR 0046 A4) For a NESTED path the
+            // leak recorded the wrong struct's field: in `s.i.a` the target `s.i` left `mvbv`
+            // at `s`, and `a`'s index was recorded as a field of `s`. The oracle records
+            // nothing there (`if let Var(base) = &target`), and `snc` now refuses the move, so
+            // a target that is itself a field access records nothing: `lastfld` is the node
+            // number of the last COMPLETED field access, and the target's node is `fd_n0 + 1`.
+            // Other compound targets keep `mvbv`, as before.
+            let fd_self: i64 = (*c).ndump;
+            let fd_n0: i64 = (*c).ndump;
             let tty: i64 = dump_texpr(out, ft, 0 - 1, src, c, gb);
-            let base_vid: i64 = (*c).mvbv;
+            let base_vid: i64 = if (*c).lastfld == fd_n0 + 1 {
+                0 - 1
+            } else {
+                (*c).mvbv
+            };
             let frecv: i64 = if mir_on(c) {
                 (*c).lastval
             } else {
@@ -1448,6 +1457,7 @@ fn dump_te_field(out: &mut Vec<u8>, ft: Expr, fdn: [u8], exp: i64, src: &[u8], c
             } else {
                 0
             };
+            (*c).lastfld = fd_self;
             fty
 }
 

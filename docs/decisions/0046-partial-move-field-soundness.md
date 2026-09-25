@@ -1,10 +1,10 @@
 # ADR 0046: Partial-move-through-field soundness (per-(VarId, FieldPath) move state)
 
-Status: **ACCEPTED-WITH-AMENDMENTS** (A1–A3) — `snc` (the borrow checker + both codegen
+Status: **ACCEPTED-WITH-AMENDMENTS** (A1–A4). `snc` (the borrow checker + both codegen
 backends) and `scg` (the self-hosted mirror) both close the partial-move-through-field
 double-free; the borrow + codegen differentials are byte-identical over the whole corpus
 and both bootstrap fixed points hold. Amendments below record the deviations from the
-PROPOSED plan.
+PROPOSED plan. A4 (2026-09-25), below, adds `snc` borrow-checker rules and one `scg` parity fix.
 
 Closes the **partial-move-through-field-projection double-free** documented in
 `docs/borrow-check-limitations.md` (the one *under*-rejection / soundness gap, as opposed
@@ -162,6 +162,103 @@ observable), which is why the codegen differential and both fixed points stayed 
 the `snc` feat before this mirror landed.
 
 **Scope unchanged.** Single-level field projections on a directly-named binding (D5);
-deep paths (`p.a.b`), index projections, and match-binding field moves remain deferred —
+deep paths (`p.a.b`), index projections, and match-binding field moves remain deferred (A4
+below refuses the first two and treats the third as a move of the scrutinee) —
 each sound-by-over-rejection in `snc`, and `scg` mirrors `snc` exactly (it records + dumps
-but never rejects; error parity is out of differential scope, ADR 0043 D5/D7).
+but never rejects; error parity is out of differential scope, ADR 0043 D5/D7) on every
+program the differentials compare; registers D116 and D117 record two shapes, found since,
+on which the two drop plans differ.
+
+**A4 (2026-09-25) — the moves D5 deferred, and moves through a reference, are refused or
+tracked (register D114).** The checker walked a deep path (`p.a.b`) or an index projection
+(`xs[i]`) moved by value as a non-consuming read and recorded no move, and it walked a move
+out through a reference (`*r`, `(*r).a`), which D5 does not mention, the same way; and moving
+a payload bound by value out of `match e` recorded nothing on `e`. So none of them stopped the
+same value being moved or read again after it had a new owner.
+
+The checker now, for a Move-typed value taken by value:
+
+- refuses a move out through a reference — `*r`, or a field or element reached through one
+  (`sentinel::borrow::move_out_of_borrow`);
+- refuses a field more than one level below a named binding
+  (`sentinel::borrow::move_out_of_nested_field`); moving the enclosing field into a binding
+  first is two tracked moves;
+- refuses an element, or a field of one, of a collection a named binding holds
+  (`sentinel::borrow::move_out_of_element`); borrowing it is the alternative;
+- leaves a projection rooted at a temporary alone, since nothing else owns it;
+- treats moving a payload binding — whole, or by a field — as a move out of the `match`'s
+  scrutinee: of `e` for `match e`, of the field for `match s.f` (a D1 partial move), a refusal
+  as above for a scrutinee reached through a reference, a deeper field or an element, and
+  register D61's `move_out_of_self` for one rooted at `self`. The scrutinee is marked moved
+  for the use checks only, not in the drop plan: an enum's drop frees its payload box and
+  never the payload's own heap (ADR 0032 D6, amendment A1), so the drop plan was already
+  right, and landing ADR 0032's deferred recursive payload drop will have to account for a
+  payload a `match` moved.
+
+Two payloads of one arm, or two fields of one payload, are different parts of one payload,
+and moving both is not a second move of it. Anything else that takes the scrutinee's payload
+counts against it: the scrutinee consumed, its payload moved by a nested `match` of it, or
+either of those on some path through an earlier `if` or `match` in the arm, since after the
+merge the checker cannot tell which path ran. A payload moved or read after that is refused
+as a use after a move. Reassigning the scrutinee does not detach the old payload's bindings
+from it: the walk cannot tell a reassignment on every path from one on some paths, and
+detaching them for the second would let the old payload be moved twice, so it detaches them
+for neither (an over-rejection when the reassignment is unconditional;
+docs/borrow-check-limitations.md).
+
+Four shapes of the same family, each accepted before, are closed with it:
+
+- a field of a binding, or a `match` payload, moved while the binding is borrowed — the rule
+  R14 applies to a whole binding (`sentinel::borrow::move_while_borrowed`), one level down;
+- a scrutinee consumed, or its payload moved through a binding of another arm, while a
+  payload binding of it is borrowed: the binding holds part of that payload, so a reference
+  to it reaches into what the move takes (`move_while_borrowed`, naming the scrutinee);
+- a borrow `&s`, or a method called on `s`, after a field of `s` was moved — including by
+  the method's own arguments, which run first (`s.m(consume(s.a))`);
+- a move of a collection or a receiver in its own index or method arguments (`v[consume(v)]`,
+  `s.m(eat(s))`), which runs before the element is read or the method called.
+
+A comparison operand or a discarded expression statement that is a place — a binding, or a
+field, element or deref path rooted at one (`(*r).next == null`, `xs[0];`) — only reads that
+place, so neither the refusals above nor a payload move apply to the place itself; a payload
+binding read that way still needs its scrutinee to hold the payload. A compared or discarded
+field of a binding is not recorded as moved out of it for the use checks. So a later use of
+that field — compared again, read, borrowed or moved — and a move of the whole binding, each
+refused before, are accepted; and A4's own rule against using a partly moved binding does not
+count it, so `n.m()` and `&n`, accepted before, still follow `if n.next == null { .. }`.
+The drop plan still records that field, as it did before, so it is not dropped with its
+binding (register D117). A compared or discarded whole binding is still recorded as moved, as
+before, which refuses a later use of it. The operand of a deref that is not itself a place is
+a computed value: under `*f(&n, x);` or `*f(&n, x) == 7`, a move in a call's arguments, a block's `let`s or tail, an
+`if`'s branches or a struct literal is a move, as it is anywhere else.
+
+As for a whole binding, a payload move is a move of the scrutinee to the other rules too: a
+`while` loop that moves the payload of a scrutinee declared outside it is refused by ADR 0036
+D8 even when it reassigns the scrutinee, as the state-machine form `st = match st { .. }` does;
+and a generic body that takes an element or a `*r` of type `T` by value is refused, since `T`
+may be a Move type.
+
+Pinned by ten `tests/ui/c25_*` fixtures (`c25_move_out_of_borrow`,
+`c25_move_out_of_nested_field`, `c25_move_out_of_element`, `c25_match_payload_moved_twice`,
+`c25_move_under_a_computed_deref`, `c25_payload_used_after_scrutinee_moved`,
+`c25_payload_after_conditional_reassign`, `c25_payload_moved_after_a_merge`,
+`c25_method_arg_moves_receiver_field`, `c25_borrowed_payload_scrutinee_moved`), the pass
+fixture `c25_compared_field_is_only_read`, and twenty-one unit tests in
+`sentinel-borrow-check`; twenty-nine mutations of these rules are each caught. Apart from the
+one acceptance above, A4 only rejects, and the drop plan's sets do not change, so the emitted
+IR of a program the checker accepted before does not move, and `scg` (which records moves and
+never rejects, ADR 0043) needs no mirror of the refusals. It does get one parity fix, because the
+new `c25_move_out_of_nested_field` fixture exposed it: `snc llvm` compiles a refused program
+anyway, and for `s.i.a` `scg` recorded `a`'s field index as a partial move of `s` — its field
+arm read a per-node tracker that the nested target `s.i` had left set — where the oracle
+records nothing. A target that is itself a field access now records nothing in `scg` either,
+and the codegen differential is byte-identical on the fixture. It refuses programs that
+compiled before, so it is at least a minor version (ADR 0076 D2); no program that was already
+in the corpus is among them. A matched `snc borrow` sweep of all 489 `.sentinel` files changes no result outside
+the slice's fourteen new fixtures: eleven of them go from accepted to refused, the pass
+fixture from refused to accepted, and two that the loop rule refused before are now reported
+first by another rule. A matched `snc build` of the 121 entries `snc borrow` cannot load
+(programs, exporting libraries, self-hosted module roots, and library modules through a
+program importing them) changes none; a
+matched `snc llvm` of every file both compilers emit changes no byte; and each of the ten
+self-hosted module roots, merged into one program, passes.

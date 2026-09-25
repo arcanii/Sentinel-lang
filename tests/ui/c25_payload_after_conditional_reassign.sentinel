@@ -1,0 +1,20 @@
+// ADR 0046 A4 (negative): reassigning a `match` scrutinee does not detach the old payload's
+// bindings from it, because the checker cannot tell a reassignment on every path from one on
+// some. Here `e` is reassigned only when `c > 0`; on the other path the second `match e`
+// would move the payload `x` already took. Reassigning on every path is refused the same way
+// (docs/borrow-check-limitations.md).
+
+enum E { A([i64]), B }
+
+fn consume(v: [i64]) -> i64 { v[0] }
+
+fn main() -> i64 {
+    let mut e: E = E::A([11, 5]);
+    let c: i64 = 0;
+    let p: i64 = match e {
+        E::A(x) => { if c > 0 { e = E::B; 0 } else { 0 }; consume(x) },
+        E::B => 0
+    };
+    let q: i64 = match e { E::A(y) => consume(y), E::B => 0 };
+    p + q
+}

@@ -1,0 +1,14 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c75_return_arm_in_loop_reports_once.sentinel\")"
+---
+sentinel::borrow::moved_in_return_arm
+
+  × cannot move out of `v` inside a handler's `return` arm
+    ╭─[tests/ui/c75_return_arm_in_loop_reports_once.sentinel:19:37]
+ 18 │             Io.read(k) => k(1),
+ 19 │             return x => x + consume(v)
+    ·                                     ┬
+    ·                                     ╰── 
+ 20 │         };
+    ╰────

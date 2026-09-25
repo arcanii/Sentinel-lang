@@ -350,6 +350,66 @@ pub enum BorrowError {
         move_span: miette::SourceSpan,
     },
 
+    /// ADR 0075 A2: a `handle`'s `return` arm moves a binding declared outside the `handle`
+    /// (whole, or by a field). The return arm runs INSIDE a resume — the resumed computation's
+    /// value passes through it before `k(v)` returns to the op arm that called it — so an op
+    /// arm's code after `k(v)` would use what it moved. Refused, as D3 refuses the move in an
+    /// op arm; the binding can be moved after the `handle` instead.
+    #[error("cannot move out of `{binding_name}` inside a handler's `return` arm")]
+    #[diagnostic(
+        code(sentinel::borrow::moved_in_return_arm),
+        help("`{binding_name}` is declared outside the `handle`, and the `return` arm runs inside a resume, before an op arm's code after `k(v)`; move it after the `handle` instead, or borrow it")
+    )]
+    MovedInReturnArm {
+        binding_name: String,
+        #[label("`{binding_name}` declared here, outside the `handle`")]
+        decl_span: miette::SourceSpan,
+        #[label("moved here, in the `return` arm")]
+        move_span: miette::SourceSpan,
+    },
+
+    /// ADR 0046 A4: a Move-typed value is moved OUT THROUGH A REFERENCE — `*r`, a field or
+    /// element reached through one, or a payload bound out of `match *r`. The referent still
+    /// belongs to its owner, which drops it, so taking it by value would give it two owners.
+    #[error("cannot move `{place}` out: it is reached through a reference")]
+    #[diagnostic(
+        code(sentinel::borrow::move_out_of_borrow),
+        help("the value still belongs to the binding the reference points into; borrow it instead, or move that binding itself")
+    )]
+    MoveOutOfBorrow {
+        place: String,
+        #[label("moved out through a reference here")]
+        move_span: miette::SourceSpan,
+    },
+
+    /// ADR 0046 A4 (D5's deep paths): a Move-typed field more than one level below a named
+    /// binding (`s.i.a`) is moved out. Partial moves are tracked for a field of a named
+    /// binding only, so this one is refused rather than left untracked.
+    #[error("cannot move `{place}` out: only a field of a named binding can be moved")]
+    #[diagnostic(
+        code(sentinel::borrow::move_out_of_nested_field),
+        help("move the enclosing field into a binding first, then move out of that binding; or borrow it")
+    )]
+    MoveOutOfNestedField {
+        place: String,
+        #[label("nested field moved here")]
+        move_span: miette::SourceSpan,
+    },
+
+    /// ADR 0046 A4 (D5's index projections): a Move-typed element — or a field of one — is
+    /// moved out of an array or vector held by a named binding. The collection keeps the
+    /// element, and moves are not tracked per element, so it is refused.
+    #[error("cannot move `{place}` out: an element cannot be moved out of its collection")]
+    #[diagnostic(
+        code(sentinel::borrow::move_out_of_element),
+        help("borrow the element instead")
+    )]
+    MoveOutOfElement {
+        place: String,
+        #[label("element moved out here")]
+        move_span: miette::SourceSpan,
+    },
+
     /// Register D61: a Move-typed value is moved OUT of `self`. A method's `self` is
     /// ALWAYS a borrow — `SelfKind` has exactly two variants, `&Self` and `&mut Self`,
     /// and an `init`'s `self` is the caller's object under construction — so the value
@@ -700,6 +760,32 @@ struct FnCtx {
     /// outside this set — escaping the function is a distinct hazard with a
     /// distinct fix, and it names the function, so it is worth saying separately.
     reported_dead: HashSet<BorrowSource>,
+    /// ADR 0046 A4: for each Move-typed payload binding of a `match` arm, what its scrutinee
+    /// is and which arm bound it — moving the binding moves out of that scrutinee.
+    payload_scrutinee: HashMap<VarId, (PayloadScrutinee, u32)>,
+    /// ADR 0046 A4: the `match` arm whose payload moves ALONE moved a scrutinee (whole, or a
+    /// field of it) on every path that moved it. Another payload move from the SAME arm takes
+    /// a different part of the same payload, so it is not a second move of it. An entry is
+    /// written only together with the scrutinee's `moved` / `moved_fields` entry, and a branch
+    /// point saves, restores and merges these two maps with those, keeping an entry only where
+    /// every branch that moved the scrutinee names the same arm; so a scrutinee moved any
+    /// other way on some path has none.
+    payload_marked_by: HashMap<VarId, u32>,
+    payload_field_marked_by: HashMap<(VarId, u32), u32>,
+    /// ADR 0046 A4: names each `match` arm for the two maps above.
+    next_match_arm: u32,
+    /// ADR 0046 A4: scrutinees already refused, so a refusal is reported once per scrutinee.
+    refused_scrutinees: HashSet<(usize, usize)>,
+    /// ADR 0046 A4: set while a place is walked by the consuming walk although it is only
+    /// READ — a comparison operand, or a discarded expression statement — so that neither a
+    /// refusal nor a payload move fires for it. It covers the place's own projection chain
+    /// only: the operand of a deref that is not itself a place (`*f(x)`) is a computed value,
+    /// and is walked with the flag cleared, as an index is.
+    reading_place: bool,
+    /// Move spans already reported by a loop-like construct (a `while`, a handler arm, a
+    /// `return` arm), so that an enclosing one does not report the same move again
+    /// (register D111).
+    reported_carried: HashSet<(usize, usize)>,
 }
 
 #[derive(Debug, Clone)]
@@ -725,6 +811,13 @@ impl FnCtx {
             moved_fields_union: HashSet::new(),
             next_seq: 0,
             reported_dead: HashSet::new(),
+            payload_scrutinee: HashMap::new(),
+            payload_marked_by: HashMap::new(),
+            payload_field_marked_by: HashMap::new(),
+            next_match_arm: 0,
+            refused_scrutinees: HashSet::new(),
+            reading_place: false,
+            reported_carried: HashSet::new(),
             self_var: None,
         }
     }
@@ -1271,6 +1364,17 @@ fn walk_stmt(
             // before recording the assignment.
             walk_expr(value, ctx, errors, program);
             walk_assign_target(target, ctx, errors, program);
+            // ADR 0046 A4: a reassigned scrutinee keeps its payload bindings' links. The walk
+            // cannot tell a reassignment on every path from one on some paths, and dropping the
+            // links for the second would let the old payload be moved twice; so a payload moved
+            // after its scrutinee was reassigned still counts against the scrutinee (an
+            // over-rejection, documented in docs/borrow-check-limitations.md).
+            // ADR 0050 A6: an element store `a[i] = v` writes THROUGH the collection's
+            // buffer, so every step of the base must still own its value. The value and the
+            // index are walked above, so `a[0] = consume(a)` and a move in the index are seen.
+            if let TypedExprKind::Index { target: base, .. } = &target.kind {
+                check_place_owned(base, ctx, errors);
+            }
             // If the assignment target is a ref-typed Var, update
             // its recorded source — re-assignment shifts which
             // place the ref points to. Same transient promotion
@@ -1344,6 +1448,10 @@ fn walk_stmt(
             // by a field (deterministic order for stable diagnostics).
             let carried = newly_moved_outer(ctx, &outer_vars, &moved_before, &fields_before);
             for (id, move_span) in carried {
+                // Register D111: an inner construct already reported this move.
+                if !ctx.reported_carried.insert((move_span.start, move_span.end)) {
+                    continue;
+                }
                 let decl_span = ctx
                     .var_info
                     .get(&id)
@@ -1365,7 +1473,10 @@ fn walk_stmt(
         // drop, not a move, so it does not concern the borrow checker.)
         TypedStmtKind::Break | TypedStmtKind::Continue => {}
         TypedStmtKind::Expr(e) => {
+            // ADR 0046 A4: a place in statement position is evaluated and discarded, not moved.
+            let was = std::mem::replace(&mut ctx.reading_place, is_place_expr(e));
             walk_expr(e, ctx, errors, program);
+            ctx.reading_place = was;
             ctx.clear_transients();
         }
     }
@@ -1536,6 +1647,7 @@ fn walk_expr_inner(
             // C2.2: walk the inner lvalue (no read-check on its
             // leaves) then attempt to add a shared borrow.
             walk_expr_lvalue(inner, ctx, errors, program);
+            check_not_partially_moved(inner, ctx, errors);
             if let Some(source) = source_of_lvalue(inner, ctx, program) {
                 check_and_add_shared_borrow(source, &expr.span, ctx, errors);
             }
@@ -1543,6 +1655,7 @@ fn walk_expr_inner(
         TypedExprKind::Unary(UnaryOp::RefMut, inner) => {
             // C2.2: same as Ref but for exclusive borrows.
             walk_expr_lvalue(inner, ctx, errors, program);
+            check_not_partially_moved(inner, ctx, errors);
             if let Some(source) = source_of_lvalue(inner, ctx, program) {
                 check_and_add_mut_borrow(source, &expr.span, ctx, errors);
             }
@@ -1564,15 +1677,23 @@ fn walk_expr_inner(
                 check_read_conflict(*id, &inner.span, ctx, errors);
                 check_use_alive(*id, &inner.span, ctx, errors);
             } else {
-                walk_expr(inner, ctx, errors, program);
+                walk_deref_operand(inner, ctx, errors, program);
             }
         }
         TypedExprKind::Unary(op, inner) => {
+            // ADR 0046 A4: a Move-typed `*r` taken by value moves out through a reference.
+            if matches!(op, UnaryOp::Deref) && !is_copy_type(expr.ty, program) {
+                refuse_untracked_move(expr, ctx, errors);
+            }
             // Deref / Neg / Not: walk the inner. Deref through a
             // ref-typed Var triggers the C2.1 OutlivesSource
             // check on r; the inner value's `*r` doesn't create
             // a new borrow.
-            walk_expr(inner, ctx, errors, program);
+            if matches!(op, UnaryOp::Deref) {
+                walk_deref_operand(inner, ctx, errors, program);
+            } else {
+                walk_expr(inner, ctx, errors, program);
+            }
             // `*pass({ let v = [5]; &v[0] })` — the deref operand carries a
             // reference to storage that is already dead, and is bound to nothing.
             if matches!(op, UnaryOp::Deref) {
@@ -1592,6 +1713,12 @@ fn walk_expr_inner(
             for side in [l, r] {
                 if ctx.self_var.is_some() && projection_root(side) == ctx.self_var {
                     walk_expr_lvalue(side, ctx, errors, program);
+                } else if is_place_expr(side) {
+                    // ADR 0046 A4: a compared place is only read (`(*r).next == null`), so
+                    // neither the untracked-move refusal nor a payload move applies to it.
+                    let was = std::mem::replace(&mut ctx.reading_place, true);
+                    walk_expr(side, ctx, errors, program);
+                    ctx.reading_place = was;
                 } else {
                     walk_expr(side, ctx, errors, program);
                 }
@@ -1615,27 +1742,21 @@ fn walk_expr_inner(
             // else { snd(p) }` accept: each branch independently
             // moves p, but the merge sees p as Moved after, which
             // is fine when no further uses follow.
-            let snapshot_moved = ctx.moved.clone();
-            let snapshot_moved_fields = ctx.moved_fields.clone();
+            let snapshot = MoveState::save(ctx);
             let yields_ref = carries_ref(expr.ty, program);
             ctx.push_scope();
             walk_block_contents(then_branch, ctx, errors, program);
             ctx.pop_scope_yield(yields_ref);
-            let then_moved = std::mem::replace(&mut ctx.moved, snapshot_moved);
-            let then_moved_fields =
-                std::mem::replace(&mut ctx.moved_fields, snapshot_moved_fields);
+            let then_state = MoveState::take(ctx);
+            snapshot.restore(ctx);
             ctx.push_scope();
             walk_block_contents(else_branch, ctx, errors, program);
             ctx.pop_scope_yield(yields_ref);
             // Merge: any binding (or field — ADR 0046) moved in the then-branch but
             // not in the else-branch is conservatively Moved after (we can't statically
             // know which branch ran).
-            for (id, span) in then_moved {
-                ctx.moved.entry(id).or_insert(span);
-            }
-            for (key, span) in then_moved_fields {
-                ctx.moved_fields.entry(key).or_insert(span);
-            }
+            let else_state = MoveState::take(ctx);
+            MoveState::merge(vec![else_state, then_state]).restore(ctx);
         }
 
         TypedExprKind::Call { id, args, .. } => {
@@ -1714,9 +1835,9 @@ fn walk_expr_inner(
             // value is a PARTIAL move of the base binding — mark `(base, field)` Moved
             // (the consumer owns + frees it) WITHOUT moving the whole base, so the
             // base's other fields stay usable + droppable. A Copy field (`p.tag`: i64)
-            // is the C2.3 non-consuming receiver read. A nested projection (target not
-            // a direct Var) falls back to the conservative non-consuming walk (deep
-            // paths deferred — ADR 0046 D5).
+            // is the C2.3 non-consuming receiver read. A projection the partial-move
+            // state cannot represent (target not a direct Var) is refused by ADR 0046 A4,
+            // unless it is rooted at a temporary.
             //
             // Register D61: a Move-typed projection ROOTED AT `self` is refused at any
             // depth — `self` is always a borrow, so the object keeps the value and would
@@ -1738,6 +1859,9 @@ fn walk_expr_inner(
                     errors,
                 );
             } else {
+                // ADR 0046 A4: a field the partial-move state cannot represent — reached
+                // through a reference, an element or another field — is refused.
+                refuse_untracked_move(expr, ctx, errors);
                 walk_expr_lvalue(target, ctx, errors, program);
             }
         }
@@ -1760,12 +1884,24 @@ fn walk_expr_inner(
                     place: render_projection(expr, ctx),
                     move_span: to_source_span(&expr.span),
                 });
+            } else if !is_copy_type(expr.ty, program) {
+                // ADR 0046 A4: a Move-typed element taken by value out of a collection a
+                // named binding or a reference holds is refused; the collection keeps it.
+                refuse_untracked_move(expr, ctx, errors);
             }
             // C2.3: same as FieldAccess — postfix receiver is
             // non-consuming. The index is a regular expression
             // (consuming read).
+            let owned = place_owned(target, ctx);
             walk_expr_lvalue(target, ctx, errors, program);
+            let was = std::mem::replace(&mut ctx.reading_place, false);
             walk_expr(index, ctx, errors, program);
+            ctx.reading_place = was;
+            // ADR 0046 A4: the element is read after the index is evaluated, so a move of the
+            // collection in the index (`v[consume(v)]`) is a use after it.
+            if owned {
+                check_place_owned(target, ctx, errors);
+            }
         }
 
         // C3.4 / ADR 0020 D5: handle/perform/resume don't reach
@@ -1806,6 +1942,10 @@ fn walk_expr_inner(
                 ctx.pop_scope_yield(yields_ref);
                 let carried = newly_moved_outer(ctx, &outer_vars, &moved_before, &fields_before);
                 for (id, move_span) in carried {
+                    // Register D111: an inner construct already reported this move.
+                    if !ctx.reported_carried.insert((move_span.start, move_span.end)) {
+                        continue;
+                    }
                     let decl_span = ctx
                         .var_info
                         .get(&id)
@@ -1819,6 +1959,18 @@ fn walk_expr_inner(
                 }
             }
             if let Some(ra) = return_arm {
+                // ADR 0075 A2: the `return` arm runs INSIDE a resume — the resumed
+                // computation's value passes through it before `k(v)` returns to the op arm
+                // that called it — so an op arm's code after `k(v)` runs after it, while this
+                // walk sees the op arms first. A binding declared outside the `handle` that
+                // the return arm moves (whole, or by a field) is refused, as D3 refuses it in
+                // an op arm; the binding can be moved after the `handle` instead.
+                let outer_vars: std::collections::HashSet<VarId> =
+                    ctx.var_in_scope.keys().copied().collect();
+                let moved_before: std::collections::HashSet<VarId> =
+                    ctx.moved.keys().copied().collect();
+                let fields_before: std::collections::HashSet<(VarId, u32)> =
+                    ctx.moved_fields.keys().copied().collect();
                 ctx.push_scope();
                 // The handled body's value flows into the return-arm binding.
                 if carries_ref(body.ty, program) {
@@ -1828,6 +1980,23 @@ fn walk_expr_inner(
                 ctx.declare(ra.value_var_id, ra.value_name.kind.clone(), ra.value_name.span.clone());
                 walk_expr(&ra.body, ctx, errors, program);
                 ctx.pop_scope_yield(yields_ref);
+                let carried = newly_moved_outer(ctx, &outer_vars, &moved_before, &fields_before);
+                for (id, move_span) in carried {
+                    // Register D111: an inner construct already reported this move.
+                    if !ctx.reported_carried.insert((move_span.start, move_span.end)) {
+                        continue;
+                    }
+                    let decl_span = ctx
+                        .var_info
+                        .get(&id)
+                        .map(|vi| vi.span.clone())
+                        .unwrap_or_else(|| move_span.clone());
+                    errors.push(BorrowError::MovedInReturnArm {
+                        binding_name: place_name(ctx, id),
+                        decl_span: to_source_span(&decl_span),
+                        move_span: to_source_span(&move_span),
+                    });
+                }
             }
         }
         TypedExprKind::Perform { args, .. } => {
@@ -1848,10 +2017,22 @@ fn walk_expr_inner(
         // receiver (e.g., two `s.write(...)`-style calls on a
         // class instance) would surface use-after-move spuriously.
         TypedExprKind::MethodCall { target, args, class_id, method_index, .. } => {
+            let owned = place_owned(target, ctx);
             walk_expr_lvalue(target, ctx, errors, program);
+            // ADR 0046 A4: the method gets the whole receiver, moved fields and all.
+            let whole = check_not_partially_moved(target, ctx, errors);
             for a in args {
                 walk_expr(a, ctx, errors, program);
                 check_operand_alive(a, ctx, errors, program);
+            }
+            // ADR 0046 A4: the call runs after its arguments, so an argument that moved the
+            // receiver (`s.m(eat(s))`), or a field of it (`s.m(eat(s.a))`), is a use after
+            // that move.
+            if owned {
+                check_place_owned(target, ctx, errors);
+            }
+            if whole {
+                check_not_partially_moved(target, ctx, errors);
             }
             // The auto-ref IS a borrow (ADR 0022 D3) — register it,
             // AFTER the args (two-phase, so `k.set(k.get())` stays legal). Transient:
@@ -1872,10 +2053,22 @@ fn walk_expr_inner(
         // receiver is non-consuming (auto-ref produces a borrow),
         // mirroring the class MethodCall arm above.
         TypedExprKind::ImplMethodCall { target, args, impl_id, method_index, .. } => {
+            let owned = place_owned(target, ctx);
             walk_expr_lvalue(target, ctx, errors, program);
+            // ADR 0046 A4: the method gets the whole receiver, moved fields and all.
+            let whole = check_not_partially_moved(target, ctx, errors);
             for a in args {
                 walk_expr(a, ctx, errors, program);
                 check_operand_alive(a, ctx, errors, program);
+            }
+            // ADR 0046 A4: the call runs after its arguments, so an argument that moved the
+            // receiver (`s.m(eat(s))`), or a field of it (`s.m(eat(s.a))`), is a use after
+            // that move.
+            if owned {
+                check_place_owned(target, ctx, errors);
+            }
+            if whole {
+                check_not_partially_moved(target, ctx, errors);
             }
             // As MethodCall — the receiver's auto-ref is a borrow.
             let kind = program.impl_decl(*impl_id).methods[*method_index].self_kind;
@@ -1924,35 +2117,44 @@ fn walk_expr_inner(
         // an unseen VarId as live, so they need no pre-registration.
         TypedExprKind::Match { scrutinee, arms, .. } => {
             walk_expr_lvalue(scrutinee, ctx, errors, program);
-            let snapshot_moved = ctx.moved.clone();
-            let snapshot_moved_fields = ctx.moved_fields.clone();
-            let mut union_moved = snapshot_moved.clone();
-            let mut union_moved_fields = snapshot_moved_fields.clone();
+            let scrutinee_owned = place_owned(scrutinee, ctx);
+            let snapshot = MoveState::save(ctx);
+            let mut arm_states: Vec<MoveState> = Vec::new();
             let yields_ref = carries_ref(expr.ty, program);
             for arm in arms {
-                ctx.moved = snapshot_moved.clone();
-                ctx.moved_fields = snapshot_moved_fields.clone();
+                snapshot.clone().restore(ctx);
                 ctx.push_scope();
                 // Pattern bindings are declared in the arm scope, so
                 // `&k` of a payload binding is `Local(k)` (named, depth-tracked) and
                 // dies at the arm's end. A ref-typed binding is unreachable (enum
                 // payloads cannot carry refs) and, unseeded, would fail closed.
+                ctx.next_match_arm += 1;
+                let arm_id = ctx.next_match_arm;
+                // A scrutinee already moved is reported where the `match` reads it; its
+                // payload bindings are then not chased, so that one error is not repeated.
                 if let sentinel_types::TypedPattern::Variant { bindings, .. } = &arm.pattern {
                     for b in bindings {
                         ctx.declare(b.var_id, b.name.clone(), b.span.clone());
+                        // ADR 0046 A4 (D5's match-binding moves): a Move-typed payload
+                        // bound by value aliases the scrutinee's payload.
+                        if !is_copy_type(b.ty, program) {
+                            let src = if scrutinee_owned {
+                                payload_scrutinee_of(scrutinee, ctx)
+                            } else {
+                                PayloadScrutinee::Temporary
+                            };
+                            ctx.payload_scrutinee.insert(b.var_id, (src, arm_id));
+                        }
                     }
                 }
                 walk_expr(&arm.body, ctx, errors, program);
                 ctx.pop_scope_yield(yields_ref);
-                for (id, span) in std::mem::take(&mut ctx.moved) {
-                    union_moved.entry(id).or_insert(span);
-                }
-                for (key, span) in std::mem::take(&mut ctx.moved_fields) {
-                    union_moved_fields.entry(key).or_insert(span);
-                }
+                arm_states.push(MoveState::take(ctx));
             }
-            ctx.moved = union_moved;
-            ctx.moved_fields = union_moved_fields;
+            // Moved in any arm → conservatively moved after. The snapshot is merged first so
+            // that a key moved before the `match` keeps its span.
+            arm_states.insert(0, snapshot);
+            MoveState::merge(arm_states).restore(ctx);
         }
     }
 }
@@ -1990,13 +2192,13 @@ fn walk_expr_lvalue(
                     check_read_conflict(*id, &inner.span, ctx, errors);
                     check_use_alive(*id, &inner.span, ctx, errors);
                 } else {
-                    walk_expr(inner, ctx, errors, program);
+                    walk_deref_operand(inner, ctx, errors, program);
                 }
                 return;
             }
             // `& *r` — walk r as a normal expression so its
             // OutlivesSource check fires.
-            walk_expr(inner, ctx, errors, program);
+            walk_deref_operand(inner, ctx, errors, program);
         }
         TypedExprKind::FieldAccess { target, field_index, .. } => {
             // ADR 0046: reading a moved field path — even non-consuming, e.g.
@@ -2009,14 +2211,39 @@ fn walk_expr_lvalue(
             walk_expr_lvalue(target, ctx, errors, program);
         }
         TypedExprKind::Index { target, index, .. } => {
+            let owned = place_owned(target, ctx);
             walk_expr_lvalue(target, ctx, errors, program);
+            let was = std::mem::replace(&mut ctx.reading_place, false);
             walk_expr(index, ctx, errors, program);
+            ctx.reading_place = was;
+            if owned {
+                check_place_owned(target, ctx, errors);
+            }
         }
         // Other shapes shouldn't appear here (type-check would
         // have rejected). Fall through to the normal walk for
         // defensiveness.
         _ => walk_expr(expr, ctx, errors, program),
     }
+}
+
+/// ADR 0046 A4: walk the operand of a deref. `reading_place` covers a compared or discarded
+/// place's own projection chain, and a deref operand that is a place (`*r`, `*s.r`) is part
+/// of that chain; any other operand (`*f(&n, x)`, `*{ let y = x; &n }`) computes a value,
+/// and a move inside it is a move, so it is walked with the flag cleared.
+fn walk_deref_operand(
+    inner: &TypedExpr,
+    ctx: &mut FnCtx,
+    errors: &mut Vec<BorrowError>,
+    program: &TypedProgram,
+) {
+    let was = if is_place_expr(inner) {
+        ctx.reading_place
+    } else {
+        std::mem::replace(&mut ctx.reading_place, false)
+    };
+    walk_expr(inner, ctx, errors, program);
+    ctx.reading_place = was;
 }
 
 /// Records a method receiver's implicit `&target` / `&mut target` borrow (per
@@ -2207,7 +2434,16 @@ fn newly_moved_outer(
         }
     }
     carried.extend(by_field);
-    carried.into_values().collect()
+    // A payload move marks its scrutinee moved at the same span (ADR 0046 A4): report that
+    // move once, by the binding the chain started from — the one declared last.
+    let mut out: Vec<(VarId, Span)> = Vec::new();
+    for (id, span) in carried.into_values() {
+        match out.iter().position(|(_, seen)| *seen == span) {
+            Some(i) => out[i] = (id, span),
+            None => out.push((id, span)),
+        }
+    }
+    out
 }
 
 /// Look up a place's source-level name for diagnostics. Falls
@@ -2390,6 +2626,7 @@ fn check_and_record_move(
         // owner may free it under a live reference (RESULTS R14). Keyed on the
         // per-place borrow records, so it is exact through merges (`if c {&a[0]}
         // else {&b[0]}` borrows BOTH places) where a single recorded source is not.
+        let mut borrowed = false;
         if let Some(state) = ctx.places.get(&id) {
             if let Some(b) = state.mut_borrow.as_ref().or(state.shared.first()) {
                 let borrow_span = b.span.clone();
@@ -2398,7 +2635,12 @@ fn check_and_record_move(
                     borrow_span: to_source_span(&borrow_span),
                     move_span: to_source_span(use_span),
                 });
+                borrowed = true;
             }
+        }
+        // ADR 0046 A4: nor while a payload bound out of it is borrowed.
+        if !borrowed && !ctx.reading_place {
+            refuse_move_while_payload_borrowed(PayloadHop::Whole(id), None, use_span, ctx, errors);
         }
         // Record the move even when it was just reported. The [`DropPlan`]
         // describes what the program DOES — codegen elides the drop of a
@@ -2409,6 +2651,13 @@ fn check_and_record_move(
         // not, and the codegen differential diverged on the two `c23_*` fixtures.
         ctx.moved.insert(id, use_span.clone());
         ctx.moved_sources_union.insert(id);
+        // ADR 0046 A4: a payload binding aliases its `match` scrutinee's payload. A payload
+        // whose scrutinee no longer owns it was reported as a use after that move, which is
+        // what it is; recording it as a move of the binding too would report it again as
+        // soon as a loop-like construct around it looked (the drop plan keeps it).
+        if note_payload_move(id, use_span, ctx, errors) {
+            ctx.moved.remove(&id);
+        }
     }
 }
 
@@ -2438,6 +2687,7 @@ fn render_projection(e: &TypedExpr, ctx: &FnCtx) -> String {
             format!("{}.{}", render_projection(target, ctx), field)
         }
         TypedExprKind::Index { target, .. } => format!("{}[..]", render_projection(target, ctx)),
+        TypedExprKind::Unary(UnaryOp::Deref, inner) => format!("(*{})", render_projection(inner, ctx)),
         _ => "<expression>".to_string(),
     }
 }
@@ -2460,8 +2710,479 @@ fn check_and_record_field_move(
         emit_use_after_move(ctx, errors, base, &move_span, use_span);
         return;
     }
-    ctx.moved_fields.insert((base, field_index), use_span.clone());
     ctx.moved_fields_union.insert((base, field_index));
+    // ADR 0046 A4: a compared or discarded field (`n.next == null`, `s.a;`) is only read, so
+    // it is not a move out of `base`: nothing is recorded for the use checks. The drop plan
+    // keeps the entry above, as it always had it, so the emitted code does not move (that
+    // entry is register D117's leak).
+    if ctx.reading_place {
+        check_payload_alive(base, use_span, ctx, errors);
+        return;
+    }
+    // ADR 0046 A4: not while the binding is borrowed — the whole-binding rule, one level
+    // down — nor while a payload bound out of that field is. Recorded even when reported,
+    // as `check_and_record_move` does.
+    if !refuse_move_while_borrowed(base, use_span, ctx, errors) {
+        refuse_move_while_payload_borrowed(
+            PayloadHop::Field(base, field_index),
+            None,
+            use_span,
+            ctx,
+            errors,
+        );
+    }
+    ctx.moved_fields.insert((base, field_index), use_span.clone());
+    // ADR 0046 A4: a field of a payload binding moves out of its scrutinee's payload.
+    note_payload_move(base, use_span, ctx, errors);
+}
+
+/// ADR 0046 A4: what a by-value read of a Move-typed projection would move out of, when it
+/// is not a named binding or a field of one (the two the move state tracks).
+enum UntrackedMove {
+    /// Reached through a reference (`*r`, `(*r).a`, `(*r)[i]`): the referent has an owner.
+    Borrowed,
+    /// A field more than one level below a named binding (`s.i.a`).
+    NestedField,
+    /// An element, or a field of one, of a collection a named binding holds.
+    Element,
+    /// Rooted at a temporary (a call's result, a literal): nothing else owns it.
+    Temporary,
+}
+
+fn classify_untracked(e: &TypedExpr) -> UntrackedMove {
+    let (mut through_ref, mut through_index, mut fields, mut cur) = (false, false, 0usize, e);
+    loop {
+        match &cur.kind {
+            TypedExprKind::FieldAccess { target, .. } => {
+                fields += 1;
+                cur = target;
+            }
+            TypedExprKind::Index { target, .. } => {
+                through_index = true;
+                cur = target;
+            }
+            TypedExprKind::Unary(UnaryOp::Deref, inner) => {
+                through_ref = true;
+                cur = inner;
+            }
+            TypedExprKind::Var(_) if through_ref => return UntrackedMove::Borrowed,
+            TypedExprKind::Var(_) if through_index => return UntrackedMove::Element,
+            TypedExprKind::Var(_) if fields > 1 => return UntrackedMove::NestedField,
+            // A single field of a named binding is ADR 0046's tracked partial move; callers
+            // never ask about one, and a bare `Var` is a whole move. Neither is refused here.
+            TypedExprKind::Var(_) => return UntrackedMove::Temporary,
+            _ if through_ref => return UntrackedMove::Borrowed,
+            _ => return UntrackedMove::Temporary,
+        }
+    }
+}
+
+/// ADR 0046 A4: refuse moving a Move-typed value out of `e` when the move state cannot
+/// represent it — ADR 0046 D5's deferred projections, and anything reached through a
+/// reference. A projection rooted at a temporary is left alone: nothing else owns it.
+fn refuse_untracked_move(e: &TypedExpr, ctx: &FnCtx, errors: &mut Vec<BorrowError>) {
+    if ctx.reading_place {
+        return;
+    }
+    let place = match &e.kind {
+        TypedExprKind::Unary(UnaryOp::Deref, inner) => format!("*{}", render_projection(inner, ctx)),
+        _ => render_projection(e, ctx),
+    };
+    let move_span = to_source_span(&e.span);
+    match classify_untracked(e) {
+        UntrackedMove::Borrowed => errors.push(BorrowError::MoveOutOfBorrow { place, move_span }),
+        UntrackedMove::NestedField => {
+            errors.push(BorrowError::MoveOutOfNestedField { place, move_span })
+        }
+        UntrackedMove::Element => errors.push(BorrowError::MoveOutOfElement { place, move_span }),
+        UntrackedMove::Temporary => {}
+    }
+}
+
+/// The move state an `if` or a `match` saves before its branches, restores for each, and
+/// merges after them: the moved sets, and the ADR 0046 A4 payload attributions that qualify
+/// them.
+#[derive(Clone)]
+struct MoveState {
+    moved: HashMap<VarId, Span>,
+    moved_fields: HashMap<(VarId, u32), Span>,
+    marked_by: HashMap<VarId, u32>,
+    field_marked_by: HashMap<(VarId, u32), u32>,
+}
+
+impl MoveState {
+    fn save(ctx: &FnCtx) -> Self {
+        MoveState {
+            moved: ctx.moved.clone(),
+            moved_fields: ctx.moved_fields.clone(),
+            marked_by: ctx.payload_marked_by.clone(),
+            field_marked_by: ctx.payload_field_marked_by.clone(),
+        }
+    }
+
+    fn take(ctx: &mut FnCtx) -> Self {
+        MoveState {
+            moved: std::mem::take(&mut ctx.moved),
+            moved_fields: std::mem::take(&mut ctx.moved_fields),
+            marked_by: std::mem::take(&mut ctx.payload_marked_by),
+            field_marked_by: std::mem::take(&mut ctx.payload_field_marked_by),
+        }
+    }
+
+    fn restore(self, ctx: &mut FnCtx) {
+        ctx.moved = self.moved;
+        ctx.moved_fields = self.moved_fields;
+        ctx.payload_marked_by = self.marked_by;
+        ctx.payload_field_marked_by = self.field_marked_by;
+    }
+
+    /// Moved on any path → moved after, at the span of the first path listed that moved it.
+    /// A scrutinee keeps its payload attribution (ADR 0046 A4) only where every path that
+    /// moved it names the same arm: a path that moved it any other way leaves none, since
+    /// after the merge the checker cannot tell which path ran.
+    fn merge(paths: Vec<MoveState>) -> MoveState {
+        let mut moved: HashMap<VarId, Span> = HashMap::new();
+        let mut moved_fields: HashMap<(VarId, u32), Span> = HashMap::new();
+        for p in &paths {
+            for (k, span) in &p.moved {
+                moved.entry(*k).or_insert_with(|| span.clone());
+            }
+            for (k, span) in &p.moved_fields {
+                moved_fields.entry(*k).or_insert_with(|| span.clone());
+            }
+        }
+        let marked_by = merge_marks(&moved, paths.iter().map(|p| (&p.moved, &p.marked_by)));
+        let field_marked_by =
+            merge_marks(&moved_fields, paths.iter().map(|p| (&p.moved_fields, &p.field_marked_by)));
+        MoveState { moved, moved_fields, marked_by, field_marked_by }
+    }
+}
+
+/// [`MoveState::merge`]'s attribution rule, for one of the two keyings.
+fn merge_marks<'a, K: Copy + Eq + std::hash::Hash + 'a>(
+    merged: &HashMap<K, Span>,
+    paths: impl Iterator<Item = (&'a HashMap<K, Span>, &'a HashMap<K, u32>)> + Clone,
+) -> HashMap<K, u32> {
+    let mut out = HashMap::new();
+    'keys: for k in merged.keys() {
+        let mut arm: Option<u32> = None;
+        for (moved, marks) in paths.clone() {
+            if !moved.contains_key(k) {
+                continue;
+            }
+            match (marks.get(k), arm) {
+                (Some(a), None) => arm = Some(*a),
+                (Some(a), Some(b)) if *a == b => {}
+                _ => continue 'keys,
+            }
+        }
+        if let Some(a) = arm {
+            out.insert(*k, a);
+        }
+    }
+    out
+}
+
+/// ADR 0046 A4: what a Move-typed payload bound out of `match <scrutinee>` aliases.
+#[derive(Clone)]
+enum PayloadScrutinee {
+    /// A named binding: moving the payload moves out of it.
+    Whole(VarId),
+    /// A field of a named binding (ADR 0046's partial move).
+    Field(VarId, u32),
+    /// Rooted at `self`, which is only borrowed (register D61): moving the payload is refused.
+    OfSelf(String),
+    /// A place the move state cannot represent: moving the payload is refused, as a move out
+    /// of that place would be.
+    Refused(TypedExpr),
+    /// A temporary: nothing else owns it.
+    Temporary,
+}
+
+fn payload_scrutinee_of(scrutinee: &TypedExpr, ctx: &FnCtx) -> PayloadScrutinee {
+    if ctx.self_var.is_some() && projection_root(scrutinee) == ctx.self_var {
+        return PayloadScrutinee::OfSelf(render_projection(scrutinee, ctx));
+    }
+    if let TypedExprKind::Var(id) = &scrutinee.kind {
+        return PayloadScrutinee::Whole(*id);
+    }
+    if let TypedExprKind::FieldAccess { target, field_index, .. } = &scrutinee.kind {
+        if let TypedExprKind::Var(base) = &target.kind {
+            return PayloadScrutinee::Field(*base, *field_index as u32);
+        }
+    }
+    match classify_untracked(scrutinee) {
+        UntrackedMove::Temporary => PayloadScrutinee::Temporary,
+        _ => PayloadScrutinee::Refused(scrutinee.clone()),
+    }
+}
+
+/// ADR 0046 A4 (D5's match-binding moves): moving a payload binding — whole or by a field —
+/// moves out of the scrutinee it aliases. The scrutinee is marked moved for the USE checks
+/// only (`moved` / `moved_fields`, not the drop plan's unions): an enum's drop frees its
+/// payload box and never the payload's own heap, so the drop plan is already right, and
+/// what was missing was the refusal of a later use — a second `match` moving the same
+/// payload again. A payload binding of a payload binding chains to the outer scrutinee.
+///
+/// Under `reading_place` the payload is only read: its scrutinee must still own it, and
+/// nothing is marked. Answers whether the payload was reported as already moved elsewhere.
+fn note_payload_move(id: VarId, use_span: &Span, ctx: &mut FnCtx, errors: &mut Vec<BorrowError>) -> bool {
+    if ctx.reading_place {
+        return check_payload_alive(id, use_span, ctx, errors);
+    }
+    // Each hop goes to a scrutinee bound before the binding it came from, so the chain ends;
+    // `seen` only makes that structural.
+    let mut seen: HashSet<VarId> = HashSet::new();
+    let mut cur = id;
+    while let Some((src, arm)) = ctx.payload_scrutinee.get(&cur).cloned() {
+        if !seen.insert(cur) {
+            break;
+        }
+        // The scrutinee must still own the payload: moved by anything other than a payload
+        // move of this same arm, it does not, and this is a second move of the payload.
+        if let Some(prior) = scrutinee_moved_elsewhere(&src, arm, ctx) {
+            emit_use_after_move(ctx, errors, id, &prior, use_span);
+            return true;
+        }
+        match src {
+            // A mark is attributed to this arm when it is made; a scrutinee already marked by
+            // this arm stays so (checked above). A payload of this scrutinee bound by ANOTHER
+            // arm (a nested `match` of it) and borrowed would reach what this move takes.
+            PayloadScrutinee::Whole(e) => {
+                if !refuse_move_while_borrowed(e, use_span, ctx, errors) {
+                    let hop = PayloadHop::Whole(e);
+                    refuse_move_while_payload_borrowed(hop, Some(arm), use_span, ctx, errors);
+                }
+                if let std::collections::hash_map::Entry::Vacant(slot) = ctx.moved.entry(e) {
+                    slot.insert(use_span.clone());
+                    ctx.payload_marked_by.insert(e, arm);
+                }
+                cur = e;
+            }
+            PayloadScrutinee::Field(base, fi) => {
+                if !refuse_move_while_borrowed(base, use_span, ctx, errors) {
+                    let hop = PayloadHop::Field(base, fi);
+                    refuse_move_while_payload_borrowed(hop, Some(arm), use_span, ctx, errors);
+                }
+                if let std::collections::hash_map::Entry::Vacant(slot) =
+                    ctx.moved_fields.entry((base, fi))
+                {
+                    slot.insert(use_span.clone());
+                    ctx.payload_field_marked_by.insert((base, fi), arm);
+                }
+                cur = base;
+            }
+            PayloadScrutinee::OfSelf(place) => {
+                errors.push(BorrowError::MoveOutOfSelf {
+                    place,
+                    move_span: to_source_span(use_span),
+                });
+                break;
+            }
+            PayloadScrutinee::Refused(scrutinee) => {
+                if ctx.refused_scrutinees.insert((scrutinee.span.start, scrutinee.span.end)) {
+                    refuse_untracked_move(&scrutinee, ctx, errors);
+                }
+                break;
+            }
+            PayloadScrutinee::Temporary => break,
+        }
+    }
+    false
+}
+
+/// ADR 0046 A4: the move that already took `src`'s payload, if one did and it was not a payload
+/// move of arm `arm` (which takes a different part of the same payload).
+fn scrutinee_moved_elsewhere(src: &PayloadScrutinee, arm: u32, ctx: &FnCtx) -> Option<Span> {
+    match src {
+        PayloadScrutinee::Whole(e) => {
+            let span = ctx.moved.get(e)?;
+            (ctx.payload_marked_by.get(e) != Some(&arm)).then(|| span.clone())
+        }
+        PayloadScrutinee::Field(base, fi) => {
+            if let Some(span) = ctx.moved.get(base) {
+                return (ctx.payload_marked_by.get(base) != Some(&arm)).then(|| span.clone());
+            }
+            let span = ctx.moved_fields.get(&(*base, *fi))?;
+            (ctx.payload_field_marked_by.get(&(*base, *fi)) != Some(&arm)).then(|| span.clone())
+        }
+        _ => None,
+    }
+}
+
+/// ADR 0046 A4: a NON-consuming use of a payload binding whose scrutinee's payload was moved
+/// elsewhere reads a payload it no longer has. Answers whether it reported that.
+fn check_payload_alive(id: VarId, use_span: &Span, ctx: &FnCtx, errors: &mut Vec<BorrowError>) -> bool {
+    let mut seen: HashSet<VarId> = HashSet::new();
+    let mut cur = id;
+    while let Some((src, arm)) = ctx.payload_scrutinee.get(&cur) {
+        if !seen.insert(cur) {
+            break;
+        }
+        if let Some(prior) = scrutinee_moved_elsewhere(src, *arm, ctx) {
+            emit_use_after_move(ctx, errors, id, &prior, use_span);
+            return true;
+        }
+        match src {
+            PayloadScrutinee::Whole(e) => cur = *e,
+            PayloadScrutinee::Field(base, _) => cur = *base,
+            _ => break,
+        }
+    }
+    false
+}
+
+/// A move out of `root` — a field of it, or its `match` payload — while it is borrowed: the
+/// reference would reach what the new owner may free (RESULTS R14, the rule
+/// `check_and_record_move` applies to a whole binding). Answers whether it reported that.
+fn refuse_move_while_borrowed(root: VarId, use_span: &Span, ctx: &FnCtx, errors: &mut Vec<BorrowError>) -> bool {
+    if let Some(state) = ctx.places.get(&root) {
+        if let Some(b) = state.mut_borrow.as_ref().or(state.shared.first()) {
+            errors.push(BorrowError::MoveWhileBorrowed {
+                binding_name: place_name(ctx, root),
+                borrow_span: to_source_span(&b.span),
+                move_span: to_source_span(use_span),
+            });
+            return true;
+        }
+    }
+    false
+}
+
+/// ADR 0046 A4: a place a move takes a scrutinee's payload out of — a binding moved whole, a
+/// field of one, or (from a payload move) the scrutinee itself.
+#[derive(Clone, Copy)]
+enum PayloadHop {
+    Whole(VarId),
+    Field(VarId, u32),
+}
+
+/// ADR 0046 A4: a payload binding holds part of its scrutinee's payload, so a live borrow of
+/// the binding reaches into that payload although the borrow is recorded on the binding.
+/// When a move takes the payload out of `moved` — the scrutinee (or a binding it is a payload
+/// of) moved whole, the field scrutinee moved, or the same payload moved through a binding of
+/// another arm — refuse it while such a borrow is live. A payload of the SAME arm as the move
+/// (`except_arm`) holds a different part of the payload and is not reached. Reports at most
+/// one borrow, the one on the earliest-declared binding.
+fn refuse_move_while_payload_borrowed(
+    moved: PayloadHop,
+    except_arm: Option<u32>,
+    use_span: &Span,
+    ctx: &FnCtx,
+    errors: &mut Vec<BorrowError>,
+) {
+    let mut found: Option<(VarId, Span)> = None;
+    for b in ctx.payload_scrutinee.keys() {
+        if !ctx.var_in_scope.contains_key(b) {
+            continue;
+        }
+        let Some(borrow_span) = ctx
+            .places
+            .get(b)
+            .and_then(|state| state.mut_borrow.as_ref().or(state.shared.first()))
+            .map(|borrow| borrow.span.clone())
+        else {
+            continue;
+        };
+        let mut seen: HashSet<VarId> = HashSet::new();
+        let mut cur = *b;
+        while let Some((src, arm)) = ctx.payload_scrutinee.get(&cur) {
+            if !seen.insert(cur) {
+                break;
+            }
+            let hit = match (moved, src) {
+                (PayloadHop::Whole(v), PayloadScrutinee::Whole(e)) => *e == v,
+                (PayloadHop::Whole(v), PayloadScrutinee::Field(base, _)) => *base == v,
+                (PayloadHop::Field(v, f), PayloadScrutinee::Field(base, fi)) => (*base, *fi) == (v, f),
+                _ => false,
+            };
+            if hit {
+                let earlier = match &found {
+                    Some((prev, _)) => b.0 < prev.0,
+                    None => true,
+                };
+                if except_arm != Some(*arm) && earlier {
+                    found = Some((*b, borrow_span.clone()));
+                }
+                break;
+            }
+            match src {
+                PayloadScrutinee::Whole(e) => cur = *e,
+                PayloadScrutinee::Field(base, _) => cur = *base,
+                _ => break,
+            }
+        }
+    }
+    if let Some((_, borrow_span)) = found {
+        let root = match moved {
+            PayloadHop::Whole(v) | PayloadHop::Field(v, _) => v,
+        };
+        errors.push(BorrowError::MoveWhileBorrowed {
+            binding_name: place_name(ctx, root),
+            borrow_span: to_source_span(&borrow_span),
+            move_span: to_source_span(use_span),
+        });
+    }
+}
+
+/// ADR 0046 A4: a WHOLE-binding use — `&s`, `&mut s`, a method receiver — of a binding one
+/// of whose fields was moved out (ADR 0046) would reach the moved field through the
+/// reference. A binding moved whole is reported by the ordinary check instead. Answers
+/// whether it reported nothing.
+fn check_not_partially_moved(e: &TypedExpr, ctx: &FnCtx, errors: &mut Vec<BorrowError>) -> bool {
+    if let TypedExprKind::Var(id) = &e.kind {
+        if ctx.moved.contains_key(id) {
+            return true;
+        }
+        let first = ctx
+            .moved_fields
+            .iter()
+            .filter(|((b, _), _)| b == id)
+            .map(|(_, span)| span.clone())
+            .min_by_key(|span| (span.start, span.end));
+        if let Some(move_span) = first {
+            emit_use_after_move(ctx, errors, *id, &move_span, &e.span);
+            return false;
+        }
+    }
+    true
+}
+
+/// Whether every step of place `e` still owns its value ([`check_place_owned`] finds nothing).
+fn place_owned(e: &TypedExpr, ctx: &FnCtx) -> bool {
+    let mut probe = Vec::new();
+    check_place_owned(e, ctx, &mut probe);
+    probe.is_empty()
+}
+
+/// A place expression — a binding, or a field, element or deref path — as opposed to a value
+/// computed by a call, an operator or a literal.
+fn is_place_expr(e: &TypedExpr) -> bool {
+    match &e.kind {
+        TypedExprKind::Var(_) | TypedExprKind::Unary(UnaryOp::Deref, _) => true,
+        TypedExprKind::FieldAccess { target, .. } | TypedExprKind::Index { target, .. } => {
+            is_place_expr(target)
+        }
+        _ => false,
+    }
+}
+
+/// ADR 0050 A6: the base of an element store must still own its value at every step — the
+/// binding (not moved whole) and each field on the path (not moved by ADR 0046). A step
+/// through an index is followed to its own base; a deref or a computed base ends the walk,
+/// since a reference or a temporary is not a place this checker tracks moves out of.
+fn check_place_owned(e: &TypedExpr, ctx: &FnCtx, errors: &mut Vec<BorrowError>) {
+    match &e.kind {
+        TypedExprKind::Var(id) => check_use_alive(*id, &e.span, ctx, errors),
+        TypedExprKind::FieldAccess { target, field_index, .. } => {
+            if let TypedExprKind::Var(base) = &target.kind {
+                check_field_use_alive(*base, *field_index as u32, &e.span, ctx, errors);
+            }
+            check_place_owned(target, ctx, errors);
+        }
+        TypedExprKind::Index { target, .. } => check_place_owned(target, ctx, errors),
+        _ => {}
+    }
 }
 
 /// C2.3: at a Var(id) read in NON-CONSUMING context (postfix
@@ -2475,7 +3196,9 @@ fn check_use_alive(
 ) {
     if let Some(move_span) = ctx.moved.get(&id).cloned() {
         emit_use_after_move(ctx, errors, id, &move_span, use_span);
+        return;
     }
+    check_payload_alive(id, use_span, ctx, errors);
 }
 
 /// ADR 0046: at a NON-consuming `base.field` read, reject if the FIELD has been moved.
@@ -2940,9 +3663,29 @@ fn borrow_error_to_diagnostic(err: &BorrowError) -> Diagnostic {
             format!("cannot move out of `{binding_name}` inside a handler arm"),
             move_span.offset()..(move_span.offset() + move_span.len()),
         ),
+        BorrowError::MovedInReturnArm { binding_name, move_span, .. } => (
+            "sentinel::borrow::moved_in_return_arm",
+            format!("cannot move out of `{binding_name}` inside a handler's `return` arm"),
+            move_span.offset()..(move_span.offset() + move_span.len()),
+        ),
         BorrowError::MoveOutOfSelf { place, move_span } => (
             "sentinel::borrow::move_out_of_self",
             format!("cannot move `{place}` out: `self` is only borrowed"),
+            move_span.offset()..(move_span.offset() + move_span.len()),
+        ),
+        BorrowError::MoveOutOfBorrow { place, move_span } => (
+            "sentinel::borrow::move_out_of_borrow",
+            format!("cannot move `{place}` out: it is reached through a reference"),
+            move_span.offset()..(move_span.offset() + move_span.len()),
+        ),
+        BorrowError::MoveOutOfNestedField { place, move_span } => (
+            "sentinel::borrow::move_out_of_nested_field",
+            format!("cannot move `{place}` out: only a field of a named binding can be moved"),
+            move_span.offset()..(move_span.offset() + move_span.len()),
+        ),
+        BorrowError::MoveOutOfElement { place, move_span } => (
+            "sentinel::borrow::move_out_of_element",
+            format!("cannot move `{place}` out: an element cannot be moved out of its collection"),
             move_span.offset()..(move_span.offset() + move_span.len()),
         ),
         BorrowError::MoveWhileBorrowed { binding_name, move_span, .. } => (
@@ -3760,6 +4503,680 @@ mod tests {
             }
             other => panic!("got {other:?}"),
         }
+    }
+
+    fn first_use_after_move(errs: &[BorrowError]) -> (&str, usize) {
+        match errs.iter().find(|e| matches!(e, BorrowError::UseAfterMove { .. })) {
+            Some(BorrowError::UseAfterMove { binding_name, use_span, .. }) => {
+                (binding_name.as_str(), use_span.offset())
+            }
+            _ => panic!("expected a use-after-move, got {errs:?}"),
+        }
+    }
+
+    #[test]
+    fn index_assign_into_a_moved_binding_rejected() {
+        // ADR 0050 A6: `v[0] = 99` stores through `v`'s buffer after `v` was moved.
+        let src = "fn consume(v: [i64]) -> i64 { v[0] } \
+             fn main() -> i64 { let mut v: [i64] = [1, 2]; let r: i64 = consume(v); v[0] = 99; r }";
+        let errs = borrow_check_err(src);
+        assert_eq!(errs.len(), 1, "got {errs:?}");
+        assert_eq!(first_use_after_move(&errs), ("v", src.find("v[0] = 99").unwrap()));
+    }
+
+    #[test]
+    fn index_assign_whose_value_moves_the_base_rejected() {
+        // The value is evaluated before the store, so `v[0] = consume(v)` stores through a
+        // `v` that no longer owns its buffer; so does a move inside the index.
+        for src in [
+            "fn consume(v: [i64]) -> i64 { v[0] } \
+             fn main() -> i64 { let mut v: [i64] = [1, 2]; v[0] = consume(v); 0 }",
+            "fn consume(v: [i64]) -> i64 { v[0] } \
+             fn main() -> i64 { let mut v: [i64] = [1, 2]; v[consume(v)] = 5; 0 }",
+        ] {
+            let errs = borrow_check_err(src);
+            assert_eq!(errs.len(), 1, "{src}: got {errs:?}");
+            assert_eq!(first_use_after_move(&errs).0, "v", "{src}");
+        }
+    }
+
+    #[test]
+    fn index_assign_through_a_moved_field_or_moved_struct_rejected_once() {
+        // Storing through `s.a` after that field was moved out (ADR 0046), or after the
+        // whole `s` was, gives exactly one diagnostic either way.
+        for (src, name) in [
+            (
+                "struct S { a: [i64], b: i64 } fn consume(v: [i64]) -> i64 { v[0] } \
+                 fn main() -> i64 { let mut s: S = S { a: [1, 2], b: 3 }; \
+                 let r: i64 = consume(s.a); s.a[0] = 9; r }",
+                "s",
+            ),
+            (
+                "struct S { a: [i64], b: i64 } fn eat(s: S) -> i64 { s.b } \
+                 fn main() -> i64 { let mut s: S = S { a: [1, 2], b: 3 }; \
+                 let r: i64 = eat(s); s.a[0] = 9; r }",
+                "s",
+            ),
+        ] {
+            let errs = borrow_check_err(src);
+            assert_eq!(errs.len(), 1, "{src}: got {errs:?}");
+            assert_eq!(first_use_after_move(&errs).0, name, "{src}");
+        }
+    }
+
+    #[test]
+    fn index_assign_into_an_owned_binding_ok() {
+        borrow_check_ok(
+            "struct S { a: [i64], b: i64 } \
+             fn main() -> i64 { let mut v: [i64] = [1, 2]; v[0] = 5; \
+             let mut s: S = S { a: [1, 2], b: 3 }; s.a[1] = 7; v[0] + s.a[1] }",
+        );
+    }
+
+    #[test]
+    fn move_out_through_a_reference_rejected() {
+        // ADR 0046 A4: `*r`, a field through `*r`, and an element through `*r` each give
+        // exactly one `MoveOutOfBorrow`; reading through the reference is fine.
+        for (src, place) in [
+            (
+                "fn consume(v: [i64]) -> i64 { v[0] } fn f(r: &[i64]) -> i64 { consume(*r) } \
+                 fn main() -> i64 { let v: [i64] = [1]; f(&v) }",
+                "*r",
+            ),
+            (
+                "struct S { a: [i64], b: i64 } fn consume(v: [i64]) -> i64 { v[0] } \
+                 fn f(r: &S) -> i64 { consume((*r).a) } \
+                 fn main() -> i64 { let s: S = S { a: [1], b: 2 }; f(&s) }",
+                "(*r).a",
+            ),
+            (
+                "fn consume(v: [i64]) -> i64 { v[0] } fn f(r: &[[i64]]) -> i64 { consume((*r)[0]) } \
+                 fn main() -> i64 { let v: [[i64]] = [[1]]; f(&v) }",
+                "(*r)[..]",
+            ),
+        ] {
+            let errs = borrow_check_err(src);
+            assert_eq!(errs.len(), 1, "{src}: got {errs:?}");
+            assert!(
+                matches!(&errs[0], BorrowError::MoveOutOfBorrow { place: p, .. } if p == place),
+                "{src}: got {errs:?}"
+            );
+        }
+        borrow_check_ok(
+            "struct S { a: [i64], b: i64 } fn f(r: &S) -> i64 { (*r).a[0] + (*r).b } \
+             fn main() -> i64 { let s: S = S { a: [1], b: 2 }; f(&s) }",
+        );
+    }
+
+    #[test]
+    fn move_out_of_a_nested_field_rejected_and_the_two_step_form_ok() {
+        // ADR 0046 A4: D5's deep paths are refused; moving the enclosing field into a binding
+        // first is two tracked moves.
+        let prelude = "struct I { a: [i64], n: i64 } struct S { i: I, b: i64 } \
+             fn consume(v: [i64]) -> i64 { v[0] } ";
+        let errs = borrow_check_err(&format!(
+            "{prelude}fn main() -> i64 {{ let s: S = S {{ i: I {{ a: [1], n: 2 }}, b: 1 }}; \
+             consume(s.i.a) }}"
+        ));
+        assert_eq!(errs.len(), 1, "got {errs:?}");
+        assert!(
+            matches!(&errs[0], BorrowError::MoveOutOfNestedField { place, .. } if place == "s.i.a"),
+            "got {errs:?}"
+        );
+        borrow_check_ok(&format!(
+            "{prelude}fn main() -> i64 {{ let s: S = S {{ i: I {{ a: [1], n: 2 }}, b: 1 }}; \
+             let t: I = s.i; consume(t.a) + s.b + t.n }}"
+        ));
+    }
+
+    #[test]
+    fn move_out_of_an_element_rejected_and_a_temporary_ok() {
+        // ADR 0046 A4: D5's index projections are refused for a collection a binding holds —
+        // the element itself or a field of one — and left alone for a temporary.
+        for (src, place) in [
+            (
+                "fn consume(v: [i64]) -> i64 { v[0] } \
+                 fn main() -> i64 { let xs: [[i64]] = [[5], [6]]; consume(xs[0]) }",
+                "xs[..]",
+            ),
+            (
+                "struct S { a: [i64], b: i64 } fn consume(v: [i64]) -> i64 { v[0] } \
+                 fn main() -> i64 { let xs: [S] = [S { a: [5], b: 1 }]; consume(xs[0].a) }",
+                "xs[..].a",
+            ),
+        ] {
+            let errs = borrow_check_err(src);
+            assert_eq!(errs.len(), 1, "{src}: got {errs:?}");
+            assert!(
+                matches!(&errs[0], BorrowError::MoveOutOfElement { place: p, .. } if p == place),
+                "{src}: got {errs:?}"
+            );
+        }
+        borrow_check_ok(
+            "fn consume(v: [i64]) -> i64 { v[0] } fn mk() -> [[i64]] { [[5], [6]] } \
+             fn main() -> i64 { consume(mk()[0]) }",
+        );
+    }
+
+    #[test]
+    fn a_moved_match_payload_moves_its_scrutinee() {
+        // ADR 0046 A4 (D5's match-binding moves): a second `match` of the same scrutinee — or
+        // any later use — after its payload was moved is a use of a moved binding; one
+        // moving `match` alone, a `match` that only reads the payload, and moving a payload
+        // of a TEMPORARY scrutinee are all fine.
+        let prelude = "enum E { A([i64]), B } fn consume(v: [i64]) -> i64 { v[0] } \
+             fn mk() -> E { E::A([3]) } ";
+        let errs = borrow_check_err(&format!(
+            "{prelude}fn main() -> i64 {{ let e: E = E::A([1]); \
+             let p: i64 = match e {{ E::A(x) => consume(x), E::B => 0 }}; \
+             let q: i64 = match e {{ E::A(y) => consume(y), E::B => 0 }}; p + q }}"
+        ));
+        assert_eq!(errs.len(), 1, "got {errs:?}");
+        assert_eq!(first_use_after_move(&errs).0, "e");
+        for body in [
+            "fn main() -> i64 { let e: E = E::A([1]); match e { E::A(x) => consume(x), E::B => 0 } }",
+            "fn main() -> i64 { let e: E = E::A([1]); \
+             let p: i64 = match e { E::A(x) => x[0], E::B => 0 }; \
+             let q: i64 = match e { E::A(y) => consume(y), E::B => 0 }; p + q }",
+            "fn main() -> i64 { match mk() { E::A(x) => consume(x), E::B => 0 } }",
+        ] {
+            borrow_check_ok(&format!("{prelude}{body}"));
+        }
+    }
+
+    #[test]
+    fn a_match_payload_through_a_reference_or_self_cannot_be_moved() {
+        // ADR 0046 A4: moving a payload bound out of `match *r` moves out through a
+        // reference; reading it is fine.
+        let prelude = "enum E { A([i64]), B } fn consume(v: [i64]) -> i64 { v[0] } ";
+        let errs = borrow_check_err(&format!(
+            "{prelude}fn f(r: &E) -> i64 {{ match *r {{ E::A(x) => consume(x), E::B => 0 }} }} \
+             fn main() -> i64 {{ let e: E = E::A([1]); f(&e) }}"
+        ));
+        assert_eq!(errs.len(), 1, "got {errs:?}");
+        assert!(matches!(&errs[0], BorrowError::MoveOutOfBorrow { .. }), "got {errs:?}");
+        borrow_check_ok(&format!(
+            "{prelude}fn f(r: &E) -> i64 {{ match *r {{ E::A(x) => x[0], E::B => 0 }} }} \
+             fn main() -> i64 {{ let e: E = E::A([1]); f(&e) }}"
+        ));
+        // And out of `match self.e`: `self` is only borrowed (register D61).
+        let errs = borrow_check_err(&format!(
+            "{prelude}trait T {{ fn take(self: &Self) -> i64; }} struct K {{ e: E }} \
+             impl as T for K {{ fn take(self: &Self) -> i64 {{ \
+             match self.e {{ E::A(x) => consume(x), E::B => 0 }} }} }} \
+             fn main() -> i64 {{ let k: K = K {{ e: E::A([1]) }}; k.take() }}"
+        ));
+        assert!(
+            errs.iter()
+                .any(|e| matches!(e, BorrowError::MoveOutOfSelf { place, .. } if place == "self.e")),
+            "got {errs:?}"
+        );
+    }
+
+    const PAYLOAD_PRELUDE: &str = "enum E { A([i64]), B } enum F { A([i64], [i64]), B } \
+         struct S2 { a: [i64], b: [i64] } enum G { A(S2), B } \
+         fn consume(v: [i64]) -> i64 { v[0] } fn eat_e(e: E) -> i64 { 0 } ";
+
+    fn use_after_move_names(errs: &[BorrowError]) -> Vec<&str> {
+        errs.iter()
+            .filter_map(|e| match e {
+                BorrowError::UseAfterMove { binding_name, .. } => Some(binding_name.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_payload_moved_after_its_scrutinee_is_refused() {
+        // ADR 0046 A4: the scrutinee consumed in the arm, or its payload moved by a nested
+        // second `match` of it, before this arm's payload is moved: a second move of the
+        // payload. Reading the payload after the scrutinee was consumed is refused too.
+        for body in [
+            "fn main() -> i64 { let e: E = E::A([1]); match e { \
+             E::A(x) => { let t: i64 = eat_e(e); t + consume(x) }, E::B => 0 } }",
+            "fn main() -> i64 { let e: E = E::A([1]); match e { \
+             E::A(x) => { let q: i64 = match e { E::A(y) => consume(y), E::B => 0 }; q + consume(x) }, \
+             E::B => 0 } }",
+            "fn main() -> i64 { let e: E = E::A([1]); match e { \
+             E::A(x) => { let t: i64 = eat_e(e); t + x[0] }, E::B => 0 } }",
+        ] {
+            let src = format!("{PAYLOAD_PRELUDE}{body}");
+            let errs = borrow_check_err(&src);
+            assert_eq!(use_after_move_names(&errs), vec!["x"], "{src}: got {errs:?}");
+            assert_eq!(errs.len(), 1, "{src}: got {errs:?}");
+        }
+    }
+
+    #[test]
+    fn payloads_of_one_arm_are_parts_of_one_payload() {
+        // Two payload bindings of one arm, and two fields of one payload binding, each take a
+        // different part of the payload: not a second move.
+        for body in [
+            "fn main() -> i64 { let f: F = F::A([1], [2]); \
+             match f { F::A(x, y) => consume(x) + consume(y), F::B => 0 } }",
+            "fn main() -> i64 { let g: G = G::A(S2 { a: [1], b: [2] }); \
+             match g { G::A(p) => consume(p.a) + consume(p.b), G::B => 0 } }",
+            // An EARLIER arm moved its payload too: each arm is its own dispatch.
+            "enum K { P([i64]), Q([i64], [i64]) } \
+             fn main() -> i64 { let k: K = K::Q([1], [2]); \
+             match k { K::P(a) => consume(a), K::Q(x, y) => consume(x) + consume(y) } }",
+        ] {
+            borrow_check_ok(&format!("{PAYLOAD_PRELUDE}{body}"));
+        }
+    }
+
+    #[test]
+    fn a_reassigned_scrutinee_still_counts_its_old_payloads_move() {
+        // The walk cannot tell a reassignment on every path from one on some paths, so a
+        // payload moved after its scrutinee was reassigned — in a branch not taken, in the
+        // other arm of an inner `match`, in a loop that may not run, of a field scrutinee, or
+        // unconditionally (the over-rejection) — still moves out of the scrutinee.
+        for body in [
+            "fn main() -> i64 { let mut e: E = E::A([1]); let c: i64 = 0; \
+             let p: i64 = match e { E::A(x) => { if c > 0 { e = E::B; 0 } else { 0 }; consume(x) }, E::B => 0 }; \
+             let q: i64 = match e { E::A(y) => consume(y), E::B => 0 }; p + q }",
+            "enum K { C, D } fn main() -> i64 { let mut e: E = E::A([1]); let k: K = K::D; \
+             let p: i64 = match e { E::A(x) => { match k { K::C => { e = E::B; 0 }, K::D => 0 }; consume(x) }, E::B => 0 }; \
+             let q: i64 = match e { E::A(y) => consume(y), E::B => 0 }; p + q }",
+            "fn main() -> i64 { let mut e: E = E::A([1]); let mut i: i64 = 0; \
+             let p: i64 = match e { E::A(x) => { while i > 5 { e = E::B; i = i + 1; } consume(x) }, E::B => 0 }; \
+             let q: i64 = match e { E::A(y) => consume(y), E::B => 0 }; p + q }",
+            "struct H { f: E } fn main() -> i64 { let mut s: H = H { f: E::A([1]) }; let c: i64 = 0; \
+             let p: i64 = match s.f { E::A(x) => { if c > 0 { s.f = E::B; 0 } else { 0 }; consume(x) }, E::B => 0 }; \
+             let q: i64 = match s.f { E::A(y) => consume(y), E::B => 0 }; p + q }",
+            "fn main() -> i64 { let mut e: E = E::A([1]); \
+             let p: i64 = match e { E::A(x) => { e = E::B; consume(x) }, E::B => 0 }; \
+             let q: i64 = match e { E::A(y) => consume(y), E::B => 0 }; p + q }",
+        ] {
+            let src = format!("{PAYLOAD_PRELUDE}{body}");
+            let errs = borrow_check_err(&src);
+            assert!(!use_after_move_names(&errs).is_empty(), "{src}: got {errs:?}");
+        }
+    }
+
+    #[test]
+    fn a_compared_place_is_only_read() {
+        // ADR 0046 A4: comparing a place with `null` moves nothing — through a reference, or
+        // a payload binding (whose `match` stays read-only).
+        let prelude = "struct S1 { a: [i64] } struct N { s: ?S1 } enum H { A(?S1), B } ";
+        for body in [
+            "fn f(r: &N) -> bool { (*r).s == null } \
+             fn main() -> i64 { let n: N = N { s: null }; if f(&n) { 1 } else { 0 } }",
+            "fn main() -> i64 { let h: H = H::A(null); \
+             let p: i64 = match h { H::A(x) => if x == null { 1 } else { 2 }, H::B => 0 }; \
+             let q: i64 = match h { H::A(y) => if y == null { 1 } else { 2 }, H::B => 0 }; p + q }",
+        ] {
+            borrow_check_ok(&format!("{prelude}{body}"));
+        }
+    }
+
+    #[test]
+    fn one_payload_move_gives_one_diagnostic() {
+        // A payload move in a loop marks its scrutinee at the same span: reported once. Two
+        // payload moves out of `match *r` report the reference once.
+        let loop_src = format!(
+            "{PAYLOAD_PRELUDE}fn main() -> i64 {{ let e: E = E::A([1]); match e {{ \
+             E::A(x) => {{ let mut i: i64 = 0; let mut t: i64 = 0; \
+             while i < 2 {{ t = t + consume(x); i = i + 1; }} t }}, E::B => 0 }} }}"
+        );
+        let errs = borrow_check_err(&loop_src);
+        assert_eq!(errs.len(), 1, "got {errs:?}");
+        assert!(matches!(&errs[0], BorrowError::MovedInLoopBody { binding_name, .. } if binding_name == "x"), "got {errs:?}");
+        let ref_src = format!(
+            "{PAYLOAD_PRELUDE}fn f(r: &F) -> i64 {{ match *r {{ F::A(x, y) => consume(x) + consume(y), F::B => 0 }} }} \
+             fn main() -> i64 {{ let v: F = F::A([1], [2]); f(&v) }}"
+        );
+        let errs = borrow_check_err(&ref_src);
+        assert_eq!(errs.len(), 1, "got {errs:?}");
+        assert!(matches!(&errs[0], BorrowError::MoveOutOfBorrow { .. }), "got {errs:?}");
+    }
+
+    #[test]
+    fn a_partial_or_payload_move_while_borrowed_is_refused() {
+        // ADR 0046 A4: the whole-binding rule (R14), one level down.
+        for body in [
+            "fn main() -> i64 { let s: S2 = S2 { a: [1], b: [2] }; let r: &S2 = &s; \
+             let t: i64 = consume(s.a); t + (*r).b[0] }",
+            "fn main() -> i64 { let e: E = E::A([1]); let r: &E = &e; \
+             let t: i64 = match e { E::A(x) => consume(x), E::B => 0 }; \
+             let u: i64 = match *r { E::A(y) => y[0], E::B => 0 }; t + u }",
+        ] {
+            let src = format!("{PAYLOAD_PRELUDE}{body}");
+            let errs = borrow_check_err(&src);
+            assert!(errs.iter().any(|e| matches!(e, BorrowError::MoveWhileBorrowed { .. })), "{src}: got {errs:?}");
+        }
+    }
+
+    #[test]
+    fn a_whole_use_of_a_partially_moved_binding_is_refused() {
+        // ADR 0046 A4: `&s`, and a method receiver, reach the moved field.
+        for body in [
+            "fn main() -> i64 { let s: S2 = S2 { a: [1], b: [2] }; let t: i64 = consume(s.a); \
+             let r: &S2 = &s; t + (*r).b[0] }",
+            "trait T { fn peek(self: &Self) -> i64; } impl as T for S2 { fn peek(self: &Self) -> i64 { 0 } } \
+             fn main() -> i64 { let s: S2 = S2 { a: [1], b: [2] }; let t: i64 = consume(s.a); t + s.peek() }",
+        ] {
+            let src = format!("{PAYLOAD_PRELUDE}{body}");
+            let errs = borrow_check_err(&src);
+            assert_eq!(use_after_move_names(&errs), vec!["s"], "{src}: got {errs:?}");
+        }
+    }
+
+    #[test]
+    fn a_move_in_an_index_or_argument_precedes_the_read() {
+        // ADR 0046 A4: the element is read, and the method called, after the index or the
+        // arguments, so a move of the base there is a use after it.
+        for (body, name) in [
+            ("fn main() -> i64 { let v: [i64] = [0, 1]; v[consume(v)] }", "v"),
+            (
+                "trait T { fn peek(self: &Self, n: i64) -> i64; } \
+                 impl as T for S2 { fn peek(self: &Self, n: i64) -> i64 { n } } \
+                 fn eat(s: S2) -> i64 { 0 } \
+                 fn main() -> i64 { let s: S2 = S2 { a: [1], b: [2] }; s.peek(eat(s)) }",
+                "s",
+            ),
+        ] {
+            let src = format!("{PAYLOAD_PRELUDE}{body}");
+            let errs = borrow_check_err(&src);
+            assert_eq!(use_after_move_names(&errs), vec![name], "{src}: got {errs:?}");
+        }
+    }
+
+    const RET_ARM_PRELUDE: &str = "effect Io { read() -> i64; } \
+         struct S { a: [i64], b: i64 } fn consume(v: [i64]) -> i64 { v[0] } ";
+
+    fn moved_in_return_arm(errs: &[BorrowError]) -> Vec<(&str, usize)> {
+        errs.iter()
+            .filter_map(|e| match e {
+                BorrowError::MovedInReturnArm { binding_name, move_span, .. } => {
+                    Some((binding_name.as_str(), move_span.offset()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn return_arm_move_of_an_outer_binding_rejected() {
+        // ADR 0075 A2: the return arm runs inside `k(1)`, so an op arm's code after it would
+        // use what the return arm moved. Moving a binding declared outside the `handle` there
+        // is refused — whole, and by an ADR 0046 field (reported by the root) — even when no
+        // op arm reads it, as D3 refuses the move in an op arm.
+        for (body, name, needle) in [
+            (
+                "fn f() -> i64 { let v: [i64] = [7, 9]; handle perform Io.read() with { \
+                 Io.read(k) => { let r: i64 = k(1); r + v[1] }, return x => x + consume(v) } } \
+                 fn main() -> i64 { f() }",
+                "v",
+                "v) } }",
+            ),
+            (
+                "fn f() -> i64 { let s: S = S { a: [7, 9], b: 1 }; handle perform Io.read() with { \
+                 Io.read(k) => k(1), return x => x + consume(s.a) } } fn main() -> i64 { f() }",
+                "s",
+                "s.a) } }",
+            ),
+        ] {
+            let src = format!("{RET_ARM_PRELUDE}{body}");
+            let errs = borrow_check_err(&src);
+            assert_eq!(errs.len(), 1, "{src}: got {errs:?}");
+            assert_eq!(moved_in_return_arm(&errs), vec![(name, src.find(needle).unwrap())], "{src}");
+        }
+    }
+
+    #[test]
+    fn return_arm_move_of_its_own_bindings_ok() {
+        // The return arm may move its own value binding and anything bound inside it; and an
+        // outer binding may be moved after the `handle`, which is the refusal's workaround.
+        for body in [
+            "fn f() -> i64 { handle perform Io.read() with { Io.read(k) => k(1), \
+             return x => { let w: [i64] = [x, 2]; consume(w) } } } fn main() -> i64 { f() }",
+            "fn f() -> i64 { let v: [i64] = [7, 9]; \
+             let r: i64 = handle perform Io.read() with { Io.read(k) => { let q: i64 = k(1); q + v[1] }, \
+             return x => x }; r + consume(v) } fn main() -> i64 { f() }",
+        ] {
+            borrow_check_ok(&format!("{RET_ARM_PRELUDE}{body}"));
+        }
+    }
+
+    #[test]
+    fn inner_return_arm_move_of_an_enclosing_arms_binding_rejected() {
+        // A binding declared in the outer op arm is outside the inner `handle`, so the inner
+        // return arm may not move it either.
+        let src = format!(
+            "{RET_ARM_PRELUDE}fn f() -> i64 {{ handle perform Io.read() with {{ \
+             Io.read(k) => {{ let w: [i64] = [3, 4]; \
+             let q: i64 = handle perform Io.read() with {{ Io.read(k2) => k2(1), \
+             return y => y + consume(w) }}; k(q) }} }} }} fn main() -> i64 {{ f() }}"
+        );
+        let errs = borrow_check_err(&src);
+        assert_eq!(moved_in_return_arm(&errs), vec![("w", src.find("w) }").unwrap())], "{errs:?}");
+    }
+
+    #[test]
+    fn a_move_is_reported_once_by_nested_loop_like_constructs() {
+        // Register D111: each `while`, handler arm and `return` arm checks what its body
+        // newly moved, so a move inside nested ones was reported once per construct. The
+        // innermost reports it; the enclosing ones skip that move.
+        for body in [
+            // A `handle` in a `return` arm, whose own `return` arm moves the outer binding.
+            "fn f() -> i64 { let v: [i64] = [7, 9]; handle perform Io.read() with { \
+             Io.read(k) => { let r: i64 = k(1); r + v[1] }, \
+             return x => handle perform Io.read() with { Io.read(k2) => k2(2), \
+             return z => z + x + consume(v) } } } fn main() -> i64 { f() }",
+            // A `while` inside a `while`.
+            "fn main() -> i64 { let v: [i64] = [7, 9]; let mut i: i64 = 0; let mut t: i64 = 0; \
+             while i < 2 { let mut j: i64 = 0; while j < 2 { t = t + consume(v); j = j + 1; } i = i + 1; } t }",
+            // A `handle` inside a `while`, whose `return` arm moves the outer binding.
+            "fn f() -> i64 { let v: [i64] = [7, 9]; let mut i: i64 = 0; let mut t: i64 = 0; \
+             while i < 2 { t = t + handle perform Io.read() with { Io.read(k) => k(1), \
+             return x => x + consume(v) }; i = i + 1; } t } fn main() -> i64 { f() }",
+            // An op arm inside an op arm.
+            "fn f() -> i64 { let v: [i64] = [7, 9]; handle perform Io.read() with { \
+             Io.read(k) => { let q: i64 = handle perform Io.read() with { \
+             Io.read(k2) => k2(consume(v)) }; k(q) } } } fn main() -> i64 { f() }",
+        ] {
+            let src = format!("{RET_ARM_PRELUDE}{body}");
+            let errs = borrow_check_err(&src);
+            assert_eq!(errs.len(), 1, "{src}: got {errs:?}");
+        }
+    }
+
+    const SINK_PRELUDE: &str = "fn sink(r: &i64, v: [i64]) -> &i64 { let k: i64 = consume(v); r } ";
+
+    #[test]
+    fn a_move_under_a_deref_of_a_computed_value_is_a_move() {
+        // ADR 0046 A4: a compared or discarded place is only read, but the operand of a deref
+        // that is not itself a place is a computed value, and a move inside it is a move —
+        // through a call's arguments, a block's `let`s or tail, an `if`'s branches, or a
+        // struct literal — so the payload moved there cannot be moved again.
+        for arm in [
+            "{ *sink(&n, x); 1 }",
+            "if *sink(&n, x) == 7 { 1 } else { 2 }",
+            "if 7 == *sink(&n, x) { 1 } else { 2 }",
+            "{ *{ let y: [i64] = x; &n }; 1 }",
+            "{ *{ sink(&n, x) }; 1 }",
+            "{ *(if n == 7 { sink(&n, x) } else { &n }); 1 }",
+            "{ *{ let w: W = W { v: x }; &n }; 1 }",
+        ] {
+            let src = format!(
+                "{PAYLOAD_PRELUDE}{SINK_PRELUDE}struct W {{ v: [i64] }} \
+                 fn main() -> i64 {{ let n: i64 = 7; let e: E = E::A([1]); \
+                 let p: i64 = match e {{ E::A(x) => {arm}, E::B => 0 }}; \
+                 let q: i64 = match e {{ E::A(y) => consume(y), E::B => 0 }}; p + q }}"
+            );
+            let errs = borrow_check_err(&src);
+            assert_eq!(use_after_move_names(&errs), vec!["e"], "{src}: got {errs:?}");
+        }
+        // The three untracked-move refusals too, in both positions.
+        for (setup, moved) in [
+            ("fn g(r: &S2, n: i64) -> i64 { ", "(*r).a"),
+            ("struct T { i: S2 } fn g(s: T, n: i64) -> i64 { ", "s.i.a"),
+            ("fn g(xs: [[i64]], n: i64) -> i64 { ", "xs[0]"),
+        ] {
+            for stmt in [format!("*sink(&n, {moved}); 0 }}"), format!("if *sink(&n, {moved}) == 7 {{ 1 }} else {{ 0 }} }}")] {
+                let src = format!("{PAYLOAD_PRELUDE}{SINK_PRELUDE}{setup}{stmt} fn main() -> i64 {{ 0 }}");
+                let errs = borrow_check_err(&src);
+                assert_eq!(errs.len(), 1, "{src}: got {errs:?}");
+                assert!(
+                    matches!(
+                        &errs[0],
+                        BorrowError::MoveOutOfBorrow { .. }
+                            | BorrowError::MoveOutOfNestedField { .. }
+                            | BorrowError::MoveOutOfElement { .. }
+                    ),
+                    "{src}: got {errs:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_discarded_place_is_only_read() {
+        // ADR 0046 A4: a place in statement position is evaluated and discarded, so none of
+        // the untracked-move refusals and no payload move applies to it. This pins the
+        // statement's flag; `a_compared_place_is_only_read` pins the comparison's.
+        for body in [
+            "fn f(r: &S2) -> i64 { (*r).a; 1 } \
+             fn main() -> i64 { let s: S2 = S2 { a: [1], b: [2] }; f(&s) }",
+            "fn f(r: &[i64]) -> i64 { *r; 1 } fn main() -> i64 { let v: [i64] = [1]; f(&v) }",
+            "fn main() -> i64 { let xs: [[i64]] = [[1], [2]]; xs[0]; xs[0]; 1 }",
+            "struct T { i: S2 } fn main() -> i64 { let s: T = T { i: S2 { a: [1], b: [2] } }; s.i.a; 1 }",
+            "fn main() -> i64 { let e: E = E::A([1]); \
+             let p: i64 = match e { E::A(x) => { x; 1 }, E::B => 0 }; \
+             let q: i64 = match e { E::A(y) => consume(y), E::B => 0 }; p + q }",
+        ] {
+            borrow_check_ok(&format!("{PAYLOAD_PRELUDE}{body}"));
+        }
+    }
+
+    #[test]
+    fn a_compared_or_discarded_field_is_not_a_move() {
+        // ADR 0046 A4: comparing a field with `null`, or discarding it, only reads it, so the
+        // binding is still whole afterwards: `&n`, a method on `n` and a second comparison are
+        // not uses of a partly moved binding.
+        let prelude = "struct S1 { a: [i64] } struct N { s: ?S1, k: i64 } \
+             struct Node { val: i64, next: ?Node } fn look(r: &N) -> i64 { 1 } \
+             trait T { fn v(self: &Self) -> i64; } impl as T for Node { fn v(self: &Self) -> i64 { self.val } } ";
+        for body in [
+            "fn main() -> i64 { let n: Node = Node { val: 7, next: null }; \
+             let last: i64 = if n.next == null { 1 } else { 0 }; last + n.v() }",
+            "fn main() -> i64 { let n: N = N { s: null, k: 3 }; \
+             let a: i64 = if n.s == null { 1 } else { 2 }; a + look(&n) }",
+            "fn main() -> i64 { let n: N = N { s: null, k: 3 }; \
+             let a: i64 = if n.s == null { 1 } else { 2 }; let b: i64 = if n.s == null { 1 } else { 2 }; a + b }",
+            "fn main() -> i64 { let n: N = N { s: null, k: 3 }; n.s; look(&n) }",
+        ] {
+            borrow_check_ok(&format!("{prelude}{body}"));
+        }
+    }
+
+    #[test]
+    fn a_compared_payload_whose_scrutinee_was_moved_is_refused() {
+        // ADR 0046 A4: a compared or discarded payload binding is only read, and a read needs
+        // the scrutinee to still hold the payload.
+        let prelude = "struct S1 { a: [i64] } enum H { A(?S1), B } fn eat_h(h: H) -> i64 { 0 } ";
+        for arm in [
+            "{ let t: i64 = eat_h(h); if x == null { t + 1 } else { t } }",
+            "{ let t: i64 = eat_h(h); x; t }",
+        ] {
+            let src = format!(
+                "{prelude}fn main() -> i64 {{ let h: H = H::A(null); \
+                 match h {{ H::A(x) => {arm}, H::B => 0 }} }}"
+            );
+            let errs = borrow_check_err(&src);
+            assert_eq!(use_after_move_names(&errs), vec!["x"], "{src}: got {errs:?}");
+            assert_eq!(errs.len(), 1, "{src}: got {errs:?}");
+        }
+    }
+
+    #[test]
+    fn a_merge_keeps_a_payload_attribution_only_where_every_path_agrees() {
+        // ADR 0046 A4: after a branch that moved `f`'s payload through `x` and a branch that
+        // consumed `f` whole, `f` is not "moved only by this arm's payloads", so `y` cannot
+        // be moved as another part of the payload — in either branch order, and through the
+        // arms of an inner `match`. Branches that agree keep the attribution.
+        for inner in [
+            "if c > 0 { consume(x) } else { eat_f(f) }",
+            "if c > 0 { eat_f(f) } else { consume(x) }",
+            "match k { K::C => consume(x), K::D => eat_f(f) }",
+        ] {
+            let src = format!(
+                "{PAYLOAD_PRELUDE}enum K {{ C, D }} \
+                 fn eat_f(f: F) -> i64 {{ match f {{ F::A(p, q) => consume(p) + consume(q), F::B => 0 }} }} \
+                 fn main() -> i64 {{ let f: F = F::A([1], [2]); let c: i64 = 0; let k: K = K::D; \
+                 match f {{ F::A(x, y) => {{ let t: i64 = {inner}; t + consume(y) }}, F::B => 0 }} }}"
+            );
+            let errs = borrow_check_err(&src);
+            assert_eq!(use_after_move_names(&errs), vec!["y"], "{src}: got {errs:?}");
+        }
+        borrow_check_ok(&format!(
+            "{PAYLOAD_PRELUDE}fn main() -> i64 {{ let f: F = F::A([1], [2]); let c: i64 = 0; \
+             match f {{ F::A(x, y) => {{ let t: i64 = if c > 0 {{ consume(x) }} else {{ 0 }}; \
+             t + consume(y) }}, F::B => 0 }} }}"
+        ));
+    }
+
+    #[test]
+    fn a_method_whose_arguments_move_part_of_its_receiver_is_refused() {
+        // ADR 0046 A4: the method runs after its arguments and gets the whole receiver, so an
+        // argument that moved a field of it — directly, or as a payload of a field scrutinee —
+        // leaves the method a partly moved receiver.
+        let prelude = "struct S { a: [i64], f: E } \
+             trait T { fn peek(self: &Self, n: i64) -> i64; } \
+             impl as T for S { fn peek(self: &Self, n: i64) -> i64 { self.a[0] + n } } \
+             class K { let v: [i64]; pub init(a: [i64]) { self.v = a; 0 } \
+             pub fn peek(self: &Self, m: i64) -> i64 { self.v[0] + m } } ";
+        for (body, name) in [
+            ("let s: S = S { a: [1], f: E::B }; s.peek(consume(s.a))", "s"),
+            ("let s: S = S { a: [1], f: E::A([2]) }; s.peek(match s.f { E::A(y) => consume(y), E::B => 0 })", "s"),
+            ("let k: K = K::init([1]); k.peek(consume(k.v))", "k"),
+        ] {
+            let src = format!("{PAYLOAD_PRELUDE}{prelude}fn main() -> i64 {{ {body} }}");
+            let errs = borrow_check_err(&src);
+            assert_eq!(use_after_move_names(&errs), vec![name], "{src}: got {errs:?}");
+        }
+    }
+
+    #[test]
+    fn a_borrowed_payload_blocks_moving_its_scrutinee() {
+        // ADR 0046 A4: a payload binding holds part of its scrutinee's payload, so while a
+        // reference to it is live the scrutinee may not be consumed, nor the same payload be
+        // moved through a nested `match` of the scrutinee. A payload of the same arm is a
+        // different part and may be moved.
+        for arm in [
+            "{ let r: &[i64] = &x; let q: i64 = match e { E::A(y) => consume(y), E::B => 0 }; q + (*r)[0] }",
+            "{ let r: &[i64] = &x; let t: i64 = eat_e(e); t + (*r)[0] }",
+        ] {
+            let src = format!(
+                "{PAYLOAD_PRELUDE}fn main() -> i64 {{ let e: E = E::A([1]); \
+                 match e {{ E::A(x) => {arm}, E::B => 0 }} }}"
+            );
+            let errs = borrow_check_err(&src);
+            assert_eq!(errs.len(), 1, "{src}: got {errs:?}");
+            assert!(
+                matches!(&errs[0], BorrowError::MoveWhileBorrowed { binding_name, .. } if binding_name == "e"),
+                "{src}: got {errs:?}"
+            );
+        }
+        borrow_check_ok(&format!(
+            "{PAYLOAD_PRELUDE}fn main() -> i64 {{ let f: F = F::A([1], [2]); \
+             match f {{ F::A(x, y) => {{ let r: &[i64] = &x; consume(y) + (*r)[0] }}, F::B => 0 }} }}"
+        ));
+    }
+
+    #[test]
+    fn a_payload_moved_after_its_scrutinee_died_is_reported_once() {
+        // The use after the scrutinee's move is the report; the loop does not add a second
+        // one at the same span.
+        let src = format!(
+            "{PAYLOAD_PRELUDE}fn main() -> i64 {{ let e: E = E::A([1]); match e {{ \
+             E::A(x) => {{ let t: i64 = eat_e(e); let mut i: i64 = 0; let mut s: i64 = t; \
+             while i < 1 {{ s = s + consume(x); i = i + 1; }} s }}, E::B => 0 }} }}"
+        );
+        let errs = borrow_check_err(&src);
+        assert_eq!(errs.len(), 1, "{src}: got {errs:?}");
+        assert_eq!(use_after_move_names(&errs), vec!["x"], "{src}: got {errs:?}");
     }
 
     #[test]

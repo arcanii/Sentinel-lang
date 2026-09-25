@@ -1,0 +1,25 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c25_payload_moved_after_a_merge.sentinel\")"
+---
+sentinel::borrow::use_after_move
+
+  × use of moved binding `y`
+    ╭─[tests/ui/c25_payload_moved_after_a_merge.sentinel:17:25]
+ 16 │             let t: i64 = if c > 0 { consume(x) } else { eat_f(f) };
+ 17 │             t + consume(y)
+    ·                         ┬
+    ·                         ╰── 
+ 18 │         },
+    ╰────
+
+sentinel::borrow::use_after_move
+
+  × use of moved binding `y`
+    ╭─[tests/ui/c25_payload_moved_after_a_merge.sentinel:28:25]
+ 27 │             let t: i64 = if c > 0 { eat_f(f) } else { consume(x) };
+ 28 │             t + consume(y)
+    ·                         ┬
+    ·                         ╰── 
+ 29 │         },
+    ╰────

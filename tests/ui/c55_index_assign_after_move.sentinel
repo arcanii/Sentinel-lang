@@ -1,0 +1,12 @@
+// ADR 0050 A6 (negative): an element store writes THROUGH the collection's buffer, so the
+// collection must still own it when the store happens. `v` is moved into `consume` first,
+// so `v[0] = 99` is a use of a moved binding.
+
+fn consume(v: [i64]) -> i64 { v[0] }
+
+fn main() -> i64 {
+    let mut v: [i64] = [1, 2, 3, 4];
+    let r: i64 = consume(v);
+    v[0] = 99;
+    r
+}

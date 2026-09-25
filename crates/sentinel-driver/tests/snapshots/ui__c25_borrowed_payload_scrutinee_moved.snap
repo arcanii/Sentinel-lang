@@ -1,0 +1,14 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c25_borrowed_payload_scrutinee_moved.sentinel\")"
+---
+sentinel::borrow::move_while_borrowed
+
+  × cannot move out of `e` while it is borrowed
+    ╭─[tests/ui/c25_borrowed_payload_scrutinee_moved.sentinel:14:32]
+ 13 │             let r: &[i64] = &x;
+ 14 │             let t: i64 = eat_e(e);
+    ·                                ┬
+    ·                                ╰── 
+ 15 │             t + (*r)[1]
+    ╰────

@@ -1,0 +1,14 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c25_move_out_of_nested_field.sentinel\")"
+---
+sentinel::borrow::move_out_of_nested_field
+
+  × cannot move `s.i.a` out: only a field of a named binding can be moved
+    ╭─[tests/ui/c25_move_out_of_nested_field.sentinel:13:13]
+ 12 │     let s: S = S { i: I { a: [1, 2], n: 2 }, b: 1 };
+ 13 │     consume(s.i.a)
+    ·             ──┬──
+    ·               ╰── 
+ 14 │ }
+    ╰────

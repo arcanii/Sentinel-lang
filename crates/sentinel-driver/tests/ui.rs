@@ -360,3 +360,47 @@ ui_snapshot!(
 // D10 asked for) and for a FIELD moved out of one, which the rule flags by its root.
 ui_snapshot!(c5d5_move_outer_in_loop, "c5d5_move_outer_in_loop.sentinel");
 ui_snapshot!(c5d5_move_outer_field_in_loop, "c5d5_move_outer_field_in_loop.sentinel");
+
+// ADR 0050 A6: an element store needs a collection that still owns its buffer.
+ui_snapshot!(c55_index_assign_after_move, "c55_index_assign_after_move.sentinel");
+
+// ADR 0075 A2: a `return` arm's moves reach an op arm's code after a resume.
+ui_snapshot!(
+    c75_return_arm_move_read_after_resume,
+    "c75_return_arm_move_read_after_resume.sentinel"
+);
+
+// ADR 0046 A4: the moves the partial-move state cannot represent are refused, and a
+// payload moved out of a `match` moves out of its scrutinee.
+ui_snapshot!(c25_move_out_of_borrow, "c25_move_out_of_borrow.sentinel");
+ui_snapshot!(c25_move_out_of_nested_field, "c25_move_out_of_nested_field.sentinel");
+ui_snapshot!(c25_move_out_of_element, "c25_move_out_of_element.sentinel");
+ui_snapshot!(c25_match_payload_moved_twice, "c25_match_payload_moved_twice.sentinel");
+// ... including under a deref of a computed value in a comparison or a discarded statement;
+// after the scrutinee was consumed; after a reassignment on some paths; after a merge with a
+// path that consumed the scrutinee; in a method's own arguments; and while a payload binding
+// is borrowed.
+ui_snapshot!(c25_move_under_a_computed_deref, "c25_move_under_a_computed_deref.sentinel");
+ui_snapshot!(
+    c25_payload_used_after_scrutinee_moved,
+    "c25_payload_used_after_scrutinee_moved.sentinel"
+);
+ui_snapshot!(
+    c25_payload_after_conditional_reassign,
+    "c25_payload_after_conditional_reassign.sentinel"
+);
+ui_snapshot!(c25_payload_moved_after_a_merge, "c25_payload_moved_after_a_merge.sentinel");
+ui_snapshot!(
+    c25_method_arg_moves_receiver_field,
+    "c25_method_arg_moves_receiver_field.sentinel"
+);
+ui_snapshot!(
+    c25_borrowed_payload_scrutinee_moved,
+    "c25_borrowed_payload_scrutinee_moved.sentinel"
+);
+
+// Register D111: a move inside nested loop-like constructs is reported once.
+ui_snapshot!(
+    c75_return_arm_in_loop_reports_once,
+    "c75_return_arm_in_loop_reports_once.sentinel"
+);

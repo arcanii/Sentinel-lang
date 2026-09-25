@@ -1,0 +1,37 @@
+// ADR 0046 A4 (negative): a compared or discarded place is only read, but the operand of a
+// deref that is not itself a place is a computed value, and a move inside it is a move. In
+// `a`, `pick` takes the payload `x` inside a comparison, so the second `match e` would move
+// the same payload again; in `b` a block under a discarded deref moves `x` into `y` with no
+// call at all; in `c` a call under a comparison takes `*r` out through a reference.
+
+enum E { A([i64]), B }
+
+fn consume(v: [i64]) -> i64 { v[0] }
+
+fn pick(v: [i64], r: &i64) -> &i64 { let k: i64 = consume(v); r }
+
+fn a() -> i64 {
+    let n: i64 = 5;
+    let e: E = E::A([11, 5]);
+    let p: i64 = match e { E::A(x) => if *pick(x, &n) == 5 { 1 } else { 0 }, E::B => 0 };
+    let q: i64 = match e { E::A(y) => consume(y), E::B => 0 };
+    p + q
+}
+
+fn b() -> i64 {
+    let n: i64 = 5;
+    let e: E = E::A([11, 5]);
+    let p: i64 = match e { E::A(x) => { *{ let y: [i64] = x; &n }; 1 }, E::B => 0 };
+    let q: i64 = match e { E::A(z) => consume(z), E::B => 0 };
+    p + q
+}
+
+fn c(r: &[i64]) -> i64 {
+    let n: i64 = 5;
+    if *pick(*r, &n) == 5 { 1 } else { 0 }
+}
+
+fn main() -> i64 {
+    let v: [i64] = [1, 2];
+    a() + b() + c(&v)
+}

@@ -1,0 +1,21 @@
+// ADR 0046 A4: comparing a field with `null` only reads it, so the checker still treats the
+// node as whole afterwards: a second comparison, a method call on the node and a borrow of it
+// all follow. (The drop plan still records the field, register D117.)
+// The linked-list idiom. 1 + 1 + 7 + 1 = 10.
+
+struct Node { val: i64, next: ?Node }
+
+trait T { fn v(self: &Self) -> i64; }
+
+impl as T for Node { fn v(self: &Self) -> i64 { self.val } }
+
+fn look(r: &Node) -> i64 { if (*r).next == null { 1 } else { 0 } }
+
+fn main() -> i64 {
+    let n: Node = Node { val: 7, next: null };
+    let last: bool = n.next == null;
+    let again: bool = n.next == null;
+    let a: i64 = if last { 1 } else { 0 };
+    let b: i64 = if again { 1 } else { 0 };
+    a + b + n.v() + look(&n)
+}

@@ -1,0 +1,19 @@
+// ADR 0046 A4 (negative): a payload binding holds part of its scrutinee's payload, so a
+// reference to the binding reaches into that payload. While `r` is live, `e` may not be
+// consumed; the read through `r` comes after it.
+
+enum E { A([i64]), B }
+
+fn eat_e(e: E) -> i64 { match e { E::A(v) => v[0], E::B => 0 } }
+
+fn main() -> i64 {
+    let e: E = E::A([11, 5]);
+    match e {
+        E::A(x) => {
+            let r: &[i64] = &x;
+            let t: i64 = eat_e(e);
+            t + (*r)[1]
+        },
+        E::B => 0
+    }
+}

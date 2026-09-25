@@ -1,0 +1,34 @@
+// ADR 0046 A4 (negative): two payloads of one arm are different parts of one payload, so
+// moving both is fine — unless something else took the scrutinee on some path. Here one
+// branch moves `x` and the other consumes `f` whole; after the `if` the checker cannot tell
+// which ran, so `y` may be a part of a payload `f` no longer has. Both branch orders.
+
+enum F { A([i64], [i64]), B }
+
+fn consume(v: [i64]) -> i64 { v[0] }
+
+fn eat_f(f: F) -> i64 { match f { F::A(p, q) => consume(p) + consume(q), F::B => 0 } }
+
+fn a(c: i64) -> i64 {
+    let f: F = F::A([11, 5], [22, 6]);
+    match f {
+        F::A(x, y) => {
+            let t: i64 = if c > 0 { consume(x) } else { eat_f(f) };
+            t + consume(y)
+        },
+        F::B => 0
+    }
+}
+
+fn b(c: i64) -> i64 {
+    let f: F = F::A([11, 5], [22, 6]);
+    match f {
+        F::A(x, y) => {
+            let t: i64 = if c > 0 { eat_f(f) } else { consume(x) };
+            t + consume(y)
+        },
+        F::B => 0
+    }
+}
+
+fn main() -> i64 { a(0) + b(1) }

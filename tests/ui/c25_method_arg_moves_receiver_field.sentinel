@@ -1,0 +1,17 @@
+// ADR 0046 A4 (negative): a method runs after its arguments and gets its whole receiver, so
+// an argument that moves a field of the receiver leaves the method a receiver with a field
+// that has another owner. Moving the field into a binding first and passing that to a free
+// function is the alternative.
+
+struct S { a: [i64], b: i64 }
+
+trait T { fn peek(self: &Self, n: i64) -> i64; }
+
+impl as T for S { fn peek(self: &Self, n: i64) -> i64 { self.a[1] + n } }
+
+fn consume(v: [i64]) -> i64 { v[0] }
+
+fn main() -> i64 {
+    let s: S = S { a: [11, 5], b: 3 };
+    s.peek(consume(s.a))
+}

@@ -1,0 +1,25 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c25_payload_used_after_scrutinee_moved.sentinel\")"
+---
+sentinel::borrow::use_after_move
+
+  × use of moved binding `x`
+    ╭─[tests/ui/c25_payload_used_after_scrutinee_moved.sentinel:21:54]
+ 20 │     let h: H = H::A(s);
+ 21 │     match h { H::A(x) => { let t: i64 = eat_h(h); if x == null { t + 1 } else { t } }, H::B => 0 }
+    ·                                                      ┬
+    ·                                                      ╰── 
+ 22 │ }
+    ╰────
+
+sentinel::borrow::use_after_move
+
+  × use of moved binding `x`
+    ╭─[tests/ui/c25_payload_used_after_scrutinee_moved.sentinel:31:43]
+ 30 │             let mut s: i64 = t;
+ 31 │             while i < 1 { s = s + consume(x); i = i + 1; }
+    ·                                           ┬
+    ·                                           ╰── 
+ 32 │             s
+    ╰────

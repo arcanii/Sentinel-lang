@@ -1,0 +1,14 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c25_match_payload_moved_twice.sentinel\")"
+---
+sentinel::borrow::use_after_move
+
+  × use of moved binding `e`
+    ╭─[tests/ui/c25_match_payload_moved_twice.sentinel:13:24]
+ 12 │     let p: i64 = match e { E::A(x1) => consume(x1), E::B => 0 };
+ 13 │     let q: i64 = match e { E::A(x2) => consume(x2), E::B => 0 };
+    ·                        ┬
+    ·                        ╰── 
+ 14 │     p + q
+    ╰────

@@ -67,7 +67,9 @@ fn main() -> i64 {
 ```
 
 Diagnostic at C2.5: `sentinel::borrow::write_while_borrowed` on
-`p.y = 99;`.
+`p.y = 99;`. Moving one field out while another is borrowed is refused
+the same way (ADR 0046 A4): with `let r: &[i64] = &s.b;` live,
+`consume(s.a)` is `sentinel::borrow::move_while_borrowed`.
 
 Cause: place tracking is binding-precise, not field-precise.
 `&p.x` records a shared borrow keyed by `p`'s VarId; the
@@ -165,9 +167,10 @@ move state. On `consume_arr(p.items)`:
 The reproducer above is now **accepted and correct** (exit 37,
 leak-free: `consume_arr` owns + frees `p.items`, `main` skips it).
 MVP scope = single-level field projections on a directly-named
-binding; deep paths (`p.a.b`), index projections, and match-binding
-field moves are deferred refinements (each sound-by-over-rejection;
-ADR 0046 D5). This was roughly half the work of the Polonius
+binding. Deep paths (`p.a.b`) and index projections moved by value are
+refused, as is a move out through a reference, and moving a `match`
+payload counts as a move out of its scrutinee (ADR 0046 A4). This
+was roughly half the work of the Polonius
 migration's fact generator, conceptually independent and shipped on
 its own.
 
@@ -394,6 +397,93 @@ fn peek(v: &[i64]) -> i64 { (*v)[0] }
 Closure: ADR 0036's Revisit trigger for D8 — a move-state fixpoint over the
 body, in which an assignment re-initializes the moved place.
 
+## Over-rejection: using a whole binding after one of its fields was moved and replaced
+
+A field moved out and then assigned a new value is still moved to the
+checker, so a later use of the whole binding is refused, as a read of
+the field is.
+
+```sentinel
+struct S { a: [i64], b: i64 }
+fn consume(v: [i64]) -> i64 { v[0] }
+fn look(r: &S) -> i64 { (*r).a[0] + (*r).b }
+fn main() -> i64 {
+    let mut s: S = S { a: [1, 2], b: 3 };
+    let t: i64 = consume(s.a);
+    s.a = [20, 21];
+    t + look(&s)   // REJECTED: use of moved binding `s`
+}
+```
+
+Diagnostic: `sentinel::borrow::use_after_move`. A method call on `s` is
+refused the same way.
+
+Cause: an assignment does not re-initialize a moved place (the rule the
+`while` section above describes), and ADR 0046 A4 makes `&s` and a method
+call on `s` a use of every field of `s`.
+
+Workaround: build a new binding from the parts
+(`let s2: S = S { a: [20, 21], b: s.b };`, then `look(&s2)`).
+
+Closure: the move-state fixpoint of ADR 0036's Revisit trigger for D8, in
+which an assignment re-initializes the moved place.
+
+## Over-rejection: a `match` payload moved after its scrutinee was reassigned
+
+Moving a payload bound out of `match e` counts as a move out of `e`
+(ADR 0046 A4), and reassigning `e` does not detach the old payload's
+bindings from it, so `e` is still moved afterwards.
+
+```sentinel
+enum E { A([i64]), B }
+fn consume(v: [i64]) -> i64 { v[0] }
+fn main() -> i64 {
+    let mut e: E = E::A([11, 5]);
+    let p: i64 = match e { E::A(x) => { e = E::A([7]); consume(x) }, E::B => 0 };
+    let q: i64 = match e { E::A(y) => consume(y), E::B => 0 };   // REJECTED
+    p + q
+}
+```
+
+Diagnostic: `sentinel::borrow::use_after_move`, at the second `match e`.
+
+Cause: the checker walks each construct once and cannot tell a
+reassignment on every path from one on some paths (one branch of an `if`,
+one arm of an inner `match`, a `while` body that may not run). Detaching
+the bindings for the second kind would let the old payload be moved
+twice, so it detaches them for neither.
+
+Workaround: put the new value in a new binding (`let e2: E = E::A([7]);`)
+and match that.
+
+Closure: the same move-state fixpoint (ADR 0036's Revisit trigger for D8).
+
+## Over-rejection: moving an element, or a nested field, out by value
+
+Moves are tracked for a named binding and a single-level field of one
+(ADR 0046), not per element and not deeper, so a Move-typed element or
+nested field taken by value is refused even where it is taken once and
+never used again.
+
+```sentinel
+fn first<T>(xs: [T]) -> T { xs[0] }   // REJECTED: move_out_of_element
+```
+
+Diagnostics: `sentinel::borrow::move_out_of_element` and
+`sentinel::borrow::move_out_of_nested_field`. A generic body is refused
+whenever `T` could be a Move type; the same function over a Copy element
+type (`fn first(xs: [i64]) -> i64 { xs[0] }`) is accepted.
+
+Cause: ADR 0046 A4 refuses a move the move state cannot represent, rather
+than leave it untracked.
+
+Workaround: borrow the element (`&xs[0]`); for a nested field, move the
+enclosing field into a binding first (`let t = s.i;`, then `t.a`), which
+is two tracked moves.
+
+Closure: per-element and deep-path move tracking (ADR 0046 D5's deferred
+refinements); not scheduled.
+
 ## Out of scope at this doc
 
 - Closures, async, traits, lifetime parameters — none of these
@@ -415,6 +505,9 @@ Each row here gets closed by a specific ADR or sub-phase:
 | Block yielding a ref keeps its borrows | ADR 0018 step .a fact generator (needs provenance) |
 | Ref-returning method's receiver moved in the same call | ADR 0018 step .b / .c (Polonius) |
 | Borrow of a field of a temporary    | Temporary-lifetime-extension ADR (unspecified for Sentinel) |
+| Move of an element, or a nested field, by value | Per-element / deep-path move tracking (ADR 0046 D5) |
+| Whole binding used after a field was moved and replaced | ADR 0036 Revisit (D8): a move-state fixpoint, an assignment re-initializing the place |
+| `match` payload moved after its scrutinee was reassigned | ADR 0036 Revisit (D8): a move-state fixpoint, an assignment re-initializing the place |
 | Move of an outer binding (or field) in a `while`, reassigned or followed by `break` | ADR 0036 Revisit (D8): a move-state fixpoint over the body, an assignment re-initializing the place |
 | Partial move + drop unsoundness     | ✅ CLOSED (ADR 0046) — `snc` + `scg` both, differentials byte-identical |
 | Reference outliving its storage     | ✅ CLOSED (ADR 0017 D7) — `snc`; rejection-only, so no `scg` mirror is needed |

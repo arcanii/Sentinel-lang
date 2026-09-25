@@ -1,0 +1,11 @@
+// ADR 0046 A4 (negative): moves are not tracked per element (ADR 0046 D5's index
+// projections), so a Move-typed element cannot be moved out of an array a binding holds:
+// the array keeps it, and nothing would stop it being moved or read a second time. Borrow
+// the element instead.
+
+fn consume(v: [i64]) -> i64 { v[0] }
+
+fn main() -> i64 {
+    let xs: [[i64]] = [[5, 1], [6, 2]];
+    consume(xs[0])
+}

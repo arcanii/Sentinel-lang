@@ -1,0 +1,38 @@
+// ADR 0046 A4 (negative): a payload binding holds part of its scrutinee's payload, so once the
+// scrutinee is consumed the binding has nothing left to use. In `a` the payload is only
+// compared with `null`, which reads it; in `b` it is moved inside a loop, and that one move
+// is reported once.
+
+struct S1 { a: [i64] }
+
+enum H { A(?S1), B }
+
+enum E { A([i64]), B }
+
+fn eat_h(h: H) -> i64 { 0 }
+
+fn eat_e(e: E) -> i64 { 0 }
+
+fn consume(v: [i64]) -> i64 { v[0] }
+
+fn a() -> i64 {
+    let s: ?S1 = null;
+    let h: H = H::A(s);
+    match h { H::A(x) => { let t: i64 = eat_h(h); if x == null { t + 1 } else { t } }, H::B => 0 }
+}
+
+fn b() -> i64 {
+    let e: E = E::A([11, 5]);
+    match e {
+        E::A(x) => {
+            let t: i64 = eat_e(e);
+            let mut i: i64 = 0;
+            let mut s: i64 = t;
+            while i < 1 { s = s + consume(x); i = i + 1; }
+            s
+        },
+        E::B => 0
+    }
+}
+
+fn main() -> i64 { a() + b() }

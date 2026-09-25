@@ -1,6 +1,6 @@
 # ADR 0050: Mutable index assignment `a[i] = v`
 
-Status: **ACCEPTED-WITH-AMENDMENTS** (A1–A5) — the feature is in `snc` (Phase 1: inkwell + the
+Status: **ACCEPTED-WITH-AMENDMENTS** (A1–A6) — the feature is in `snc` (Phase 1: inkwell + the
 `snc llvm` textual oracle) AND mirrored into the self-hosted `scg` (Phase 2); the corpus
 fixture `tests/pass/c55_index_assign` validates `scg == snc` byte-for-byte across all 8
 selfhost stage differentials, both bootstrap fixed points hold, and the full nextest (1553
@@ -185,3 +185,23 @@ construct is added (Phase 2), at which point both sides emit it identically.
   calls `qr`, and writes them back via index-assign (`state[i] = o.a; …`). This stays squarely
   in the MVP (Var-base local array, Copy `secret i32` elements) while still showcasing in-place
   array permutation under the constant-time check.
+
+- **A6 (2026-09-25) — the collection an element store writes through must still own it
+  (register D112).** The borrow checker walked the base of `a[i] = v` for a write conflict
+  only, exactly as it walks the base of `a.f = v`, and never asked whether `a` had been moved.
+  A field store writes into the binding's own storage, which a move leaves in place; an element
+  store writes through the collection's buffer, which a moved collection no longer owns. So
+  `let r: i64 = consume(v); v[0] = 99;` passed. The store now checks its base the way a read
+  of it is checked — no binding on the path moved whole, no field on it moved by ADR 0046 —
+  after the value and the index are walked, so `v[0] = consume(v)` and a move inside the index
+  are refused as well. It is reported as a use of a moved binding (`use_after_move`), the
+  diagnostic a read of `v` gets. As for a read, a reassignment does not revive the collection:
+  `consume(v); v = [3, 4]; v[0] = 9;` is refused, as `consume(v); v = [3, 4]; v[0]` always
+  was, although `v` owns a new buffer by then (the checker's moved state has no reassignment
+  rule). A field store into a moved binding is not refused: it writes into storage the binding
+  still has. Pinned by `tests/ui/c55_index_assign_after_move.sentinel`
+  and four unit tests in `sentinel-borrow-check`; a mutation removing the check fails three of
+  them (the fourth is the accept case). A rejection only — the drop plan does not change, so
+  neither does the emitted IR, and `scg` (which records moves and never rejects, ADR 0043)
+  needs no mirror. It refuses programs that compiled before, so it is at least a minor version
+  (ADR 0076 D2).

@@ -1,0 +1,26 @@
+// ADR 0075 A2 / register D111 (negative): a `handle` inside a `while`, whose `return` arm
+// moves `v`, declared outside both. The `return` arm rule and the loop rule each refuse the
+// move, and it is reported once, by the inner construct: an enclosing `while`, op arm or
+// `return` arm skips a move an inner one already reported.
+
+effect Io {
+    read() -> i64;
+}
+
+fn consume(v: [i64]) -> i64 { v[0] }
+
+fn f() -> i64 {
+    let v: [i64] = [7, 9];
+    let mut i: i64 = 0;
+    let mut t: i64 = 0;
+    while i < 2 {
+        t = t + handle perform Io.read() with {
+            Io.read(k) => k(1),
+            return x => x + consume(v)
+        };
+        i = i + 1;
+    }
+    t
+}
+
+fn main() -> i64 { f() }

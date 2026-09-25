@@ -1,0 +1,14 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c25_move_out_of_borrow.sentinel\")"
+---
+sentinel::borrow::move_out_of_borrow
+
+  × cannot move `(*r).a` out: it is reached through a reference
+    ╭─[tests/ui/c25_move_out_of_borrow.sentinel:9:33]
+  8 │ 
+  9 │ fn take(r: &S) -> i64 { consume((*r).a) }
+    ·                                 ───┬──
+    ·                                    ╰── 
+ 10 │ 
+    ╰────

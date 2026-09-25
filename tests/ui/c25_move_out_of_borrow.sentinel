@@ -1,0 +1,14 @@
+// ADR 0046 A4 (negative): a Move-typed value cannot be moved out THROUGH a reference. `r`
+// only borrows `s`, so `s` still owns `s.a` and drops it; taking `(*r).a` by value would give
+// that array a second owner. Reading through the reference (`(*r).a[0]`) is fine.
+
+struct S { a: [i64], b: i64 }
+
+fn consume(v: [i64]) -> i64 { v[0] }
+
+fn take(r: &S) -> i64 { consume((*r).a) }
+
+fn main() -> i64 {
+    let s: S = S { a: [9, 1], b: 3 };
+    take(&s) + s.b
+}

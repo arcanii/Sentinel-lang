@@ -1,0 +1,21 @@
+// ADR 0075 A2 (negative): a `handle`'s `return` arm runs INSIDE a resume — the resumed
+// computation's value passes through it before `k(1)` returns — so the op arm's code after
+// `k(1)` runs after the return arm. A return arm may therefore not move a binding declared
+// outside the `handle`, as ADR 0075 D3 refuses the move in an op arm; `v` can be moved after
+// the `handle` instead (`let r = handle ... with { .., return x => x }; r + consume(v)`).
+
+effect Io {
+    read() -> i64;
+}
+
+fn consume(v: [i64]) -> i64 { v[0] }
+
+fn f() -> i64 {
+    let v: [i64] = [7, 9, 3, 4];
+    handle perform Io.read() with {
+        Io.read(k) => { let r: i64 = k(1); r + v[1] },
+        return x => x + consume(v)
+    }
+}
+
+fn main() -> i64 { f() }

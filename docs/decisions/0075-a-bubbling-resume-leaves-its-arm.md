@@ -1,6 +1,7 @@
 # ADR 0075: A bubbling resume leaves the arm's entry, and must drain it
 
-Status: **ACCEPTED** (D1–D5 2026-09-21, D6 2026-09-22), **amended by A1** (2026-09-23).
+Status: **ACCEPTED** (D1–D5 2026-09-21, D6 2026-09-22), **amended by A1** (2026-09-23) and
+**A2** (2026-09-25).
 Addresses register item **D87**, whose leak half slice 1 closes.
 Amends [ADR 0074](0074-handler-arm-owns-its-continuation.md) D2, whose bubble bullet
 settles what the bubble does with the arm's *continuation* and is silent on the arm's
@@ -498,6 +499,49 @@ lookup (`c75_remainder_capture_types`). A matched pre/post sweep of all 473 trac
 untracked `.sentinel` files, each binary smoke-tested first, moves the oracle on exactly two
 files and `scg` on exactly two, all of them the new fixtures; inkwell's only change is a
 comment.
+
+### A2 (2026-09-25). A `return` arm may not move a binding declared outside its `handle`.
+
+Register D113. A `handle`'s `return` arm runs INSIDE a resume: when the resumed computation
+completes, its value passes through the return arm before `k(v)` returns to the op arm that
+called it, so an op arm's code after `k(v)` runs after the return arm. The borrow checker walks
+the op arms first and the return arm last, so a return arm that moved a binding declared
+outside the `handle` did not make that binding moved where the op arms use it:
+`Io.read(k) => { let r: i64 = k(1); r + v[1] }, return x => x + consume(v)` passed.
+
+A return arm that moves a binding declared outside its `handle` — whole, or by an ADR 0046
+field, which is reported by its root — is now refused
+(`sentinel::borrow::moved_in_return_arm`), as D3 refuses the move in an op arm. It is
+refused whether or not an op arm uses the binding afterwards, which is the same conservative
+posture D3 takes: which op-arm code runs after the return arm depends on where each `k(v)`
+is and whether the resumed computation reaches the return arm at all, and the borrow checker
+does not model that. The binding can be moved after the `handle` instead: `let r = handle
+e with { .., return x => x }; r + consume(v)`. A return arm may still move its own value
+binding and anything it binds itself; and since an inner `handle` written inside an op arm is
+inside that arm, a binding the op arm declared is outside the inner `handle`, and the inner
+return arm may not move it either.
+
+A first design applied the return arm's moves at each resume of the handle's continuation
+instead, and was withdrawn before landing: telling those applied moves apart from the arm's
+own, across the checker's branch merges, sibling arms, loops and borrow checks, was more
+machinery than the rule is worth, and the review found it both refusing sound programs and
+accepting a program the checker had refused before.
+
+Like D3's arm rule and ADR 0036 D8's loop rule, this one checks what its own body newly
+moved, so a move inside a `handle` inside a `return` arm would have been reported by both
+`return` arms, as a move inside nested loops or arms already was (register D111). A move is
+now reported once, by the innermost `while`, op arm or `return` arm that refuses it: an
+enclosing one skips a move an inner one already reported. The verdict does not change; a
+program with such a move is refused either way.
+
+Pinned by `tests/ui/c75_return_arm_move_read_after_resume.sentinel` and three unit tests in
+`sentinel-borrow-check`; a mutation that reports nothing fails two of them (the third is the
+accept case). The reporting is pinned by `tests/ui/c75_return_arm_in_loop_reports_once.sentinel`
+and one unit test over four nestings, which fails under each of three mutations that let the
+`while`, the op arm or the `return` arm report a move again. A rejection only: the drop plan's
+sets do not change, so the emitted IR does not move and `scg` (which records moves and never
+rejects, ADR 0043) needs no mirror. It refuses programs that compiled before, so it is at
+least a minor version (ADR 0076 D2); no program that was already in the corpus is among them.
 
 ## Slices
 

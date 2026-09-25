@@ -1,0 +1,14 @@
+// ADR 0046 A4 (negative): partial moves are tracked for a field of a named binding only
+// (ADR 0046 D5), so a Move-typed field two levels down cannot be moved out: `s.i.a` would
+// leave `s` still owning a field it no longer has. Move the enclosing field into a binding
+// first (`let t: I = s.i;`, then `consume(t.a)`), which is a tracked move at each step.
+
+struct I { a: [i64], n: i64 }
+struct S { i: I, b: i64 }
+
+fn consume(v: [i64]) -> i64 { v[0] }
+
+fn main() -> i64 {
+    let s: S = S { i: I { a: [1, 2], n: 2 }, b: 1 };
+    consume(s.i.a)
+}
