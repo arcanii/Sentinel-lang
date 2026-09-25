@@ -372,6 +372,30 @@ indexed / bridged / `str_eq`'d), exit 55, **0 leaks** under `leaks --atExit`.
 - **FnId base.** `pop` / `vec_to_array` are builtins FnId 9 / 10, so user fns now
   start at FnId 11 (main 9 -> 11); the hardcoded-FnId test sites shifted again.
 
+### Later amendments
+
+- **C1 (2026-09-25, register D125) — `vec_to_array` is admitted only for an element that
+  owns nothing.** B2 has `vec_to_array` copy the live elements into a fresh array "so the
+  Vec and the array own independent buffers". The buffers are independent, but the copy is
+  byte for byte and leaves the Vec holding its elements, which is sound only for an element
+  that owns nothing — not for one holding an array or `Vec` field, an enum variant's payload
+  box, a `?Struct` box, or a `Shared` / `Mutex` handle — and nothing checked that. The call
+  is now refused with
+  `TypeError::VecToArrayElementNotPlain` (`sentinel::types::vec_to_array_element_not_plain`)
+  unless the element is plain data: a scalar (`i64`, `i32`, `u8`, `u128`, `f64`, `bool` or
+  `ptr`, or a `secret` one), a nullable scalar or a `?Channel`, one of the `Copy` handles
+  that no drop frees (`Channel`, `Task`, `Process`, `SealedChannel`, `Fn`), a payload-free
+  enum, or a struct or generic-struct instance built only from those. An abstract element (`T` inside a generic body) is refused, because
+  nothing re-checks a generic body once it is instantiated. The rule is
+  `vec_to_array_elem_is_plain` in `sentinel-types`, an exhaustive match with no catch-all
+  arm. No program in the corpus, the examples or the self-hosted compiler is refused.
+  Pinned by the unit tests `vec_to_array_refuses_an_element_that_is_not_plain` (one element
+  per refused category, and a generic body) and `vec_to_array_admits_a_plain_element`, and
+  by `tests/ui/c5d3_vec_to_array_element_not_plain.sentinel`; each of seventeen mutations to
+  the rule or its call site is caught. The self-hosted checker does not refuse it yet: it
+  has no rejection path (register D97). A rule that now rejects a program that compiled
+  before is at least a minor version (ADR 0076 D2).
+
 ## Revisit
 
 PROPOSED until D.3 closes. Triggers:

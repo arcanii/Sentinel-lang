@@ -32,6 +32,7 @@ use sentinel_resolve::{
     ResolvedStmtKind, StructId, TraitId, TypeParamId, VarId, APPLY_FN_ID, CHANNEL_CLOSE_FN_ID,
     CHANNEL_NEW_FN_ID, LEN_FN_ID, PROCESS_RECV_FN_ID, PROCESS_SEND_FN_ID, RECV_FN_ID, SEND_FN_ID,
     LOCK_FN_ID, MUTEX_NEW_FN_ID, SHARED_GET_FN_ID, SHARED_NEW_FN_ID, UNWRAP_OR_FN_ID,
+    VEC_TO_ARRAY_FN_ID,
 };
 use sentinel_ast::SelfKind;
 
@@ -4181,6 +4182,19 @@ pub enum TypeError {
     )]
     UnwrapOrHeapPayloadNotSupported {
         #[label("this `?T` has a heap-indirected payload")]
+        span: miette::SourceSpan,
+    },
+
+    /// ADR 0034 C1 (register D125): `vec_to_array` copies the Vec's elements into the new
+    /// array byte for byte and leaves the Vec holding them, so it is admitted only for an
+    /// element that is plain data — see [`vec_to_array_elem_is_plain`].
+    #[error("`vec_to_array` is not supported for this element type")]
+    #[diagnostic(
+        code(sentinel::types::vec_to_array_element_not_plain),
+        help("`vec_to_array` copies the elements and leaves the Vec as it was, so it is limited to elements that own no memory: scalars, nullable scalars, `Copy` handles, payload-free enums, and structs built from those; read the elements' fields through the Vec (`v[i].f`) instead")
+    )]
+    VecToArrayElementNotPlain {
+        #[label("the elements of this `Vec` are not plain data")]
         span: miette::SourceSpan,
     },
 
@@ -8458,6 +8472,105 @@ fn generic_field_ref_owner(
     None
 }
 
+/// ADR 0034 C1 (register D125): may `vec_to_array` copy an element of type `ty`? It copies
+/// the Vec's buffer byte for byte and leaves the Vec holding its elements, so the copy is
+/// sound only for a value that owns nothing: scalars (`u128` and `secret` ones included),
+/// nullable scalars and `?Channel`, the `Copy` handles no drop frees, payload-free enums, and
+/// structs and generic instances built only from those.
+///
+/// ⚠ EXHAUSTIVE ON PURPOSE, and fail-closed: a new `Type` or `NullableInner` variant must
+/// be classified here, and anything that owns memory, holds a refcount, or is still
+/// abstract answers `false`.
+fn vec_to_array_elem_is_plain(
+    ty: Type,
+    structs: &[TypedStructDecl],
+    enums: &[EnumData],
+    instances: &mut Vec<GenericInstanceData>,
+    refs: &mut Vec<RefData>,
+    secrets: &[SecretData],
+    seen: &mut Vec<Type>,
+) -> bool {
+    match ty {
+        Type::I64 | Type::I32 | Type::U8 | Type::U128 | Type::F64 | Type::Bool | Type::Ptr => true,
+        // Handles that are `Copy` and never freed by a drop: copying one is what they
+        // are for.
+        Type::Channel(_) | Type::Task(_) | Type::Process | Type::SealedChannel | Type::Fn(_) => {
+            true
+        }
+        Type::Secret(sid) => match secrets.get(sid.0 as usize) {
+            Some(d) => {
+                let inner = d.inner;
+                vec_to_array_elem_is_plain(inner, structs, enums, instances, refs, secrets, seen)
+            }
+            None => false,
+        },
+        Type::Nullable(inner) => match inner {
+            NullableInner::I64
+            | NullableInner::I32
+            | NullableInner::Bool
+            | NullableInner::U8
+            | NullableInner::U128
+            | NullableInner::F64
+            | NullableInner::Ptr
+            | NullableInner::Channel(_) => true,
+            // A struct payload lives in a heap box; a guard unlocks on drop; a
+            // reference and an abstract payload are not decided here.
+            NullableInner::Struct(_)
+            | NullableInner::GenericInstance(_)
+            | NullableInner::Guard(_)
+            | NullableInner::Ref(_)
+            | NullableInner::TypeParam(_) => false,
+        },
+        Type::Struct(id) => {
+            if seen.contains(&ty) {
+                return true;
+            }
+            seen.push(ty);
+            let field_tys: Vec<Type> = match structs.get(id.0 as usize) {
+                Some(decl) => decl.fields.iter().map(|f| f.ty).collect(),
+                None => return false,
+            };
+            field_tys
+                .into_iter()
+                .all(|f| vec_to_array_elem_is_plain(f, structs, enums, instances, refs, secrets, seen))
+        }
+        Type::GenericInstance(gi) => {
+            if seen.contains(&ty) {
+                return true;
+            }
+            seen.push(ty);
+            let inst = match instances.get(gi.0 as usize) {
+                Some(i) => i.clone(),
+                None => return false,
+            };
+            let field_tys: Vec<Type> = match structs.get(inst.struct_id.0 as usize) {
+                Some(decl) => decl.fields.iter().map(|f| f.ty).collect(),
+                None => return false,
+            };
+            field_tys.into_iter().all(|f| {
+                let sub = f.substitute(&inst.args, instances, refs);
+                vec_to_array_elem_is_plain(sub, structs, enums, instances, refs, secrets, seen)
+            })
+        }
+        // A variant with a payload keeps it in a heap box.
+        Type::Enum(id) => match enums.get(id.0 as usize) {
+            Some(e) => e.variants.iter().all(|v| v.payloads.is_empty()),
+            None => false,
+        },
+        // Own a buffer, a refcount, a lock or an object; or not decided here.
+        Type::Array(_)
+        | Type::Vec(_)
+        | Type::Shared(_)
+        | Type::Mutex(_)
+        | Type::Guard(_)
+        | Type::Class(_)
+        | Type::Ref(_)
+        | Type::Kont(_)
+        | Type::TypeParam(_)
+        | Type::TraitSelf(_) => false,
+    }
+}
+
 /// Type-check a fn call per ADR 0016 D4 / D7c / D8a. Handles both
 /// non-generic calls (signature.type_params is empty) and generic
 /// calls (TypeParams in param / return types). For generic calls,
@@ -9228,6 +9341,19 @@ fn check_call(
                         span: to_source_span(&args[0].span),
                     });
                 }
+            }
+        }
+    }
+
+    // ADR 0034 C1 (register D125): `vec_to_array` copies the elements without moving them
+    // out of the Vec, so the element must be plain data. An abstract `T` (inside a
+    // generic body) is refused: nothing re-checks the body once it is instantiated.
+    if id == VEC_TO_ARRAY_FN_ID {
+        if let Some(elem) = concrete_type_args.first().copied() {
+            if !vec_to_array_elem_is_plain(elem, structs, enums, instances, refs, secrets, &mut Vec::new()) {
+                return Err(TypeError::VecToArrayElementNotPlain {
+                    span: to_source_span(&args[0].span),
+                });
             }
         }
     }
@@ -12180,6 +12306,11 @@ fn type_error_to_diagnostic(err: &TypeError) -> Diagnostic {
         TypeError::ChannelElementNotSupported { span } => (
             "sentinel::types::channel_element_not_supported",
             "`Channel<T>` element type is not supported yet".to_string(),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        TypeError::VecToArrayElementNotPlain { span } => (
+            "sentinel::types::vec_to_array_element_not_plain",
+            "`vec_to_array` is not supported for this element type".to_string(),
             span.offset()..(span.offset() + span.len()),
         ),
         TypeError::UnwrapOrHeapPayloadNotSupported { span } => (
@@ -15636,6 +15767,57 @@ fn main() -> i64 {
              fn main() -> i64 { 0 }",
         );
         assert_eq!(fn_body_ty(&p, "f"), Type::Array(ArrayElem::U8));
+    }
+
+    // ADR 0034 C1 (register D125): `vec_to_array` copies without moving, so it is refused for
+    // an element that owns memory, holds a refcount or is abstract, and admitted for plain
+    // data. One program per category on each side.
+    #[test]
+    fn vec_to_array_refuses_an_element_that_is_not_plain() {
+        for decls in [
+            "struct H { xs: [i64] }",
+            "enum E { A, B(i64) }\nstruct H { e: E, k: i64 }",
+            "struct H { s: Shared<i64> }",
+            "struct H { m: Mutex<i64> }",
+            "struct I { xs: [i64] }\nstruct H { i: I, k: i64 }",
+            "struct I { k: i64 }\nstruct H { n: ?I }",
+            "struct B<T> { v: T }\nstruct H { b: B<[i64]> }",
+            "struct H { v: Vec<u8> }",
+            "struct B<T> { v: T }\nstruct H { n: ?B<i64> }",
+            "class K { let n: i64; pub init(n: i64) { self.n = n; 0 } }\nstruct H { c: K }",
+        ] {
+            let src = [
+                decls,
+                "fn f(v: Vec<H>) -> i64 { let a = vec_to_array(v); len(a) }",
+                "fn main() -> i64 { 0 }",
+            ]
+            .join("\n");
+            let err = check_err(&src);
+            assert!(matches!(err, TypeError::VecToArrayElementNotPlain { .. }), "{decls}: got {err:?}");
+        }
+        // An abstract element: nothing re-checks a generic body once it is instantiated.
+        let err = check_err("fn g<T>(v: Vec<T>) -> [T] { vec_to_array(v) }\nfn main() -> i64 { 0 }");
+        assert!(matches!(err, TypeError::VecToArrayElementNotPlain { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn vec_to_array_admits_a_plain_element() {
+        for decls in [
+            "struct H { a: i64, b: bool, c: u8, d: ?i64, f: f64 }",
+            "enum C { R, G }\nstruct I { k: i64 }\nstruct H { c: C, i: I }",
+            "struct B<T> { v: T }\nstruct H { b: B<i64> }",
+            "struct H { c: Channel<i64>, k: i64 }",
+            "struct I { k: i64 }\nstruct H { a: I, b: I, g: u128, p: ptr }",
+            "struct H { f: Fn<i64, i64> }",
+        ] {
+            let src = [
+                decls,
+                "fn f(v: Vec<H>) -> i64 { let a = vec_to_array(v); len(a) }",
+                "fn main() -> i64 { 0 }",
+            ]
+            .join("\n");
+            check_ok(&src);
+        }
     }
 
     #[test]

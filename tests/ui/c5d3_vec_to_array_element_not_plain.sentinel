@@ -1,0 +1,16 @@
+// ADR 0034 C1 (register D125): `vec_to_array` copies the Vec's elements byte for byte and
+// leaves the Vec holding them, so it is admitted only for an element that owns nothing —
+// scalars, the `Copy` handles no drop frees, and structs or payload-free enums built from
+// those. `H` holds an enum whose variant carries a payload, which lives in a heap box.
+// Surfaces VecToArrayElementNotPlain at the argument.
+
+enum E { A, B(i64) }
+
+struct H { e: E, k: i64 }
+
+fn main() -> i64 {
+    let mut v: Vec<H> = vec_new();
+    push(&mut v, H { e: E::B(1), k: 0 });
+    let a = vec_to_array(v);
+    len(a)
+}

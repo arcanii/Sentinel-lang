@@ -366,6 +366,10 @@ ui_snapshot!(
 ui_snapshot!(c5d5_move_outer_in_loop, "c5d5_move_outer_in_loop.sentinel");
 ui_snapshot!(c5d5_move_outer_field_in_loop, "c5d5_move_outer_field_in_loop.sentinel");
 
+// ADR 0034 C1 (register D125): `vec_to_array` copies without moving, so it is refused for an
+// element that owns memory (VecToArrayElementNotPlain).
+ui_snapshot!(c5d3_vec_to_array_element_not_plain, "c5d3_vec_to_array_element_not_plain.sentinel");
+
 // ADR 0050 A6: an element store needs a collection that still owns its buffer.
 ui_snapshot!(c55_index_assign_after_move, "c55_index_assign_after_move.sentinel");
 
