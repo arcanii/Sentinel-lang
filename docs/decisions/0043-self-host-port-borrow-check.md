@@ -94,6 +94,28 @@ program" foundation. **The REUSE MECHANICS are the central PROBE-GATED question 
     transform half + the bootstrap fixed-point; its own kickoff ADR, reusing `types::run`'s
     typed-program foundation).
 
+- **A3 — a block's tail and a `match` arm's body are consuming wherever they sit
+  (2026-09-25, register D124).** A1 had them INHERIT the consuming context around the block
+  or the `match`. The oracle's checker walks a block's value like any other value — a block
+  is never a place (`is_place_expr`), so no reading context reaches inside one — and records
+  a binding named by the tail as moved even where the block itself is only read: an index or
+  field target, a builtin argument such as `len`, a comparison operand, a `match` scrutinee.
+  `scg` inherited the reading context there and recorded no move, so its moved-sources dump
+  and its drop plan diverged from the oracle's, on shapes no accepted corpus program had. The `Block`
+  arm and `dump_tarms` now walk the tail and each arm's body with `consuming` set, and
+  restore it after; an `if` branch is a block, so it follows. Pinned by
+  `tests/pass/c43_block_tail_read_is_a_move.sentinel` through the codegen and borrow
+  differentials, on both of which the previous `scg` differs from the oracle; removing
+  either of the two `consuming` settings fails the codegen differential. The only other
+  program whose `scg` output changes is `tests/ui/c71_guard_deref_computed.sentinel`, which
+  the oracle rejects with a pin added because of this move (`*{ g }`, `GuardDerefNotVar`);
+  `scg` does not implement that pin and now records the same move. A handler's op-arm and
+  `return`-arm bodies are the one remaining sibling: `scg` still has them inherit the context,
+  where the oracle's checker walks them consuming, so its moved-sources dump differs on a
+  Move-typed `handle` value read in place (register D127). Taking the oracle's drop plan also
+  means `scg` now keeps a binding that such a value takes on only one path, as the oracle and
+  inkwell already did (register D93, ADR 0077).
+
 ## Decision
 
 ### D1. Goal.

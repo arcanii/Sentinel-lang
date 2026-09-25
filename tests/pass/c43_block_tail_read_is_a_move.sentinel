@@ -1,0 +1,64 @@
+// tests/pass/c43_block_tail_read_is_a_move.sentinel — a block's tail, and a `match` arm's
+// body, are consuming uses even where the value around them is only read.
+//
+// The oracle's borrow checker never treats a block as a place, so a binding named by its
+// tail moves out of it wherever the block sits: indexed, measured by `len`, a field read,
+// compared, or matched on. `scg`'s move analysis had the tail inherit the context around
+// the block instead, so under a reading context (an index or field target, a `len`
+// argument, a `match` scrutinee) it did not record the move where the oracle records one,
+// and its moved-sources dump and drop plan differed from the oracle's — a divergence that no
+// accepted corpus program could show, because none names a Move-typed binding as the tail of
+// a block in a reading position. The same held for an arm's body inside a `match` in a
+// reading position. This fixture puts
+// each shape in the corpus, where the codegen and borrow differentials hold `scg` to the
+// oracle on them (ADR 0043 A3, register D124).
+//
+// Exit 42 = every shape read the value its block or arm handed out.
+
+enum E { A, B(i64) }
+
+struct S { a: [i64], k: i64 }
+
+fn indexed() -> i64 {
+    { let v = [1, 2, 3]; v }[1]
+}
+
+fn measured() -> i64 {
+    len({ let v = [4, 5, 6, 7]; v })
+}
+
+fn field() -> i64 {
+    { let s = S { a: [1, 2, 3], k: 5 }; s }.k
+}
+
+fn compared() -> i64 {
+    if { let v = [1, 2]; v }[0] == 1 { 7 } else { 3 }
+}
+
+fn matched(n: i64) -> i64 {
+    match { let e = E::B(n); e } { E::A => 0, E::B(x) => x }
+}
+
+fn outer_in_block(n: i64) -> i64 {
+    let e = E::B(n);
+    match { e } { E::A => 0, E::B(x) => x + 1 }
+}
+
+fn outer_in_if(c: bool) -> i64 {
+    let a = E::B(2);
+    let b = E::B(3);
+    match (if c { a } else { b }) { E::A => 0, E::B(x) => x }
+}
+
+fn arm_bodies(n: i64) -> i64 {
+    let a = [1];
+    let b = [n, n, n];
+    let e = if n > 0 { E::B(n) } else { E::A };
+    len(match e { E::A => a, E::B(x) => b })
+}
+
+fn main() -> i64 {
+    // 2 + 4 + 5 + 7 + 6 + 5 + 3 + 3 = 35, plus 7 = 42.
+    indexed() + measured() + field() + compared() + matched(6) + outer_in_block(4)
+        + outer_in_if(false) + arm_bodies(9) + 7
+}

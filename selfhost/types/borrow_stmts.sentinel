@@ -152,7 +152,12 @@ fn dump_tarms(out: &mut Vec<u8>, a: Arms, exp: i64, own: bool, src: &[u8], c: &m
             };
             push(out, ' ');
             (*c).cg_own = own;
+            // An arm's body is a consuming use wherever the `match` sits, as a block's tail is
+            // (ADR 0043 A3).
+            let arm_svc: bool = (*c).consuming;
+            (*c).consuming = true;
             let bt: i64 = dump_texpr(out, abody, exp, src, c, gb);
+            (*c).consuming = arm_svc;
             // (registers D59 / D66) as the oracle does, a divergent arm stores, in its dead block,
             // the value it hands back at that value's own type, and a live arm stores at the
             // match's type (the slot's, settled after the last arm): the first live arm fixes it

@@ -1250,6 +1250,15 @@ fn pass_c43_delegate_forwards_move_param() {
 }
 
 #[test]
+fn pass_c43_block_tail_read_is_a_move() {
+    // ADR 0043 A3 (register D124): a block's tail and a `match` arm's body are consuming uses
+    // wherever the value around them is only read. The exit code is not the check; the
+    // fixture is in the corpus so the codegen and borrow differentials hold `scg` to the
+    // oracle on each shape. Exit 42.
+    assert_eq!(run_exit("c43_block_tail_read_is_a_move.sentinel"), 42);
+}
+
+#[test]
 fn pass_c41_go_no_go() {
     // ADR 0022 D11 phase-go: Point with manhattan + translate.
     // p starts at (10, 20). translate(3, 9) updates to (13, 29)

@@ -514,9 +514,15 @@ fn dump_texpr_arm(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyC
             let stdiv: bool = (*c).sdivs;
             (*c).sdivs = sdivs_up;
             push(out, ' ');
-            // The block's value is its tail — thread the expectation through to it.
+            // The block's value is its tail — thread the expectation through to it. The tail
+            // is a consuming use wherever the block sits, as the oracle's checker has it: a
+            // block is never a place, so a binding named by its tail moves out, even under a
+            // reading context (an index or field target, a `match` scrutinee) (ADR 0043 A3).
             (*c).cg_own = bk_own;
+            let bk_svc: bool = (*c).consuming;
+            (*c).consuming = true;
             let tt: i64 = dump_texpr(out, tail, exp, src, c, gb);
+            (*c).consuming = bk_svc;
             let tldiv: bool = (*c).sdiv;
             close_ty(out, tt, c);
             if cg_on(c) {
@@ -988,9 +994,10 @@ fn dump_texpr_arm(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyC
             // (ADR 0071 D2 amendment A1) the `match`'s owning context, for its arms' values.
             let mt_own: bool = (*c).cg_tailown;
             append_str(out, "(match ");
-            // (6/N) a `match` scrutinee is NOT a move (the oracle does not record it —
-            // it's read/inspected); the arms inherit the match's own consuming context
-            // (restored `svc`), so an arm body's returned-tail Vars still move.
+            // (6/N) a `match` scrutinee that names a binding is NOT a move (the oracle does
+            // not record it — it's read/inspected); a computed one's own tails still move,
+            // since a block's tail is always consuming. The arm bodies are consuming too
+            // (`dump_tarms`, ADR 0043 A3).
             let svc: bool = (*c).consuming;
             (*c).consuming = false;
             let scrty: i64 = dump_texpr(out, mscr, 0 - 1, src, c, gb);
