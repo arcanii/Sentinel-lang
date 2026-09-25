@@ -124,6 +124,14 @@ reference as you work through the milestones.
 > confirming nothing pre-existing is newly refused; oracle-vs-scg byte-equality on the new
 > fixture at types, mir and llvm; and the secret-taint check in both directions.
 
+### ▶ RESUME HERE (2026-09-25c — `origin/main` was `707c456` when this was written, and this session's two commits sit on top of it, unpushed; read `git reflog show refs/remotes/origin/main` and `git log --oneline origin/main..HEAD` at the START and AGAIN before writing either down. This session: **registers D111–D114 CLOSED** (`3d6a79b` fix, then this docs commit) by three borrow-checker amendments — [ADR 0050](decisions/0050-index-assignment.md) **A6** (an element store needs a collection that still owns its buffer), [ADR 0075](decisions/0075-a-bubbling-resume-leaves-its-arm.md) **A2** (a `return` arm may not move a binding declared outside its `handle`; a move inside nested `while` loops, op arms or `return` arms is reported once, which closes D111) and [ADR 0046](decisions/0046-partial-move-field-soundness.md) **A4** (the moves the move state cannot follow are refused, and moving a `match` payload is a move out of its scrutinee, checked against anything else that took it on any path) — plus one `scg` parity fix (`dump_te_field` records no partial move when its target is itself a field access; new `TyCtx` field `lastfld`). A4 also accepts one thing it refused before: a field compared with `null` or discarded as a statement is only read. Filed **D115–D118**; **D117 is a leak** (a place compared with `null`, or discarded as a statement, is not dropped with its binding), and its fix needs a comparison to read its operands in both the oracle and `scg`, whose drop plans record the place in different positions. Three bounded review rounds; the third found no defect in the rules, and every blocking finding it made was prose, all fixed. Register: **118 distinct ids, 48 whose heading opens `**D<n> — DONE`** (the 2026-09-22 block's rule). Four-check: **2,067 passed with exactly the 18 known Windows failures**, doctests and clippy clean, every `selfhost_*` differential green including both bootstrap fixed points. Sweeps, each OLD (`707c456`) against NEW: `snc borrow` over all 489 `.sentinel` files changes no result outside the slice's fourteen new fixtures; `snc build` over the 121 entries `snc borrow` cannot load (61 programs, 4 exporting libraries, 9 self-hosted module roots, and 47 programs importing a library module) changes none; `snc llvm` changes no byte on the 341 programs both emit, the ten merged self-hosted module roots among them. Thirty-four mutations caught; a thirty-fifth (`f2_first_arm_kept`) was dropped as equivalent once the branch points restored the payload attributions. Each amendment refuses programs that compiled before, so the next version is at least 0.2.0 (ADR 0076 D2); `Cargo.toml` still says 0.1.0. ⚠ **Traps this session:** a fixture you add can expose a divergence no corpus program had reached — the new fixtures turned up D117's position-dependent drop plans and D118 — so run the `selfhost_*` differentials before believing a remedy; a drop-plan change made to fix that leak in the oracle alone moved the divergence to other positions rather than closing it, and was withdrawn; and `grep -c` on a runtime symbol counts its `declare` line.)
+
+> **NEXT:** continue the approved order:
+> 1. item 4: D92, then D96 + D97, then register the four new leaks and one more pre-existing defect. That defect: `==` between two arrays type-checks and borrow-checks, then panics inside inkwell in `snc build`.
+> 2. ADR 0077's implementation, with the draft's proposed answers to Q1–Q5.
+>
+> D117 (a leak) is not yet scheduled; it is the maintainer's call where it goes in the order. Owed by the maintainer: D102, D103, ADR 0077's Q6, and when to bump the version.
+
 ### ▶ RESUME HERE (2026-09-25 — `origin/main` was `3cc3e06` when this was written, and this session's two commits sit on top of it, unpushed; read `git reflog show refs/remotes/origin/main` and `git log --oneline origin/main..HEAD` at the START and AGAIN before writing either down. This session: **item 2 of the approved order LANDED — register D110 CLOSED** by [ADR 0036](decisions/0036-loops.md) **A5** (`5c46d4c` fix, then this docs commit): the loop-carried move rule sees a FIELD moved out of an outer binding (ADR 0046's single-level partial move), flagged by its root through `newly_moved_outer`, which ADR 0075 D3's handler-arm rule shares, so the arm rule's reported span no longer follows hash-map order. Like the whole-binding rule it refuses loops that passed before (a field moved at most once at run time, or reassigned in the body); `docs/borrow-check-limitations.md` lists the ones a flow-sensitive checker would accept. Two bounded review rounds (rule soundness and prose, then the remedies) found no defect in the rule; every blocking finding was a false or over-scoped sentence, all fixed; filed **D111**. Four-check **2,024 passed with exactly the 18 known Windows failures**, every example failure a LINK failure, doctests and clippy clean. A matched `snc borrow` sweep of all 475 `.sentinel` files changes one verdict, the new field fixture's; a matched `snc build` covering the 141 files that command cannot load changes none. Four mutations caught. Register: **111 distinct ids, 44 whose heading opens `**D<n> — DONE`**. ⚠ **Two traps this session:** `snc build --lib` on a file with no `export "C"` fails with "nothing to export" BEFORE the borrow stage, so a build sweep that counts such a file as checked claims coverage it does not have — a two-line program importing one `pub` item checks the whole module, an unused private function included; and the prose written to fix the first review round was itself wrong where the second round looked — the span rule forgot the NEW-moves filter, and the over-rejection list included two shapes no flow-sensitive checker accepts. The register counts use the 2026-09-22 block's rule; it gives 109 and 43 at `3cc3e06`.)
 
 > **NEXT:** item 3, ADR 0077 for D93 (run-time drop flags where a binding is maybe-moved, a path-sensitive moved set elsewhere; the maintainer reviews the ADR before any code), then item 4: D92, then D96 + D97, then register the four new leaks. Owed by the maintainer: design calls on D102 and D103, and when to bump the version — D99 moved the oracle and A5 refuses loops that passed before, so the next version is at least 0.2.0; `Cargo.toml` still says 0.1.0.
@@ -1904,16 +1912,131 @@ reference as you work through the milestones.
 >      `snc build` covering the 141 files that command cannot load (a module part through its
 >      module's root, a library module through a program importing it) changes none.
 >
->      **D111 — a move of a binding declared outside N enclosing loop-like constructs is
->      reported N times.** Found 2026-09-24 by D110's review; pre-existing for whole bindings
->      since ADR 0036 D8, and A5 extends it to fields. Each `while` (and each handler arm, ADR
->      0075 D3) runs its own check over what its body newly moved, so a move, inside a `while`
->      inside another `while`, of a binding declared outside both prints `moved_in_loop_body`
->      twice — at the same span when it is the only move of that binding the outer loop sees —
->      and one inside a handler arm inside a `while` prints `moved_in_handler_arm` and
->      `moved_in_loop_body`. A binding declared between the two loops is reported once.
->      Diagnostic noise only: the verdict is right. The fix is for an outer construct to skip a
->      (binding, move span) an inner one already reported.
+>      **D111 — DONE (2026-09-25). A move of a binding declared outside N enclosing loop-like
+>      constructs was reported N times.** Found 2026-09-24 by D110's review; pre-existing for
+>      whole bindings since ADR 0036 D8, and A5 extends it to fields. Each `while` (and each
+>      handler arm, ADR 0075 D3) runs its own check over what its body newly moved, so a move,
+>      inside a `while` inside another `while`, of a binding declared outside both printed
+>      `moved_in_loop_body` twice — at the same span when it is the only move of that binding
+>      the outer loop sees — and one inside a handler arm inside a `while` printed
+>      `moved_in_handler_arm` and `moved_in_loop_body`. A binding declared between the two loops
+>      was reported once. Diagnostic noise only: the verdict was right. ADR 0075 A2's `return`
+>      arm rule would have joined it (a move inside a `handle` inside a `return` arm was
+>      reported by both `return` arms). Fixed with A2: a move is reported once, by the innermost
+>      `while`, op arm or `return` arm that refuses it, and an enclosing one skips a move span an
+>      inner one already reported. Pinned by `tests/ui/c75_return_arm_in_loop_reports_once.sentinel`
+>      and one unit test over four nestings; three mutations (one per construct) are each
+>      caught.
+>
+>      **D112 — DONE (2026-09-25). An element store into a collection that had been moved
+>      passed the borrow checker.** Found 2026-09-25 by a review. The base of `a[i] = v` was
+>      checked for a write conflict only, as the base of `a.f = v` is, so
+>      `let r: i64 = consume(v); v[0] = 99;` passed — and so did `v[0] = consume(v)` and a move
+>      inside the index — although the store goes through a buffer `v` no longer owns. Fixed by
+>      [ADR 0050](decisions/0050-index-assignment.md) A6: the base is checked as a read of it is,
+>      after the value and the index; as for a read, a reassignment does not revive it. Pinned
+>      by `tests/ui/c55_index_assign_after_move.sentinel` and four unit tests; the mutation
+>      removing the check is caught. A rejection only.
+>
+>      **D113 — DONE (2026-09-25). A `handle`'s `return` arm could move a binding that an op arm
+>      then used after resuming.** Found 2026-09-25 by a review. The return arm runs inside the
+>      resume, but the checker walked it after the op arms, so
+>      `Io.read(k) => { let r: i64 = k(1); r + v[1] }, return x => x + consume(v)` passed. Fixed
+>      by [ADR 0075](decisions/0075-a-bubbling-resume-leaves-its-arm.md) A2: a return arm may not
+>      move a binding declared outside its `handle` (`moved_in_return_arm`), as D3 refuses the
+>      move in an op arm; it can be moved after the `handle` instead. Pinned by
+>      `tests/ui/c75_return_arm_move_read_after_resume.sentinel` and three unit tests; the
+>      mutation removing the rule is caught. A rejection only.
+>
+>      **D114 — DONE (2026-09-25). Moves the partial-move state cannot represent were accepted
+>      and recorded nothing.** Found 2026-09-24 and 2026-09-25 by reviews.
+>      [ADR 0046](decisions/0046-partial-move-field-soundness.md) D5 deferred deep paths, index
+>      projections and `match`-binding moves as sound by over-rejection, but a deep path
+>      (`s.i.a`) or an element (`xs[0]`) moved by value was walked as a non-consuming read, as
+>      was a value moved out through a reference (`*r`, `(*r).a`); and moving a payload bound
+>      out of `match e` recorded nothing on `e`, so the same payload could be moved again.
+>      Fixed by ADR 0046 A4: the first three are refused (`move_out_of_nested_field`,
+>      `move_out_of_element`, `move_out_of_borrow`), and moving a payload is a move out of the
+>      scrutinee, checked against anything else that took it on any path — the scrutinee
+>      consumed, or its payload moved by a nested `match` of it — including where the move sits
+>      under a deref of a computed value in a comparison or a discarded statement
+>      (`*f(&n, x) == 7`). Reassigning the scrutinee does not detach the old payload's bindings,
+>      since the walk cannot tell a reassignment on every path from one on some; the
+>      unconditional form is a documented over-rejection. Closed with it: a field or a payload
+>      moved while its binding is borrowed; a scrutinee consumed, or its payload moved through
+>      another arm's binding, while a payload binding of it is borrowed; `&s` or a method call on
+>      `s` after a field of `s` was moved, including by the method's own arguments; and a move
+>      of a collection or receiver in its own index or arguments. One acceptance: a field
+>      compared with `null` or discarded as a statement is only read, so a later use of that
+>      field (compared again, read, borrowed or moved) and a move of the whole binding, each
+>      refused before, are accepted, and the new rule against using a partly moved binding does
+>      not count it. Pinned by ten `tests/ui/c25_*` fixtures, the pass
+>      fixture `c25_compared_field_is_only_read` and twenty-one unit tests; twenty-nine
+>      mutations caught. No corpus program is refused, and each self-hosted module root,
+>      merged into one program, passes. One `scg` parity fix rode
+>      along: for `s.i.a` its field arm recorded `a`'s index as a partial move of `s` (a
+>      per-node tracker left set by the target `s.i`), where the oracle records nothing; the
+>      codegen differential saw it through the new nested-field fixture, which `snc llvm`
+>      compiles although `snc` refuses it.
+>
+>      **D115 — `snc build` panics on a `perform` whose argument is a `Shared<T>`.** Found
+>      2026-09-25 while scoping register D35. `effect Io { put(x: Shared<i64>) -> i64; }` with
+>      `perform Io.put(s)` in an effecting fn borrow-checks, and `snc build` then aborts with a
+>      Rust panic inside inkwell (`values/enums.rs:309`, a pointer value taken as an integer)
+>      instead of a diagnostic — ADR 0072 D3/D4 fixes the continuation seam at one `i64`, and
+>      nothing refuses a pointer-typed operation argument before codegen. The project's rule
+>      against panicking on user-program input makes this a defect whatever the fix: a
+>      diagnostic at the type or effect stage, or support for a handle-typed argument.
+>
+>      **D116 — the oracle and `scg` disagree on a field moved out of a block or `if` value.**
+>      Found 2026-09-25 while fixing D114's `scg` parity. For `consume(({ s }).a)` or
+>      `consume((if c { s } else { t }).a)`, the oracle walks the block as a whole-binding move
+>      of `s` (and `t`) and drops none of it, so the fields not moved leak; `scg` records a
+>      partial move of `s`'s field `a` and drops the rest. The IR differs (constructed: no
+>      `sentinel_free` in the oracle's `main`, one in `scg`'s for the block form, three for the
+>      `if` form). No corpus program has the shape, so the codegen differential is green; a
+>      fixture with it would turn it red. `scg`'s answer is the tighter one; the oracle's is a
+>      leak, not a double drop.
+>
+>      **D117 — a place compared with `null`, or discarded as a statement, is not dropped with its
+>      binding.**
+>      Found 2026-09-25 while fixing D114. The borrow checker walks a comparison operand and a
+>      discarded expression statement with its consuming walk, so a Move-typed binding or field
+>      there (`x == null`, `n.next == null`, `s.a;`) is recorded as moved in the drop plan, and
+>      codegen then does not drop it with its binding, although nothing takes its value.
+>      Constructed with the
+>      `707c456` compiler, each shape called 2,000,000 times from a loop and measured by the
+>      kernel's peak working set after exit: `n.next == null` on a node with a non-null `next`
+>      peaks at 70.8 MB, `x == null` on a non-null `?Node` at 70.8 MB, and `s.a;` on a
+>      four-element array at 101.4 MB, against 9.2-9.3 MB for the same programs without the
+>      comparison or the statement (`is_some` in its place, or no statement). ADR 0046 A4 stops
+>      counting a compared or discarded field as moved for the use checks, and leaves the drop
+>      plan as it was. The oracle and `scg` do not agree on where this happens: the oracle (and
+>      inkwell, which uses the same drop plan) records the place in every position, while
+>      `scg`'s checker records it only where the comparison's value is itself consumed (a `let`
+>      initializer, an assignment, a call argument, a struct-literal field, a function's tail)
+>      and not in an `if` or `while` condition, under `!`, or in a discarded statement, whose
+>      context it treats as a read. So `scg`'s drop
+>      plan drops the place in the second kind of position and, like the oracle's, not in the
+>      first. No program the differentials compare showed it: the one with such a place in the
+>      second kind of position, the new `tests/ui/c25_payload_used_after_scrutinee_moved.sentinel`,
+>      is refused by the oracle, which the borrow differential skips, and the IR the codegen
+>      differential compares does not differ there. The fix is for a
+>      comparison and a discarded statement to read their place in every position, in both
+>      checkers, including a place reached through a block's or an `if`'s tail. Tried and
+>      withdrawn here: changing only the oracle's drop plan removed the three leaks (9.2-9.3 MB each)
+>      but made the oracle disagree with `scg` in the first kind of position.
+>
+>      **D118 — `scg` emits invalid IR for a `null` passed directly as an enum payload.** Found
+>      2026-09-25 while building D114's fixtures. For `H::A(null)` with `enum H { A(?S1), B }`,
+>      `scg`'s typer gives the literal the type `?T`, where the oracle gives it the payload's
+>      declared `?S1`, and `scg`'s codegen then writes the payload operand as
+>      `i64 { i1 0, i64 0 }` inside an `insertvalue` whose slot is `{ i1, ptr }`; `llvm-as`
+>      rejects it ("constant expression type mismatch"). A scalar payload (`G::A(null)` with
+>      `A(?i64)`) fails the same way. The oracle is right in both. Binding the `null` first
+>      (`let s: ?S1 = null; H::A(s)`) avoids it. No corpus program passes a `null` directly as a
+>      payload, so the differentials are green; the typer, MIR and codegen differentials each
+>      diverge on a fixture that does.
 >
 >      **D78 — stale corpus fixture counts in `llvm.rs` and `README.md`, at six sites, stale
 >      before this change.** Found by D74's reviews. `crates/sentinel-driver/tests/llvm.rs`

@@ -5,7 +5,7 @@ HANDOVER.md, STATE.md is the source of truth. New contributors (or
 new chat sessions) should be able to read this file and understand
 the current state of the workspace without re-reading every commit.
 
-## Current State (2026-09-24)
+## Current State (2026-09-25)
 
 > **Phase C closed at the bootstrap milestone (2026-05-30); Phase D self-hosts; the
 > per-unit separate-compilation back end is functionally complete.**
@@ -14,7 +14,35 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
-**Latest (2026-09-24) — ADR 0036 A5: the loop-carried move rule sees a FIELD moved out of an
+**Latest (2026-09-25) — three borrow-checker amendments (registers D111–D114).**
+[ADR 0050](decisions/0050-index-assignment.md) A6: an element store `a[i] = v` now needs a
+collection that still owns its buffer, so a store after `a` was moved is a use of a moved
+binding. [ADR 0075](decisions/0075-a-bubbling-resume-leaves-its-arm.md) A2: a `handle`'s
+`return` arm runs inside a resume, so it may not move a binding declared outside the `handle`,
+as an op arm may not; with it, a move inside nested `while` loops, op arms or `return` arms is
+reported once, by the innermost (register D111). [ADR 0046](decisions/0046-partial-move-field-soundness.md)
+A4: the projections D5 deferred — a deep field path and an element moved by value — are
+refused, as is a move out through a reference, and moving a `match` payload is a move out of
+its scrutinee, checked against anything else that took the scrutinee on any path; with it, a
+field or payload moved while borrowed, a scrutinee consumed while a payload binding of it is
+borrowed, a borrow or method call on a partly moved binding (including by the method's own
+arguments), and a move of a collection or receiver in its own index or arguments are refused.
+A4 also accepts what it refused before: a field compared with `null` or discarded as a
+statement is only read, so a later use of that field (compared again, read, borrowed or
+moved) and a move of the whole binding are accepted, and A4's own rule against using a partly
+moved binding does not count it. The emitted IR of a program accepted before does not
+move — a matched `snc llvm` sweep of every corpus file it emits and of the merged self-hosted
+compiler changes no byte — and `scg` needs no mirror of the rules (it gets one parity fix for
+a nested field path, which the new fixtures exposed). No program already in the corpus is
+refused; each
+amendment refuses programs that compiled before, so each is at least a minor version (ADR 0076
+D2), which the next version already is. Filed D115 (`snc build` panics on a `perform` whose
+argument is a `Shared<T>`), D116 (the oracle and `scg` disagree on a field moved out of a
+block or `if` value), D117 (a place compared with `null`, or discarded as a statement, is
+not dropped with its binding — a leak, recorded differently by the oracle and `scg`) and D118 (`scg` emits
+invalid IR for a `null` passed directly as an enum payload).
+
+**Previously (2026-09-24) — ADR 0036 A5: the loop-carried move rule sees a FIELD moved out of an
 outer binding (register D110).** A `while` body that moved a field (`s.a`, ADR 0046's
 single-level partial move) out of an outer `s` passed the borrow checker; it is now refused
 like a whole-binding move, and reported against the root `s`. Like the whole-binding rule, it
