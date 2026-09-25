@@ -423,6 +423,8 @@ fn tmethod(buf: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u
     let svcons_m: bool = (*c).consuming;
     (*c).curfn = 1000000 + selfvid;
     (*c).consuming = true;
+    // (ADR 0071 D2 amendment A1) the caller is a new owner of the returned value.
+    (*c).cg_own = true;
     dump_texpr(buf, mbody, mrth, src, c, gb);
     (*c).fnret = svmfr;
     push(buf, ')');

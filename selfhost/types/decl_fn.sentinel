@@ -187,6 +187,9 @@ fn type_fn(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u
         // (ADR 0014 D3 / ADR 0051 A5) publish the return type for any `return e` inside.
         let svfr: i64 = (*c).fnret;
         (*c).fnret = rty;
+        // (ADR 0071 D2 amendment A1) the caller is a new owner of the returned value: the
+        // body block hands the owning context on to its tail.
+        (*c).cg_own = true;
         dump_texpr(out, body, rty, src, c, gb);
         (*c).fnret = svfr;
         // (8d-drops) free the param frame (frame 0) — AFTER the body-block drops (emitted

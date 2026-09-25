@@ -1061,6 +1061,62 @@ fn llvm_match_if_else_chain() {
     );
 }
 
+/// The body of `define … @name(…) { … }` in a `snc llvm` dump.
+fn dump_fn_body<'a>(ir: &'a str, name: &str) -> &'a str {
+    let head = ir
+        .find(&format!(" @{name}("))
+        .unwrap_or_else(|| panic!("no fn @{name} in:\n{ir}"));
+    let start = head + ir[head..].find('{').expect("fn body opens");
+    let end = start + ir[start..].find("\n}").expect("fn body closes");
+    &ir[start..end]
+}
+
+#[test]
+fn llvm_a_moved_generic_read_hands_its_unit_on() {
+    // ADR 0071 D2 amendment A1: a generic body instantiated at `Shared` treats its type
+    // parameter as Move, so the drop plan records the parameter (or a field of one) as moved
+    // where it flows into the body value, a struct literal or a call, and skips its drop. That
+    // read transfers the unit; a clone there would never be released. A `Shared` field read
+    // of a binding moved only ELSEWHERE (`take(h.s)` before `eat(h)`) still clones. The
+    // corpus cannot carry the generic shapes (register D36), so this reads the IR.
+    let ir = llvm_dump(
+        "a1_moved_reads",
+        concat!(
+            "struct Bx<U> { v: U, n: i64 }\n",
+            "struct H { s: Shared<i64>, n: i64 }\n",
+            "fn sink<U>(x: U) -> i64 { 1 }\n",
+            "fn ident<U>(x: U) -> U { x }\n",
+            "fn boxit<U>(x: U) -> Bx<U> { Bx { v: x, n: 1 } }\n",
+            "fn unbox<U>(b: Bx<U>) -> U { b.v }\n",
+            "fn relay<U>(x: U) -> i64 { sink({ x }) }\n",
+            "fn eat(h: H) -> i64 { h.n }\n",
+            "fn take(x: Shared<i64>) -> i64 { shared_get(x) }\n",
+            "fn read_then_move(h: H) -> i64 { take(h.s) + eat(h) }\n",
+            "fn main() -> i64 {\n",
+            "    let s: Shared<i64> = shared_new(5);\n",
+            "    let a: Shared<i64> = ident(s);\n",
+            "    let b: Bx<Shared<i64>> = boxit(s);\n",
+            "    let c: Shared<i64> = unbox(b);\n",
+            "    relay(s) + shared_get(a) + shared_get(c) + read_then_move(H { s: s, n: 1 })\n",
+            "}\n",
+        ),
+    );
+    for f in ["ident__shared_i64", "boxit__shared_i64", "unbox__shared_i64", "relay__shared_i64"] {
+        let body = dump_fn_body(&ir, f);
+        assert_eq!(
+            body.matches("@sentinel_shared_clone(").count(),
+            0,
+            "@{f} clones a parameter its drop plan moves, so nothing releases the clone:\n{body}"
+        );
+    }
+    let body = dump_fn_body(&ir, "read_then_move");
+    assert_eq!(
+        body.matches("@sentinel_shared_clone(").count(),
+        1,
+        "@read_then_move: the field read before the move must clone:\n{body}"
+    );
+}
+
 // ---- Layer 2: the 0-panics corpus sweep ---------------------------------
 
 fn corpus_fixtures() -> Vec<PathBuf> {

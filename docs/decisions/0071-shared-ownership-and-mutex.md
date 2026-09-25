@@ -5,7 +5,9 @@ Status: **ACCEPTED for M1.4a (`Shared<T>`) — implemented 2026-07-02 — and fo
 (see the implementation log + the D5 amendment); and for M1.4c (secret
 `Shared`/`Mutex`) — implemented 2026-07-19, snc-side + the scg mirror, whose element WIDTHS
 were then completed 2026-09-02 (M1.4c-1c, `6337bea`, register D17); see the M1.4c
-implementation log + the D6/D4 amendment. `Channel<secret T>` (M1.4c-2) remains open.** Design
+implementation log + the D6/D4 amendment. `Channel<secret T>` (M1.4c-2) remains open. D2 is
+amended by A1 (2026-09-25): a duplication out of a place into a new owner is counted, with the
+exceptions A1 lists.** Design
 PINNED with maintainer sign-off 2026-07-02. This is the M1.4 sub-phase of the ADR 0066 threading roadmap, broken out into
 its own ADR per **ADR 0066 D5** ("blocked on first designing a runtime-refcounted
 `Shared<T>` handle … a language feature in its own right, arguably bigger than the mutex
@@ -178,6 +180,10 @@ assert the cell is freed exactly once (leak-checked, mirroring
 type's `needs_drop` true and recurses a `--` in the aggregate drop walk (unlike a
 `Channel` field, which is never dropped) — the ADR 0046 field-precise drop walk is the
 mechanism it plugs into.
+
+**Amended by A1 (2026-09-25), below:** the duplication is counted wherever the value is read
+out of a place, not only out of a named binding, and into more kinds of new owner; A1 lists
+what it leaves out.
 
 ### D3. Deterministic drop reuses the existing scope-exit machinery; a hard-coded drop-content arm, not a `Drop` trait. **PINNED.**
 
@@ -748,3 +754,118 @@ memory-policy story is genuinely different and deserves its own decision: a chan
 in-transit values sit in `std::sync::mpsc` queue nodes that Sentinel does not allocate, so
 they can be neither mlocked nor scrubbed without replacing the queue. Deferred rather than
 bundled.
+
+## D2 amendment A1 (2026-09-25) — a duplication out of a place, into a new owner (register D121)
+
+D2 counted a duplication only when the value came from a named binding and went into a
+`let`, a by-value user-fn argument or a spawn capture. Every other duplication went
+uncounted: a value read out of a field (`take(h.s)`, `let v = h.s`), through a reference
+(`take((*r).s)`), or as a block's, an `if`'s or a `match` arm's tail (`let v = { s }`); and
+a value stored by a struct literal (`H { s: s }`), an assignment (`v = s`), a method
+argument, or returned out of a place (`fn get(r: &H) -> Shared<i64> { (*r).s }`). Each of
+those owners released a unit at its drop that no clone had added, so the release count ran
+ahead of the clone count, which the runtime's debug refcount check reports as an abort.
+
+The rule now, in all three back ends:
+
+- A `Shared` / `Mutex` value **read out of a place** — a binding, a deref, or a field or
+  element path rooted at one of those — **into a new owner** is cloned right after it is
+  read, unless the read moves the place (below). A value not read out of a place (a call's
+  result, `shared_new`, `mutex_new`) hands its own unit on and is not; so does a field of a
+  temporary (`mk().s`), which nothing drops.
+- The new owners are a `let`, an assignment (to a binding, through a reference, or to a
+  struct field), a user-fn, generic or spawn argument, a method, qualified-call or class-init
+  argument where the callee drops its parameters, the argument a delegating class's
+  synthesised method forwards, a struct-literal field, a `return` operand, and a
+  non-effecting fn's or a method's body value.
+- A block, an `if`, a `match` or a `scope` in one of those positions hands the context on to
+  its tail — each branch's, each arm's, the scope body's — and to nothing else, so `if c { s }
+  else { shared_new(3) }` clones on the `s` path only.
+- A read that **moves** its place hands the unit on instead: a binding the drop plan records
+  as moved, or exactly a field of one it records as partially moved. A `Shared` / `Mutex`
+  place is one only in a generic body instantiated at it (`fn ident<T>(x: T) -> T { x }`),
+  where the checker treats the type parameter as Move and the parameter's drop is skipped. A
+  path merely rooted at a binding moved elsewhere is not moved by the read — `take(h.s)`
+  before `h` is moved on still clones.
+- An enum-construct argument, and an assignment into a field of a class instance, keep D2's
+  original treatment. A value read out of a class field, like one read out of a `match` arm's
+  payload binding, is a place read and is cloned into a new owner.
+- A handle cannot be `secret`-qualified: `secret Shared<T>` and `secret Mutex<T>` are a type
+  error (`SecretHandle`), as `secret f64` is. A handle is a pointer to a refcounted cell, not a
+  value to keep secret, and the secret belongs inside the container (`Shared<secret T>`, D6);
+  what a `secret`-qualified handle would own was never settled. Nothing in the corpus spelled
+  one.
+
+What the rule does not reach is an owner that is never dropped. There, the unit it counts
+stays held — a leak, and never a release too many:
+
+- An array or `Vec` never releases its elements' handles: its drop frees the buffer only, the
+  per-element drop ADR 0068 and ADR 0034 defer. A read out of an element (`take(a[0].s)`,
+  `let v = a[0].s`) is cloned like any place read, so the unit the element holds stays held,
+  one per evaluation. D2's missing clone had handed that unit to the first reader, which
+  balanced a single read, and a second read released one too many. Register D122.
+- A binding moved on one path is dropped on no path (the drop plan's moved set is per
+  function, register D93), so a field read out of it on another path — `if c { take(h.s) }
+  else { eat(h) }` — is cloned and the unit the field holds stays held. In the oracle and
+  inkwell, D2's missing clone had handed that unit to the reader. Register D122.
+- A struct literal that nothing drops — read in place (`H { s: s, n: 1 }.n`), or stored where
+  it is never released (an array literal, `push`, an enum constructor) — still counts its
+  fields, so the units they took stay held. So does one inkwell never drops: a method,
+  qualified-call or class-init argument (D119). Register D122.
+- A call's result that nothing drops — read in place by a builtin (`shared_get(getf(&h))`)
+  or discarded (`getf(&h);`) — keeps the unit its callee counted into the returned value, now
+  that a returned place read (`(*r).s`, `self.s`) is cloned. Register D122.
+- In inkwell, a block's own `let`-local returned as its tail, where nothing receives the
+  block's value (a builtin's argument, an expression statement), keeps the unit counted into
+  it. Register D123.
+
+Each back end implements it as an **owning context**: the sink sets it immediately before
+the value is lowered, the next node takes it, and only a block's, an `if`'s, a `match` arm's
+or a `scope` body's tail inherits it. The oracle's and inkwell's `lower_expr` clone a place
+read in the context, unless their `moved_out` finds the read moves its place; `scg`'s
+`dump_texpr_node` does, with each node publishing whether it read out of a place
+(`cg_placen`, the `sdivn` pattern), so the decision no longer rests on `mvbv`, the per-node
+tracker a compound argument could leak (register D35). `scg` emits a delegating class's
+forwarding body by hand, not through `dump_texpr_node`, so its forwarder clones each
+`Shared` / `Mutex` parameter itself, as the oracle's ordinary method call there does. Outside
+a generic body a bare binding's emitted sequence (load, clone) is what it was. Inside one, a
+type-parameter binding the drop plan records as moved is no longer cloned as a call argument:
+the oracle and inkwell cloned it there before and never released the clone, a leak A1
+closes (`fn f<U>(x: U, c: bool) -> i64 { if c { sink(x) } else { sink(x) + 1 } }` at
+`Shared<i64>`, 2,000,000 calls: 70.8 MB before, 9.3 after). No corpus program has that
+shape, so no pre-existing corpus program's emitted IR changes.
+
+The back ends differ in three places. inkwell does not drop a method's or a class init's
+parameters (register D119, a leak), so its method, qualified-call and class-init arguments
+stay out of the context; the oracle and `scg` clone into them. inkwell lowers a block's own
+`let`-local returned as its tail without a clone; in an owning position all three balance
+(register D123 for inkwell elsewhere). And a generic body is lowered differently (register
+D36): the oracle and inkwell hand a moved type-parameter binding on, while `scg` clones it and
+releases the parameter. Where the binding is moved on every path both balance. Where it is
+moved on only some, the oracle and inkwell leave its unit held on the others (D93, as before
+A1), and `scg` does too when a field of it is read on another path (`if c { Bx { v: b.v, n:
+0 } } else { b }`). The IR differs, so the corpus carries no such program. An assignment
+still does not release the value it overwrites (register D120, a leak), so `v = s` now
+leaves one unit held rather than releasing one too many.
+
+Pinned by `tests/pass/c71_shared_place_duplications.sentinel`, which reads a `Shared` out of
+a place into every owner above (a `Mutex` into two of them), three times over, and answers
+94 in all three back ends; a missing clone aborts it, save the second of `element_read`'s two
+reads, which without its clone would take the unit the array never releases (D122).
+`pass_c71_shared_place_duplications` builds it through inkwell;
+`selfhost_codegen::oracle_ir_of_the_shared_duplication_program_runs` builds and runs the
+oracle's IR, since the corpus-wide behaviour check cannot run on Windows; and the codegen
+differential holds `scg` to the oracle byte for byte on it. The moved-place rule is pinned by
+IR tests instead — `a1_a_moved_generic_read_hands_its_unit_on` (inkwell) and
+`llvm_a_moved_generic_read_hands_its_unit_on` (the oracle) — since a generic return of a
+container cannot go in the corpus (D36). The refusal is pinned by `tests/ui/c71_secret_handle`
+and `c71_secret_mutex_handle`. Of fifty-five mutations of the rule across the three back ends
+and the type checker, fifty-four are caught — by the fixture's abort through inkwell, by the
+oracle's IR run, by the differential, by those IR tests, or by the refusal fixtures. The one
+that survives removes inkwell's hand-on of a block's own tail binding, which would leak a unit
+per evaluation rather than release one too many; nothing in `tests/pass` measures a leak. It
+moves the oracle, `scg` and inkwell for any program with such a duplication, and refuses a
+program that spells a `secret`-qualified handle, so it is at least a minor version (ADR 0076
+D2). A matched `snc llvm` sweep of the corpus and of the ten self-hosted module roots, merged
+from this tree, changes no byte except on the new fixture and newly refuses only the two
+refusal fixtures, and both bootstrap fixed points hold.

@@ -1,0 +1,264 @@
+// ADR 0071 D2 amendment A1: a `Shared` / `Mutex` handle read out of a PLACE — a binding, a
+// field or element path rooted at one or at a reference, or a deref — into a new owner is
+// cloned; a value that is not (a call's result, `shared_new`) hands its own unit on. The
+// owners exercised here are a `let`, an assignment (to a binding, through a reference, to a
+// struct field), a user-fn, generic, spawn, method, qualified-call and class-init argument,
+// the argument a delegating class forwards, a struct-literal field and a returned value; a
+// block's, an `if`'s or a `match` arm's tail passes its value through to one of those. The
+// ADR lists what the rule leaves out — among them inkwell's method, qualified-call and
+// class-init arguments, whose parameters inkwell never drops (register D119).
+//
+// Before the amendment the oracle released one unit more than it took on every shape below,
+// inkwell on all but five (block_local, class_field, method_arg, qualified_arg and
+// delegate_arg) and `scg` on all but eight. Each shape runs in its own function, called three
+// times, so a cell whose count reached zero early would be reused by a later call; the
+// runtime's debug refcount check aborts on a release that would go below zero. The answer is
+// the sum of the values read back:
+// field_arg 5+5+1, field_let 5+1, deref_arg 5+5, block_tail 5+5, block_local 5,
+// if_places 5+5, if_mixed 5+5 (i even) or 3+5, match_payload 5+5, lit_var 5+1+2,
+// lit_field 3, assign 5+5, method_arg 5+5, returned_field 5+1, returned_early 5+1,
+// method_tail 5+1, class_field 5+5, mutex_field 1, deref_assign 5+5, field_assign 5+5,
+// generic_arg 1+1+1, spawn_arg 5+1, qualified_arg 5+5+1, element_read 5+5,
+// delegate_arg 6+6: 194 for an even round, 192 for an odd one. 194 + 192 + 194 - 486 = 94
+// (kept under 256, since a POSIX exit code is eight bits). The class-init argument is a new
+// owner in the oracle and `scg` (A1 lists the exceptions).
+
+struct H { s: Shared<i64>, n: i64 }
+
+struct M { m: Mutex<i64>, n: i64 }
+
+enum E { A(Shared<i64>), B }
+
+class K {
+    let v: Shared<i64>;
+    pub init(a: Shared<i64>) { self.v = a; 0 }
+    pub fn get(self: &Self) -> i64 { shared_get(self.v) }
+}
+
+trait T {
+    fn use_it(self: &Self, x: Shared<i64>) -> i64;
+    fn get(self: &Self) -> Shared<i64>;
+}
+
+impl as T for H {
+    fn use_it(self: &Self, x: Shared<i64>) -> i64 { shared_get(x) }
+    fn get(self: &Self) -> Shared<i64> { self.s }
+}
+
+trait Sink {
+    fn put_s(self: &Self, x: Shared<i64>) -> i64;
+}
+
+impl Direct as Sink for H {
+    fn put_s(self: &Self, x: Shared<i64>) -> i64 { shared_get(x) }
+}
+
+trait Feed {
+    fn feed(self: &Self, x: Shared<i64>) -> i64;
+}
+
+struct Plain { n: i64 }
+
+impl as Feed for Plain {
+    fn feed(self: &Self, x: Shared<i64>) -> i64 { shared_get(x) + self.n }
+}
+
+class Core {
+    let n: i64;
+    pub init() { self.n = 1; 0 }
+    pub fn feed(self: &Self, x: Shared<i64>) -> i64 { shared_get(x) + self.n }
+}
+
+impl as Feed for Core {
+    fn feed(self: &Self, x: Shared<i64>) -> i64 { shared_get(x) }
+}
+
+// Two delegating classes: `Relay` forwards `feed` to `Plain`'s impl, `Front` to `Core`'s own
+// method — the two dispatches a synthesised forwarder can make.
+class Relay {
+    delegate inner: Plain to Feed;
+    pub init(p: Plain) { self.inner = p; 0 }
+}
+
+class Front {
+    delegate c: Core to Feed;
+    pub init(i: Core) { self.c = i; 0 }
+}
+
+fn take(x: Shared<i64>) -> i64 { shared_get(x) }
+
+fn take_m(x: Mutex<i64>) -> i64 { 1 }
+
+fn gtake<U>(x: U) -> i64 { 1 }
+
+fn put(r: &mut Shared<i64>, s: Shared<i64>) -> i64 { *r = s; 0 }
+
+fn work(x: Shared<i64>) -> i64 ! { Async } { shared_get(x) }
+
+fn getf(r: &H) -> Shared<i64> { (*r).s }
+
+fn getr(r: &H) -> Shared<i64> { return (*r).s }
+
+fn field_arg() -> i64 {
+    let h: H = H { s: shared_new(5), n: 1 };
+    take(h.s) + take(h.s) + h.n
+}
+
+fn field_let() -> i64 {
+    let h: H = H { s: shared_new(5), n: 1 };
+    let v: Shared<i64> = h.s;
+    shared_get(v) + h.n
+}
+
+fn via_ref(r: &H) -> i64 { take((*r).s) }
+
+fn deref_arg() -> i64 {
+    let h: H = H { s: shared_new(5), n: 1 };
+    via_ref(&h) + via_ref(&h)
+}
+
+fn block_tail() -> i64 {
+    let s: Shared<i64> = shared_new(5);
+    let v: Shared<i64> = { s };
+    shared_get(v) + shared_get(s)
+}
+
+fn block_local() -> i64 {
+    let v: Shared<i64> = { let t: Shared<i64> = shared_new(5); t };
+    shared_get(v)
+}
+
+fn if_places(c: bool) -> i64 {
+    let s: Shared<i64> = shared_new(5);
+    let v: Shared<i64> = if c { s } else { s };
+    shared_get(v) + shared_get(s)
+}
+
+fn if_mixed(c: bool) -> i64 {
+    let s: Shared<i64> = shared_new(5);
+    let v: Shared<i64> = if c { s } else { shared_new(3) };
+    shared_get(v) + shared_get(s)
+}
+
+fn match_payload() -> i64 {
+    let s: Shared<i64> = shared_new(5);
+    let e: E = E::A(s);
+    let v: Shared<i64> = match e { E::A(x) => x, E::B => shared_new(0) };
+    shared_get(v) + shared_get(s)
+}
+
+fn lit_var() -> i64 {
+    let s: Shared<i64> = shared_new(5);
+    let h: H = H { s: s, n: 1 };
+    let h2: H = H { s: s, n: 2 };
+    shared_get(s) + h.n + h2.n
+}
+
+fn lit_field() -> i64 {
+    let h: H = H { s: shared_new(5), n: 1 };
+    let h2: H = H { s: h.s, n: 2 };
+    h.n + h2.n
+}
+
+fn assign() -> i64 {
+    let s: Shared<i64> = shared_new(5);
+    let mut v: Shared<i64> = shared_new(7);
+    v = s;
+    shared_get(v) + shared_get(s)
+}
+
+fn method_arg() -> i64 {
+    let s: Shared<i64> = shared_new(5);
+    let h: H = H { s: shared_new(1), n: 1 };
+    h.use_it(s) + h.use_it(s)
+}
+
+fn returned_field() -> i64 {
+    let h: H = H { s: shared_new(5), n: 1 };
+    let a: Shared<i64> = getf(&h);
+    shared_get(a) + h.n
+}
+
+fn returned_early() -> i64 {
+    let h: H = H { s: shared_new(5), n: 1 };
+    let a: Shared<i64> = getr(&h);
+    shared_get(a) + h.n
+}
+
+fn method_tail() -> i64 {
+    let h: H = H { s: shared_new(5), n: 1 };
+    let a: Shared<i64> = h.get();
+    shared_get(a) + h.n
+}
+
+fn class_field() -> i64 {
+    let s: Shared<i64> = shared_new(5);
+    let k: K = K::init(s);
+    k.get() + shared_get(s)
+}
+
+fn mutex_field() -> i64 {
+    let k: M = M { m: mutex_new(4), n: 0 };
+    let v: Mutex<i64> = k.m;
+    take_m(v) + take_m(k.m) - 1 + k.n
+}
+
+fn deref_assign() -> i64 {
+    let s: Shared<i64> = shared_new(5);
+    let mut v: Shared<i64> = shared_new(7);
+    put(&mut v, s);
+    shared_get(v) + shared_get(s)
+}
+
+fn field_assign() -> i64 {
+    let s: Shared<i64> = shared_new(5);
+    let mut h: H = H { s: shared_new(7), n: 1 };
+    h.s = s;
+    shared_get(h.s) + shared_get(s)
+}
+
+fn generic_arg() -> i64 {
+    let h: H = H { s: shared_new(5), n: 1 };
+    gtake(h.s) + gtake(h.s) + h.n
+}
+
+fn spawn_arg() -> i64 {
+    let h: H = H { s: shared_new(5), n: 1 };
+    let r: i64 = scope concurrent { let w = spawn work(h.s); w.await };
+    r + h.n
+}
+
+fn qualified_arg() -> i64 {
+    let h: H = H { s: shared_new(5), n: 1 };
+    Direct::put_s(&h, h.s) + Direct::put_s(&h, h.s) + h.n
+}
+
+// An array never releases its elements' handles, so each call leaves the element's own unit
+// held (register D122). What this shape checks is the first read's clone: without it, the
+// first `take` releases the element's only unit and the second read finds none. Without only
+// the second read's clone, that read would take the unit the array never releases, and
+// balance — no exit code can see it.
+fn element_read() -> i64 {
+    let a: [H] = [H { s: shared_new(5), n: 1 }];
+    take(a[0].s) + take(a[0].s)
+}
+
+fn delegate_arg() -> i64 {
+    let s: Shared<i64> = shared_new(5);
+    let r: Relay = Relay::init(Plain { n: 1 });
+    let f: Front = Front::init(Core::init());
+    r.feed(s) + f.feed(s)
+}
+
+fn round(i: i64) -> i64 {
+    let even: bool = i == 0 || i == 2;
+    field_arg() + field_let() + deref_arg() + block_tail() + block_local() + if_places(even)
+        + if_mixed(even) + match_payload() + lit_var() + lit_field() + assign() + method_arg()
+        + returned_field() + returned_early() + method_tail() + class_field() + mutex_field()
+        + deref_assign() + field_assign() + generic_arg() + spawn_arg() + qualified_arg()
+        + element_read() + delegate_arg()
+}
+
+fn main() -> i64 {
+    round(0) + round(1) + round(2) - 486
+}

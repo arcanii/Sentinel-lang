@@ -2363,6 +2363,21 @@ fn pass_c71_generic_container_arg_rc() {
 }
 
 #[test]
+fn pass_c71_shared_place_duplications() {
+    // ADR 0071 D2 amendment A1: a `Shared` / `Mutex` read out of a place (a binding, a field
+    // or element path, a deref), directly or as a block's / `if`'s / `match` arm's tail, into
+    // a new owner (a `let`, an assignment, a user-fn, generic or spawn argument, a
+    // struct-literal field, a returned value) is cloned. This builds through inkwell, which before the amendment
+    // released one unit more than it took on 19 of the fixture's 24 shapes — the debug
+    // runtime's refcount check turns that into an abort; balanced, the program answers 94.
+    // inkwell leaves method, qualified-call and class-init arguments out of the rule (it never
+    // drops those parameters, register D119), so those shapes pin the oracle and `scg`:
+    // `selfhost_codegen::oracle_ir_of_the_shared_duplication_program_runs` runs the oracle's
+    // IR of the same file, and the codegen differential holds `scg` to it.
+    assert_eq!(run_exit("c71_shared_place_duplications.sentinel"), 94);
+}
+
+#[test]
 fn pass_c16_transitive_mono_order() {
     // Register D24: the transitive monomorphisation closure's EMISSION ORDER. A
     // branching graph (main → g1,g2; g1 → h1; g2 → h2), because a single chain cannot

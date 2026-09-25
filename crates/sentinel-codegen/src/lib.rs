@@ -1649,6 +1649,7 @@ pub fn compile_to_object_for_module(
             current_method: None,
             vars: HashMap::new(),
             scope_stack: Vec::new(),
+            owning: false,
             arm_remainder_seq: 0,
             drop_plan,
             arena_routed,
@@ -2112,6 +2113,11 @@ struct CodegenCtx<'ctx, 'plan, 'm> {
     /// reverse to emit drop calls for heap-backed bindings that
     /// weren't moved.
     scope_stack: Vec<ScopeFrame<'ctx>>,
+    /// ADR 0071 D2 amendment A1: set by a sink that makes the value it lowers the
+    /// property of a new owner, and passed on only to a block's, an `if`'s, a `match`
+    /// arm's or a `scope` body's tail. A `Shared` / `Mutex` read out of a place in that
+    /// context is a duplication and is cloned; see [`Self::lower_expr`].
+    owning: bool,
     /// C2.4: per-fn moved-source sets from the borrow checker.
     /// Codegen looks up `current_fn_id` to determine which
     /// bindings should be skipped at scope-exit drop emission
@@ -3672,7 +3678,8 @@ impl<'ctx, 'plan, 'm> CodegenCtx<'ctx, 'plan, 'm> {
                 .push(param.id);
         }
 
-        let body_val = self.lower_block(&def.body, program)?;
+        // ADR 0071 D2 amendment A1: the caller is a new owner of the returned value.
+        let body_val = self.lower_block(&def.body, program, true)?;
         let tail_returned = tail_returned_var(&def.body.tail);
         self.emit_scope_drops(tail_returned, program)?;
         self.scope_stack.pop();
@@ -3794,7 +3801,8 @@ impl<'ctx, 'plan, 'm> CodegenCtx<'ctx, 'plan, 'm> {
                     .expect("just pushed")
                     .push(param.id);
             }
-            let body_val = self.lower_block(&m.body, program)?;
+            // ADR 0071 D2 amendment A1: the caller is a new owner of the returned value.
+            let body_val = self.lower_block(&m.body, program, true)?;
             self.scope_stack.pop();
             self.builder
                 .build_return(Some(&body_val))
@@ -3862,7 +3870,8 @@ impl<'ctx, 'plan, 'm> CodegenCtx<'ctx, 'plan, 'm> {
                     .expect("just pushed")
                     .push(param.id);
             }
-            let body_val = self.lower_block(&m.body, program)?;
+            // ADR 0071 D2 amendment A1: the caller is a new owner of the returned value.
+            let body_val = self.lower_block(&m.body, program, true)?;
             self.scope_stack.pop();
             self.builder
                 .build_return(Some(&body_val))
@@ -3978,7 +3987,8 @@ impl<'ctx, 'plan, 'm> CodegenCtx<'ctx, 'plan, 'm> {
                 .push(param.id);
         }
 
-        let body_val = self.lower_block(&fn_def.body, program)?;
+        // ADR 0071 D2 amendment A1: the caller is a new owner of the returned value.
+        let body_val = self.lower_block(&fn_def.body, program, true)?;
 
         // C2.4: emit drops for params (scope 0). The tail value
         // has already been loaded into body_val by lower_block;
@@ -4809,12 +4819,12 @@ impl<'ctx, 'plan, 'm> CodegenCtx<'ctx, 'plan, 'm> {
                 // flag before lowering elements; reset here too defensively.
                 self.array_route_active = self.arena_routed.contains(id)
                     && matches!(value.kind, TypedExprKind::ArrayLit { .. });
-                let v = self.lower_expr(value, program)?;
+                // ADR 0071 D2: the binding is a new owner of a `Shared` / `Mutex` read out
+                // of a place (`let y = x`, `let y = h.s`, `let y = { x }`) → rc++; an
+                // rvalue RHS, or a read that moves its place, transfers its unit (amendment
+                // A1).
+                let v = self.lower_owned(value, program)?;
                 self.array_route_active = false;
-                // ADR 0071 M1.4a slice 3: a `let y = x` where `x` is a named
-                // `Shared` binding duplicates it into a new owner → rc++ (a fresh
-                // `shared_new(...)`/call RHS is an rvalue transfer → no clone).
-                let v = self.clone_if_shared_var(value, v)?;
                 let llvm_ty = self.llvm_basic_type(*ty);
                 // D.5 / ADR 0036 D4: hoist to the entry block inside loops.
                 let alloca = self.binding_alloca(llvm_ty, name)?;
@@ -4885,7 +4895,13 @@ impl<'ctx, 'plan, 'm> CodegenCtx<'ctx, 'plan, 'm> {
                     // C2 / ADR 0017 D2: lower the RHS, compute the LHS
                     // address as a pointer, then store. Lvalue / mut
                     // gates already passed at type-check time.
-                    let v = self.lower_expr(value, program)?;
+                    // ADR 0071 D2 amendment A1: the place is a new owner of the value,
+                    // unless it lies in a class (left as D2 had it).
+                    let v = if in_class_field(target, program) {
+                        self.lower_expr(value, program)?
+                    } else {
+                        self.lower_owned(value, program)?
+                    };
                     let ptr = self.lower_lvalue_ptr(target, program)?;
                     self.builder
                         .build_store(ptr, v)
@@ -4943,7 +4959,7 @@ impl<'ctx, 'plan, 'm> CodegenCtx<'ctx, 'plan, 'm> {
                     arm_floor: self.arm_kont_slots.len(),
                 });
                 self.loop_depth += 1;
-                let body_result = self.lower_block(body, program);
+                let body_result = self.lower_block(body, program, false);
                 self.loop_depth -= 1;
                 self.loop_targets.pop();
                 let _ = body_result?;
@@ -5093,10 +5109,13 @@ impl<'ctx, 'plan, 'm> CodegenCtx<'ctx, 'plan, 'm> {
         }
     }
 
+    /// `owning_tail`: the block's value goes to a new owner, so its tail is lowered in an
+    /// owning context (ADR 0071 D2 amendment A1).
     fn lower_block(
         &mut self,
         block: &TypedBlock,
         program: &TypedProgram,
+        owning_tail: bool,
     ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
         // C2.4: push a fresh scope for this block's bindings.
         // Drops fire at the bottom (after the tail evaluates)
@@ -5106,11 +5125,17 @@ impl<'ctx, 'plan, 'm> CodegenCtx<'ctx, 'plan, 'm> {
         for stmt in &block.stmts {
             self.lower_stmt(stmt, program)?;
         }
-        let val = self.lower_expr(&block.tail, program)?;
         // Skip dropping a Var binding that's returned via the
         // tail — the move tracking will mark it in
         // `moved_sources`, but we also conservatively guard here.
         let tail_returned = tail_returned_var(&block.tail);
+        // ADR 0071 D2 amendment A1: a binding this block declares and returns as its tail
+        // is handed on — this block does not drop it — so it is not a duplication.
+        let local_tail = tail_returned.is_some_and(|id| {
+            self.scope_stack.last().is_some_and(|f| f.vars.contains(&id))
+        });
+        self.owning = owning_tail && !local_tail;
+        let val = self.lower_expr(&block.tail, program)?;
         self.emit_scope_drops(tail_returned, program)?;
         self.scope_stack.pop();
         Ok(val)
@@ -5532,8 +5557,8 @@ impl<'ctx, 'plan, 'm> CodegenCtx<'ctx, 'plan, 'm> {
                 // ADR 0071 M1.4b slice 3a: the refcount `--` at scope exit — load the
                 // handle ptr and `sentinel_mutex_release` it (frees the cell when the
                 // last owner drops), mirroring the Shared arm. The rc++ that balances
-                // it fires at each duplication of a named Mutex binding (let-init /
-                // by-value user-fn arg / spawn capture) via `clone_if_shared_var`.
+                // it fires at each duplication of a Mutex read out of a place into a
+                // new owner (ADR 0071 D2 and its amendment A1) via `clone_handle`.
                 let ptr_val = self
                     .builder
                     .build_load(self.context.ptr_type(inkwell::AddressSpace::default()), ptr, "mutex_drop_ld")
@@ -5727,6 +5752,7 @@ impl<'ctx, 'plan, 'm> CodegenCtx<'ctx, 'plan, 'm> {
         else_branch: &TypedBlock,
         result_ty: Type,
         program: &TypedProgram,
+        owning: bool,
     ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
         // ADR 0010 D9 retired at C1.3 step 5: the type checker
         // guarantees cond.ty == Bool, so the lowered value is already
@@ -5763,7 +5789,7 @@ impl<'ctx, 'plan, 'm> CodegenCtx<'ctx, 'plan, 'm> {
         // oracle keeps that store, and scg with it byte for byte; inkwell answers to no
         // byte-parity requirement, so it drops it.
         self.builder.position_at_end(then_bb);
-        let then_val = self.lower_block(then_branch, program)?;
+        let then_val = self.lower_block(then_branch, program, owning)?;
         if then_branch.ty == result_ty {
             self.builder
                 .build_store(result, then_val)
@@ -5774,7 +5800,7 @@ impl<'ctx, 'plan, 'm> CodegenCtx<'ctx, 'plan, 'm> {
             .map_err(|e| CodegenError::Builder(e.to_string()))?;
 
         self.builder.position_at_end(else_bb);
-        let else_val = self.lower_block(else_branch, program)?;
+        let else_val = self.lower_block(else_branch, program, owning)?;
         if else_branch.ty == result_ty {
             self.builder
                 .build_store(result, else_val)
@@ -6085,6 +6111,7 @@ impl<'ctx, 'plan, 'm> CodegenCtx<'ctx, 'plan, 'm> {
         arms: &[TypedMatchArm],
         result_ty: Type,
         program: &TypedProgram,
+        owning: bool,
     ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
         let scrut = self.lower_expr(scrutinee, program)?.into_struct_value();
         let tag = self
@@ -6133,6 +6160,7 @@ impl<'ctx, 'plan, 'm> CodegenCtx<'ctx, 'plan, 'm> {
             if let TypedPattern::Variant { variant_index, bindings, .. } = &arm.pattern {
                 self.bind_pattern_payloads(payload_ptr, enum_id, *variant_index, bindings, program)?;
             }
+            self.owning = owning;
             let v = self.lower_expr(&arm.body, program)?;
             // Register D66, as `lower_if` does for D59: only an arm of the match's own type
             // stores. The type checker makes every live arm that type, so an arm that differs
@@ -6150,6 +6178,7 @@ impl<'ctx, 'plan, 'm> CodegenCtx<'ctx, 'plan, 'm> {
         // Default block: the wildcard body, or `unreachable`.
         self.builder.position_at_end(default_bb);
         if let Some(arm) = wildcard_arm {
+            self.owning = owning;
             let v = self.lower_expr(&arm.body, program)?;
             // Register D66: as for the variant arms above.
             if arm.body.ty == result_ty {
@@ -7272,25 +7301,17 @@ impl<'ctx, 'plan, 'm> CodegenCtx<'ctx, 'plan, 'm> {
         Ok(value)
     }
 
-    /// ADR 0071 M1.4a slice 3: if `expr` is a bare `Var` of `Shared<T>` type, its
-    /// value is being DUPLICATED into a new owner (a `let` binding, a by-value
-    /// user-fn parameter, or a `spawn` capture) — emit `sentinel_shared_clone`
-    /// (rc++) on the just-lowered ptr, so the new owner's eventual scope-exit
-    /// `sentinel_shared_release` is balanced. An RVALUE source (a fresh
-    /// `shared_new(...)` result, or a call returning `Shared`) TRANSFERS its unit —
-    /// no clone. `lowered` is `expr`'s already-lowered value (a Var load = the
-    /// handle ptr). Non-Shared/Mutex / non-Var exprs pass through unchanged. ADR
-    /// 0071 M1.4b slice 3a: a named `Mutex` binding clones via `sentinel_mutex_clone`
-    /// (the same rc++ pattern — `Mutex<T> = Shared<SentinelMutex<T>>`).
-    fn clone_if_shared_var(
+    /// ADR 0071 D2 (and its amendment A1): `lowered` is a `Shared` / `Mutex` handle read
+    /// out of a place into a new owner — emit `sentinel_shared_clone` /
+    /// `sentinel_mutex_clone` (rc++) on it, so the new owner's scope-exit release is
+    /// balanced (`Mutex<T> = Shared<SentinelMutex<T>>`, the same rc++ pattern). Any other
+    /// type passes through unchanged.
+    fn clone_handle(
         &mut self,
-        expr: &TypedExpr,
+        ty: Type,
         lowered: BasicValueEnum<'ctx>,
     ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
-        if !matches!(expr.kind, TypedExprKind::Var(_)) {
-            return Ok(lowered);
-        }
-        let (clone_fn, name) = match expr.ty {
+        let (clone_fn, name) = match ty {
             Type::Shared(_) => (self.shared_clone_fn, "shared_clone"),
             Type::Mutex(_) => (self.mutex_clone_fn, "mutex_clone"),
             _ => return Ok(lowered),
@@ -8168,8 +8189,7 @@ impl<'ctx, 'plan, 'm> CodegenCtx<'ctx, 'plan, 'm> {
         // every arg reaching here is a user-fn param that the callee will release.
         let mut arg_values: Vec<BasicMetadataValueEnum> = Vec::with_capacity(args.len());
         for a in args {
-            let v = self.lower_expr(a, program)?;
-            let v = self.clone_if_shared_var(a, v)?;
+            let v = self.lower_owned(a, program)?;
             arg_values.push(v.into());
         }
         let call = self
@@ -8215,8 +8235,7 @@ impl<'ctx, 'plan, 'm> CodegenCtx<'ctx, 'plan, 'm> {
         // every arg reaching here is a user-fn param that the callee will release.
         let mut arg_values: Vec<BasicMetadataValueEnum> = Vec::with_capacity(args.len());
         for a in args {
-            let v = self.lower_expr(a, program)?;
-            let v = self.clone_if_shared_var(a, v)?;
+            let v = self.lower_owned(a, program)?;
             arg_values.push(v.into());
         }
         let call_name = format!("call_{}", signature.name);
@@ -8259,10 +8278,72 @@ impl<'ctx, 'plan, 'm> CodegenCtx<'ctx, 'plan, 'm> {
         })
     }
 
+    /// Lower `expr`. ADR 0071 D2 amendment A1: in an owning context (see
+    /// [`Self::owning`]), a `Shared` / `Mutex` read out of a place — a binding, a field or
+    /// element path rooted at one or at a reference, or a deref — is a second owner of the
+    /// handle, so it is cloned right after it is read — unless the read moves the place
+    /// ([`Self::moved_out`]). A value that is not read out of a place (a call's result,
+    /// `shared_new`) carries its own unit and is not. Every sub-expression is lowered
+    /// outside the context unless the arm hands it on (a block's, an `if`'s, a `match`
+    /// arm's or a `scope` body's tail).
     fn lower_expr(
         &mut self,
         expr: &TypedExpr,
         program: &TypedProgram,
+    ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+        let owning = std::mem::replace(&mut self.owning, false);
+        let v = self.lower_expr_kind(expr, program, owning)?;
+        if owning && is_place_read(expr) && !self.moved_out(expr) {
+            self.clone_handle(expr.ty, v)
+        } else {
+            Ok(v)
+        }
+    }
+
+    /// ADR 0071 D2 amendment A1: whether this read moves the place it reads — a binding the
+    /// drop plan records as moved, or exactly a field of one it records as partially moved.
+    /// A `Shared` / `Mutex` place is one only in a generic body instantiated at it, where the
+    /// checker treats the type parameter as Move; its drop is then skipped, so the read hands
+    /// its unit on and a clone would never be released. A path merely rooted at a binding
+    /// moved elsewhere (`take(h.s)`, with `h` moved later) is not moved by this read, and is
+    /// cloned. Mirrors the text oracle's `moved_out`.
+    fn moved_out(&self, e: &TypedExpr) -> bool {
+        let (moved, moved_fields) = match self.current_method {
+            Some(k) => (
+                self.drop_plan.method_moved_sources_for(k),
+                self.drop_plan.method_moved_fields_for(k),
+            ),
+            None => (
+                self.drop_plan.moved_sources_for(self.current_fn_id),
+                self.drop_plan.moved_fields_for(self.current_fn_id),
+            ),
+        };
+        match &e.kind {
+            TypedExprKind::Var(id) => moved.contains(id),
+            TypedExprKind::FieldAccess { target, field_index, .. } => match &target.kind {
+                TypedExprKind::Var(b) => moved_fields.contains(&(*b, *field_index as u32)),
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+
+    /// Lower `e` as a value that becomes the property of a new owner (ADR 0071 D2
+    /// amendment A1).
+    fn lower_owned(
+        &mut self,
+        e: &TypedExpr,
+        program: &TypedProgram,
+    ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+        self.owning = true;
+        self.lower_expr(e, program)
+    }
+
+    fn lower_expr_kind(
+        &mut self,
+        expr: &TypedExpr,
+        program: &TypedProgram,
+        owning: bool,
     ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
         match &expr.kind {
             TypedExprKind::IntLit(n) => {
@@ -8599,9 +8680,9 @@ impl<'ctx, 'plan, 'm> CodegenCtx<'ctx, 'plan, 'm> {
             TypedExprKind::Logic(LogicOp::Or, lhs, rhs) => {
                 self.lower_logic_or(lhs, rhs, program)
             }
-            TypedExprKind::Block(b) => self.lower_block(b, program),
+            TypedExprKind::Block(b) => self.lower_block(b, program, owning),
             TypedExprKind::If { cond, then_branch, else_branch } => {
-                self.lower_if(cond, then_branch, else_branch, expr.ty, program)
+                self.lower_if(cond, then_branch, else_branch, expr.ty, program, owning)
             }
             TypedExprKind::Call { id, args, type_args, .. } => {
                 // ADR 0014 D9 + ADR 0015 D4 builtins: lower inline
@@ -8850,8 +8931,12 @@ impl<'ctx, 'plan, 'm> CodegenCtx<'ctx, 'plan, 'm> {
                 // is never appended to a terminated block. This is the
                 // `break`/`continue` shape (ADR 0036) with the floor set to the
                 // whole function ("break all the way out").
-                let val = self.lower_expr(inner, program)?;
                 let tail_returned = tail_returned_var(inner);
+                // ADR 0071 D2 amendment A1: the caller is a new owner of the value; a
+                // returned binding is exempt from every frame's drop below, so it is
+                // handed on rather than duplicated.
+                self.owning = tail_returned.is_none();
+                let val = self.lower_expr(inner, program)?;
                 self.emit_return_drops(tail_returned, program)?;
                 // ADR 0065 D6 / ADR 0074 D2: this `return` may leave one or
                 // more handler arms (a `return` in an arm body, or in a nested
@@ -9029,7 +9114,9 @@ impl<'ctx, 'plan, 'm> CodegenCtx<'ctx, 'plan, 'm> {
                 };
                 let mut agg = struct_ty.get_undef();
                 for (i, fv) in fields.iter().enumerate() {
-                    let val = self.lower_expr(fv, program)?;
+                    // ADR 0071 D2 amendment A1: the struct owns its fields (its drop walks
+                    // them), so a field's value goes to a new owner.
+                    let val = self.lower_owned(fv, program)?;
                     let inserted = self
                         .builder
                         .build_insert_value(agg, val, i as u32, "structlit")
@@ -9187,7 +9274,7 @@ impl<'ctx, 'plan, 'm> CodegenCtx<'ctx, 'plan, 'm> {
                     .into_pointer_value();
                 let prev_scope = self.current_scope;
                 self.current_scope = Some(scope_ptr);
-                let body_val = self.lower_block(body, program)?;
+                let body_val = self.lower_block(body, program, owning)?;
                 self.current_scope = prev_scope;
                 self.builder
                     .build_call(self.scope_exit_fn, &[scope_ptr.into()], "scope_exit")
@@ -9219,10 +9306,9 @@ impl<'ctx, 'plan, 'm> CodegenCtx<'ctx, 'plan, 'm> {
                 // instruction, so this is unchanged from the prior order there.
                 let mut lowered = Vec::with_capacity(n);
                 for arg in call_args_exprs.iter() {
-                    let v = self.lower_expr(arg, program)?;
-                    // ADR 0071 M1.4a slice 3: a `Shared` Var captured into a spawn is
+                    // ADR 0071 D2: a `Shared` captured into a spawn out of a place is
                     // duplicated into the spawned task's (drop-recorded) param → rc++.
-                    let v = self.clone_if_shared_var(arg, v)?;
+                    let v = self.lower_owned(arg, program)?;
                     lowered.push(v);
                 }
                 let args_storage = self.alloc_call(size_v)?;
@@ -9329,7 +9415,7 @@ impl<'ctx, 'plan, 'm> CodegenCtx<'ctx, 'plan, 'm> {
                 self.lower_enum_construct(*enum_id, *variant_index, args, expr.ty, program)
             }
             TypedExprKind::Match { scrutinee, enum_id, arms } => {
-                self.lower_match(scrutinee, *enum_id, arms, expr.ty, program)
+                self.lower_match(scrutinee, *enum_id, arms, expr.ty, program, owning)
             }
         }
     }
@@ -12661,6 +12747,36 @@ fn find_var_name_in_expr(expr: &TypedExpr, id: VarId) -> Option<&str> {
     }
 }
 
+/// ADR 0071 D2 amendment A1: `e` reads its value out of a place — a binding, a deref, or
+/// a field or element path rooted at one of those — rather than computing it. A path
+/// rooted at a temporary (`mk().s`) is not a place: nothing drops the temporary, so the
+/// value it carries is handed on, not duplicated.
+fn is_place_read(e: &TypedExpr) -> bool {
+    match &e.kind {
+        TypedExprKind::Var(_) | TypedExprKind::Unary(UnaryOp::Deref, _) => true,
+        TypedExprKind::FieldAccess { target, .. } | TypedExprKind::Index { target, .. } => {
+            is_place_read(target)
+        }
+        _ => false,
+    }
+}
+
+/// Whether the place `e` is, or lies inside, a field of a class instance, which ADR 0071
+/// D2 amendment A1 leaves as D2 had it (not a new owner).
+fn in_class_field(e: &TypedExpr, program: &TypedProgram) -> bool {
+    match &e.kind {
+        TypedExprKind::FieldAccess { target, .. } => {
+            let base = match target.ty {
+                Type::Ref(id) => program.refs[id.0 as usize].inner,
+                t => t,
+            };
+            matches!(base, Type::Class(_)) || in_class_field(target, program)
+        }
+        TypedExprKind::Index { target, .. } => in_class_field(target, program),
+        _ => false,
+    }
+}
+
 /// C2.4 / ADR 0017 D8 helper: if a block / fn tail expression
 /// is `Var(id)`, returns `Some(id)` — codegen should skip
 /// dropping that binding at scope exit (it's being returned by
@@ -12838,6 +12954,22 @@ mod tests {
     fn compile_src_ir(src: &str) -> String {
         LAST_VERIFIED_IR.with(|ir| *ir.borrow_mut() = None);
         compile_src(src).expect("compile");
+        LAST_VERIFIED_IR
+            .with(|ir| ir.borrow_mut().take())
+            .expect("a verified module was captured")
+    }
+
+    /// [`compile_src_ir`] with the borrow checker's real drop plan instead of the empty
+    /// one, for a test whose subject is what codegen does with the moves it records.
+    fn compile_src_ir_with_moves(src: &str) -> String {
+        let prog = parse(src).expect("parse");
+        let resolved = resolve(&prog).expect("resolve");
+        let typed = check(&resolved).expect("check");
+        let (drop_plan, errors) = sentinel_borrow_check::borrow_check(&typed);
+        assert!(errors.is_empty(), "the test program must borrow-check: {errors:?}");
+        let hir = sentinel_hir::lower_to_hir(&typed, &drop_plan);
+        LAST_VERIFIED_IR.with(|ir| *ir.borrow_mut() = None);
+        compile_to_object(&hir, &out_path()).expect("compile");
         LAST_VERIFIED_IR
             .with(|ir| ir.borrow_mut().take())
             .expect("a verified module was captured")
@@ -13338,6 +13470,60 @@ fn main() -> i64 { conds(2) }
         assert!(
             stray.iter().any(|l| l.contains("%tail = alloca")),
             "`tail`'s slot is nowhere outside the entry block — where was it built?\n{body}"
+        );
+    }
+
+    // ===== ADR 0071 D2 amendment A1: a read that moves its place hands the unit on =====
+    //
+    // A generic body instantiated at `Shared` treats its type parameter as Move: the drop
+    // plan records the parameter (or a field of one) as moved where it flows into the body
+    // value, a struct literal or a call, and skips its drop. Such a read transfers the unit,
+    // so cloning it would leave a unit nothing releases. A read of a `Shared` field of a
+    // binding that is moved only ELSEWHERE is not a move of that field and must still clone.
+    // Getting the first wrong is a leak, which no exit code shows, and the corpus cannot carry
+    // the generic shapes (the oracle and `scg` lower generic bodies differently, register
+    // D36), so this reads the IR. The second shape is not generic; it is here because a
+    // moved-place test keyed on the ROOT binding would drop exactly its clone, and that would
+    // release one unit too many.
+
+    const A1_MOVED_READS: &str = r#"
+struct Bx<U> { v: U, n: i64 }
+struct H { s: Shared<i64>, n: i64 }
+fn sink<U>(x: U) -> i64 { 1 }
+fn ident<U>(x: U) -> U { x }
+fn boxit<U>(x: U) -> Bx<U> { Bx { v: x, n: 1 } }
+fn unbox<U>(b: Bx<U>) -> U { b.v }
+fn relay<U>(x: U) -> i64 { sink({ x }) }
+fn eat(h: H) -> i64 { h.n }
+fn take(x: Shared<i64>) -> i64 { shared_get(x) }
+fn read_then_move(h: H) -> i64 { take(h.s) + eat(h) }
+fn main() -> i64 {
+    let s: Shared<i64> = shared_new(5);
+    let a: Shared<i64> = ident(s);
+    let b: Bx<Shared<i64>> = boxit(s);
+    let c: Shared<i64> = unbox(b);
+    relay(s) + shared_get(a) + shared_get(c) + read_then_move(H { s: s, n: 1 })
+}
+"#;
+
+    #[test]
+    fn a1_a_moved_generic_read_hands_its_unit_on() {
+        let ir = compile_src_ir_with_moves(A1_MOVED_READS);
+        for f in ["ident__shared_i64", "boxit__shared_i64", "unbox__shared_i64", "relay__shared_i64"] {
+            let body = ir_fn_body(&ir, f);
+            assert_eq!(
+                body.matches("@sentinel_shared_clone(").count(),
+                0,
+                "@{f} clones a parameter its drop plan moves, so nothing releases the clone:\n{body}"
+            );
+        }
+        // `h` is moved into `eat` after `take(h.s)` reads its field; that read still clones,
+        // or `take` and `eat` would release the same unit.
+        let body = ir_fn_body(&ir, "read_then_move");
+        assert_eq!(
+            body.matches("@sentinel_shared_clone(").count(),
+            1,
+            "@read_then_move: the field read before the move must clone:\n{body}"
         );
     }
 

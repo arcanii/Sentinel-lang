@@ -20,11 +20,15 @@ fn close_ty(out: &mut Vec<u8>, ty: i64, c: &mut TyCtx) -> i64 {
 fn dump_cargs(out: &mut Vec<u8>, a: Args, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
     let svc: bool = (*c).consuming;
     (*c).consuming = true;
-    // (ADR 0071 M1.4a slice 3) construct/aggregate args are NOT user-fn owning
-    // params — don't rc++ a Shared element here (matches the oracle, which clones
-    // only at let-init / user-fn call-arg / spawn).
+    // (ADR 0071 D2 amendment A1) the arguments of a class init, a method or a qualified
+    // call go to parameters the callee drops, so each is walked in the owning context;
+    // those of an enum construct or a `perform` are not (the caller sets `cg_ownargs`,
+    // and it is consumed here so a nested walk does not inherit it). The oracle's
+    // `lower_args` is the owning half.
+    let own_args: bool = (*c).cg_ownargs;
+    (*c).cg_ownargs = false;
     let svu: bool = (*c).cg_ufarg;
-    (*c).cg_ufarg = false;
+    (*c).cg_ufarg = own_args;
     dump_targs(out, a, 0 - 1, 0, src, c, gb);
     (*c).cg_ufarg = svu;
     (*c).consuming = svc;
@@ -47,12 +51,12 @@ fn dump_targs(out: &mut Vec<u8>, a: Args, pfid: i64, pidx: i64, src: &[u8], c: &
             // (6/N) args INHERIT the caller's consuming context (the call arm sets it —
             // user-fn/construct args consume, builtin args do not).
             let aexp: i64 = fn_param_ty(c, pfid, pidx);
+            // (ADR 0071 D2 and its amendment A1) an argument to a parameter the callee
+            // drops (`cg_ufarg`) is walked in the owning context, so a `Shared` / `Mutex`
+            // read out of a place is cloned as it is read, before it is collected.
+            (*c).cg_own = (*c).cg_ufarg;
             let cg_argty: i64 = dump_texpr(out, x, aexp, src, c, gb);
             mir_collect(c);
-            // (ADR 0071 M1.4a slice 3) rc++ a named-`Shared` arg into a user-fn
-            // owning param (gated by `cg_ufarg`), re-threading to the clone before
-            // it is collected. A no-op for every non-Shared / non-user-fn arg.
-            cg_clone_shared_arg(c, cg_argty);
             cg_collect(c, cg_argty);
             dump_targs(out, rest, pfid, pidx + 1, src, c, gb)
         },
@@ -408,9 +412,6 @@ fn dump_args_capture_all(out: &mut Vec<u8>, a: Args, ps: i64, pi: i64, np: i64, 
             push(out, ' ');
             // (6/N) generic-call args inherit the caller's consuming context (set true
             // by the user-fn call arm).
-            // (register D31) snapshot the node counter so the clone gate below can tell
-            // a BARE `Var` argument from a compound one whose tail merely happens to be
-            // a Var. See the gate.
             // (register D45) The parameter this argument fills, and the expectation it
             // implies under the bindings built by the arguments to its LEFT.
             let pty: i64 = if pi < np {
@@ -419,38 +420,14 @@ fn dump_args_capture_all(out: &mut Vec<u8>, a: Args, ps: i64, pi: i64, np: i64, 
                 0 - 1
             };
             let aexp: i64 = arg_expected(c, pty, bi, bt);
-            let n0: i64 = (*c).ndump;
+            // (ADR 0071 D2 and its amendment A1 / register D31) a generic callee drops its
+            // parameters too, so the argument is walked in the owning context, as in
+            // `dump_targs`: a container read out of a place is cloned as it is read, and
+            // `dump_texpr_node` decides "read out of a place" from the node's own shape —
+            // the oracle's test — not from a tracker a compound argument can leak.
+            (*c).cg_own = (*c).cg_ufarg;
             let t0: i64 = dump_texpr(out, x, aexp, src, c, gb);
             mir_collect(c);
-            // (ADR 0071 M1.4a slice 3 / register D31) rc++ a named container arg into
-            // the callee's owning param, as `dump_targs` does. ⚠ THIS WAS MISSING and the
-            // comment below claimed it was here: a `Shared<T>` or `Mutex<T>` passed by
-            // value to a GENERIC fn got no clone while the callee still emitted its
-            // release, so the refcount went one release too far — the cell was freed
-            // while the caller still held it and the caller's next use read freed memory.
-            // The oracle always emitted the clone; only this path diverged, which is why
-            // a NON-generic callee was byte-identical.
-            //
-            // ⚠ THE `ndump` TEST IS LOAD-BEARING — DO NOT REDUCE THIS TO A BARE
-            // `cg_clone_shared_arg` CALL. That helper gates on `mvbv >= 0`, which is NOT
-            // "the argument is a named Var": `mvbv` is reset per node and set by the Var
-            // arm, so ANY compound argument whose tail is a Var (`{ s }`, `if c { s }
-            // else { t }`, `p.h`) leaks it upward and the helper fires. The oracle
-            // decides structurally (`clone_if_shared_var` returns early unless the whole
-            // argument is a `Var` node), so the leaky gate would emit a clone the oracle
-            // does not. A first cut of this fix did exactly that and the review caught it:
-            // three shapes that were byte-identical before became DIVERGENT. A delta of
-            // exactly 1 node means the argument was a LEAF, and `mvbv >= 0` means that
-            // leaf was a Var — together, the oracle's test.
-            //
-            // `dump_targs` still carries the leaky gate and still over-clones on those
-            // three shapes (pre-existing, registered). It is NOT fixed here because the
-            // ORACLE is the wrong side there and the fix is oracle-first.
-            if (*c).ndump == n0 + 1 {
-                cg_clone_shared_arg(c, t0)
-            } else {
-                0
-            };
             // (Bar B / generics-b) codegen: collect the arg operand so cg_emit_call can
             // pass it to the monomorphic callee (mirrors dump_targs / dump_args_capture_first).
             cg_collect(c, t0);
@@ -1106,6 +1083,9 @@ fn dump_sfields(out: &mut Vec<u8>, f: Fields, sid: i64, gen: bool, gargs: &Vec<i
             };
             sink_name(gb, fnm);
             push(out, ' ');
+            // (ADR 0071 D2 amendment A1) the struct owns its fields (its drop walks them),
+            // so a field's value goes to a new owner.
+            (*c).cg_own = true;
             let sf_vty: i64 = dump_texpr(out, fval, ftype, src, c, gb);
             mir_collect(c);
             // (8c-1) codegen: collect this field's operand + type onto the shared

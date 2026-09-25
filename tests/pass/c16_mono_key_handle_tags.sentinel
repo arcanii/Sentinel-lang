@@ -20,17 +20,15 @@
 // `@idg__opt_ty`. That is "invalid redefinition of function", not a byte difference.
 //
 // Deliberately NOT exercised here, each for its own specific reason:
-//   * `Shared<T>` / `Mutex<T>` through a generic argument. Their tags are correct,
-//     but `scg` drops the refcount `clone` on a container passed as a GENERIC call
-//     argument, so those programs diverge for an unrelated, pre-existing reason (the
-//     `dump_generic_call` gap). Pinning them here would pin that bug instead.
-//     ⚠ That bug is worse than "diverges": it is an OVER-RELEASE — the oracle emits
-//     1 `sentinel_shared_clone` against 2 `sentinel_shared_release`, `scg` emits 0
-//     against the same 2, so the rc hits zero inside the callee and the next read is a
-//     use-after-free. Observed here first and left as a parenthetical; now filed as
-//     **register D31**, with the locus (`dump_args_capture_all` omits the
-//     `cg_clone_shared_arg` that `dump_targs` has). Recording a defect in a fixture
-//     comment is not the same as filing it, and this one waited a slice too long.
+//   * `Shared<T>` / `Mutex<T>` through a generic argument. Their tags were correct, but
+//     when this fixture was written `scg` did not emit the refcount `clone` on a
+//     container passed as a GENERIC call argument, so those programs diverged for an
+//     unrelated reason (the `dump_generic_call` gap), and pinning them here would have
+//     pinned that instead. It released one unit more than the oracle and was filed as
+//     **register D31**, since closed; `c71_generic_container_arg_rc` and
+//     `c71_shared_place_duplications` now carry the shape. Observed here first and left
+//     as a parenthetical — recording a defect in a fixture comment is not the same as
+//     filing it, and this one waited a slice too long.
 //   * `task_<elem>`. `Task<T>`'s result is always `i64` at the ADR 0024 minimum, so
 //     `task_i64` cannot be distinguished from a hardcoded `i64` in any back end.
 //     Recorded rather than silently absent.

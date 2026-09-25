@@ -1034,6 +1034,7 @@ fn dump_fn_named(
         parent_sym: sym.to_string(),
         arm_kslots: Vec::new(),
         embed_ph: None,
+        owning: false,
         handle_depth: 0,
         current_scope: None,
     };
@@ -1061,7 +1062,13 @@ fn dump_fn_named(
     for stmt in &f.body.stmts {
         e.lower_stmt(stmt)?;
     }
-    let tail = e.lower_expr(&f.body.tail)?;
+    // ADR 0071 D2 amendment A1: the caller is a new owner of the returned value. (An
+    // effecting fn's value crosses the one-`i64` continuation seam instead, ADR 0072.)
+    let tail = if is_effecting {
+        e.lower_expr(&f.body.tail)?
+    } else {
+        e.lower_owned(&f.body.tail)?
+    };
     e.emit_scope_drops()?; // body-frame drops
     e.scopes.pop();
     e.emit_scope_drops()?; // param-frame drops
@@ -1161,6 +1168,7 @@ fn dump_let_shape_fn(
             parent_sym: sym.to_string(),
             arm_kslots: Vec::new(),
             embed_ph: None,
+            owning: false,
         handle_depth: 0,
         current_scope: None,
         };
@@ -1245,6 +1253,7 @@ fn dump_let_shape_fn(
             parent_sym: sym.to_string(),
             arm_kslots: Vec::new(),
             embed_ph: None,
+            owning: false,
         handle_depth: 0,
         current_scope: None,
         };
@@ -1347,6 +1356,7 @@ fn dump_embedded_shape_fn(
             parent_sym: sym.to_string(),
             arm_kslots: Vec::new(),
             embed_ph: None,
+            owning: false,
         handle_depth: 0,
         current_scope: None,
         };
@@ -1432,6 +1442,7 @@ fn dump_embedded_shape_fn(
             parent_sym: sym.to_string(),
             arm_kslots: Vec::new(),
             embed_ph: None,
+            owning: false,
         handle_depth: 0,
         current_scope: None,
         };
@@ -1555,6 +1566,7 @@ fn dump_chained_lets_fn(
             parent_sym: sym.to_string(),
             arm_kslots: Vec::new(),
             embed_ph: None,
+            owning: false,
         handle_depth: 0,
         current_scope: None,
         };
@@ -1616,6 +1628,7 @@ fn dump_chained_lets_fn(
             parent_sym: sym.to_string(),
             arm_kslots: Vec::new(),
             embed_ph: None,
+            owning: false,
         handle_depth: 0,
         current_scope: None,
         };
@@ -1733,6 +1746,7 @@ fn dump_method(
         parent_sym: sym.to_string(),
         arm_kslots: Vec::new(),
         embed_ph: None,
+        owning: false,
         handle_depth: 0,
         current_scope: None,
     };
@@ -1760,7 +1774,8 @@ fn dump_method(
     }
     match ret_ty {
         Some(_) => {
-            let tail = e.lower_expr(&body.tail)?;
+            // ADR 0071 D2 amendment A1: the caller is a new owner of the returned value.
+            let tail = e.lower_owned(&body.tail)?;
             e.emit_scope_drops()?;
             e.scopes.pop();
             e.emit_scope_drops()?;
@@ -1807,6 +1822,20 @@ type HandleFrame = (
     usize,
     Option<Result<ArmRemainderInfo, String>>,
 );
+
+/// ADR 0071 D2 amendment A1: `e` reads its value out of a place — a binding, a deref, or
+/// a field or element path rooted at one of those — rather than computing it. A path
+/// rooted at a temporary (`mk().s`) is not a place: nothing drops the temporary, so the
+/// value it carries is handed on, not duplicated.
+fn is_place_read(e: &TypedExpr) -> bool {
+    match &e.kind {
+        TypedExprKind::Var(_) | TypedExprKind::Unary(UnaryOp::Deref, _) => true,
+        TypedExprKind::FieldAccess { target, .. } | TypedExprKind::Index { target, .. } => {
+            is_place_read(target)
+        }
+        _ => false,
+    }
+}
 
 struct Emit<'a> {
     program: &'a TypedProgram,
@@ -1867,6 +1896,11 @@ struct Emit<'a> {
     /// lowers as a `load` from this slot (the parent already lowered the real
     /// perform + its args); `None` everywhere else.
     embed_ph: Option<u32>,
+    /// ADR 0071 D2 amendment A1: set by a sink that makes the value it lowers
+    /// the property of a new owner, and passed on only to a block's, an `if`'s, a
+    /// `match` arm's or a `scope` body's tail. A `Shared` / `Mutex` read out of a place in that context is a
+    /// duplication and is cloned; see [`Self::lower_expr`].
+    owning: bool,
     /// ADR 0075 D6: top-level `define`s discovered while lowering this one — the resumer
     /// that replays a handler arm's remainder. Nothing about it is known before the arm is
     /// reached, so it is accumulated here and appended to the module text after the
@@ -1966,11 +2000,11 @@ impl Emit<'_> {
     fn lower_stmt(&mut self, stmt: &TypedStmt) -> Result<(), String> {
         match &stmt.kind {
             TypedStmtKind::Let { id, ty, value, .. } => {
-                let v = self.lower_expr(value)?;
-                // ADR 0071 M1.4a slice 3: `let y = x` where `x` is a named `Shared`
-                // binding duplicates it into a new owner → rc++ (an rvalue RHS
-                // transfers → no clone).
-                let v = self.clone_if_shared_var(value, v)?;
+                // ADR 0071 D2: the binding is a new owner of a `Shared` / `Mutex` read out
+                // of a place (`let y = x`, `let y = h.s`, `let y = { x }`) → rc++; an
+                // rvalue RHS, or a read that moves its place, transfers its unit (amendment
+                // A1).
+                let v = self.lower_owned(value)?;
                 let llty = self.lty(*ty)?;
                 let slot = self.alloca(&llty);
                 writeln!(self.body, "  store {llty} {v}, ptr %v{slot}").unwrap();
@@ -1987,7 +2021,8 @@ impl Emit<'_> {
                     // value then storing matches the Sentinel's target-then-value
                     // order (its suppressed target walk emits nothing).
                     let slot = *self.slots.get(id).ok_or("assign to an unbound var")?;
-                    let v = self.lower_expr(value)?;
+                    // ADR 0071 D2 amendment A1: the binding is a new owner of the value.
+                    let v = self.lower_owned(value)?;
                     let llty = self.lty(target.ty)?;
                     writeln!(self.body, "  store {llty} {v}, ptr %v{slot}").unwrap();
                     Ok(())
@@ -2000,7 +2035,13 @@ impl Emit<'_> {
                 | TypedExprKind::FieldAccess { .. }
                 | TypedExprKind::Index { .. } => {
                     let ptr = self.lower_lvalue_ptr(target)?;
-                    let v = self.lower_expr(value)?;
+                    // ADR 0071 D2 amendment A1: the place is a new owner of the value,
+                    // unless it lies in a class (left as D2 had it).
+                    let v = if self.in_class_field(target) {
+                        self.lower_expr(value)?
+                    } else {
+                        self.lower_owned(value)?
+                    };
                     let llty = self.lty(target.ty)?;
                     writeln!(self.body, "  store {llty} {v}, ptr {ptr}").unwrap();
                     Ok(())
@@ -2027,7 +2068,7 @@ impl Emit<'_> {
                 // 8d-drops-3: scope_floor = the body frame's index, captured NOW (before
                 // lower_block_expr pushes it) so break/continue drain frames >= it.
                 self.loops.push((cond_b, after_b, self.scopes.len(), self.arm_kslots.len()));
-                let _ = self.lower_block_expr(body)?; // a while body's value is discarded
+                let _ = self.lower_block_expr(body, false)?; // a while body's value is discarded
                 self.loops.pop();
                 writeln!(self.body, "  br label %bb{cond_b}").unwrap();
                 writeln!(self.body, "bb{after_b}:").unwrap();
@@ -2064,7 +2105,47 @@ impl Emit<'_> {
     /// Lower an expression, emitting instructions into `self.body`, and
     /// return its **operand** — either a literal (`42`, `0`/`1`) or a
     /// register (`%vN`).
+    /// Lower `expr`. ADR 0071 D2 amendment A1: in an owning context (see [`Self::owning`]),
+    /// a `Shared` / `Mutex` read out of a place — a binding, a field or element path rooted
+    /// at one or at a reference, or a deref — is a second owner of the handle, so it is
+    /// cloned right after it is read, unless the read moves the place ([`Self::moved_out`]).
+    /// A value that is not read out of a place (a call's result, `shared_new`) carries its
+    /// own unit and is not. Every sub-expression is lowered outside the context unless the
+    /// arm hands it on (a block's, an `if`'s, a `match` arm's or a `scope` body's tail).
     fn lower_expr(&mut self, expr: &TypedExpr) -> Result<String, String> {
+        let owning = std::mem::replace(&mut self.owning, false);
+        let op = self.lower_expr_kind(expr, owning)?;
+        if owning && is_place_read(expr) && !self.moved_out(expr) {
+            self.clone_handle(expr.ty, op)
+        } else {
+            Ok(op)
+        }
+    }
+
+    /// ADR 0071 D2 amendment A1: whether this read moves the place it reads — a binding the
+    /// drop plan records as moved, or exactly a field of one it records as partially moved.
+    /// A `Shared` / `Mutex` place is one only in a generic body instantiated at it, where the
+    /// checker treats the type parameter as Move; its drop is then skipped, so the read hands
+    /// its unit on and a clone would never be released. A path merely rooted at a binding
+    /// moved elsewhere (`take(h.s)`, with `h` moved later) is not moved by this read, and is
+    /// cloned. Mirrors inkwell's `moved_out`.
+    fn moved_out(&self, e: &TypedExpr) -> bool {
+        let dp = self.drop_plan;
+        let (moved, moved_fields) = match self.current_method {
+            Some(k) => (dp.method_moved_sources_for(k), dp.method_moved_fields_for(k)),
+            None => (dp.moved_sources_for(self.current_fn), dp.moved_fields_for(self.current_fn)),
+        };
+        match &e.kind {
+            TypedExprKind::Var(id) => moved.contains(id),
+            TypedExprKind::FieldAccess { target, field_index, .. } => match &target.kind {
+                TypedExprKind::Var(b) => moved_fields.contains(&(*b, *field_index as u32)),
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+
+    fn lower_expr_kind(&mut self, expr: &TypedExpr, owning: bool) -> Result<String, String> {
         match &expr.kind {
             TypedExprKind::IntLit(n) => Ok(n.to_string()),
             // ADR 0058: `f64` is not ported to the textual `snc llvm` oracle
@@ -2102,7 +2183,8 @@ impl Emit<'_> {
             // sink. This is byte-identical to the self-hosted `scg` (the `cg` mode of
             // `dump_texpr` in `selfhost/types.sentinel`).
             TypedExprKind::Return(inner) => {
-                let val = self.lower_expr(inner)?;
+                // ADR 0071 D2 amendment A1: the caller is a new owner of the value.
+                let val = self.lower_owned(inner)?;
                 // Floor 0: drain ALL open scope frames (params + body + any nested).
                 self.emit_loop_exit_drops(0)?;
                 // ADR 0065 D6 / ADR 0074 D2: a `return` leaves every handler arm being
@@ -2394,7 +2476,7 @@ impl Emit<'_> {
             }
             // A value-block `{ stmts; tail }` needs no new basic block (only
             // if/while do) — lower its stmts, return its tail operand.
-            TypedExprKind::Block(b) => self.lower_block_expr(b),
+            TypedExprKind::Block(b) => self.lower_block_expr(b, owning),
             // `if c { t } else { e }` — the no-phi memory-cell merge: a hoisted
             // result slot, a conditional branch, each arm storing its value into
             // the slot, and a load at the merge. The slot is reserved AFTER the then
@@ -2416,14 +2498,14 @@ impl Emit<'_> {
                 let merge_b = self.fresh_block();
                 writeln!(self.body, "  br i1 {c}, label %bb{then_b}, label %bb{else_b}").unwrap();
                 writeln!(self.body, "bb{then_b}:").unwrap();
-                let tv = self.lower_block_expr(then_branch)?;
+                let tv = self.lower_block_expr(then_branch, owning)?;
                 let rty = self.lty(expr.ty)?;
                 let slot = self.alloca(&rty);
                 let tty = self.lty(then_branch.ty)?;
                 writeln!(self.body, "  store {tty} {tv}, ptr %v{slot}").unwrap();
                 writeln!(self.body, "  br label %bb{merge_b}").unwrap();
                 writeln!(self.body, "bb{else_b}:").unwrap();
-                let ev = self.lower_block_expr(else_branch)?;
+                let ev = self.lower_block_expr(else_branch, owning)?;
                 let ety = self.lty(else_branch.ty)?;
                 writeln!(self.body, "  store {ety} {ev}, ptr %v{slot}").unwrap();
                 writeln!(self.body, "  br label %bb{merge_b}").unwrap();
@@ -2476,7 +2558,9 @@ impl Emit<'_> {
                 let mut field_ops = Vec::with_capacity(fields.len());
                 for fv in fields {
                     let fty = self.lty(fv.ty)?;
-                    let op = self.lower_expr(fv)?;
+                    // ADR 0071 D2 amendment A1: the struct owns its fields (its drop walks
+                    // them), so a field's value goes to a new owner.
+                    let op = self.lower_owned(fv)?;
                     field_ops.push((fty, op));
                 }
                 let mut agg = "undef".to_string();
@@ -2567,7 +2651,7 @@ impl Emit<'_> {
             // each arm's payload fields), a memory-cell result merge (no phi), and the
             // `_` wildcard (or `unreachable`) as the final else.
             TypedExprKind::Match { scrutinee, enum_id, arms } => {
-                self.lower_match(scrutinee, *enum_id, arms, expr.ty)
+                self.lower_match(scrutinee, *enum_id, arms, expr.ty, owning)
             }
             // `null` (ADR 0014 D2) is the constant `{ i1 0, <zero payload> }` — a
             // constant aggregate operand (no instruction), mirroring inkwell's
@@ -2715,7 +2799,7 @@ impl Emit<'_> {
                 self.used.scope_enter = true;
                 let prev = self.current_scope;
                 self.current_scope = Some(sc);
-                let bv = self.lower_block_expr(body)?;
+                let bv = self.lower_block_expr(body, owning)?;
                 self.current_scope = prev;
                 writeln!(self.body, "  call void @sentinel_scope_exit(ptr %v{sc})").unwrap();
                 self.used.scope_exit = true;
@@ -2739,10 +2823,9 @@ impl Emit<'_> {
                 // constant arg emits no instruction, so this is unchanged there.
                 let mut lowered: Vec<(String, String)> = Vec::with_capacity(n);
                 for arg in args.iter() {
-                    let v = self.lower_expr(arg)?;
-                    // ADR 0071 M1.4a slice 3: a `Shared` Var captured into a spawn is
+                    // ADR 0071 D2: a `Shared` captured into a spawn out of a place is
                     // duplicated into the spawned task's drop-recorded param → rc++.
-                    let v = self.clone_if_shared_var(arg, v)?;
+                    let v = self.lower_owned(arg)?;
                     // ADR 0066 M1.1: store the arg with its real type (was i64).
                     let aty = self.lty(arg.ty)?;
                     lowered.push((aty, v));
@@ -2820,6 +2903,7 @@ impl Emit<'_> {
         enum_id: EnumId,
         arms: &[TypedMatchArm],
         result_ty: Type,
+        owning: bool,
     ) -> Result<String, String> {
         let scrut = self.lower_expr(scrutinee)?;
         let tag = self.fresh();
@@ -2842,6 +2926,7 @@ impl Emit<'_> {
                     writeln!(self.body, "  br i1 %v{cmp}, label %bb{arm_b}, label %bb{next_b}").unwrap();
                     writeln!(self.body, "bb{arm_b}:").unwrap();
                     self.bind_pattern_payloads(payload, enum_id, *variant_index, bindings)?;
+                    self.owning = owning;
                     let v = self.lower_expr(&arm.body)?;
                     // Register D66: each arm stores at its OWN type, as D59 has the `if` arms
                     // do. A live arm's type is the match's; a divergent one stores, in its dead
@@ -2857,6 +2942,7 @@ impl Emit<'_> {
         }
         // The final else (the last `next_b` block): the wildcard body, or `unreachable`.
         if let Some(arm) = wildcard {
+            self.owning = owning;
             let v = self.lower_expr(&arm.body)?;
             // Register D66: at the arm's own type, as above.
             let aty = self.lty(arm.body.ty)?;
@@ -3075,7 +3161,9 @@ impl Emit<'_> {
         }
     }
 
-    fn lower_block_expr(&mut self, b: &TypedBlock) -> Result<String, String> {
+    /// `owning_tail`: the block's value goes to a new owner, so its tail is lowered in an
+    /// owning context (ADR 0071 D2 amendment A1).
+    fn lower_block_expr(&mut self, b: &TypedBlock, owning_tail: bool) -> Result<String, String> {
         // 8d-drops: a nested `{ … }` block opens a scope frame whose locals are freed
         // at its exit (after the tail value is computed, before the block's value is
         // used by the parent). Moved-out / tail-returned bindings are in
@@ -3084,6 +3172,7 @@ impl Emit<'_> {
         for stmt in &b.stmts {
             self.lower_stmt(stmt)?;
         }
+        self.owning = owning_tail;
         let val = self.lower_expr(&b.tail)?;
         self.emit_scope_drops()?;
         self.scopes.pop();
@@ -3329,31 +3418,48 @@ impl Emit<'_> {
         Ok(())
     }
 
-    /// ADR 0071 M1.4a slice 3: if `expr` is a bare `Var` of `Shared<T>` type, its
-    /// value (`op`, the just-lowered handle ptr) is being DUPLICATED into a new
-    /// owner (a `let` binding / by-value user-fn param / spawn capture) — emit
-    /// `sentinel_shared_clone` (rc++) and return the clone register. An RVALUE
-    /// source transfers its unit → no clone. Mirrors inkwell's `clone_if_shared_var`
-    /// and the selfhost clone sites (byte-identical `call ptr @sentinel_shared_clone`).
-    fn clone_if_shared_var(&mut self, expr: &TypedExpr, op: String) -> Result<String, String> {
-        if !matches!(expr.kind, TypedExprKind::Var(_)) {
-            return Ok(op);
-        }
-        // ADR 0071 M1.4b slice 3a: a named `Mutex` binding clones via
-        // `sentinel_mutex_clone` (the same rc++ pattern as Shared).
-        let sym = match expr.ty {
+    /// ADR 0071 D2 (and its amendment A1): `op` is a `Shared` / `Mutex` handle read out of
+    /// a place into a new owner — emit `sentinel_shared_clone` / `sentinel_mutex_clone`
+    /// (rc++) and return the clone register. Any other type passes through. Mirrors
+    /// inkwell's `clone_handle` and `scg`'s owning-context clone (byte-identical
+    /// `call ptr @sentinel_shared_clone`).
+    fn clone_handle(&mut self, ty: Type, op: String) -> Result<String, String> {
+        let sym = match ty {
             Type::Shared(_) => "sentinel_shared_clone",
             Type::Mutex(_) => "sentinel_mutex_clone",
             _ => return Ok(op),
         };
         let c = self.fresh();
         writeln!(self.body, "  %v{c} = call ptr @{sym}(ptr {op})").unwrap();
-        if matches!(expr.ty, Type::Shared(_)) {
+        if matches!(ty, Type::Shared(_)) {
             self.used.shared_clone = true;
         } else {
             self.used.mutex_clone = true;
         }
         Ok(format!("%v{c}"))
+    }
+
+    /// Whether the place `e` is, or lies inside, a field of a class instance, which ADR 0071
+    /// D2 amendment A1 leaves as D2 had it (not a new owner).
+    fn in_class_field(&self, e: &TypedExpr) -> bool {
+        match &e.kind {
+            TypedExprKind::FieldAccess { target, .. } => {
+                let base = match target.ty {
+                    Type::Ref(rid) => self.program.refs[rid.0 as usize].inner,
+                    t => t,
+                };
+                matches!(base, Type::Class(_)) || self.in_class_field(target)
+            }
+            TypedExprKind::Index { target, .. } => self.in_class_field(target),
+            _ => false,
+        }
+    }
+
+    /// Lower `e` as a value that becomes the property of a new owner (ADR 0071 D2
+    /// amendment A1).
+    fn lower_owned(&mut self, e: &TypedExpr) -> Result<String, String> {
+        self.owning = true;
+        self.lower_expr(e)
     }
 
     /// Emit a heap `[T]` buffer from already-rendered element operands: the
@@ -3826,6 +3932,7 @@ impl Emit<'_> {
             parent_sym: self.parent_sym.clone(),
             arm_kslots: Vec::new(),
             embed_ph: None,
+            owning: false,
             handle_depth: 0,
             current_scope: None,
         };
@@ -3864,11 +3971,13 @@ impl Emit<'_> {
 
     /// Lower a slice of argument expressions to `(ll-type, operand)` pairs, in order —
     /// the collect-then-emit shape shared by every call form (Bar B / classes reuses it
-    /// for the class-call args after the leading `self`/`out_ptr`).
+    /// for the class-call args after the leading `self`/`out_ptr`). Every caller passes
+    /// the arguments to a callee that drops its parameters, so each is lowered for a new
+    /// owner (ADR 0071 D2 amendment A1).
     fn lower_args(&mut self, args: &[TypedExpr]) -> Result<Vec<(String, String)>, String> {
         let mut ops = Vec::with_capacity(args.len());
         for a in args {
-            let op = self.lower_expr(a)?;
+            let op = self.lower_owned(a)?;
             ops.push((self.lty(a.ty)?, op));
         }
         Ok(ops)
@@ -4624,11 +4733,10 @@ impl Emit<'_> {
         // Lower args to operands first, then emit the call.
         let mut arg_ops: Vec<(String, String)> = Vec::with_capacity(args.len());
         for a in args {
-            let op = self.lower_expr(a)?;
-            // ADR 0071 M1.4a slice 3: a by-value `Shared` Var arg to this USER fn
-            // duplicates it into the callee's drop-recorded param → rc++. (Builtins
-            // taking a `Shared` are handled above, before this user-fn path.)
-            let op = self.clone_if_shared_var(a, op)?;
+            // ADR 0071 D2: a by-value `Shared` read out of a place into this USER fn's
+            // drop-recorded param duplicates it → rc++. (Builtins taking a `Shared` are
+            // handled above, before this user-fn path.)
+            let op = self.lower_owned(a)?;
             arg_ops.push((self.lty(a.ty)?, op));
         }
         let v = self.fresh();

@@ -20,28 +20,28 @@
 //   - `takes_one(m)`         the `Mutex` branch of the helper, a separate arm from
 //                            `Shared` emitting `sentinel_mutex_clone`.
 //
-// THREE NEGATIVE cases matter more than any of those, because each pins one conjunct of
-// the gate, and a wrong implementation that drops that conjunct passes every positive
-// case above AND the entire rest of the corpus:
+// TWO NEGATIVE cases matter more than any of those, because each pins one half of the
+// decision; before ADR 0071 D2 amendment A1 a wrong implementation that dropped either passed
+// every positive case above AND the rest of the corpus, and `c71_shared_place_duplications`
+// now pins both as well:
 //   - `takes_zero(shared_new(1))`  an RVALUE source. It TRANSFERS its unit, so the oracle
-//                                  emits NO clone. Drop the `mvbv >= 0` conjunct and this
-//                                  over-clones — a permanent leak, D31's mirror image.
+//                                  emits NO clone. Since ADR 0071 D2 amendment A1 the
+//                                  decision is `dump_texpr_node`'s: only a node that reads
+//                                  out of a place is cloned. Let a call's node claim to be
+//                                  one and this over-clones — a permanent leak, D31's
+//                                  mirror image.
 //   - `Holder::With(u)`            an ENUM-CONSTRUCT payload (below).
 //
-// ⚠ A THIRD NEGATIVE CASE BELONGS HERE AND CANNOT BE WRITTEN YET. The `ndump` leaf test
-// in `dump_args_capture_all` exists for a COMPOUND argument whose tail happens to be a
-// Var. The oracle tests the whole argument structurally and emits no clone; the helper's
-// bare `mvbv >= 0` gate does not, and the first version of this fix used it and turned
-// three byte-identical programs DIVERGENT — so that shape is exactly what the `ndump`
-// test pins, and NOTHING in `tests/pass` currently pins it. The reason it cannot be
-// written here is a separate defect OUTSIDE `scg` that is tracked privately with the
-// maintainer, not in the register; ask before adding the case. Until then the `ndump`
-// test is guarded by this paragraph and by nothing else — which is why the paragraph is
-// long.
+// A COMPOUND argument whose tail is a binding (`takes_one({ s })`) was a third negative
+// case before A1: the oracle cloned only a bare binding, and `scg`'s `ndump` leaf test
+// existed to match that. It could not be written here then, for a reason outside `scg`. A1
+// made it a duplication like any other (a block hands the owning context to its tail), so
+// the oracle and `scg` both clone it now, and the `ndump` test is gone from that path.
 //
 // The enum payload: `Holder::With(u)` is an enum-CONSTRUCT argument, not a user-fn owning
-// param. Drop the `cg_ufarg` conjunct and it over-clones. `dump_cargs` exists solely to
-// suppress that, and nothing else pins it.
+// param. Its walker, `dump_cargs`, is asked not to own there, so `cg_ufarg` stays off and
+// the payload gets no owning context; turn it on and it over-clones. The codegen differential
+// pins that here and on `c71_shared_place_duplications`'s `E::A(s)`.
 //
 // ⚠ THE EXIT CODE CANNOT CATCH THIS DEFECT AT ALL, and saying "it is the weaker
 // assertion" would understate it. `run_exit` builds through inkwell, which emitted the
@@ -59,9 +59,10 @@
 //
 // ⚠ DELIBERATELY ABSENT, because they hit DIFFERENT defects and would pin those instead:
 // a generic that RETURNS its container param (`fn ident<T>(x: T) -> T`), and a generic
-// that passes its param to another generic. Both still diverge, for a callee-side
-// over-release that is a separate register item, and the second also needs D24's
-// transitive monomorphisation worklist. Do not "complete" this fixture with either.
+// that passes its param to another generic. Both still emit different IR in the oracle and
+// `scg` (register D36: the oracle hands a moved generic parameter on, `scg` clones it and
+// releases the parameter — balanced either way since ADR 0071 D2 amendment A1), so the
+// codegen differential would fail on them. Do not "complete" this fixture with either.
 //
 // Trace: 7 + 9 + 9 + 7 + 0 (the rvalue negative case) + 6 (s) + 4 (t) = 42.
 // Exit 42, no stdout.
@@ -98,7 +99,7 @@ fn main() -> i64 {
     let c: i64 = takes_two(s, t);
     let d: i64 = takes_one(m);
 
-    // The three NEGATIVE cases. Each must emit NO clone; see the header.
+    // The two NEGATIVE cases. Each must emit NO clone; see the header.
     let e: i64 = takes_zero(shared_new(1));
     let u: Shared<i64> = shared_new(0);
     let h: Holder = Holder::With(u);

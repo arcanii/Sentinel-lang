@@ -756,6 +756,8 @@ fn dump_te_unary(out: &mut Vec<u8>, uop: i64, inner: Expr, exp: i64, src: &[u8],
 }
 
 fn dump_te_if(out: &mut Vec<u8>, cnd: Expr, thn: Expr, els: Expr, exp: i64, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
+            // (ADR 0071 D2 amendment A1) the `if`'s owning context, for its branches' tails.
+            let if_own: bool = (*c).cg_tailown;
             append_str(out, "(if ");
             // (6/N) the condition is a read (non-consuming); the branches INHERIT the
             // if's consuming context (a returned/moved if moves its branch-tail Vars —
@@ -822,6 +824,7 @@ fn dump_te_if(out: &mut Vec<u8>, cnd: Expr, thn: Expr, els: Expr, exp: i64, src:
             push(out, ' ');
             // Both branches inherit the `if`'s expectation, so a `?T`-returning `if`
             // widens each branch's tail (and the `if`'s type is that branch type).
+            (*c).cg_own = if_own;
             let tt: i64 = dump_texpr(out, thn, exp, src, c, gb);
             let tdiv: bool = (*c).sdiv;
             // (8b) codegen: capture the then operand; reserve the if-result slot; store the
@@ -888,6 +891,7 @@ fn dump_te_if(out: &mut Vec<u8>, cnd: Expr, thn: Expr, els: Expr, exp: i64, src:
                 0
             };
             push(out, ' ');
+            (*c).cg_own = if_own;
             let et: i64 = dump_texpr(out, els, exp, src, c, gb);
             let edv: bool = (*c).sdiv;
             // (register D59) the if's type is the JOIN — the oracle's `If` node type, which the
@@ -1243,6 +1247,10 @@ fn dump_te_field(out: &mut Vec<u8>, ft: Expr, fdn: [u8], exp: i64, src: &[u8], c
             let fd_self: i64 = (*c).ndump;
             let fd_n0: i64 = (*c).ndump;
             let tty: i64 = dump_texpr(out, ft, 0 - 1, src, c, gb);
+            // (ADR 0071 D2 amendment A1) whether the target read out of a place, and lies
+            // in a class field; this node's own answers follow from them (set at the end).
+            let fd_tpl: bool = (*c).cg_place;
+            let fd_tcls: bool = (*c).cg_clsfld;
             let base_vid: i64 = if (*c).lastfld == fd_n0 + 1 {
                 0 - 1
             } else {
@@ -1458,6 +1466,11 @@ fn dump_te_field(out: &mut Vec<u8>, ft: Expr, fdn: [u8], exp: i64, src: &[u8], c
                 0
             };
             (*c).lastfld = fd_self;
+            // (ADR 0071 D2 amendment A1) a field path reads out of a place iff its target
+            // does (the oracle's `is_place_read`), and lies in a class field iff its base is
+            // a class or its target lies in one (`in_class_field`).
+            (*c).cg_placen = fd_tpl;
+            (*c).cg_clsfldn = ccid >= 0 || fd_tcls;
             fty
 }
 
@@ -1566,6 +1579,8 @@ fn dump_te_method(out: &mut Vec<u8>, mt: Expr, mn: [u8], ma: Args, exp: i64, src
                 append_str(out, vec_to_array(tbuf));
                 push(out, ' ');
                 append_str(out, mn);
+                // (ADR 0071 D2 amendment A1) the method drops its parameters: owning args.
+                (*c).cg_ownargs = true;
                 dump_cargs(out, ma, src, c, gb);
                 close_ty(out, mret, c);
                 if cg_on(c) {
@@ -1589,6 +1604,8 @@ fn dump_te_method(out: &mut Vec<u8>, mt: Expr, mn: [u8], ma: Args, exp: i64, src
                 append_str(out, vec_to_array(tbuf));
                 push(out, ' ');
                 append_str(out, mn);
+                // (ADR 0071 D2 amendment A1) the method drops its parameters: owning args.
+                (*c).cg_ownargs = true;
                 dump_cargs(out, ma, src, c, gb);
                 close_ty(out, mret2, c);
                 if cg_on(c) {

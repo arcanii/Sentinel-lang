@@ -183,9 +183,27 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
 // sets `sdivn` as its last act; a child's own exit has already reset it, so an arm that
 // never sets it leaves `false`.
 fn dump_texpr_node(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
+    // (ADR 0071 D2 amendment A1) this node takes the owning context; a block, `if`, `match`
+    // or `scope` arm reads `cg_tailown` before it walks anything, to hand it on to its tail.
+    let own: bool = (*c).cg_own;
+    (*c).cg_own = false;
+    (*c).cg_tailown = own;
     let t: i64 = dump_texpr_arm(out, ex, exp, src, c, gb);
     (*c).sdiv = (*c).sdivn;
     (*c).sdivn = false;
+    (*c).cg_place = (*c).cg_placen;
+    (*c).cg_placen = false;
+    (*c).cg_clsfld = (*c).cg_clsfldn;
+    (*c).cg_clsfldn = false;
+    // A `Shared` / `Mutex` read out of a place into a new owner is cloned right after it
+    // is read (the oracle's `lower_expr` wrapper). The oracle's `moved_out` exception has no
+    // counterpart here on purpose: it fires only in a generic body, where `scg` clones the
+    // moved parameter and releases it at exit instead (register D36).
+    if own && (*c).cg_place {
+        cg_clone_handle(c, t)
+    } else {
+        0
+    };
     t
 }
 
@@ -362,6 +380,8 @@ fn dump_texpr_arm(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyC
             };
             mir_widen(c, w, exp);
             cg_widen(c, w, exp);
+            // (ADR 0071 D2 amendment A1) a binding read is a read out of a place.
+            (*c).cg_placen = true;
             widen_post(out, w, exp, ty, c)
             }
         },
@@ -451,6 +471,14 @@ fn dump_texpr_arm(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyC
         Expr::Unary(uop, inner) => {
             let mut utmp: Vec<u8> = vec_new();
             let urt: i64 = dump_te_unary(&mut utmp, uop, inner, exp, src, c, gb);
+            // (ADR 0071 D2 amendment A1) a deref reads out of a place (the oracle's
+            // `is_place_read`); `-`, `!` and the rest compute a value.
+            if uop == 3 {
+                (*c).cg_placen = true;
+                0
+            } else {
+                0
+            };
             // Two `_on` probes rather than `||`: each takes `&mut TyCtx`, and the
             // lexical borrow checker reads the pair in one expression as
             // overlapping (the same reason `dump_te_binary` spells it this way).
@@ -468,6 +496,8 @@ fn dump_texpr_arm(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyC
         Expr::Binary(bop, l, r) => dump_te_binary(out, bop, l, r, exp, src, c, gb),
         Expr::If(cnd, thn, els) => dump_te_if(out, cnd, thn, els, exp, src, c, gb),
         Expr::Block(stmts, tail) => {
+            // (ADR 0071 D2 amendment A1) this block's owning context, for its tail only.
+            let bk_own: bool = (*c).cg_tailown;
             append_str(out, "(block");
             // (8d-drops) a block opens a scope frame; its un-moved heap locals are
             // freed at its exit (after the tail value, before it's used by the parent).
@@ -485,6 +515,7 @@ fn dump_texpr_arm(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyC
             (*c).sdivs = sdivs_up;
             push(out, ' ');
             // The block's value is its tail — thread the expectation through to it.
+            (*c).cg_own = bk_own;
             let tt: i64 = dump_texpr(out, tail, exp, src, c, gb);
             let tldiv: bool = (*c).sdiv;
             close_ty(out, tt, c);
@@ -745,6 +776,11 @@ fn dump_texpr_arm(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyC
                 0
             };
             let tty: i64 = dump_texpr(out, it, 0 - 1, src, c, gb);
+            // (ADR 0071 D2 amendment A1) an element path reads out of a place iff its target
+            // does, and lies in a class field iff its target does; captured before the
+            // index walk overwrites them.
+            let ix_tpl: bool = (*c).cg_place;
+            let ix_tcls: bool = (*c).cg_clsfld;
             let ibase: i64 = if mir_on(c) {
                 (*c).lastval
             } else {
@@ -818,6 +854,8 @@ fn dump_texpr_arm(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyC
             } else {
                 0
             };
+            (*c).cg_placen = ix_tpl;
+            (*c).cg_clsfldn = ix_tcls;
             ety
         },
         // (4e) `Name::Variant(args)` / paren-less `Name::Variant`. If `Name` is an
@@ -917,6 +955,8 @@ fn dump_texpr_arm(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyC
                 } else {
                     0
                 };
+                // (ADR 0071 D2 amendment A1) the callee drops its parameters: owning args.
+                (*c).cg_ownargs = true;
                 dump_cargs(out, qa, src, c, gb);
                 close_ty(out, qmret, c);
                 if cg_on(c) {
@@ -945,6 +985,8 @@ fn dump_texpr_arm(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyC
         // types its body. The match's type is the (shared) arm-body type.
         // `(match <scrut :Enum> #eid (arm (pat vidx V (bind #vid n ty)…) <body :T>)… :T)`.
         Expr::Match(mscr, marms) => {
+            // (ADR 0071 D2 amendment A1) the `match`'s owning context, for its arms' values.
+            let mt_own: bool = (*c).cg_tailown;
             append_str(out, "(match ");
             // (6/N) a `match` scrutinee is NOT a move (the oracle does not record it —
             // it's read/inspected); the arms inherit the match's own consuming context
@@ -1030,7 +1072,7 @@ fn dump_texpr_arm(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyC
             let smlive_up: i64 = (*c).smlive;
             (*c).sdiva = true;
             (*c).smlive = 0 - 1;
-            let mfirst: i64 = dump_tarms(out, marms, exp, src, c, gb);
+            let mfirst: i64 = dump_tarms(out, marms, exp, mt_own, src, c, gb);
             let alldiv: bool = (*c).sdiva;
             let mlive: i64 = (*c).smlive;
             (*c).sdiva = sdiva_up;
@@ -1129,6 +1171,8 @@ fn dump_texpr_arm(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyC
             } else {
                 0
             };
+            // (ADR 0071 D2 amendment A1) the init drops its parameters: owning args.
+            (*c).cg_ownargs = true;
             dump_cargs(out, ca, src, c, gb);
             close_ty(out, cty, c);
             if mir_on(c) {
@@ -1282,6 +1326,8 @@ fn dump_texpr_arm(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyC
             // comes back WIDENED, which is what also fixes the enclosing block's type —
             // a block is typed by its tail, so a dropped wrapper here retyped the whole
             // block `:i64` where the oracle says `:?i64`.
+            // (ADR 0071 D2 amendment A1) the caller is a new owner of the value.
+            (*c).cg_own = true;
             let it: i64 = dump_texpr(out, ri, (*c).fnret, src, c, gb);
             (*c).consuming = svc;
             close_ty(out, it, c);
@@ -1548,6 +1594,8 @@ fn dump_texpr_arm(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyC
         // scope widens its tail). Discharges the Async effect (effect-check is D1, out of
         // scope), so the type is just the body type.
         Expr::Scope(sbody) => {
+            // (ADR 0071 D2 amendment A1) the scope's owning context, for its body's tail.
+            let sc_own: bool = (*c).cg_tailown;
             append_str(out, "(scope ");
             // (concurrency) cg: enter a scope ctx (so `spawn`s inside register with it),
             // lower the body, exit the scope (joins/awaits unawaited tasks). The body's
@@ -1562,6 +1610,7 @@ fn dump_texpr_arm(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyC
             } else {
                 0 - 1
             };
+            (*c).cg_own = sc_own;
             let sct: i64 = dump_texpr(out, sbody, exp, src, c, gb);
             if cg_on(c) {
                 (*c).cg_scope = sv_scope;

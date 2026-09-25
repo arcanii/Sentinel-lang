@@ -1979,17 +1979,15 @@ fn cg_drop_range(c: &mut TyCtx, floor: i64) -> i64 {
     0
 }
 
-// collect one call arg (its operand + type) onto the arg stacks (gated).
-// (ADR 0071 M1.4a slice 3) rc++ a Shared arg passed by value into a USER-fn
-// owning param when its source is a named Var ((*c).mvbv >= 0, set by the just-
-// dumped `Expr::Var`). Emits `sentinel_shared_clone` and RE-THREADS the operand
-// (`cg_reg`) to the clone register BEFORE `cg_collect` pushes it — the selfhost
-// env is append-only, so we can't overwrite a collected slot. Called after
-// `mir_collect` (so the MIR operand stays the original) and before `cg_collect`.
-// Mirrors the oracle's `clone_if_shared_var` in the user-fn call-arg loop (the
-// same `%vC = call ptr @sentinel_shared_clone(ptr <op>)`, byte-identical).
-fn cg_clone_shared_arg(c: &mut TyCtx, at: i64) -> i64 {
-    if cg_on(c) && (*c).cg_ufarg && (*c).mvbv >= 0 && cg_is_shared(c, at) {
+// (ADR 0071 D2 and its amendment A1) rc++ a `Shared` / `Mutex` read out of a place into a
+// new owner: emit `sentinel_shared_clone` / `sentinel_mutex_clone` on the current operand
+// and RE-THREAD the operand (`cg_reg`) to the clone register — the selfhost env is
+// append-only, so a consumer that collects the operand afterwards sees the clone. Called
+// by `dump_texpr_node` for a place node walked in the owning context. Mirrors the oracle's
+// `clone_handle` (the same `%vC = call ptr @sentinel_shared_clone(ptr <op>)`,
+// byte-identical). Any other type passes through.
+fn cg_clone_handle(c: &mut TyCtx, at: i64) -> i64 {
+    if cg_on(c) && cg_is_shared(c, at) {
         let ok: i64 = (*c).cglk;
         let ov: i64 = (*c).cglv;
         let clv: i64 = cg_dst(c);
@@ -1999,9 +1997,7 @@ fn cg_clone_shared_arg(c: &mut TyCtx, at: i64) -> i64 {
         (*c).cg_used_sharedclone = true;
         cg_reg(c, clv);
         0
-    } else if cg_on(c) && (*c).cg_ufarg && (*c).mvbv >= 0 && cg_is_mutex(c, at) {
-        // (ADR 0071 M1.4b slice 3a) the Mutex analog — rc++ a named Mutex arg into a
-        // user-fn owning param via sentinel_mutex_clone (mirrors the Shared branch).
+    } else if cg_on(c) && cg_is_mutex(c, at) {
         let mok: i64 = (*c).cglk;
         let mov: i64 = (*c).cglv;
         let mclv: i64 = cg_dst(c);
@@ -2016,6 +2012,7 @@ fn cg_clone_shared_arg(c: &mut TyCtx, at: i64) -> i64 {
     }
 }
 
+// collect one call arg (its operand + type) onto the arg stacks (gated).
 fn cg_collect(c: &mut TyCtx, at: i64) -> i64 {
     if cg_on(c) {
         if (*c).cg_collecting {

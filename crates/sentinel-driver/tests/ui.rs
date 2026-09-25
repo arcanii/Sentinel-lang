@@ -194,6 +194,11 @@ ui_snapshot!(c71_guard_no_borrow, "c71_guard_no_borrow.sentinel");
 // (GuardDerefNotVar) — only the directly `let`-bound guard Var may be `*g`-derefed
 // (a computed operand would consume the guard, skipping its unlock-on-drop).
 ui_snapshot!(c71_guard_deref_computed, "c71_guard_deref_computed.sentinel");
+// ADR 0071 D2 amendment A1: a `Shared` / `Mutex` handle cannot be `secret`-qualified —
+// the secret belongs inside the container (`Shared<secret T>`, D6). SecretHandle, at a
+// `let` annotation and at a parameter's.
+ui_snapshot!(c71_secret_handle, "c71_secret_handle.sentinel");
+ui_snapshot!(c71_secret_mutex_handle, "c71_secret_mutex_handle.sentinel");
 // ADR 0071 M1.4c (D6): a secret read out of a `Mutex<secret T>` is STILL secret for
 // every downstream check — branching on `*g` is rejected exactly as any other secret
 // branch is. This is the fixture that proves the secret container did not become a

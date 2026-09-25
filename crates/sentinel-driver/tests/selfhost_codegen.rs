@@ -410,6 +410,44 @@ fn oracle_ir_of_the_arm_remainder_programs_runs() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
+/// ADR 0071 D2 amendment A1, RUN from the oracle's IR, for the same reason as the test
+/// above: the codegen differential holds `scg` to the oracle byte for byte, which proves they
+/// agree, not that the count is right, and the corpus-wide behaviour check cannot run here.
+/// `tests/pass/c71_shared_place_duplications` duplicates a `Shared` out of a place into a new
+/// owner in every position the amendment counts, and a `Mutex` in two of them; a position the
+/// oracle does not clone releases one unit too many, and the runtime's refcount check aborts
+/// instead of the program answering 94.
+#[test]
+fn oracle_ir_of_the_shared_duplication_program_runs() {
+    let tmp = std::env::temp_dir().join(format!("snc_shdup_oracle_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).expect("create temp dir");
+    let stem = "c71_shared_place_duplications";
+    let src = workspace_root().join("tests/pass").join(format!("{stem}.sentinel"));
+    let oracle = Command::new(env!("CARGO_BIN_EXE_snc"))
+        .arg("llvm")
+        .arg(&src)
+        .output()
+        .expect("run snc llvm");
+    assert!(
+        oracle.status.success(),
+        "snc llvm failed on {stem}:\n{}",
+        String::from_utf8_lossy(&oracle.stderr)
+    );
+    let ll = tmp.join(format!("{stem}.ll"));
+    std::fs::write(&ll, &oracle.stdout).expect("write the oracle's IR");
+    let exe = compile_ll_to_exe(&ll, &tmp.join(stem));
+    let run = Command::new(&exe).output().expect("run the program built from the oracle's IR");
+    assert_eq!(
+        run.status.code(),
+        Some(94),
+        "{stem}: built from the oracle's IR it exits {:?}; stderr:\n{}",
+        run.status,
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
 /// ADR 0075 A1, for the one effecting-fn shape the corpus differential cannot hold: an
 /// EMBEDDED shape (`perform Op(arg) + rest`) with a bubbling `handle` in each of its two
 /// defines -- one in the perform's argument, which the parent lowers, and one in the rest

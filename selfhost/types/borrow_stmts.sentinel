@@ -128,7 +128,9 @@ fn dump_tpat(out: &mut Vec<u8>, p: Pattern, c: &mut TyCtx, gb: &mut Vec<u8>) -> 
 // type the body (threading the match's expectation `exp`), then TRUNCATE the scope
 // back (the payloads are arm-local; VarIds stay monotonic). Returns the FIRST arm's body
 // type; the match's own type is its first NON-divergent arm's (`smlive`, register D59).
-fn dump_tarms(out: &mut Vec<u8>, a: Arms, exp: i64, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
+// `own`: the `match` is in an owning context, which each arm body's value inherits (ADR
+// 0071 D2 amendment A1).
+fn dump_tarms(out: &mut Vec<u8>, a: Arms, exp: i64, own: bool, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
     match a {
         Arms::ArmEnd => 0 - 1,
         Arms::ArmCell(ap, abody, arest) => {
@@ -149,6 +151,7 @@ fn dump_tarms(out: &mut Vec<u8>, a: Arms, exp: i64, src: &[u8], c: &mut TyCtx, g
                 0 - 1
             };
             push(out, ' ');
+            (*c).cg_own = own;
             let bt: i64 = dump_texpr(out, abody, exp, src, c, gb);
             // (registers D59 / D66) as the oracle does, a divergent arm stores, in its dead block,
             // the value it hands back at that value's own type, and a live arm stores at the
@@ -232,7 +235,7 @@ fn dump_tarms(out: &mut Vec<u8>, a: Arms, exp: i64, src: &[u8], c: &mut TyCtx, g
                 0
             };
             push(out, ')');
-            dump_tarms(out, arest, exp, src, c, gb);
+            dump_tarms(out, arest, exp, own, src, c, gb);
             bt
         },
     }
@@ -490,6 +493,10 @@ fn dump_tstmt(out: &mut Vec<u8>, s: Stmt, src: &[u8], c: &mut TyCtx, gb: &mut Ve
             // (6/N) a `let`'s RHS is CONSUMING (a bare-Var RHS moves the binding).
             let lsvc: bool = (*c).consuming;
             (*c).consuming = true;
+            // (ADR 0071 D2 and its amendment A1) the binding is a new owner of the value,
+            // so a `Shared` / `Mutex` read out of a place (`let y = x`, `let y = h.s`,
+            // `let y = { x }`) is cloned as it is read; an rvalue RHS transfers its unit.
+            (*c).cg_own = true;
             let valty: i64 = dump_texpr(&mut vbuf, lval, letexp, src, c, gb);
             stmt_div(c);
             (*c).consuming = lsvc;
@@ -512,37 +519,10 @@ fn dump_tstmt(out: &mut Vec<u8>, s: Stmt, src: &[u8], c: &mut TyCtx, gb: &mut Ve
             // (8/N) codegen: the RHS instructions are already in `cgout`; bind by an
             // alloca slot + store the RHS operand. Reads of this var load from the slot.
             if cg_on(c) {
-                let rk0: i64 = (*c).cglk;
-                let rv0: i64 = (*c).cglv;
-                // (ADR 0071 M1.4a slice 3 / M1.4b slice 3a) rc++ a `let y = x` that
-                // duplicates a named Shared/Mutex binding (mvbv >= 0, set by the RHS
-                // `Expr::Var`) into a new owner — an rvalue RHS (shared_new/mutex_new/
-                // call) transfers its unit, no clone.
-                let cln_shared: bool = (*c).mvbv >= 0 && cg_is_shared(c, letty);
-                let cln_mutex: bool = (*c).mvbv >= 0 && cg_is_mutex(c, letty);
-                let cln: bool = cln_shared || cln_mutex;
-                let rv: i64 = if cln_shared {
-                    let clv: i64 = cg_dst(c);
-                    cgo_str(c, "call ptr @sentinel_shared_clone(ptr ");
-                    cgo_operand(c, rk0, rv0);
-                    cgo_str(c, ")\n");
-                    (*c).cg_used_sharedclone = true;
-                    clv
-                } else if cln_mutex {
-                    let mclv: i64 = cg_dst(c);
-                    cgo_str(c, "call ptr @sentinel_mutex_clone(ptr ");
-                    cgo_operand(c, rk0, rv0);
-                    cgo_str(c, ")\n");
-                    (*c).cg_used_mutexclone = true;
-                    mclv
-                } else {
-                    rv0
-                };
-                let rk: i64 = if cln {
-                    0
-                } else {
-                    rk0
-                };
+                // (ADR 0071 D2 amendment A1) a clone, if any, was emitted as the RHS was
+                // read (`dump_texpr_node`), so the operand here is already the owner's.
+                let rk: i64 = (*c).cglk;
+                let rv: i64 = (*c).cglv;
                 let cgslot: i64 = cg_alloca(c, letty);
                 cg_store(c, letty, rk, rv, cgslot);
                 cg_slot_set(c, lvid, cgslot);
@@ -609,6 +589,9 @@ fn dump_tstmt(out: &mut Vec<u8>, s: Stmt, src: &[u8], c: &mut TyCtx, gb: &mut Ve
             } else {
                 0
             };
+            // (ADR 0071 D2 amendment A1) the place is a new owner of the value, unless it
+            // lies in a class, left as D2 had it (the oracle's `in_class_field`).
+            let as_own: bool = !(*c).cg_clsfld;
             (*c).consuming = true;
             push(out, ' ');
             // (ADR 0014 D3 / ADR 0051 A5) the RHS is checked against the assigned PLACE's
@@ -617,6 +600,7 @@ fn dump_tstmt(out: &mut Vec<u8>, s: Stmt, src: &[u8], c: &mut TyCtx, gb: &mut Ve
             // than a text divergence: `let mut o: ?i64 = null; o = 42;` emitted
             // `store { i1, i64 } 42, ptr %v0` — an aggregate store of a bare integer,
             // which `llvm-as` rejects with "integer constant must have integer type".
+            (*c).cg_own = as_own;
             dump_texpr(out, aval, ttgt, src, c, gb);
             stmt_div(c);
             // (7c) MIR: a plain-Var target rebinds var_defs to the RHS; a field/`*`-deref

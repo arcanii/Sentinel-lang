@@ -260,16 +260,42 @@ struct TyCtx {
     smlive: i64,
     // (register D31) A monotonic count of `dump_texpr_node` ENTRIES. Snapshot it before
     // dumping a sub-expression and the delta is that sub-expression's node count, so a
-    // delta of exactly 1 means the sub-expression was a LEAF. Paired with `mvbv >= 0`
-    // (whose leaf was a `Var`) that is the precise "this argument IS a bare `Var`" test
-    // the oracle's `clone_if_shared_var` makes structurally — and which `mvbv` alone
-    // CANNOT make, because `mvbv` is reset per node and set by the Var arm, so any
-    // compound expression whose tail happens to be a Var leaks it upward.
+    // delta of exactly 1 means the sub-expression was a LEAF. It was paired with
+    // `mvbv >= 0` to recognise a bare-`Var` argument for the refcount clone — `mvbv` alone
+    // cannot, since any compound expression whose tail is a Var leaks it upward — until
+    // ADR 0071 D2 amendment A1 moved that decision into `dump_texpr_node`. The field-access
+    // arm still uses it, through `lastfld`.
     ndump: i64,
     // (ADR 0046 A4) the `ndump` number of the last COMPLETED field-access node, so the
     // field-access arm can tell that its own target was a field access (a nested path)
     // without peeking at the AST node.
     lastfld: i64,
+    // (ADR 0071 D2 amendment A1) the OWNING CONTEXT, the oracle's `owning`: set by a sink
+    // that makes the value it walks the property of a new owner (a `let`, an assignment, a
+    // user-fn / generic / method / qualified-call / class-init / spawn argument, a
+    // struct-literal field, a returned value), taken by the very next node
+    // (`dump_texpr_node`), and handed on only to a
+    // block's, an `if`'s, a `match` arm's or a `scope` body's tail through `cg_tailown`.
+    // A `Shared` / `Mutex` read out of a place in that context is cloned right after it
+    // is read.
+    cg_own: bool,
+    cg_tailown: bool,
+    // (ADR 0071 D2 amendment A1) whether the node just walked read its value out of a
+    // PLACE — a binding, a deref, or a field / element path rooted at one — the oracle's
+    // `is_place_read`. An arm sets `cg_placen` as its last act (the `sdivn` pattern) and
+    // `dump_texpr_node` moves it here; an arm that never sets it leaves `false`.
+    cg_place: bool,
+    cg_placen: bool,
+    // (ADR 0071 D2 amendment A1) whether the place just walked is, or lies inside, a field
+    // of a class instance (the oracle's `in_class_field`): an assignment into one is left as
+    // ADR 0071 D2 had it, not a new owner. Same set/move pattern as above.
+    cg_clsfld: bool,
+    cg_clsfldn: bool,
+    // (ADR 0071 D2 amendment A1) `dump_cargs` walks the arguments of a class init, a
+    // method and a qualified call (whose callees drop their parameters, so each argument
+    // goes to a new owner) and of an enum construct and a `perform` (which are not): set
+    // by the caller.
+    cg_ownargs: bool,
     // --- (7/N) MIR lowering (ADR 0044) — built ONLY under `mode == 2` as a guarded
     //     side-effect of the pass-2 walk; PER-FN (reset in `type_fn`). Everything is
     //     a flat append-only parallel-Vec pool tagged by block (so out-of-order block

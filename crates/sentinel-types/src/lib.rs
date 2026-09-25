@@ -2678,6 +2678,15 @@ fn resolve_type_expr_with_scope(
                     span: to_source_span(&inner.span),
                 });
             }
+            // ADR 0071 D2 amendment A1: a `Shared` / `Mutex` handle is a pointer to a
+            // refcounted cell, not a value to keep secret; a secret belongs INSIDE the
+            // container (`Shared<secret T>`, D6). What a `secret`-qualified handle would
+            // own was never settled, so it is refused.
+            if matches!(inner_ty, Type::Shared(_) | Type::Mutex(_)) {
+                return Err(TypeError::SecretHandle {
+                    span: to_source_span(&inner.span),
+                });
+            }
             let id = intern_secret(secrets, inner_ty);
             Ok(Type::Secret(id))
         }
@@ -4742,6 +4751,20 @@ pub enum TypeError {
     )]
     SecretFloat {
         #[label("`secret f64` here")]
+        span: miette::SourceSpan,
+    },
+
+    /// ADR 0071 D2 amendment A1: `secret Shared<T>` / `secret Mutex<T>` is rejected. A
+    /// handle is a pointer to a refcounted cell, not a value to keep secret; the secret
+    /// belongs inside the container, `Shared<secret T>` / `Mutex<secret T>` (ADR 0071
+    /// D6). What a `secret`-qualified handle would own was never settled.
+    #[error("a `secret` `Shared` / `Mutex` handle is not allowed")]
+    #[diagnostic(
+        code(sentinel::types::secret_handle),
+        help("keep the secret inside the container: `Shared<secret T>` / `Mutex<secret T>` (ADR 0071 D6)")
+    )]
+    SecretHandle {
+        #[label("a `Shared` / `Mutex` handle cannot be `secret`")]
         span: miette::SourceSpan,
     },
 
@@ -12360,6 +12383,11 @@ fn type_error_to_diagnostic(err: &TypeError) -> Diagnostic {
         TypeError::SecretFloat { span } => (
             "sentinel::types::secret_float",
             "`secret f64` is not allowed — float operations are not constant-time".to_string(),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        TypeError::SecretHandle { span } => (
+            "sentinel::types::secret_handle",
+            "a `secret` `Shared` / `Mutex` handle is not allowed".to_string(),
             span.offset()..(span.offset() + span.len()),
         ),
         TypeError::FloatBitwise { span } => (
