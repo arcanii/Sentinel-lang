@@ -1,0 +1,26 @@
+// ADR 0022 A3 (register D129): a class `init` must assign every field on every path. A
+// field assigned only inside a `while` body is not definitely assigned — the loop may run
+// zero times — and neither is one assigned in only one arm of an `if` or a `match`.
+// Surfaces InitFieldMaybeUnassigned for `e`.
+
+enum E { A, B(i64) }
+
+class K {
+    let e: E;
+    let n: i64;
+    pub init(n: i64) {
+        self.n = n;
+        let mut i = 0;
+        while i < n {
+            self.e = E::B(n);
+            i = i + 1;
+        }
+        0
+    }
+    pub fn get(self: &Self) -> i64 { self.n }
+}
+
+fn main() -> i64 {
+    let k = K::init(0);
+    k.get()
+}

@@ -1,0 +1,20 @@
+// ADR 0022 A3 (register D129): inside `init`, `self` itself — a method call, a reference,
+// passing it on — may be used only once every field is assigned on every path to the use.
+// Here `self.get()` runs before `b` is assigned. Surfaces InitSelfUsedBeforeAssigned.
+
+class K {
+    let a: i64;
+    let b: [i64];
+    pub init(n: i64) {
+        self.a = n;
+        let t = self.get();
+        self.b = [t];
+        0
+    }
+    pub fn get(self: &Self) -> i64 { self.b[0] }
+}
+
+fn main() -> i64 {
+    let k = K::init(1);
+    k.get()
+}

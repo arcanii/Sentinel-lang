@@ -1,0 +1,20 @@
+// ADR 0022 A3 (register D129): inside `init`, `self.field` may be read only after the
+// field is assigned on every path to the read (ADR 0022 D4's InitFieldReadBeforeAssign).
+// Here `self.b` is read before any assignment to it.
+
+class K {
+    let a: [i64];
+    let b: i64;
+    pub init(n: i64) {
+        let x = self.b;
+        self.a = [x, n];
+        self.b = 2;
+        0
+    }
+    pub fn get(self: &Self) -> i64 { self.a[1] + self.b }
+}
+
+fn main() -> i64 {
+    let k = K::init(40);
+    k.get()
+}

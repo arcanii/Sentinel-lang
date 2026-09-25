@@ -1,0 +1,21 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c41_init_field_assigned_on_one_path.sentinel\")"
+---
+sentinel::types::init_field_maybe_unassigned
+
+  × class `K` field `e` is not assigned by the end of `init`
+    ╭─[tests/ui/c41_init_field_assigned_on_one_path.sentinel:11:22]
+ 10 │         let n: i64;
+ 11 │ ╭─▶     pub init(n: i64) {
+ 12 │ │           self.n = n;
+ 13 │ │           let mut i = 0;
+ 14 │ │           while i < n {
+ 15 │ │               self.e = E::B(n);
+ 16 │ │               i = i + 1;
+ 17 │ │           }
+ 18 │ │           0
+ 19 │ ├─▶     }
+    · ╰──── 
+ 20 │         pub fn get(self: &Self) -> i64 { self.n }
+    ╰────

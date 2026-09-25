@@ -101,6 +101,11 @@ ui_snapshot!(c37_perform_outside_handle, "c37_perform_outside_handle.sentinel");
 
 // ---- C4.1 class definite-assignment rejection ----
 ui_snapshot!(c41_init_field_unassigned, "c41_init_field_unassigned.sentinel");
+// ADR 0022 A3 (register D129): definite assignment is path by path — a field assigned on
+// one path only, a field read before it is assigned, `self` used before every field is.
+ui_snapshot!(c41_init_field_assigned_on_one_path, "c41_init_field_assigned_on_one_path.sentinel");
+ui_snapshot!(c41_init_field_read_before_assign, "c41_init_field_read_before_assign.sentinel");
+ui_snapshot!(c41_init_self_used_before_assigned, "c41_init_self_used_before_assigned.sentinel");
 // Register D61: method bodies are borrow-checked. Before D61 none of these was rejected.
 ui_snapshot!(c41_method_double_move, "c41_method_double_move.sentinel");
 ui_snapshot!(c41_method_move_out_of_self, "c41_method_move_out_of_self.sentinel");

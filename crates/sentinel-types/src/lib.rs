@@ -5004,6 +5004,34 @@ pub enum TypeError {
         init_span: miette::SourceSpan,
     },
 
+    /// ADR 0022 A3 (register D129): `init` reads `self.field` at a point that some path
+    /// reaches before the field is assigned (D4's `InitFieldReadBeforeAssign`).
+    #[error("`init` of class `{class_name}` reads `self.{field_name}` before it is assigned")]
+    #[diagnostic(
+        code(sentinel::types::init_field_read_before_assign),
+        help("assign the field on every path before this read (ADR 0022 D4)")
+    )]
+    InitFieldReadBeforeAssign {
+        class_name: String,
+        field_name: String,
+        #[label("some path reaches this read before `{field_name}` is assigned")]
+        span: miette::SourceSpan,
+    },
+
+    /// ADR 0022 A3 (register D129): `init` uses `self` itself (a method call, a reference,
+    /// passing it on) at a point that some path reaches before every field is assigned.
+    #[error("`init` of class `{class_name}` uses `self` before `{field_name}` is assigned")]
+    #[diagnostic(
+        code(sentinel::types::init_self_used_before_assigned),
+        help("assign every field on every path before using `self` itself (ADR 0022 D4)")
+    )]
+    InitSelfUsedBeforeAssigned {
+        class_name: String,
+        field_name: String,
+        #[label("some path reaches this use before `{field_name}` is assigned")]
+        span: miette::SourceSpan,
+    },
+
     /// C4.1 / ADR 0022 D5: a struct-literal expression targets a
     /// class — `Name { field: value, ... }` for a class is
     /// rejected to enforce D4's no-half-constructed invariant.
@@ -6793,29 +6821,15 @@ pub fn check_module(
                 &mut konts,
                 &mut tasks,
             )?;
-            // C4.1 / ADR 0022 D4: definite-assignment (minimal at
-            // this iteration). Walk the body's stmts and the tail
-            // skip-recursively; collect the set of fields ever
-            // assigned via `self.field = expr`. Reject any field
-            // not in that set with InitFieldMaybeUnassigned.
-            // Branch-aware (if/else snapshot+merge) dataflow is a
-            // follow-on iteration; the C4.1 (2/N) minimum catches
-            // the obvious "field never written" case.
-            let assigned = collect_init_assigned_fields(
+            // C4.1 / ADR 0022 D4, as amendment A3 (register D129) implements it: every
+            // field is assigned on every path before `init` ends or returns, and no path
+            // reads a field, or uses `self` itself, before assigning it.
+            check_init_definite_assignment(
                 &body,
                 init_def.self_var_id,
                 &typed_class_decls[idx],
-            );
-            for f in &typed_class_decls[idx].fields {
-                if !assigned.contains(&f.name) {
-                    return Err(TypeError::InitFieldMaybeUnassigned {
-                        class_name: typed_class_decls[idx].name.clone(),
-                        field_name: f.name.clone(),
-                        field_span: to_source_span(&f.name_span),
-                        init_span: to_source_span(&init_def.body.span),
-                    });
-                }
-            }
+                &init_def.body.span,
+            )?;
             Some(TypedInitDef {
                 visibility: init_def.visibility,
                 self_var_id: init_def.self_var_id,
@@ -7046,93 +7060,286 @@ fn stub_block(span: Span) -> TypedBlock {
     }
 }
 
-/// Walk a type-checked init body and return the set of field
-/// names assigned via `self.field = expr` somewhere in the body
-/// (any stmt or the tail). At C4.1 minimum this is a flat
-/// collection — if any if/else branch leaves a field unassigned,
-/// we accept it. Branch-aware merge is a follow-on iteration.
-fn collect_init_assigned_fields(
+/// ADR 0022 D4, as amendment A3 (register D129) implements it: the definite-assignment
+/// check on a class `init`, which must hand back an instance whose every field has been
+/// assigned. A1 shipped D4 as a flat collection, which counted a field assigned where
+/// statements, blocks, `if`s and `while` loops alone reached it, and checked no reads of
+/// `self`.
+///
+/// Walks the body in evaluation order (for `place = value`, both orders: inkwell lowers the
+/// value first unless the place is a lock guard's `*g`, the oracle and `scg` always the
+/// place) with the set of fields assigned on EVERY
+/// path so far: an `if` or `match` keeps only what all its arms assign; nothing assigned
+/// inside a `while` body, a `handle`, a `scope`, a `spawn` or the right operand of `&&` /
+/// `||` counts afterwards (a loop body, a handler arm and a right operand may not run; the
+/// others are not followed); a `return` (already refused inside `init`) would need every
+/// field assigned. A read of `self.f` needs `f` assigned, and so does a reference to it or a
+/// write into part of it (`self.xs[0] = ..`, which reads `self.xs` first); any other use of
+/// `self` itself (a method call, `&self`, passing it on) needs every field assigned. The
+/// body's TAIL is walked for its reads but its assignments do not count.
+///
+/// ⚠ FAIL-CLOSED: the expression match is exhaustive with no catch-all arm, so a new
+/// `TypedExprKind` must decide here whether it can assign or read a field.
+fn check_init_definite_assignment(
     body: &TypedBlock,
     self_var_id: VarId,
-    _class_data: &ClassData,
-) -> std::collections::HashSet<String> {
-    let mut acc: std::collections::HashSet<String> = std::collections::HashSet::new();
+    class: &ClassData,
+    init_span: &Span,
+) -> Result<(), TypeError> {
+    let da = InitDa { self_var_id, class };
+    let mut assigned = vec![false; class.fields.len()];
     for stmt in &body.stmts {
-        collect_init_assigned_in_stmt(stmt, self_var_id, &mut acc);
+        da.stmt(stmt, &mut assigned)?;
     }
-    collect_init_assigned_in_expr(&body.tail, self_var_id, &mut acc);
-    acc
+    // The tail's assignments do not count: check its reads only.
+    let mut tail = assigned.clone();
+    da.expr(&body.tail, &mut tail)?;
+    da.require_all(&assigned, |field_name, field_span| TypeError::InitFieldMaybeUnassigned {
+        class_name: class.name.clone(),
+        field_name,
+        field_span,
+        init_span: to_source_span(init_span),
+    })
 }
 
-fn collect_init_assigned_in_stmt(
-    stmt: &TypedStmt,
+/// The walker behind [`check_init_definite_assignment`]; `assigned[i]` is true when field
+/// `i` is assigned on every path to the current point.
+struct InitDa<'a> {
     self_var_id: VarId,
-    acc: &mut std::collections::HashSet<String>,
-) {
-    match &stmt.kind {
-        TypedStmtKind::Assign { target, value } => {
-            collect_init_assigned_in_assign_target(target, self_var_id, acc);
-            collect_init_assigned_in_expr(value, self_var_id, acc);
-        }
-        TypedStmtKind::Let { value, .. } => {
-            collect_init_assigned_in_expr(value, self_var_id, acc);
-        }
-        TypedStmtKind::While { cond, body } => {
-            // Phase D.5 / ADR 0036: a `while` body may assign `self.f`
-            // (in a class init); recurse into the cond + body like the
-            // If/Block forms.
-            collect_init_assigned_in_expr(cond, self_var_id, acc);
-            for s in &body.stmts {
-                collect_init_assigned_in_stmt(s, self_var_id, acc);
-            }
-            collect_init_assigned_in_expr(&body.tail, self_var_id, acc);
-        }
-        // D.5 (2/N): payload-free loop control assigns no `self.field`.
-        TypedStmtKind::Break | TypedStmtKind::Continue => {}
-        TypedStmtKind::Expr(e) => {
-            collect_init_assigned_in_expr(e, self_var_id, acc);
-        }
-    }
+    class: &'a ClassData,
 }
 
-fn collect_init_assigned_in_assign_target(
-    target: &TypedExpr,
-    self_var_id: VarId,
-    acc: &mut std::collections::HashSet<String>,
-) {
-    if let TypedExprKind::FieldAccess { target: inner, field, .. } = &target.kind {
-        if let TypedExprKind::Var(v) = &inner.kind {
-            if *v == self_var_id {
-                acc.insert(field.clone());
+impl InitDa<'_> {
+    fn field_index(&self, name: &str) -> Option<usize> {
+        self.class.fields.iter().position(|f| f.name == name)
+    }
+
+    /// The first field not assigned on every path, if any, turned into an error.
+    fn require_all(
+        &self,
+        assigned: &[bool],
+        err: impl FnOnce(String, miette::SourceSpan) -> TypeError,
+    ) -> Result<(), TypeError> {
+        match assigned.iter().position(|a| !*a) {
+            Some(i) => {
+                let f = &self.class.fields[i];
+                Err(err(f.name.clone(), to_source_span(&f.name_span)))
             }
+            None => Ok(()),
         }
     }
-}
 
-fn collect_init_assigned_in_expr(
-    expr: &TypedExpr,
-    self_var_id: VarId,
-    acc: &mut std::collections::HashSet<String>,
-) {
-    match &expr.kind {
-        TypedExprKind::Block(b) => {
-            for stmt in &b.stmts {
-                collect_init_assigned_in_stmt(stmt, self_var_id, acc);
-            }
-            collect_init_assigned_in_expr(&b.tail, self_var_id, acc);
+    fn block(&self, b: &TypedBlock, assigned: &mut Vec<bool>) -> Result<(), TypeError> {
+        for stmt in &b.stmts {
+            self.stmt(stmt, assigned)?;
         }
-        TypedExprKind::If { cond, then_branch, else_branch } => {
-            collect_init_assigned_in_expr(cond, self_var_id, acc);
-            for stmt in &then_branch.stmts {
-                collect_init_assigned_in_stmt(stmt, self_var_id, acc);
+        self.expr(&b.tail, assigned)
+    }
+
+    /// Walk something that may not run: its reads are checked, its assignments dropped.
+    fn maybe_expr(&self, e: &TypedExpr, assigned: &[bool]) -> Result<(), TypeError> {
+        let mut scratch = assigned.to_vec();
+        self.expr(e, &mut scratch)
+    }
+
+    fn maybe_block(&self, b: &TypedBlock, assigned: &[bool]) -> Result<(), TypeError> {
+        let mut scratch = assigned.to_vec();
+        self.block(b, &mut scratch)
+    }
+
+    /// `self.f` exactly, as an assignment target: the field's index.
+    fn self_field(&self, e: &TypedExpr) -> Option<usize> {
+        if let TypedExprKind::FieldAccess { target, field, .. } = &e.kind {
+            if let TypedExprKind::Var(v) = &target.kind {
+                if *v == self.self_var_id {
+                    return self.field_index(field);
+                }
             }
-            collect_init_assigned_in_expr(&then_branch.tail, self_var_id, acc);
-            for stmt in &else_branch.stmts {
-                collect_init_assigned_in_stmt(stmt, self_var_id, acc);
-            }
-            collect_init_assigned_in_expr(&else_branch.tail, self_var_id, acc);
         }
-        _ => {}
+        None
+    }
+
+    fn stmt(&self, stmt: &TypedStmt, assigned: &mut Vec<bool>) -> Result<(), TypeError> {
+        match &stmt.kind {
+            TypedStmtKind::Let { value, .. } => self.expr(value, assigned),
+            TypedStmtKind::Assign { target, value } => match self.self_field(target) {
+                Some(i) => {
+                    self.expr(value, assigned)?;
+                    assigned[i] = true;
+                    Ok(())
+                }
+                // Any other target — a local, `self.f.g`, `self.xs[i]` — is walked as the
+                // expression it is, so a target inside a field reads that field first. The
+                // back ends do not share this statement's order (inkwell lowers the value
+                // first unless the place is a lock guard's `*g`; the oracle and `scg` lower
+                // the place first), so each side's reads are checked against the state
+                // before the other side runs, and what either side assigns counts
+                // afterwards.
+                None => {
+                    let mut after_value = assigned.clone();
+                    self.expr(value, &mut after_value)?;
+                    self.expr(target, assigned)?;
+                    for (a, v) in assigned.iter_mut().zip(after_value) {
+                        *a |= v;
+                    }
+                    Ok(())
+                }
+            },
+            TypedStmtKind::While { cond, body } => {
+                self.expr(cond, assigned)?;
+                self.maybe_block(body, assigned)
+            }
+            TypedStmtKind::Break | TypedStmtKind::Continue => Ok(()),
+            TypedStmtKind::Expr(e) => self.expr(e, assigned),
+        }
+    }
+
+    fn expr(&self, e: &TypedExpr, assigned: &mut Vec<bool>) -> Result<(), TypeError> {
+        match &e.kind {
+            TypedExprKind::IntLit(_)
+            | TypedExprKind::FloatLit(_)
+            | TypedExprKind::BoolLit(_)
+            | TypedExprKind::NullLit
+            | TypedExprKind::CharLit(_)
+            | TypedExprKind::StringLit(_)
+            | TypedExprKind::FnRef(_) => Ok(()),
+            TypedExprKind::Var(v) => {
+                if *v == self.self_var_id {
+                    self.require_all(assigned, |field_name, _| {
+                        TypeError::InitSelfUsedBeforeAssigned {
+                            class_name: self.class.name.clone(),
+                            field_name,
+                            span: to_source_span(&e.span),
+                        }
+                    })
+                } else {
+                    Ok(())
+                }
+            }
+            TypedExprKind::FieldAccess { target, field, .. } => {
+                if let TypedExprKind::Var(v) = &target.kind {
+                    if *v == self.self_var_id {
+                        return match self.field_index(field) {
+                            Some(i) if assigned[i] => Ok(()),
+                            Some(_) => Err(TypeError::InitFieldReadBeforeAssign {
+                                class_name: self.class.name.clone(),
+                                field_name: field.clone(),
+                                span: to_source_span(&e.span),
+                            }),
+                            // Not a declared field: the checker has already refused it.
+                            None => Ok(()),
+                        };
+                    }
+                }
+                self.expr(target, assigned)
+            }
+            TypedExprKind::WidenToNullable(x)
+            | TypedExprKind::WidenToSecret(x)
+            | TypedExprKind::Declassify(x)
+            | TypedExprKind::Cast(x)
+            | TypedExprKind::Unary(_, x) => self.expr(x, assigned),
+            TypedExprKind::Return(x) => {
+                self.expr(x, assigned)?;
+                self.require_all(assigned, |field_name, field_span| {
+                    TypeError::InitFieldMaybeUnassigned {
+                        class_name: self.class.name.clone(),
+                        field_name,
+                        field_span,
+                        init_span: to_source_span(&e.span),
+                    }
+                })?;
+                // Nothing after a `return` runs on this path.
+                assigned.iter_mut().for_each(|a| *a = true);
+                Ok(())
+            }
+            TypedExprKind::Binary(_, l, r) | TypedExprKind::Cmp(_, l, r) => {
+                self.expr(l, assigned)?;
+                self.expr(r, assigned)
+            }
+            // The right operand may not run.
+            TypedExprKind::Logic(_, l, r) => {
+                self.expr(l, assigned)?;
+                self.maybe_expr(r, assigned)
+            }
+            TypedExprKind::Block(b) => self.block(b, assigned),
+            TypedExprKind::If { cond, then_branch, else_branch } => {
+                self.expr(cond, assigned)?;
+                let mut then_a = assigned.clone();
+                self.block(then_branch, &mut then_a)?;
+                let mut else_a = assigned.clone();
+                self.block(else_branch, &mut else_a)?;
+                for (i, a) in assigned.iter_mut().enumerate() {
+                    *a = then_a[i] && else_a[i];
+                }
+                Ok(())
+            }
+            TypedExprKind::Match { scrutinee, arms, .. } => {
+                self.expr(scrutinee, assigned)?;
+                let mut all_arms: Option<Vec<bool>> = None;
+                for arm in arms {
+                    let mut arm_a = assigned.clone();
+                    self.expr(&arm.body, &mut arm_a)?;
+                    all_arms = Some(match all_arms {
+                        None => arm_a,
+                        Some(acc) => acc.iter().zip(&arm_a).map(|(x, y)| *x && *y).collect(),
+                    });
+                }
+                if let Some(acc) = all_arms {
+                    *assigned = acc;
+                }
+                Ok(())
+            }
+            TypedExprKind::Call { args, .. }
+            | TypedExprKind::Perform { args, .. }
+            | TypedExprKind::ResumeKont { args, .. }
+            | TypedExprKind::ClassInit { args, .. }
+            | TypedExprKind::QualifiedCall { args, .. }
+            | TypedExprKind::EnumConstruct { args, .. } => {
+                for a in args {
+                    self.expr(a, assigned)?;
+                }
+                Ok(())
+            }
+            TypedExprKind::StructLit { fields, .. } => {
+                for f in fields {
+                    self.expr(f, assigned)?;
+                }
+                Ok(())
+            }
+            TypedExprKind::ArrayLit { elements, .. } => {
+                for x in elements {
+                    self.expr(x, assigned)?;
+                }
+                Ok(())
+            }
+            TypedExprKind::Index { target, index, .. } => {
+                self.expr(target, assigned)?;
+                self.expr(index, assigned)
+            }
+            TypedExprKind::MethodCall { target, args, .. }
+            | TypedExprKind::ImplMethodCall { target, args, .. } => {
+                self.expr(target, assigned)?;
+                for a in args {
+                    self.expr(a, assigned)?;
+                }
+                Ok(())
+            }
+            // A handled body may not run to its end, and its arms and `return` arm may not
+            // run: their reads are checked, their assignments do not count.
+            TypedExprKind::Handle { body, arms, return_arm, .. } => {
+                self.maybe_expr(body, assigned)?;
+                for arm in arms {
+                    self.maybe_expr(&arm.body, assigned)?;
+                }
+                if let Some(ra) = return_arm {
+                    self.maybe_expr(&ra.body, assigned)?;
+                }
+                Ok(())
+            }
+            TypedExprKind::Scope { body, .. } => self.maybe_block(body, assigned),
+            TypedExprKind::Spawn { call, .. } => self.maybe_expr(call, assigned),
+            TypedExprKind::Await { task_expr, .. } => self.expr(task_expr, assigned),
+        }
     }
 }
 
@@ -12603,6 +12810,18 @@ fn type_error_to_diagnostic(err: &TypeError) -> Diagnostic {
             ),
             init_span.offset()..(init_span.offset() + init_span.len()),
         ),
+        TypeError::InitFieldReadBeforeAssign { class_name, field_name, span } => (
+            "sentinel::types::init_field_read_before_assign",
+            format!(
+                "`init` of class `{class_name}` reads `self.{field_name}` before it is assigned"
+            ),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        TypeError::InitSelfUsedBeforeAssigned { class_name, field_name, span } => (
+            "sentinel::types::init_self_used_before_assigned",
+            format!("`init` of class `{class_name}` uses `self` before `{field_name}` is assigned"),
+            span.offset()..(span.offset() + span.len()),
+        ),
         TypeError::ClassConstructionMustUseInit { name, span } => (
             "sentinel::types::class_construction_must_use_init",
             format!("class `{name}` cannot be constructed with struct-literal syntax"),
@@ -13425,6 +13644,114 @@ fn main() -> i64 {
             "class Cell { let r: &i64;\n init(r: &i64) { self.r = r; 0 } }\nfn main() -> i64 { 0 }",
         );
         assert!(matches!(err, TypeError::RefInClassField { .. }), "got {err:?}");
+    }
+
+    // ADR 0022 A3 (register D129): definite assignment in a class `init`, path by path.
+    // Each program wraps the `init` body in the same class; `@` marks where it goes.
+    const DA_CLASS: &str = "enum E { A, B(i64) }\nclass K { let e: E; let n: i64;\n pub init(c: bool, m: E) { @ }\n pub fn get(self: &Self) -> i64 { self.n } }\nfn main() -> i64 { 0 }";
+
+    fn da_src(body: &str) -> String {
+        DA_CLASS.replace('@', body)
+    }
+
+    #[test]
+    fn init_field_assigned_on_one_path_only_is_refused() {
+        for body in [
+            // one `if` arm
+            "if c { self.e = E::A; 0 } else { 0 }; self.n = 1; 0",
+            // a `while` body may run zero times
+            "let mut i = 0; while i < 1 { self.e = E::A; i = i + 1; } self.n = 1; 0",
+            // one `match` arm
+            "match m { E::A => { self.e = E::A; 0 }, E::B(_) => 0 }; self.n = 1; 0",
+            // the right operand of `&&` may not run
+            "let b = c && { self.e = E::A; true }; self.n = 1; 0",
+            // a `scope` and the `init` tail do not count
+            "scope concurrent { self.e = E::A; 0 }; self.n = 1; 0",
+            "self.n = 1; { self.e = E::A; 0 }",
+        ] {
+            let err = check_err(&da_src(body));
+            assert!(
+                matches!(err, TypeError::InitFieldMaybeUnassigned { ref field_name, .. } if field_name == "e"),
+                "{body}: got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn init_reads_or_uses_self_before_assigning_is_refused() {
+        let err = check_err(&da_src("let x = self.n; self.e = E::A; self.n = x; 0"));
+        assert!(
+            matches!(err, TypeError::InitFieldReadBeforeAssign { ref field_name, .. } if field_name == "n"),
+            "got {err:?}"
+        );
+        // a read on a path that skipped the assignment
+        let err = check_err(&da_src("if c { self.n = 1; 0 } else { 0 }; self.e = E::A; self.n = self.n + 1; 0"));
+        assert!(
+            matches!(err, TypeError::InitFieldReadBeforeAssign { ref field_name, .. } if field_name == "n"),
+            "got {err:?}"
+        );
+        // `self` itself, before every field is assigned
+        let err = check_err(&da_src("self.n = 1; let x = self.get(); self.e = E::A; 0"));
+        assert!(
+            matches!(err, TypeError::InitSelfUsedBeforeAssigned { ref field_name, .. } if field_name == "e"),
+            "got {err:?}"
+        );
+        // the value of a field's own first assignment is evaluated before the field is set
+        let err = check_err(&da_src("self.e = E::A; self.n = self.n + 1; 0"));
+        assert!(
+            matches!(err, TypeError::InitFieldReadBeforeAssign { ref field_name, .. } if field_name == "n"),
+            "got {err:?}"
+        );
+        // `a[i] = v`: the back ends do not share the order of the place and the value, so
+        // each side is checked against the state before the other runs — both ways round
+        let err = check_err(&da_src("let mut a = [0]; a[{ self.n = 1; 0 }] = self.n; self.e = E::A; 0"));
+        assert!(
+            matches!(err, TypeError::InitFieldReadBeforeAssign { ref field_name, .. } if field_name == "n"),
+            "got {err:?}"
+        );
+        let err = check_err(&da_src("let mut a = [0]; a[self.n] = { self.n = 0; 0 }; self.e = E::A; 0"));
+        assert!(
+            matches!(err, TypeError::InitFieldReadBeforeAssign { ref field_name, .. } if field_name == "n"),
+            "got {err:?}"
+        );
+        // a write into part of a field reads the field first
+        let err = check_err(
+            "class J { let xs: [i64];\n pub init() { self.xs[0] = 1; self.xs = [1]; 0 } }\nfn main() -> i64 { 0 }",
+        );
+        assert!(
+            matches!(err, TypeError::InitFieldReadBeforeAssign { ref field_name, .. } if field_name == "xs"),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn init_field_assigned_only_in_a_handled_body_is_refused() {
+        for src in [
+            "effect Io { read() -> i64; }\nclass K { let n: i64;\n pub init() { handle { self.n = 1; 0 } with { Io.read(k) => k(0) }; 0 } }\nfn main() -> i64 { 0 }",
+            // a `return` arm does not run when an op arm does not resume
+            "effect Io { read() -> i64; }\nclass K { let n: i64;\n pub init() { let v = handle { perform Io.read() } with { Io.read(k) => 0, return r => { self.n = r; r } }; 0 } }\nfn main() -> i64 { 0 }",
+            // nor does a `spawn`'s argument count
+            "fn f(x: i64) -> i64 { x }\nclass K { let n: i64; let m: i64;\n pub init() { let t = spawn f({ self.n = 1; 0 }); self.m = t.await; 0 } }\nfn main() -> i64 { 0 }",
+        ] {
+            let err = check_err(src);
+            assert!(
+                matches!(err, TypeError::InitFieldMaybeUnassigned { ref field_name, .. } if field_name == "n"),
+                "{src}: got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn init_assigning_every_field_on_every_path_is_accepted() {
+        for body in [
+            "self.e = E::A; self.n = 1; let x = self.n; self.n = x + 1; 0",
+            "if c { self.e = E::A; 0 } else { self.e = E::B(2); 0 }; self.n = 1; 0",
+            "match m { E::A => { self.e = E::A; 0 }, E::B(x) => { self.e = E::B(x); 0 } }; self.n = 1; 0",
+            "self.e = E::A; self.n = 1; let x = self.get(); self.n = x; 0",
+            "self.e = E::A; self.n = 1; let mut i = 0; while i < 2 { self.n = self.n + i; i = i + 1; } 0",
+        ] {
+            check_ok(&da_src(body));
+        }
     }
 
     #[test]

@@ -3,9 +3,10 @@
 Status: ACCEPTED-WITH-AMENDMENTS — flipped at C4.1 close after
 the two-iteration landing (C4.1 (1/N) AST + parser; C4.1 (2/N)
 resolve / types / codegen + method-call + Name::init). Eleven
-D-decisions exercised; two amendments documented below covering
-the partial definite-assignment dataflow (D4) and the deferred
-`Self` in general type position (D8). This ADR details the
+D-decisions exercised; the amendments below cover the partial
+definite-assignment dataflow (D4: A1, completed path by path by
+A3 on 2026-09-25) and the deferred `Self` in general type
+position (D8: A2). This ADR details the
 concrete surface syntax + typing rules for the Phase C4.1
 class sub-phase per ADR 0021 D1-D3. ADR 0021 is the phase
 kickoff (PROPOSED); ADR 0022 mirrors the role of ADR 0013
@@ -478,9 +479,10 @@ materialise.
 
 ## Amendments at C4.1 close
 
-Two amendments document the gap between the as-drafted ADR
-and what shipped at C4.1 (2/N). Both are carry-overs to a
-future iteration; neither blocks Phase C4.2.
+Two amendments (A1, A2) document the gap between the as-drafted
+ADR and what shipped at C4.1 (2/N). Both are carry-overs to a
+future iteration; neither blocks Phase C4.2. A3 (2026-09-25)
+later closed A1.
 
 ### A1. D4 definite-assignment is partial (flat any-assigned)
 
@@ -515,6 +517,49 @@ return types (i64), so the gap doesn't surface. Reopen when
 a return-Self method shape surfaces (e.g., builder pattern,
 chainable mutators).
 
+### A3 (2026-09-25, register D129). D4's definite assignment, path by path and fail-closed
+
+A1 shipped D4 as a flat check: a field counted as assigned if `self.field = ..` appeared
+among the body's statements, in a nested block, in one arm of an `if` or in a `while` body
+(though not, for example, inside a `match` arm, an operand or a call's argument), and reads
+of `self` inside `init` were not checked. So the check did not establish what D4 promises — that `init`
+hands back an instance whose every field has been assigned.
+`check_init_definite_assignment` in `sentinel-types` now implements D4 as drafted, in the
+fail-closed direction:
+
+- The body is walked in evaluation order with the set of fields assigned on every path so
+  far. For `place = value`, whose order the back ends do not share (inkwell lowers the
+  value first unless the place is a lock guard's `*g`; the oracle and `scg` lower the place
+  first), each side's reads are checked against the state before the other side runs. An `if` or `match` keeps only what all its arms
+  assign. Nothing assigned inside a `while` body, a `handle` (its body and its arms), a
+  `scope`, a `spawn` or the right operand of `&&` / `||` counts afterwards: a loop body, a
+  handler arm and a right operand may not run, and the walk does not follow what a handled
+  body, a `scope` or a `spawn` assigns. The body's tail is walked for its reads, but what
+  it assigns does not count.
+- A read of `self.f` needs `f` assigned on every path to the read
+  (`InitFieldReadBeforeAssign`, the error D4 named), and so does a reference to it
+  (`&self.f`, `&mut self.f`) or a write into part of it (`self.xs[0] = ..`, `self.p.a = ..`),
+  which reads `self.f` first. Any other use of `self` itself — a method call, `&self`,
+  passing it on — needs every field assigned (`InitSelfUsedBeforeAssigned`). A `return` is
+  already refused inside `init`; the walk requires every field at one anyway.
+- At the end every field must be assigned (`InitFieldMaybeUnassigned`, as before).
+
+The match over expression kinds is exhaustive with no catch-all arm, so a new kind must
+decide what it can assign or read. The rule refuses some programs a finer analysis would
+accept: an assignment inside a loop body, a `scope` or a handled body never counts, even
+where the program always runs it. It also accepts shapes A1 refused, such as a field
+assigned in every arm of a `match`, inside an operand or in a call's argument. No program
+in the corpus, the examples or the self-hosted compiler is refused. Pinned by the unit tests
+`init_field_assigned_on_one_path_only_is_refused`,
+`init_reads_or_uses_self_before_assigning_is_refused`,
+`init_field_assigned_only_in_a_handled_body_is_refused` and
+`init_assigning_every_field_on_every_path_is_accepted`, and by
+`tests/ui/c41_init_field_assigned_on_one_path.sentinel`,
+`c41_init_field_read_before_assign.sentinel` and
+`c41_init_self_used_before_assigned.sentinel`; each of sixteen mutations is caught. `scg`
+has no rejection path and does not refuse these yet (register D97). A rule that refuses
+programs that compiled before is at least a minor version (ADR 0076 D2).
+
 ## Revisit
 
 This ADR is **ACCEPTED-WITH-AMENDMENTS at C4.1 close**.
@@ -532,7 +577,8 @@ Per-D status:
   `&Self` + `&mut Self` receivers; method-call dispatch is
   static (D7).
 - **D4 (init constructor + definite-assignment)**: exercised
-  with amendment A1 — full dataflow deferred.
+  with amendment A1; the path-by-path dataflow landed as A3
+  (2026-09-25).
 - **D5 (Name::init form)**: exercised. Struct-literal syntax
   for classes (`Point { x: 1 }`) NOT reached at type-check
   because resolve catches it as UndefinedStruct first;
@@ -562,10 +608,11 @@ Future revisit triggers (carried forward):
 - **D1 (generic classes)**: revisit if user testing surfaces
   the need before C4.2 (the typing layer can accept
   `class Pair<A, B>` with modest work).
-- **D4 (definite-assignment)**: revisit when branch-aware
-  merge becomes necessary in practice. Candidate for
-  refactoring into a shared analysis core with the C2
-  borrow CFG.
+- **D4 (definite-assignment)**: A3 implements the branch-aware
+  merge; revisit if the refusals A3 lists (an assignment in a
+  loop body, a `scope` or a handled body) bite in practice.
+  Candidate for refactoring into a shared analysis core with
+  the C2 borrow CFG.
 - **D5 (Name::init form)**: revisit at first user-reported
   ergonomic friction. `new Name(args)` sugar remains the
   natural alternative.

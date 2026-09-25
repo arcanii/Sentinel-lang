@@ -1,0 +1,14 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c41_init_field_read_before_assign.sentinel\")"
+---
+sentinel::types::init_field_read_before_assign
+
+  × `init` of class `K` reads `self.b` before it is assigned
+    ╭─[tests/ui/c41_init_field_read_before_assign.sentinel:9:17]
+  8 │     pub init(n: i64) {
+  9 │         let x = self.b;
+    ·                 ───┬──
+    ·                    ╰── 
+ 10 │         self.a = [x, n];
+    ╰────
