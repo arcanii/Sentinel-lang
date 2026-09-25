@@ -124,6 +124,14 @@ reference as you work through the milestones.
 > confirming nothing pre-existing is newly refused; oracle-vs-scg byte-equality on the new
 > fixture at types, mir and llvm; and the secret-taint check in both directions.
 
+### ▶ RESUME HERE (2026-09-25d — `origin/main` was `707c456` when this was written, and this session's four commits sit on top of it, unpushed; read `git reflog show refs/remotes/origin/main` and `git log --oneline origin/main..HEAD` at the START and AGAIN before writing either down. This session's second slice: **register D121 CLOSED, and D35 with it** (the fix commit, then this docs commit) by [ADR 0071](decisions/0071-shared-ownership-and-mutex.md) D2 amendment A1: a `Shared` / `Mutex` read out of a place into a new owner is cloned in all three back ends, per branch through block / `if` / `match` / `scope` tails, unless the read moves the place; `scg`'s delegate forwarder clones too, and a `secret`-qualified handle is now a type error. Fixture `c71_shared_place_duplications` (24 shapes) answers 94 in all three back ends and aborts on a missing clone; two IR tests pin the moved-place rule and two `tests/ui` fixtures the refusal. Three bounded review rounds: they found a generic-body leak the rule introduced and an `scg` forwarder that did not clone (both fixed), owners that are never dropped (registered as leaks D122 and D123), and the one generic shape where `scg` moved (recorded in D36). Filed D119 and D120 (leaks). Register: **123 distinct ids, 50 whose heading opens `**D<n> — DONE`**. Four-check: **2,073 passed with exactly the 18 known Windows failures**, doctests and clippy clean, every `selfhost_*` differential green including both bootstrap fixed points. Sweeps, each OLD (`1cd0d28`) against NEW: `snc llvm` leaves 341 programs byte-identical, the ten self-hosted module roots (merged from this tree) among them, changes only the new fixture, and newly refuses only the two new refusal fixtures; `snc build` over the 121 entries changes no verdict. Fifty-four of fifty-five mutations caught. Moves emitted IR, so at least a minor version (ADR 0076 D2); `Cargo.toml` still says 0.1.0.)
+
+> **NEXT:** continue the approved order:
+> 1. item 4: D92, together with a prerequisite `scg` fix tracked privately, and a second `scg` fix tracked privately; then D96 + D97 (D97 needs `scg`'s first rejection path, an ADR amendment to the types port); then register the leaks re-verified on 2026-09-25 — a class instance's heap fields, an enum payload's own heap, an effecting let-shape fn's heap parameter (the fourth of the earlier four is D120) — and `==` between two arrays, which passes the checker and then fails in every back end.
+> 2. ADR 0077's implementation, with the draft's proposed answers to Q1–Q5.
+>
+> D117 is not yet scheduled; it is the maintainer's call. Owed by the maintainer: D102, D103, ADR 0077's Q6, D36's decision, and when to bump the version.
+
 ### ▶ RESUME HERE (2026-09-25c — `origin/main` was `707c456` when this was written, and this session's two commits sit on top of it, unpushed; read `git reflog show refs/remotes/origin/main` and `git log --oneline origin/main..HEAD` at the START and AGAIN before writing either down. This session: **registers D111–D114 CLOSED** (`3d6a79b` fix, then this docs commit) by three borrow-checker amendments — [ADR 0050](decisions/0050-index-assignment.md) **A6** (an element store needs a collection that still owns its buffer), [ADR 0075](decisions/0075-a-bubbling-resume-leaves-its-arm.md) **A2** (a `return` arm may not move a binding declared outside its `handle`; a move inside nested `while` loops, op arms or `return` arms is reported once, which closes D111) and [ADR 0046](decisions/0046-partial-move-field-soundness.md) **A4** (the moves the move state cannot follow are refused, and moving a `match` payload is a move out of its scrutinee, checked against anything else that took it on any path) — plus one `scg` parity fix (`dump_te_field` records no partial move when its target is itself a field access; new `TyCtx` field `lastfld`). A4 also accepts one thing it refused before: a field compared with `null` or discarded as a statement is only read. Filed **D115–D118**; **D117 is a leak** (a place compared with `null`, or discarded as a statement, is not dropped with its binding), and its fix needs a comparison to read its operands in both the oracle and `scg`, whose drop plans record the place in different positions. Three bounded review rounds; the third found no defect in the rules, and every blocking finding it made was prose, all fixed. Register: **118 distinct ids, 48 whose heading opens `**D<n> — DONE`** (the 2026-09-22 block's rule). Four-check: **2,067 passed with exactly the 18 known Windows failures**, doctests and clippy clean, every `selfhost_*` differential green including both bootstrap fixed points. Sweeps, each OLD (`707c456`) against NEW: `snc borrow` over all 489 `.sentinel` files changes no result outside the slice's fourteen new fixtures; `snc build` over the 121 entries `snc borrow` cannot load (61 programs, 4 exporting libraries, 9 self-hosted module roots, and 47 programs importing a library module) changes none; `snc llvm` changes no byte on the 341 programs both emit, the ten merged self-hosted module roots among them. Thirty-four mutations caught; a thirty-fifth (`f2_first_arm_kept`) was dropped as equivalent once the branch points restored the payload attributions. Each amendment refuses programs that compiled before, so the next version is at least 0.2.0 (ADR 0076 D2); `Cargo.toml` still says 0.1.0. ⚠ **Traps this session:** a fixture you add can expose a divergence no corpus program had reached — the new fixtures turned up D117's position-dependent drop plans and D118 — so run the `selfhost_*` differentials before believing a remedy; a drop-plan change made to fix that leak in the oracle alone moved the divergence to other positions rather than closing it, and was withdrawn; and `grep -c` on a runtime symbol counts its `declare` line.)
 
 > **NEXT:** continue the approved order:
@@ -611,7 +619,8 @@ reference as you work through the milestones.
 > re-measure every literal against the program beside it.**
 >
 > ⚠ **SECURITY-CLASS FINDINGS ARE TRACKED PRIVATELY WITH THE MAINTAINER and are deliberately
-> not described here.** D35 is blocked behind one; D19 IS another. D59 was a third, and is now
+> not described here.** D35 was blocked behind one, which [ADR 0071](decisions/0071-shared-ownership-and-mutex.md)
+> D2 amendment A1 closed on 2026-09-25 (register D121); D19 IS another. D59 was a third, and is now
 > CLOSED and described in the register. Two more were raised privately on 2026-09-05/06; one of
 > them — class-field move tracking — is CLOSED by **D61** (2026-09-11), together with the wider
 > gap it was a symptom of (no method body was borrow-checked at all), and both are described
@@ -2038,6 +2047,95 @@ reference as you work through the milestones.
 >      payload, so the differentials are green; the typer, MIR and codegen differentials each
 >      diverge on a fixture that does.
 >
+>      **D119 — inkwell never drops a method's or a class init's by-value parameters.** Found
+>      2026-09-25 while designing D121. `snc build` pushes a method's or an init's parameters
+>      into a scope frame, as it does a free fn's, but pops that frame without emitting its
+>      drops, so a heap value passed to a method by value is never freed: `h.eat(a)` with
+>      `a: [i64]` of four elements, called 2,000,000 times from a loop, peaks at 101.4 MB,
+>      against 9.3 MB for the same call to a free fn (kernel peak working set after exit);
+>      `K::init(a)` the same, 101.4 MB. Only the shipping back end leaks: the IR the
+>      differential compares frees them. D121 keeps inkwell's method, qualified-call and
+>      class-init arguments themselves out of its clone rule for this reason, but a struct
+>      literal passed there still counts its fields, so those units stay held too (D122);
+>      fixing D119 means dropping those parameters in inkwell and putting those arguments
+>      back into the rule, together.
+>
+>      **D120 — an assignment never drops the value it overwrites.** Found 2026-09-25 while
+>      designing D121. `a = [i, 2, 3, 4];` in a loop peaks at 101.5 MB after 2,000,000
+>      iterations (the same measurement as D119); the old buffer is never freed, in every back
+>      end, and for a `Shared` / `Mutex` the old unit is never released. Dropping it is not a
+>      local fix: the old value may already have been moved away (`a = f(a)`), so whether to
+>      drop depends on the path taken, which is ADR 0077's drop-flag question.
+>
+>      **D121 — DONE (2026-09-25). A `Shared` / `Mutex` duplicated out of a field, a
+>      reference or a tail, or into a struct literal, an assignment, a method argument or a
+>      returned value, was not counted.** The field shapes were first recorded under D35
+>      (2026-09-02); a 2026-09-24 review found them again, and construction on 2026-09-25
+>      widened the set. ADR 0071 D2 counted a duplication only from a named binding into a
+>      `let`, a user-fn argument or a spawn capture, so `take(h.s)`, `let v = h.s`,
+>      `take((*r).s)`, `let v = { s }`, `let v = if c { s } else { s }`, `H { s: s }`,
+>      `v = s`, a method argument, and `fn get(r: &H) -> Shared<i64> { (*r).s }` each
+>      released a unit at the new owner's drop that no clone had added. Over the fixture's 24
+>      shapes the oracle did so on every one, inkwell on 19 and `scg` on 16; the runtime's
+>      debug refcount check aborts on each. Fixed by
+>      [ADR 0071](decisions/0071-shared-ownership-and-mutex.md) D2 amendment A1 in all three
+>      back ends: a value read out of a place into a new owner is cloned, per branch through a
+>      block's, an `if`'s, a `match` arm's or a `scope` body's tail, unless the read moves the
+>      place (a generic parameter at `Shared` — which also closes an older leak: HEAD's
+>      oracle and inkwell cloned a moved generic parameter passed to a call and never released
+>      the clone). An enum-construct argument and an assignment into a class field keep D2's
+>      treatment; a read out of a class field is cloned like any other place read. A
+>      `secret`-qualified handle (`secret Shared<T>`, `secret Mutex<T>`) is now a type error,
+>      `SecretHandle`: the secret belongs inside the container. The reviews found two more
+>      defects, both fixed before this landed: `scg`'s hand-emitted delegate forwarder did not
+>      clone, and a generic body cloned a parameter it moves out, which leaked in the oracle
+>      and inkwell. Pinned by `tests/pass/c71_shared_place_duplications.sentinel` (24 shapes;
+>      answers 94 in all three back ends, aborts on a missing clone) through inkwell, the
+>      oracle's IR and the codegen differential, the moved-place rule by two IR tests, and the
+>      refusal by two `tests/ui` fixtures. No pre-existing corpus program's IR changes. Owners A1 cannot reach, because nothing drops them, are D122 and
+>      D123. Closes D35.
+>
+>      **D122 — a `Shared` / `Mutex` counted into an owner that is never dropped stays held
+>      (a leak).** Found 2026-09-25 by the reviews of D121's fix. Such owners predate it: an
+>      array or `Vec` releases none of its elements' handles — its drop frees the buffer
+>      only, the per-element drop ADR 0068 and ADR 0034 defer, the same gap that leaks an
+>      element's own heap — and a struct literal that is read in place or stored into an
+>      array literal, a `push` or an enum constructor is never dropped at all (D92's family
+>      of temporaries, and ADR 0032 A1's box-only enum drop). ADR 0071 D2 amendment A1 counts
+>      a read out of an element and a struct literal's fields like any other, so the unit
+>      such an owner holds stays held. Measured over 2,000,000 evaluations, peak working set
+>      after exit, in inkwell, the oracle's IR and `scg`'s IR alike: `take(a[0].s)` and
+>      `let v = a[0].s` with `a: [H]`, `shared_get(H { s: s, n: 1 }.s)`,
+>      `[H { s: s, n: 1 }]`, `push(&mut v, H { s: s, n: 1 })` and `E::A(H { s: s, n: 1 })`
+>      each peak at 70.8–70.9 MB, against 9.2–9.3 MB before A1; an element that is never
+>      read leaks before and after (70.8–70.9 MB). Before A1 the element's unit went to its
+>      first reader, which balanced one read — a second read released one unit too many.
+>      Three more owners of the same kind came out of the later review rounds. A call's
+>      result that nothing drops — `shared_get(getf(&h))`, or `getf(&h);` discarded, with
+>      `fn getf(r: &H) -> Shared<i64> { (*r).s }` — keeps the unit the callee now counts into
+>      its returned place read: 70.8 MB in all three back ends, against 9.2–9.3 before; an
+>      rvalue result (`shared_get(mk())`) leaked before and after. A binding moved on one
+>      path is dropped on no path (D93's per-function moved set), so a field read out of it
+>      on another — `if c { take(h.s) } else { eat(h) }` — leaves the field's unit held:
+>      40.1 MB in inkwell and the oracle, against 9.2–9.3 before (`scg` already leaked it,
+>      40.1). And in inkwell only, a struct literal passed as a method, qualified-call or
+>      class-init argument is never dropped either (D119), so its fields' units stay held:
+>      `p.use_h(H { s: s, n: 1 })` peaks at 70.9 MB, against 9.2 before. The fix is the
+>      owners' drops: element drops for arrays and `Vec`, payload drops for enums, a drop for
+>      a temporary once its reader is done (D92's seam), drop flags for a maybe-moved binding
+>      (ADR 0077), and D119.
+>
+>      **D123 — inkwell keeps a unit counted into a block's own `let`-local when nothing
+>      receives the block's value (a leak).** Found 2026-09-25 by the review of D121's fix.
+>      As a builtin's argument (`shared_get({ let t: Shared<i64> = h.s; t })`) or an
+>      expression statement (`{ let t: Shared<i64> = h.s; t };`), 2,000,000 evaluations in
+>      inkwell peak at 70.9 MB, and at 101.5 MB for a `Mutex`, against 9.3 MB before A1. The
+>      shape already leaked before A1 when the local came from a binding (`{ let t = s; t }`,
+>      70.8 MB before and after); A1 extends it to a field source, which it now clones into
+>      the `let`. In an owning position (`let u = { let t = h.s; t }`) all three back ends
+>      balance. The fix is to release the block's value once its reader is done with it —
+>      D92's seam for temporaries.
+>
 >      **D78 — stale corpus fixture counts in `llvm.rs` and `README.md`, at six sites, stale
 >      before this change.** Found by D74's reviews. `crates/sentinel-driver/tests/llvm.rs`
 >      carries them three times: a comment at line 1214 saying a `tests/pass` substring filter
@@ -3067,25 +3165,47 @@ reference as you work through the milestones.
 >      **▸ D35-D37 came out of the D31 work (2026-09-02), all verified BY CONSTRUCTION
 >      and all PRE-EXISTING (pre- and post-change `scg` byte-identical).**
 >
->      **D35 — THREE call paths still carry the leaky `mvbv` gate**, not the one this
->      entry first named. Settled by construction (each shape run against both binaries):
+>      **D35 — DONE (2026-09-25). THREE call paths carried the leaky `mvbv` gate**, not the
+>      one this entry first named. Settled by construction (each shape run against both binaries):
 >      `let y = p.h;` (the let-init duplication), `takes(p.h)` through `dump_targs` (the
->      ordinary-call arg walker), and `spawn work(p.h)` (the capture). All three
->      over-clone — `scg` emits 1 where the oracle emits 0 — which is a LEAK and a
->      divergence. D31's generic site is now correct, which is the independent
->      confirmation that its `ndump` leaf test is scoped right.
+>      ordinary-call arg walker), and `spawn work(p.h)` (the capture). In all three `scg`
+>      emits 1 clone where the oracle emits 0 — a divergence, first read here as a leak in
+>      `scg`. Construction later showed the opposite: `scg`'s count was right and the
+>      oracle released one unit too many on all three (the closure below). D31's generic
+>      site is now correct, which is the independent confirmation that its `ndump` leaf
+>      test is scoped right.
 >
->      **⚠ THREE EMITTERS, THREE DIFFERENT PREDICATES**, which is why this pair has
->      drifted twice: `llvm_dump.rs` and the inkwell twin both test
+>      **⚠ THREE EMITTERS, THREE DIFFERENT PREDICATES** (until the closure below), which
+>      is why this pair drifted twice: `llvm_dump.rs` and the inkwell twin both tested
 >      `matches!(expr.kind, Var(_))`, while `selfhost/types/cg.sentinel`'s
->      `cg_clone_shared_arg` tests `mvbv >= 0`, a per-node most-recent-`Var` tracker.
->      Any fix must move all three together, and any new fixture for these shapes will
->      diverge until it does. NOT fixed here deliberately: the ORACLE is the wrong side
->      on some of these, so it is oracle-first and cannot be done from `selfhost/`.
->      There is more to this item than the parity divergence and that part is tracked
->      privately with the maintainer — ask before working it, and do not widen it.
+>      `cg_clone_shared_arg` tested `mvbv >= 0`, a per-node most-recent-`Var` tracker.
+>      Any fix had to move all three together. It was not fixed from `selfhost/`
+>      because the ORACLE was the wrong side on all three, so it was oracle-first.
+>      There was more to this item than the parity divergence, tracked privately with the
+>      maintainer; A1 closed that part too.
+>      Closed by [ADR 0071](decisions/0071-shared-ownership-and-mutex.md) D2 amendment A1
+>      (register D121): the oracle and inkwell now clone a container read out of a place into
+>      a new owner, `p.h` in all three shapes included, which is what `scg`'s gate did
+>      on them; and `scg`'s three sites now take the decision from the node's own shape
+>      (`dump_texpr_node`, the oracle's test) instead of `mvbv`. The three emitters now apply
+>      one predicate at these sites, and the oracle and `scg` agree on these shapes, with a
+>      clone. (The predicate's own exceptions — inkwell's method arguments, a moved generic
+>      parameter — are listed in A1.)
 >
->      **D36 — a generic fn that RETURNS its container param over-releases in `scg`.**
+>      **D36 — a generic fn that RETURNS its container param: the oracle and `scg` lower
+>      it differently.** Until 2026-09-25 `scg` over-released it. [ADR 0071](decisions/0071-shared-ownership-and-mutex.md)
+>      D2 amendment A1 changed that without taking the decision below: its owning context
+>      clones the parameter read in the mono body's tail, which balances `scg`'s release,
+>      while the oracle and inkwell hand the moved parameter on (A1's moved-place rule), as
+>      they did before. Both now balance — `fn keep<V>(y: V) -> V { y }` at `Shared<i64>`,
+>      2,000,000 calls, peaks at 9.3–9.4 MB in all three back ends, where HEAD's `scg` aborted —
+>      but the IR differs, so such a program still cannot join the corpus, and which
+>      lowering to keep is still the open question. A1 also moved `scg` on one shape where
+>      the two used to agree: a field of a generic struct parameter read into an owner on one
+>      path while the parameter is moved on another (`fn fw<U>(b: Bx<U>, c: bool) -> Bx<U> {
+>      if c { Bx { v: b.v, n: 0 } } else { b } }`). The oracle hands the field on; `scg`
+>      clones it, and nothing releases the parameter, so `scg` now peaks at 40.2 MB over
+>      2,000,000 calls where all three were balanced (9.2–9.3), and the IR differs there too.
 >      **⚠ NEEDS A MAINTAINER DECISION BEFORE ANY CODE — options, costs and a
 >      recommendation are tabulated in [`open-decisions.md`](open-decisions.md).**
 >      **The question SPLITS IN TWO**

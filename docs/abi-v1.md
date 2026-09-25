@@ -397,11 +397,11 @@ Codegen declares these as external; `sentinel-runtime` defines them
 | `sentinel_process_send` | `(ptr p, i64 value) -> i64` | typed framed IPC (ADR 0066 M2.3) — frame `value` (8-byte LE) to child stdin, keep open; 0 ok, -1 error |
 | `sentinel_process_recv` | `(ptr p, ptr out) -> i64` | typed framed IPC — read one 8-byte LE i64 frame from child stdout; writes `*out`, returns 0 (some) / 1 (closed). Codegen builds the `?i64` |
 | `sentinel_shared_new` | `(i64 value) -> ptr` | shared ownership (ADR 0071 M1.4a) — a new refcounted `Shared<T>` cell (rc 1) holding the word-scalar `value`; the first handle that is freed (not leaked) |
-| `sentinel_shared_clone` | `(ptr s) -> ptr` | shared ownership — register a new owner (rc++), returns the same ptr; emitted at each duplication of a named `Shared` binding |
+| `sentinel_shared_clone` | `(ptr s) -> ptr` | shared ownership — register a new owner (rc++), returns the same ptr; emitted when a `Shared` is read out of a place into a new owner (ADR 0071 D2 amendment A1, which lists the exceptions) |
 | `sentinel_shared_get` | `(ptr s) -> i64` | shared ownership — read the shared value out (immutable at M1.4a; mutation is `Mutex<T>`, M1.4b) |
 | `sentinel_shared_release` | `(ptr s) -> void` | shared ownership — drop one owner (rc--), free the cell at zero; emitted at each `Shared` binding's scope-exit drop |
 | `sentinel_mutex_new` | `(i64 value) -> ptr` | mutex (ADR 0071 M1.4b) — a new refcounted, lock-protected `Mutex<T>` cell (rc 1, unlocked) holding the word-scalar `value`; reuses the `Shared` co-ownership pattern (freed on the last drop) |
-| `sentinel_mutex_clone` | `(ptr m) -> ptr` | mutex — register a new owner (rc++), returns the same ptr; emitted at each duplication of a named `Mutex` binding (mirrors `sentinel_shared_clone`) |
+| `sentinel_mutex_clone` | `(ptr m) -> ptr` | mutex — register a new owner (rc++), returns the same ptr; emitted when a `Mutex` is read out of a place into a new owner (mirrors `sentinel_shared_clone`) |
 | `sentinel_mutex_release` | `(ptr m) -> void` | mutex — drop one owner (rc--), free the cell at zero; emitted at each `Mutex` binding's scope-exit drop (mirrors `sentinel_shared_release`) |
 | `sentinel_mutex_lock` | `(ptr m, ptr out) -> i64` | mutex — acquire with the always-on `LockTimeout` deadline (D5); writes a `*mut i64` to the protected slot into `*out`, returns 0 (acquired) / 1 (timeout, or null `m`/`out`). Codegen builds the `?Guard` like `recv`'s `?i64` |
 | `sentinel_mutex_try_lock_for` | `(ptr m, i64 timeout_nanos, ptr out) -> i64` | mutex — bounded acquire (`timeout_nanos ≤ 0` = a non-blocking `try_lock`); same `(status, out-ptr)` contract as `sentinel_mutex_lock` |

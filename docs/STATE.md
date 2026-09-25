@@ -14,7 +14,31 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
-**Latest (2026-09-25) — three borrow-checker amendments (registers D111–D114).**
+**Latest (2026-09-25, second slice) — a `Shared` / `Mutex` duplication out of a place into a
+new owner is counted (register D121, closing D35).** [ADR 0071](decisions/0071-shared-ownership-and-mutex.md)
+D2 amendment A1: the clone that balances a new owner's release fired only for a named
+binding into a `let`, a user-fn argument or a spawn capture; a value read out of a field,
+through a reference or as a block's / `if`'s / `match` arm's tail, or stored by a struct
+literal, an assignment, a method argument or a returned value, went uncounted, so the
+release count ran ahead of the clone count (in the oracle on every one of the fixture's 24
+shapes, in inkwell on 19, in `scg` on 16). All three back ends now clone a value read out of
+a place into a new owner, per branch, through an owning context each sink sets and only tails
+(a block's, an `if`'s, a `match` arm's, a `scope` body's) inherit, unless the read moves the
+place (a generic parameter at `Shared`); A1 lists the rest of what it leaves out, among them
+inkwell's method arguments. A `secret`-qualified handle (`secret Shared<T>`, `secret
+Mutex<T>`) is now a type error: the secret belongs inside the container. Outside a generic
+body a bare binding's emitted sequence is unchanged, and no pre-existing corpus program's IR
+moves. It moves the emitted code of any program with such a duplication and refuses one that
+spells a `secret`-qualified handle, so it is at least a minor version (ADR 0076 D2). Filed
+D119 (inkwell never drops a method's or a class init's by-value parameters), D120 (an
+assignment never drops the value it overwrites), D122 (a unit counted into an owner that is
+never dropped stays held: an array or `Vec` element, a struct literal or a call's result
+nothing drops, a field of a binding moved on another path) and D123 (inkwell keeps a unit
+counted into a block's tail local when nothing receives the block's value) — all leaks — and
+updated D36: the oracle and `scg` still lower a generic return of a container differently;
+both now balance when the parameter is moved on every path.
+
+**Previously (2026-09-25) — three borrow-checker amendments (registers D111–D114).**
 [ADR 0050](decisions/0050-index-assignment.md) A6: an element store `a[i] = v` now needs a
 collection that still owns its buffer, so a store after `a` was moved is a use of a moved
 binding. [ADR 0075](decisions/0075-a-bubbling-resume-leaves-its-arm.md) A2: a `handle`'s
