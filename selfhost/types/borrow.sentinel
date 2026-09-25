@@ -1001,6 +1001,10 @@ fn dump_texpr_arm(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyC
             let svc: bool = (*c).consuming;
             (*c).consuming = false;
             let scrty: i64 = dump_texpr(out, mscr, 0 - 1, src, c, gb);
+            // (ADR 0032 A5, register D92) a scrutinee that is not a place is a temporary nothing
+            // else owns (ADR 0034 C1): an arm for a payload-carrying variant frees its box once
+            // the bindings have copied it out, and a `_` arm frees whatever reached it.
+            let cgm_tmp: bool = !(*c).cg_place;
             // (8e-2) cg: capture the scrutinee's `{i32,ptr}` operand before anything else.
             let cgm_sk: i64 = if cg_on(c) {
                 (*c).cglk
@@ -1029,6 +1033,7 @@ fn dump_texpr_arm(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyC
             let cgm_save_res: i64 = (*c).cg_m_result;
             let cgm_save_mrg: i64 = (*c).cg_m_merge;
             let cgm_save_wild: bool = (*c).cg_m_wild;
+            let cgm_save_tmp: bool = (*c).cg_m_tmp;
             if cg_on(c) {
                 let cgm_tg: i64 = cg_dst(c);
                 cgo_str(c, "extractvalue { i32, ptr } ");
@@ -1050,6 +1055,7 @@ fn dump_texpr_arm(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyC
                 (*c).cg_m_result = cgm_rs;
                 (*c).cg_m_merge = cgm_mg;
                 (*c).cg_m_wild = false;
+                (*c).cg_m_tmp = cgm_tmp;
                 0
             } else {
                 0
@@ -1121,6 +1127,7 @@ fn dump_texpr_arm(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyC
                 (*c).cg_m_result = cgm_save_res;
                 (*c).cg_m_merge = cgm_save_mrg;
                 (*c).cg_m_wild = cgm_save_wild;
+                (*c).cg_m_tmp = cgm_save_tmp;
                 0
             } else {
                 0

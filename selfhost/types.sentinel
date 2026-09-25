@@ -431,6 +431,7 @@ struct TyCtx {
     cg_m_armnext: i64,// the current arm's next-check block (set in dump_tpat; -1 = wildcard)
     cg_m_pj: i64,     // the current variant's flat index (for cg_emit_pstruct in the bind)
     cg_m_wild: bool,  // (8g) true once a `_` arm emitted the final-else body+br (the match epilogue then skips `unreachable`); save/restored around dump_tarms for nesting
+    cg_m_tmp: bool,   // (ADR 0032 A5) the scrutinee is a temporary, so each arm frees its payload box; save/restored with the rest
     // (Bar B / generics-b) MONOMORPHIZATION. Generic fns are SKIPPED in the mode-4 main
     // walk + RE-WALKED once per instance. Recorded instances: `cgmono_fid[i]` = the
     // generic fn id, `cgmono_as[i]`/`cgmono_ae[i]` = its concrete-arg slice into the flat

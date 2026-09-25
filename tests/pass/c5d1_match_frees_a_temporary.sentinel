@@ -1,0 +1,132 @@
+// tests/pass/c5d1_match_frees_a_temporary.sentinel — a `match` on a temporary frees the
+// temporary's payload box (ADR 0032 A5, register D92).
+//
+// An enum's payload lives in a heap box, and the drop that frees it runs at the scope exit
+// of the binding that owns the enum. A scrutinee that is not a place — a variant built in
+// place, a call's result, a field of a call's result, the value of a block or an `if` — is
+// owned by no binding, so its box was never freed. An arm for a payload-carrying variant
+// now frees it once its bindings have copied the payload out; an arm for a unit variant has
+// no box to free, and a `_` arm frees whatever reached it (null is a no-op). A scrutinee
+// that IS a place (`match e`, `match h.e`, `match *r`) is still freed by its owner, once.
+//
+// What this program checks is that every shape still sees the values its bindings copied
+// out before the box was freed. The frees themselves are pinned by the IR tests
+// `d92_a_temporary_scrutinee_frees_its_box` (inkwell, which also pins that a `match` on a
+// place frees nothing) and `llvm_match_on_a_temporary_frees_its_box` (the text oracle), and
+// by the codegen differential against `scg`.
+//
+// Exit 42.
+
+enum E { A, B(i64), P(i64, i64) }
+
+enum W { Empty, Wrap(E) }
+
+enum V { None, Some([i64]) }
+
+struct H { e: E, k: i64 }
+
+trait Pick { fn pick(self: &Self, n: i64) -> E; }
+
+impl as Pick for H {
+    fn pick(self: &Self, n: i64) -> E {
+        if n > self.k { E::B(n) } else { E::A }
+    }
+}
+
+fn mk(n: i64) -> E {
+    if n > 0 { E::P(n, 1) } else { E::A }
+}
+
+fn mkh(n: i64) -> H {
+    H { e: E::B(n), k: 1 }
+}
+
+fn mkw(n: i64) -> W {
+    W::Wrap(E::B(n))
+}
+
+fn mkv(n: i64) -> V {
+    V::Some([n, n + 1, n + 2])
+}
+
+fn id<T>(x: T) -> T {
+    x
+}
+
+// Each temporary shape below makes a fresh box per evaluation: none for a unit variant, and
+// two for `mkw`, the `W` box and the `E` box inside it.
+fn shapes(n: i64) -> i64 {
+    let h = H { e: E::B(3), k: 0 };
+    let e = E::P(4, 5);
+    let r = &e;
+    // A variant built in place, and a call's result with a unit arm.
+    let a = match E::B(n) { E::A => 0, E::B(x) => x, E::P(x, y) => x + y };
+    let b = match mk(n) { E::A => 100, E::B(x) => x, E::P(x, y) => x * y };
+    // A `_` arm, and one reached by a unit variant (a null box).
+    let c = match mk(n) { E::P(x, _) => x, _ => 0 };
+    let d = match mk(0) { E::P(x, _) => x, _ => 9 };
+    // A method's and a generic fn's result, and a field of a call's result.
+    let f = match h.pick(n) { E::A => 0, E::B(x) => x, E::P(x, _) => x };
+    let g = match id(E::B(n)) { E::A => 0, E::B(x) => x, E::P(x, _) => x };
+    let i = match mkh(n).e { E::A => 0, E::B(x) => x, E::P(x, _) => x };
+    // A block's value, whose own binding is moved out of it, and an `if`'s.
+    let j = match { let t = E::B(n); t } { E::A => 0, E::B(x) => x, E::P(x, _) => x };
+    let k = match (if n > 1 { E::B(n) } else { E::A }) { E::A => 0, E::B(x) => x, E::P(x, _) => x };
+    // A temporary whose payload is another enum, matched in turn: the outer box is freed;
+    // `inner` is a binding, so the inner `match` is on a place and frees nothing (the
+    // inner box is the payload's own heap, which A1 leaves where it is).
+    let l = match mkw(n) { W::Empty => 0, W::Wrap(inner) => match inner { E::A => 0, E::B(x) => x, E::P(x, _) => x } };
+    // A payload that owns heap: the box is freed, the array it holds is still read.
+    let m = match mkv(n) { V::None => 0, V::Some(xs) => xs[2] - xs[0] };
+    // Places: freed by their owners, not by the `match`.
+    let p = match e { E::A => 0, E::B(x) => x, E::P(x, y) => x * y };
+    let q = match h.e { E::A => 0, E::B(x) => x, E::P(x, _) => x };
+    let s = match *r { E::A => 0, E::B(x) => x, E::P(_, y) => y };
+    a + b + c + d + f + g + i + j + k + l + m + p + q + s
+}
+
+// An arm that leaves the function: the box is freed before the body runs.
+fn early(n: i64) -> i64 {
+    let v = match mk(n) {
+        E::P(x, _) => if x > 5 { return x } else { x },
+        _ => 0,
+    };
+    v + 1
+}
+
+enum N { Wrap(E), Pair(i64, i64), Empty }
+
+fn mkn(n: i64) -> N {
+    if n > 5 { N::Pair(n, 1) } else { N::Wrap(E::B(n)) }
+}
+
+// A `match` nested in an EARLY arm must leave the outer one's state as it found it: after a
+// place `match` inside a temporary one, the outer `Pair` arm still frees its box; after a
+// temporary `match` inside a place one, the outer `B` arm still frees nothing.
+fn nested(n: i64) -> i64 {
+    let e = E::P(n, 2);
+    let a = match mkn(n) {
+        N::Wrap(inner) => match inner { E::B(x) => x, _ => 0 },
+        N::Pair(x, y) => x + y,
+        N::Empty => 0,
+    };
+    let b = match e {
+        E::P(x, _) => match mk(x) { E::P(y, _) => y, _ => 0 },
+        E::B(x) => x,
+        E::A => 0,
+    };
+    a + b
+}
+
+fn main() -> i64 {
+    let mut i: i64 = 0;
+    let mut acc: i64 = 0;
+    while i < 1000 {
+        acc = acc + shapes(2) + early(3) + early(7) + nested(2) + nested(7);
+        i = i + 1;
+    }
+    // shapes(2) = 2 + 2 + 2 + 9 + 2 + 2 + 2 + 2 + 2 + 2 + 2 + 20 + 3 + 5 = 57;
+    // early(3) = 4, early(7) = 7; nested(2) = 2 + 2, nested(7) = 8 + 7: 87 per pass,
+    // 87000 in all.
+    acc - 86958
+}

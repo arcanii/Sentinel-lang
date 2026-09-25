@@ -1708,6 +1708,19 @@ fn pass_c5d1_enum() {
 }
 
 #[test]
+fn pass_c5d1_match_frees_a_temporary() {
+    // ADR 0032 A5 (register D92): a `match` on a temporary — a variant built in place, a
+    // call's, a method's or a generic's result, a field of one, a block's or an `if`'s value
+    // — frees the temporary's payload box, in an arm for a payload-carrying variant once its
+    // bindings have copied the payload out, and in a `_` arm; a place scrutinee is still freed
+    // by its owner. What this checks is that every shape still sees the values its bindings
+    // copied out before the box was freed; the frees are pinned by the IR tests
+    // `d92_a_temporary_scrutinee_frees_its_box` and
+    // `llvm_match_on_a_temporary_frees_its_box`. Exit 42.
+    assert_eq!(run_exit("c5d1_match_frees_a_temporary.sentinel"), 42);
+}
+
+#[test]
 fn pass_c5d2_strings() {
     // ADR 0033 D9 (4/N) phase-go: strings + a `u8` byte type end to end.
     // Char-literal `u8` comparison (`is_digit`), explicit `u8`↔`i64`

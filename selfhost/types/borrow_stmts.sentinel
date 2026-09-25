@@ -7,7 +7,9 @@ module types;
 // `bind_name` copies it there (it consumes the AST `[u8]`).
 fn dump_tbinds(out: &mut Vec<u8>, b: Binds, pbase: i64, payidx: i64, c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
     match b {
-        Binds::BindEnd => 0,
+        // Answers the number of bindings (ADR 0032 A5: none means a unit variant, whose
+        // payload is null).
+        Binds::BindEnd => payidx,
         Binds::BindCell(nm, rest) => {
             let bvid: i64 = (*c).nextvid;
             (*c).nextvid = (*c).nextvid + 1;
@@ -71,9 +73,17 @@ fn dump_tpat(out: &mut Vec<u8>, p: Pattern, c: &mut TyCtx, gb: &mut Vec<u8>) -> 
         Pattern::PatWild => {
             append_str(out, "(pat _)");
             // (8e-2) cg: a wildcard arm has no tag check — signal the epilogue (-1).
-            // (No emitting fixture uses one; the final-else body is a deferred case.)
+            // (As the LAST arm it is the final else, which `c5d1_match_frees_a_temporary`
+            // pins; one written before a variant arm emits invalid IR, register D126.)
             if cg_on(c) {
                 (*c).cg_m_armnext = 0 - 1;
+                // (ADR 0032 A5) a temporary scrutinee's box, freed before the body; a unit
+                // variant reaching this arm frees null, which is a no-op.
+                if (*c).cg_m_tmp {
+                    cg_free_payload_box(c)
+                } else {
+                    0
+                };
                 0
             } else {
                 0
@@ -117,7 +127,19 @@ fn dump_tpat(out: &mut Vec<u8>, p: Pattern, c: &mut TyCtx, gb: &mut Vec<u8>) -> 
             append_int(out, vidx);
             push(out, ' ');
             append_str(out, vn);
-            dump_tbinds(out, bs, pbase, 0, c, gb);
+            let pnb: i64 = dump_tbinds(out, bs, pbase, 0, c, gb);
+            // (ADR 0032 A5) a temporary scrutinee's box, freed once the bindings have copied
+            // the payload out.
+            if cg_on(c) {
+                if (*c).cg_m_tmp && pnb > 0 {
+                    cg_free_payload_box(c)
+                } else {
+                    0
+                };
+                0
+            } else {
+                0
+            };
             push(out, ')');
             0
         },

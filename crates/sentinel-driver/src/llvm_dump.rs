@@ -2906,6 +2906,11 @@ impl Emit<'_> {
         owning: bool,
     ) -> Result<String, String> {
         let scrut = self.lower_expr(scrutinee)?;
+        // ADR 0032 A5 (register D92): a scrutinee that is not a place is a temporary nothing
+        // else owns (ADR 0034 C1 keeps `vec_to_array`, which copies without moving, to
+        // elements that own nothing), so an arm for a payload-carrying variant frees its box
+        // once the bindings have copied the payload out, and a `_` arm frees whatever reached it.
+        let temporary = !is_place_read(scrutinee);
         let tag = self.fresh();
         writeln!(self.body, "  %v{tag} = extractvalue {{ i32, ptr }} {scrut}, 0").unwrap();
         let payload = self.fresh();
@@ -2926,6 +2931,10 @@ impl Emit<'_> {
                     writeln!(self.body, "  br i1 %v{cmp}, label %bb{arm_b}, label %bb{next_b}").unwrap();
                     writeln!(self.body, "bb{arm_b}:").unwrap();
                     self.bind_pattern_payloads(payload, enum_id, *variant_index, bindings)?;
+                    // A unit variant (no bindings) has a null payload.
+                    if temporary && !bindings.is_empty() {
+                        self.free_payload_box(payload);
+                    }
                     self.owning = owning;
                     let v = self.lower_expr(&arm.body)?;
                     // Register D66: each arm stores at its OWN type, as D59 has the `if` arms
@@ -2942,6 +2951,9 @@ impl Emit<'_> {
         }
         // The final else (the last `next_b` block): the wildcard body, or `unreachable`.
         if let Some(arm) = wildcard {
+            if temporary {
+                self.free_payload_box(payload);
+            }
             self.owning = owning;
             let v = self.lower_expr(&arm.body)?;
             // Register D66: at the arm's own type, as above.
@@ -2956,6 +2968,15 @@ impl Emit<'_> {
         let loaded = self.fresh();
         writeln!(self.body, "  %v{loaded} = load {rty}, ptr %v{result}").unwrap();
         Ok(format!("%v{loaded}"))
+    }
+
+    /// ADR 0032 A5: free a temporary scrutinee's payload box at the top of an arm. Only the
+    /// box: a payload's own heap stays where A1 leaves it. `sentinel_free(null)` is a no-op,
+    /// so a wildcard arm reached by a unit variant needs no test. Mirrors inkwell's
+    /// `free_payload_box` and `scg`'s `cg_free_payload_box`.
+    fn free_payload_box(&mut self, payload: u32) {
+        writeln!(self.body, "  call void @sentinel_free(ptr %v{payload})").unwrap();
+        self.used.free = true;
     }
 
     /// 8e-2: bind a variant pattern's payload fields into the arm's locals — GEP each

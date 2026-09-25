@@ -10,11 +10,11 @@
 //   - a `match` payload binding and its result (A3's slot and A2's): 32 bytes an iteration,
 //     overflowing by about 524,000 — this loop runs 600,000.
 //
-// Note `match_cond`'s scrutinee `E::B(n)` is an UNBOUND temporary, which is never dropped:
-// it retains about 18 bytes per evaluation, so that loop holds about 11 MB by the time it
-// ends. That is pre-existing and orthogonal to A4 — the same spelling in a loop BODY retains
-// identically before and after it, and binding it first is flat — but do not read this
-// program as a leak-free example under `leaks --atExit` (register D92).
+// Note `match_cond`'s scrutinee `E::B(n)` is an UNBOUND temporary. Until ADR 0032 A5
+// (register D92) nothing dropped it: it retained about 18 bytes per evaluation, so that loop
+// held about 11 MB by the time it ended, orthogonal to A4 — the same spelling in a loop BODY
+// retained identically before and after it. An arm for a payload-carrying variant, or a
+// `_` arm, of a `match` on a temporary now frees the temporary's box.
 //
 // Measured: each loop ALONE crashes a compiler that hoists only the body, and both complete
 // once the condition is hoisted too. So this fixture CRASHES (stack overflow, no output)

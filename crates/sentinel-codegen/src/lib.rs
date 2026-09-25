@@ -5957,6 +5957,11 @@ impl<'ctx, 'plan, 'm> CodegenCtx<'ctx, 'plan, 'm> {
             .build_extract_value(scrut, 1, "match_payload")
             .map_err(|e| CodegenError::Builder(e.to_string()))?
             .into_pointer_value();
+        // ADR 0032 A5 (register D92): a scrutinee that is not a place is a temporary nothing
+        // else owns (ADR 0034 C1 keeps `vec_to_array`, which copies without moving, to
+        // elements that own nothing), so an arm for a payload-carrying variant frees its box
+        // once the bindings have copied the payload out, and a `_` arm frees whatever reached it.
+        let temporary = !is_place_read(scrutinee);
 
         let current_fn = self.current_fn.expect("current_fn set");
         let i32_ty = self.context.i32_type();
@@ -5988,6 +5993,10 @@ impl<'ctx, 'plan, 'm> CodegenCtx<'ctx, 'plan, 'm> {
             self.builder.position_at_end(*bb);
             if let TypedPattern::Variant { variant_index, bindings, .. } = &arm.pattern {
                 self.bind_pattern_payloads(payload_ptr, enum_id, *variant_index, bindings, program)?;
+                // A unit variant (no bindings) has a null payload.
+                if temporary && !bindings.is_empty() {
+                    self.free_payload_box(payload_ptr)?;
+                }
             }
             let kont = self.lower_body_as_kont(&arm.body, program)?;
             self.builder
@@ -6000,6 +6009,9 @@ impl<'ctx, 'plan, 'm> CodegenCtx<'ctx, 'plan, 'm> {
 
         self.builder.position_at_end(default_bb);
         if let Some(arm) = wildcard_arm {
+            if temporary {
+                self.free_payload_box(payload_ptr)?;
+            }
             let kont = self.lower_body_as_kont(&arm.body, program)?;
             self.builder
                 .build_store(result, kont)
@@ -6124,6 +6136,11 @@ impl<'ctx, 'plan, 'm> CodegenCtx<'ctx, 'plan, 'm> {
             .build_extract_value(scrut, 1, "match_payload")
             .map_err(|e| CodegenError::Builder(e.to_string()))?
             .into_pointer_value();
+        // ADR 0032 A5 (register D92): a scrutinee that is not a place is a temporary nothing
+        // else owns (ADR 0034 C1 keeps `vec_to_array`, which copies without moving, to
+        // elements that own nothing), so an arm for a payload-carrying variant frees its box
+        // once the bindings have copied the payload out, and a `_` arm frees whatever reached it.
+        let temporary = !is_place_read(scrutinee);
 
         let current_fn = self.current_fn.expect("current_fn set");
         let i32_ty = self.context.i32_type();
@@ -6159,6 +6176,10 @@ impl<'ctx, 'plan, 'm> CodegenCtx<'ctx, 'plan, 'm> {
             self.builder.position_at_end(*bb);
             if let TypedPattern::Variant { variant_index, bindings, .. } = &arm.pattern {
                 self.bind_pattern_payloads(payload_ptr, enum_id, *variant_index, bindings, program)?;
+                // A unit variant (no bindings) has a null payload.
+                if temporary && !bindings.is_empty() {
+                    self.free_payload_box(payload_ptr)?;
+                }
             }
             self.owning = owning;
             let v = self.lower_expr(&arm.body, program)?;
@@ -6178,6 +6199,9 @@ impl<'ctx, 'plan, 'm> CodegenCtx<'ctx, 'plan, 'm> {
         // Default block: the wildcard body, or `unreachable`.
         self.builder.position_at_end(default_bb);
         if let Some(arm) = wildcard_arm {
+            if temporary {
+                self.free_payload_box(payload_ptr)?;
+            }
             self.owning = owning;
             let v = self.lower_expr(&arm.body, program)?;
             // Register D66: as for the variant arms above.
@@ -6201,6 +6225,17 @@ impl<'ctx, 'plan, 'm> CodegenCtx<'ctx, 'plan, 'm> {
             .build_load(llvm_result_ty, result, "matchresult_val")
             .map_err(|e| CodegenError::Builder(e.to_string()))?;
         Ok(loaded)
+    }
+
+    /// ADR 0032 A5: free a temporary scrutinee's payload box at the top of an arm. Only the
+    /// box: a payload's own heap stays where A1 leaves it. `sentinel_free(null)` is a no-op,
+    /// so a wildcard arm reached by a unit variant needs no test. Mirrors the text oracle's
+    /// `free_payload_box` and `scg`'s `cg_free_payload_box`.
+    fn free_payload_box(&mut self, payload_ptr: PointerValue<'ctx>) -> Result<(), CodegenError> {
+        self.builder
+            .build_call(self.free_fn, &[payload_ptr.into()], "")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        Ok(())
     }
 
     /// Phase D.1 / ADR 0032 D5: bind a variant pattern's payload fields
@@ -13525,6 +13560,47 @@ fn main() -> i64 {
             1,
             "@read_then_move: the field read before the move must clone:\n{body}"
         );
+    }
+
+    // ===== Register D92 / ADR 0032 A5: a `match` on a temporary frees its payload box =====
+    //
+    // A scrutinee that is not a place is owned by no binding, so no scope-exit drop frees
+    // its payload box; each arm that has a box to free frees it once its bindings have
+    // copied the payload out. A place scrutinee is freed by its owner and must not be freed
+    // here too. The frees are memory, not an exit code, so this reads the IR.
+
+    const D92_SCRUTINEES: &str = r#"
+enum E { A, B(i64) }
+struct H { e: E, k: i64 }
+effect Io { read() -> i64; }
+fn mk(n: i64) -> E { if n > 0 { E::B(n) } else { E::A } }
+fn built(n: i64) -> i64 { match E::B(n) { E::A => 0, E::B(x) => x } }
+fn called(n: i64) -> i64 { match mk(n) { E::B(x) => x, _ => 0 } }
+fn bound(n: i64) -> i64 { let e = mk(n); match e { E::A => 0, E::B(x) => x } }
+fn field(h: &H) -> i64 { match (*h).e { E::A => 0, E::B(x) => x } }
+fn kont(n: i64) -> i64 {
+    handle { match mk(n) { E::B(_) => perform Io.read(), _ => 0 } } with {
+        Io.read(k) => k(5),
+        return v => v + 1
+    }
+}
+fn main() -> i64 { 0 }
+"#;
+
+    #[test]
+    fn d92_a_temporary_scrutinee_frees_its_box() {
+        let ir = compile_src_ir(D92_SCRUTINEES);
+        // `built`: the `B` arm frees (the `A` arm's unit variant has no box). `called` and
+        // `kont` (the `match` a handled body lowers as a continuation): the `B` arm and the
+        // `_` arm. `bound` and `field`: a place, which its owner frees.
+        for (f, n) in [("built", 1), ("called", 2), ("kont", 2), ("bound", 0), ("field", 0)] {
+            let body = ir_fn_body(&ir, f);
+            assert_eq!(
+                body.matches("@sentinel_free(ptr %match_payload").count(),
+                n,
+                "@{f}: expected {n} free(s) of the scrutinee's payload box:\n{body}"
+            );
+        }
     }
 
     // ===== Register D87 / ADR 0075 D1: a bubbling resume drains its arm =====

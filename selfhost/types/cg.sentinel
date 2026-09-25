@@ -2012,6 +2012,17 @@ fn cg_clone_handle(c: &mut TyCtx, at: i64) -> i64 {
     }
 }
 
+// (ADR 0032 A5, register D92) free a temporary `match` scrutinee's payload box at the top of
+// an arm. Only the box: a payload's own heap stays where A1 leaves it. Mirrors the oracle's
+// `free_payload_box` (the same `call void @sentinel_free(ptr %vP)`, byte-identical).
+fn cg_free_payload_box(c: &mut TyCtx) -> i64 {
+    cgo_str(c, "  call void @sentinel_free(ptr %v");
+    cgo_int(c, (*c).cg_m_payload);
+    cgo_str(c, ")\n");
+    (*c).cg_used_free = true;
+    0
+}
+
 // collect one call arg (its operand + type) onto the arg stacks (gated).
 fn cg_collect(c: &mut TyCtx, at: i64) -> i64 {
     if cg_on(c) {

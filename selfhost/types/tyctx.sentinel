@@ -190,6 +190,7 @@ fn new_tyctx(mode: i64) -> TyCtx {
         cg_m_armnext: 0 - 1,
         cg_m_pj: 0 - 1,
         cg_m_wild: false,
+        cg_m_tmp: false,
         cgmono_fid: vec_new(),
         cgmono_as: vec_new(),
         cgmono_ae: vec_new(),

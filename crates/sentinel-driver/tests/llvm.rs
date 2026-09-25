@@ -1061,6 +1061,69 @@ fn llvm_match_if_else_chain() {
     );
 }
 
+#[test]
+fn llvm_match_on_a_temporary_frees_its_box() {
+    // ADR 0032 A5 (register D92): a scrutinee that is not a place — here a variant built in
+    // place — is owned by no binding, so each arm frees its payload box once the bindings
+    // have copied the payload out: the `B` arm after binding `x`, the `_` arm before its
+    // body (a unit variant reaching it frees null, a no-op). Nothing frees it at the exit.
+    assert_eq!(
+        llvm_dump(
+            "match_temp",
+            "enum E { A, B(i64) }\nfn f(n: i64) -> i64 {\n    match E::B(n) {\n        E::B(x) => x,\n        _ => 0,\n    }\n}\nfn main() -> i64 {\n    f(7)\n}\n"
+        ),
+        concat!(
+            "target triple = \"arm64-apple-darwin\"\n",
+            "\n",
+            "declare ptr @sentinel_alloc(i64)\n",
+            "declare void @sentinel_free(ptr)\n",
+            "\n",
+            "define i64 @f(i64 %arg0) {\n",
+            "entry:\n",
+            "  %v0 = alloca i64\n",
+            "  %v10 = alloca i64\n",
+            "  %v14 = alloca i64\n",
+            "  store i64 %arg0, ptr %v0\n",
+            "  %v1 = load i64, ptr %v0\n",
+            "  %v2 = insertvalue { i64 } undef, i64 %v1, 0\n",
+            "  %v3 = getelementptr { i64 }, ptr null, i64 1\n",
+            "  %v4 = ptrtoint ptr %v3 to i64\n",
+            "  %v5 = call ptr @sentinel_alloc(i64 %v4)\n",
+            "  store { i64 } %v2, ptr %v5\n",
+            "  %v6 = insertvalue { i32, ptr } undef, i32 1, 0\n",
+            "  %v7 = insertvalue { i32, ptr } %v6, ptr %v5, 1\n",
+            "  %v8 = extractvalue { i32, ptr } %v7, 0\n",
+            "  %v9 = extractvalue { i32, ptr } %v7, 1\n",
+            "  %v11 = icmp eq i32 %v8, 1\n",
+            "  br i1 %v11, label %bb1, label %bb2\n",
+            "bb1:\n",
+            "  %v12 = getelementptr { i64 }, ptr %v9, i32 0, i32 0\n",
+            "  %v13 = load i64, ptr %v12\n",
+            "  store i64 %v13, ptr %v14\n",
+            "  call void @sentinel_free(ptr %v9)\n",
+            "  %v15 = load i64, ptr %v14\n",
+            "  store i64 %v15, ptr %v10\n",
+            "  br label %bb0\n",
+            "bb2:\n",
+            "  call void @sentinel_free(ptr %v9)\n",
+            "  store i64 0, ptr %v10\n",
+            "  br label %bb0\n",
+            "bb0:\n",
+            "  %v16 = load i64, ptr %v10\n",
+            "  ret i64 %v16\n",
+            "}\n",
+            "\n",
+            "define i32 @main() {\n",
+            "entry:\n",
+            "  %v0 = call i64 @f(i64 7)\n",
+            "  %v1 = trunc i64 %v0 to i32\n",
+            "  ret i32 %v1\n",
+            "}\n",
+            "\n",
+        )
+    );
+}
+
 /// The body of `define … @name(…) { … }` in a `snc llvm` dump.
 fn dump_fn_body<'a>(ir: &'a str, name: &str) -> &'a str {
     let head = ir

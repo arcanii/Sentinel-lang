@@ -130,7 +130,8 @@ D4) stays a post-MVP follow-on (every enum value heap-allocates its
 payload). **A3** — D9 generic enums (`Option`/`Result`) are the immediate
 follow-on **D.1b**, not in this ADR's MVP. **A4** — D10 out-of-scope list
 (named-field variants, or-/nested/guard/literal patterns, `secret enum`)
-confirmed deferred.
+confirmed deferred. **A5** (2026-09-25) — a `match` on a temporary frees the
+temporary's payload box, below.
 
 ### A1 follow-up investigation (2026-05-30): recursive drop needs the **payload-ownership model**, not just drop fns
 
@@ -187,6 +188,52 @@ de-escalates the urgency of the ownership-model follow-on — it is a
 blocker. **Bonus:** `leaks --atExit` makes the eventual ownership-model fix
 **verifiable** (leak-count *and* double-free both observable), removing the
 main risk that made it daunting.
+
+### A5 (2026-09-25): a `match` on a temporary frees the temporary's payload box (register D92)
+
+A scrutinee that is not a place — a variant built in place, a call's result, a field of a
+call's result, the value of a block or an `if` — is owned by no binding, so no scope-exit drop
+freed its payload box: every evaluation of `match E::B(n) { .. }` or `match mk(n) { .. }` kept
+the box (40.3 MB against 9.2 MB over 2,000,000 evaluations, in all three back ends). A place
+scrutinee (`match e`, `match h.e`, `match *r`) is freed by its owner, as before.
+
+An arm for a variant that carries a payload now frees a temporary scrutinee's box once its
+bindings have copied the payload out — the step the A1 follow-up's payload-ownership model
+gives the `match`, taken for the case where nothing else owns the box. An arm for a unit
+variant has no box to free and frees nothing; a `_` arm frees whatever reached it, and
+`sentinel_free(null)` is a no-op. Freeing at the top of each arm, not after the `match`, means
+an arm that leaves early or suspends frees it too. Only the box is freed: a payload's own heap stays where A1 leaves it, including a payload that is
+itself an enum (`W::Wrap(inner) => match inner { .. }` frees the outer box; `inner` is a
+binding, so the inner `match` is on a place).
+
+This is sound because every field of a class instance holds a value its `init` assigned on
+every path (ADR 0022 A3), and no accepted non-place scrutinee shares its box with an enum
+something else owns: a move out of `self`, or out through a reference (`*r`, or a field or
+element reached through one, generic or not), is refused (ADR 0046 A4);
+`Shared`, `Mutex`, `Channel`, `Vec`, array and nullable of an enum, and a `spawn` whose
+result is an enum, are not supported, and a nullable's heap payload cannot be read (register
+D47); `vec_to_array`, the one builtin that copies elements
+without moving them, is admitted only for an element that owns nothing (ADR 0034 C1), so no
+projection of its result holds a box; a field moved out of a place into the value is a
+partial move (ADR 0046), so the place's own drop skips that field; a payload binding moved
+out of another `match` leaves that enum's drop freeing only its own box (A1); and a binding
+named by a block's or an `if`'s tail, or by a `match` arm's body, is recorded as moved into
+the value — by the oracle's checker, and by `scg` since ADR 0043 A3. This amendment needs
+ADR 0022 A3, ADR 0034 C1 and ADR 0043 A3. Implemented in inkwell (`lower_match`, `lower_match_as_kont`), the
+text oracle (`lower_match`) and `scg` (`dump_tpat`, with a `cg_m_tmp` saved and restored with
+the rest of the match state). Pinned by `tests/pass/c5d1_match_frees_a_temporary.sentinel`
+(each temporary shape named above and the three place shapes; answers 42 in all three back
+ends), the IR tests `d92_a_temporary_scrutinee_frees_its_box` (inkwell, including the
+continuation form, and that a `match` on a place frees nothing) and `llvm_match_on_a_temporary_frees_its_box` (the oracle),
+and the codegen differential. Twelve mutations are each caught: never freeing and always
+freeing, in each back end; no free in the `_` arm, in the oracle, `scg` and inkwell's
+continuation form; never freeing in that form; a free in the oracle's unit arms; and `scg`'s
+flag left unrestored after a nested `match`. It moves the oracle's IR of every program with a
+`match` on a temporary that has an arm for a payload-carrying variant or a `_` arm (one whose
+arms are all unit variants, such as `c65_return_match`'s `match classify(n)`, frees nothing and
+does not move) — four in the corpus besides the new fixtures (`c5d5_loop_cond_slot_reuse`,
+`c65_match_join`, `c65_return_gaps` and the ui program `c65_secret_join_guarded`), none of the
+ten self-hosted module roots — so it is at least a minor version (ADR 0076 D2).
 
 ## Context
 
