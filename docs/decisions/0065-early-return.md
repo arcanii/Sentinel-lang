@@ -224,7 +224,8 @@ selfhost compiler sources need not *use* `return` (they keep tail returns), but 
    early on `expr_diverges`) and the **match-arm divergence** (skip diverging arms in the result-type
    join). Demonstrators `examples/lang/early_return*.sentinel` (snc-only) cover the mismatched-divergent
    cases (out of the differential, the u128/f64 pattern). The **selfhost typer needs no `expr_diverges`
-   mirror** — it is a pure dumper (never rejects), and the only observable difference is the node type
+   mirror** — it is a pure dumper (never rejects; since ADR 0041 A14 it refuses a first set of
+   programs, none of them this), and the only observable difference is the node type
    for a *mismatched*-divergent join, which is snc-only.
    **Amended (register D59, 2026-09-11):** that stopped being true. D59 sizes an `if`'s result slot
    from the `if`'s join, which the typer picks by divergence, so scg now mirrors `expr_diverges` (the

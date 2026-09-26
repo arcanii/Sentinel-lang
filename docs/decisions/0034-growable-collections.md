@@ -392,8 +392,8 @@ indexed / bridged / `str_eq`'d), exit 55, **0 leaks** under `leaks --atExit`.
   Pinned by the unit tests `vec_to_array_refuses_an_element_that_is_not_plain` (one element
   per refused category, and a generic body) and `vec_to_array_admits_a_plain_element`, and
   by `tests/ui/c5d3_vec_to_array_element_not_plain.sentinel`; each of seventeen mutations to
-  the rule or its call site is caught. The self-hosted checker does not refuse it yet: it
-  has no rejection path (register D97). A rule that now rejects a program that compiled
+  the rule or its call site is caught. The self-hosted checker refuses it too since
+  register D97 (ADR 0041 A14). A rule that now rejects a program that compiled
   before is at least a minor version (ADR 0076 D2).
 
 ## Revisit

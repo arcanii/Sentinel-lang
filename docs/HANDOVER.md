@@ -124,6 +124,12 @@ reference as you work through the milestones.
 > confirming nothing pre-existing is newly refused; oracle-vs-scg byte-equality on the new
 > fixture at types, mir and llvm; and the secret-taint check in both directions.
 
+### ▶ RESUME HERE (2026-09-26c — `origin/main` was `04c592b` when this was written (the maintainer pushed D131 and D96), and this slice's two commits sit on top of it, unpushed; read `git reflog show refs/remotes/origin/main` and `git log --oneline origin/main..HEAD` at the START and AGAIN before writing either down. This session's third slice: **register D97 CLOSED** (`14e1031` fix, then this docs commit) — [ADR 0041](decisions/0041-self-host-port-types.md) **A14**, `scg`'s first rejection path. The self-hosted typer refuses, with the oracle's code and message, a struct literal naming a field its struct lacks, naming one twice or leaving one out; a field access naming a field its struct or class lacks; `vec_to_array` over an element that owns memory (D125's refusal); and a class `init` holding a `return` (D60's) or failing D129's definite assignment. New part `selfhost/types/refuse.sentinel`; `run` answers a refusal in place of its output and each driver exits 1. Two bounded review rounds (`wf_97d6dc74-ed0`, four lenses; `wf_6643aec4-0ec`, two). The first found that a program with several refused constructs can be refused for a different one than the oracle names — a recurring family, so the rule claimed and tested is verdict parity and the order is registered (D145) — and a false refusal: `vec_to_array` over a `Vec<T>` reached through generic substitution, because `subst_type` does not substitute inside a `Vec`. The remedy (substitute there) was reviewed in the second round and moved the typed dump, MIR and the code generator's type-definition order, so it was withdrawn and the over-refusal registered (D147) — **both reported to the maintainer**. Also filed: **D142** (the code generator checks a generic body only at its instances), **D143** (it aborts on some refused programs before printing the refusal; older than D97), **D144** (`scg` does not parse an empty struct literal; D97 turns one nested misparse into a bogus refusal), **D146** (`vec_to_array` over a `secret T` field: the oracle refuses, `scg` accepts). Register: **146 distinct ids, 57 whose heading opens `**D<n> — DONE`** (the 2026-09-22 block's rule; the id D130 is reserved and not in the public register). Four-check: **2,100 passed with exactly the 18 known Windows failures**, doctests and clippy clean, every `selfhost_*` differential green including both bootstrap fixed points. A matched sweep of the five drivers over the 501 `.sentinel` files the tree held before the change moves only the seven `tests/ui` fixtures there that carry a ported code; twenty-eight mutations caught, a twenty-ninth equivalent. `scg`-only, so a patch by ADR 0076 D2; the next version is still at least 0.2.0 from the earlier slices, and `Cargo.toml` says 0.1.0.)
+
+> **NEXT:** ADR 0077's implementation, with the draft's proposed answers to Q1–Q5 — built and probed in this session's scratchpad (`wt77/` holds the Rust half, `a77/scg77.py` the `scg` mirror, `a77fx/` and `a77fx2/` seven `c77_*` fixtures, `a77pin/` the IR pins, `a77/docs77.py` the amendments to the other ADRs).
+>
+> D117 is not yet scheduled; it is the maintainer's call. Owed by the maintainer: D102, D103, ADR 0077's Q6, D36's decision, D146's direction, and when to bump the version (at least 0.2.0; `Cargo.toml` still says 0.1.0).
+
 ### ▶ RESUME HERE (2026-09-26b — `origin/main` was `0496d4f` when this was written, and this session's commits sit on top of it, unpushed; read `git reflog show refs/remotes/origin/main` and `git log --oneline origin/main..HEAD` at the START and AGAIN before writing either down. This session so far: **register D131 CLOSED** (`0644835` fix + `aac48e4` docs; see the 2026-09-26a block below) and **register D96 CLOSED** (`3df92f5` fix, then this docs commit) — [ADR 0013](decisions/0013-concrete-c1-4-struct-syntax.md) **A1**: a struct literal that names a field twice is refused with `DuplicateField` at the repeated name, where `P { lo: 1, lo: 2 }` panicked `snc types`, `snc llvm` and `snc build` and `P { lo: 1, lo: 2, hi: 3 }` compiled, keeping the second `lo` and never evaluating the first. It refuses a program that compiled before, so it is a minor by ADR 0076 D2, whose example table listed D96 as a patch and is corrected. Filed **D137–D141**, D137–D140 each re-verified on 2026-09-26: a class instance's heap fields, an enum payload's own heap and an effecting let-shape fn's heap parameters are never freed (leaks), `==` between two arrays type-checks, then fails in every back end, and (D141, found by the review) a struct declaration may name a field twice and a literal of it panics the checker. Register: **140 distinct ids, 56 whose heading opens `**D<n> — DONE`** (the 2026-09-22 block's rule; the id D130 is reserved and not in the public register). One bounded review round (`wf_4e54627e-043`). Four-check: **2,091 passed with exactly the 18 known Windows failures**, doctests and clippy clean, every `selfhost_*` differential green including both bootstrap fixed points. A matched sweep of `snc types` and `snc llvm` over all 501 `.sentinel` files moves only the new fixture (a panic before, a refusal after); four mutations caught. The next version is at least 0.2.0; `Cargo.toml` says 0.1.0.)
 
 > **NEXT:** continue the approved order:
@@ -1704,24 +1710,32 @@ reference as you work through the milestones.
 >      stage that runs the type checker — `snc types`, `borrow`, `effects`, `mir`,
 >      `ctverify`, `llvm` and `build` — with exit 101 and a Rust panic message rather than a
 >      `miette` diagnostic, which the project's own rule against
->      `unwrap` / `panic!` on user-program input forbids. `scg` does not panic; it emits IR
->      (D97).
+>      `unwrap` / `panic!` on user-program input forbids. `scg` did not panic; it emitted IR
+>      until D97.
 >
->      **D97 — `scg` ACCEPTS a struct literal naming a field the struct does not declare,
->      where the oracle rejects it.** Found 2026-09-22 by D95's review; pre-existing.
->      `struct P { lo: i64, hi: i64 }` + `P { zzz: 1, lo: 2, hi: 3 }`: `snc llvm` and
->      `snc types` exit 1 with "struct `P` has no field `zzz`", while `scg` exits 0 and emits
->      403 bytes. `field_type` answers -1 for the unknown name and nothing acts on it. The
+>      **D97 — DONE (2026-09-26, `14e1031`, ADR 0041 A14). `scg` ACCEPTED a struct literal naming a
+>      field the struct does not declare, where the oracle rejects it.** Closed by `scg`'s first
+>      rejection path: the self-hosted typer refuses that literal, one that names a field twice
+>      or leaves one out, a field access naming a field its struct or class lacks,
+>      `vec_to_array` over an element that owns memory (D125's refusal), and a class `init`
+>      that holds a `return` (D60's refusal) or fails D129's definite assignment, each with the
+>      oracle's code and message, and the driver then exits 1; every other type error is still
+>      out of scope (ADR 0041 D7). Its limits are D142 to D147. Found 2026-09-22 by
+>      D95's review; pre-existing. As found: `struct P { lo: i64, hi: i64 }` +
+>      `P { zzz: 1, lo: 2, hi: 3 }`: `snc llvm` and `snc types` exited 1 with "struct `P` has
+>      no field `zzz`", while `scg` exited 0 and emitted 403 bytes. `field_type` answered -1
+>      for the unknown name and nothing acted on it. The
 >      differentials do not see this because the oracle Errs, so the fixture is SKIPPED — the
->      same blind spot that hid D95. It is a missing REJECTION rather than a wrong answer, and
->      the compiler that ships is the one that rejects, so it is a divergence and not a
->      miscompile. The fix is a `field_type` / `field_index` -1 check at the `dump_sfields`
->      call site. D97 also has to carry D96's refusal (ADR 0013 A1), which `scg` lacks: it
->      exits 0 on `P { lo: 1, lo: 2 }` and on `P { lo: 1, lo: 2, hi: 3 }`, and for the second
->      it emits a third `insertvalue`, at index 2, into a two-field struct, which `llc`
->      rejects ("invalid indices for insertvalue"); for the first it puts the second `lo` in
->      `hi`'s slot and `llc` accepts the module, so that shape is the silent one. A -1 check
->      does not catch a duplicate, so the rejection path needs a seen-field check as well.
+>      same blind spot that hid D95. It was a missing REJECTION rather than a wrong answer,
+>      and the compiler that ships is the one that rejects, so it was a divergence and not a
+>      miscompile. The fix that landed is `check_sfields` at the struct-literal site (an
+>      unknown, a repeated and a missing field) and a -1 check in `dump_te_field` for a field
+>      access. D97 also had to carry D96's refusal (ADR 0013 A1), which `scg` lacked: it
+>      exited 0 on `P { lo: 1, lo: 2 }` and on `P { lo: 1, lo: 2, hi: 3 }`, and for the second
+>      it emitted a third `insertvalue`, at index 2, into a two-field struct, which `llc`
+>      rejects ("invalid indices for insertvalue"); for the first it put the second `lo` in
+>      `hi`'s slot and `llc` accepted the module, so that shape was the silent one. A -1 check
+>      does not catch a duplicate, so the rejection path has a seen-field check as well.
 >
 >      **D98 — an `if` written inside a handler ARM diverges in the MIR stage: the
 >      self-hosted lowerer descends into the arm and emits its branch blocks, the Rust oracle
@@ -2234,7 +2248,7 @@ reference as you work through the milestones.
 >      is refused. Pinned by the unit tests `vec_to_array_refuses_an_element_that_is_not_plain`
 >      and `vec_to_array_admits_a_plain_element` and by
 >      `tests/ui/c5d3_vec_to_array_element_not_plain.sentinel`; seventeen mutations caught. `scg`
->      does not refuse it yet (D97). ADR 0032 A5's free relies on it, so it lands first.
+>      refuses it too since D97. ADR 0032 A5's free relies on it, so it lands first.
 >
 >      **D126 — `scg` emits invalid IR for a `match` whose `_` arm is written before a variant
 >      arm.** Found 2026-09-25 by the review of D92's fix; pre-existing, before that fix too.
@@ -2288,7 +2302,7 @@ reference as you work through the milestones.
 >      the corpus, the examples or the self-hosted compiler is refused. Pinned by four unit
 >      tests and three ui fixtures (`c41_init_field_assigned_on_one_path`,
 >      `c41_init_field_read_before_assign`, `c41_init_self_used_before_assigned`); sixteen
->      mutations caught. `scg` does not refuse these yet (D97). ADR 0032 A5 relies on it.
+>      mutations caught. `scg` refuses these too since D97. ADR 0032 A5 relies on it.
 >
 >      **D131 — DONE (2026-09-26). `scg` typed a method's, an impl method's, a qualified
 >      call's and a class `init`'s arguments without their parameters' types.** Found
@@ -2434,6 +2448,81 @@ reference as you work through the milestones.
 >      missing-field check matches fields by name, so the second `a`'s slot is never reported
 >      missing and stays `None`. (`Q { a: 1, a: 2 }` is refused, as D96's duplicate.) The fix
 >      is to refuse a repeated field name in the declaration, with a `tests/ui` fixture.
+>
+>      **D142 — `scg`'s code generator checks a generic fn's body for D97's refusals only at
+>      its instances.** Found 2026-09-26 by D97's review. In codegen mode `scg` types a generic
+>      fn's body per monomorphised instance, after every non-generic fn, and never abstractly,
+>      so: a refused construct in a generic fn that is never instantiated is not checked (the
+>      driver exits 0; no code is emitted for the fn); `vec_to_array` over an abstract
+>      `Vec<T>`, which the oracle refuses outright (ADR 0034 C1), is checked at each instance's
+>      element instead, so `fn g<T>(v: Vec<T>) -> [T] { vec_to_array(v) }` called at
+>      `Vec<i64>` compiles (an instance at a non-plain element is refused); and a generic
+>      body's refusal is named after a later non-generic fn's. The types, borrow, MIR and
+>      ct-verify drivers type the body itself and refuse as the oracle does. The fix is to type
+>      each generic body once, abstractly, in codegen mode too.
+>
+>      **D143 — `scg`'s code generator aborts on some programs the oracle refuses for an unknown
+>      field, instead of printing the refusal.** Found 2026-09-26 by D97's review; it predates
+>      D97 (the drivers before it abort the same way). `p.zzz.get()`, `let x = p.zzz;
+>      x.foo()` and a method `self.zzz.get()`, never called: the walk records `unknown_field`
+>      and runs on, the method dispatch then indexes with the field's type, -1, and the driver
+>      aborts ("index out of bounds: idx=-1"), so the build fails without the message. The
+>      other four drivers print the refusal. Separately, D49's non-convergent layout, used by
+>      value, still overflows the code generator's stack whether or not the program also holds
+>      a refused construct. The fix is to stop lowering once a refusal is recorded, or to give
+>      an unknown field a type that no lookup indexes with.
+>
+>      **D144 — `scg` does not parse an empty struct literal, `P {}`.** Found 2026-09-26 by
+>      D97's review; the misparse is pre-existing, and one refusal of it below is D97's. The oracle parses it and refuses it with `missing_field`;
+>      `scg`'s parser produces no struct literal, so the binding becomes a function reference
+>      typed `?T`, the rest of the block drops out of the typed dump, the types, borrow, MIR and
+>      ct-verify drivers exit 0, and the code generator aborts ("index out of bounds").
+>      `fn fp(x: P) -> i64 { x.lo }` + `fp(P {})` gives MIR a two-argument call to a
+>      one-parameter fn. For a struct with no fields the oracle accepts `U { }`; nested in
+>      another literal (`P { u: U { }, n: 2 }`), `scg`'s misparse hands D97's field-set check
+>      a field named `{`, so the types, borrow, MIR and ct-verify drivers refuse that
+>      accepted program with "struct `P` has no field `{`" (before D97 they emitted a wrong
+>      typed dump, and borrow and ct-verify matched the oracle). The fix is to parse
+>      `Name {}` wherever the oracle does, with a `tests/ui` fixture.
+>
+>      **D145 — a program with more than one refused construct can be refused by `scg` for a
+>      different one than the oracle names.** Found 2026-09-26 by D97's review; the verdict is
+>      the same, only the message differs. Three orders differ: `scg` types a class's methods in
+>      source order, where the oracle types the `init` (and runs its definite-assignment and
+>      `return` checks) before any method; it checks a struct literal's whole field set before
+>      typing any value, where the oracle checks each name and then types that value; and it
+>      types a literal's values in declaration order (D95's sort), where the oracle types them
+>      in source order. So a method above `init` holding `self.zzz`, with an `init` that
+>      leaves a field unassigned, is refused for `zzz` by `scg` and for the field by the oracle.
+>      Matching needs the class's refusals held until its `init` is checked, and a
+>      source-order typing pass for a literal's values.
+>
+>      **D146 — `vec_to_array` over a generic instance whose field is `secret T`: the oracle
+>      refuses, `scg` accepts.** Found 2026-09-26 by D97's review. `struct Box<T> { s: secret
+>      T }` + `vec_to_array` of a `Vec<Box<i32>>`: the oracle's plain-element test substitutes
+>      the field with `Type::substitute`, which does not reach inside a `secret`, so the
+>      field stays `secret T`, is judged abstract, and is refused; `scg` substitutes it to
+>      `secret i32`, which is plain, and accepts. The element owns nothing, and the oracle
+>      accepts the same element written without a type parameter, so the oracle is the likely
+>      over-refuser; which side moves is the maintainer's call.
+>
+>      **D147 — `scg` refuses `vec_to_array` over a `Vec<T>` reached through a generic call's
+>      result or a generic instance's field, even when `T` is plain; the oracle accepts it.**
+>      Found 2026-09-26 by D97's review; a false refusal D97 introduced, kept deliberately.
+>      `fn pass<T>(v: Vec<T>) -> Vec<T> { v }` + `vec_to_array(pass(v))` with `v: Vec<i64>`,
+>      and `vec_to_array(s.items)` with `s: Stack<i64>` and `items: Vec<T>`: `scg`'s
+>      `subst_type` does not substitute inside a `Vec`, so the element stays the abstract `T`
+>      (its typed dump has said `[<T#0>]` there since the port), and D97's plain-element check
+>      refuses it. A first remedy made `subst_type` rebuild the `Vec`; the second review round
+>      showed it wrong in three ways: the oracle's `Type::substitute` rebuilds only when the
+>      substituted element can be a `Vec` element and otherwise keeps `Vec<T>` (so an enum,
+>      `f64`, `?i64` or `Fn` element moved the typed dump and MIR, and accepted a
+>      `vec_to_array` the oracle refuses), and the new instances it interned, as a side effect
+>      of the code generator's drop walk, moved the order of its `%Name = type` definitions.
+>      So it was withdrawn, and the over-refusal stays: the program is refused, never
+>      miscompiled. The fix is the oracle's rule in one helper for the `Vec`, array and
+>      nullable arms (`subst_type`'s array and nullable arms rebuild unconditionally too, a
+>      divergence older than D97), with the code generator's interning order checked.
 >
 >      **D78 — stale corpus fixture counts in `llvm.rs` and `README.md`, at six sites, stale
 >      before this change.** Found by D74's reviews. `crates/sentinel-driver/tests/llvm.rs`
@@ -2984,6 +3073,9 @@ reference as you work through the milestones.
 >      entirely (188 bytes). That is the best available answer and still not the oracle's.
 >      ⚠ Capping WITHOUT the bail is worse than useless — measured, it turns the stack
 >      overflow into a 70 MB module. Giving mode 4 a refusal channel is the real fix.
+>      (2026-09-26: mode 4 has one since D97, ADR 0041 A14 — `refuse` records a refusal
+>      and `run` answers it in place of the output, in every mode — but this walk does not
+>      use it yet.)
 >
 >      **D39 — DONE (`0bf7abb`).** `scg` rendered a `?GenericInstance` payload BY VALUE
 >      where the Rust side heap-indirects it (ADR 0015 D11 + ADR 0016 D6b, and ADR 0045
@@ -3283,9 +3375,11 @@ reference as you work through the milestones.
 >      oracle refuses cleanly.** `struct S<T> { c: S<S<T>> }` plus any use gives oracle
 >      exit 1 with a real diagnostic ("generic instantiation does not converge: laying out
 >      `S` requires more than 4096 distinct generic-struct instances…") and `scg` exit
->      `0xC00000FD` (STACK OVERFLOW), 0 bytes. Same root as D38 — mode 4 has no refusal
->      channel — but a DIFFERENT walk: D38 is the monomorphisation worklist, this is the
->      Pass-0 layout closure. Note the declaration ALONE is harmless (the oracle and both
+>      `0xC00000FD` (STACK OVERFLOW), 0 bytes (2026-09-27: for a use BY VALUE; a `?S<i64>`
+>      parameter instead makes `scg` emit a 33.6 MB module and exit 0). Same root as D38 —
+>      mode 4 had no refusal channel (it has one since D97, and neither walk uses it yet) —
+>      but a DIFFERENT walk: D38 is the monomorphisation worklist, this is the Pass-0 layout
+>      closure. Note the declaration ALONE is harmless (the oracle and both
 >      `scg` builds emit an identical 111 bytes); the use is the trigger, which is the
 >      same trap D32 records.
 >

@@ -14,7 +14,29 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
-**Latest (2026-09-26, second slice) — a struct literal that names a field twice is refused
+**Latest (2026-09-26, third slice) — `scg` refuses a first set of the programs the oracle
+refuses (register D97).** [ADR 0041](decisions/0041-self-host-port-types.md) A14: the
+self-hosted typer typed a program the oracle refuses, and the stages after it lowered whatever
+its walk made of it; `P { zzz: 1, lo: 2, hi: 3 }` against `struct P { lo: i64, hi: i64 }`, for
+one, came out as a module. It now refuses, with the oracle's code and message, a struct literal
+that names a field its struct does not declare, names one twice or leaves one out; a field
+access naming a field its struct or class does not declare; `vec_to_array` over an element
+that owns memory (ADR 0034 C1, D125); and a class `init` that holds a `return` (D60) or fails
+ADR 0022 A3's definite assignment (D129). The driver prints the code and the message and exits
+1. Every other type error is still out of scope (ADR 0041 D7). The limits are registered: a
+program with several refused constructs can be refused for a different one than the oracle
+names (D145); the code generator checks a generic fn's body only at its instances (D142); on
+some refused programs it aborts before printing the refusal (D143, older than this change); and
+three verdicts differ from the oracle's — `vec_to_array` over a `Vec<T>` reached through a
+generic call or a generic instance's field is refused even when `T` is plain (D147), an empty
+struct literal nested in another is misparsed and refused (D144), and `vec_to_array` over a
+generic instance with a `secret T` field is accepted (D146). `scg`-only, so a patch by ADR 0076
+D2: the oracle and inkwell move no byte. A matched sweep of the five drivers over the 501
+`.sentinel` files the tree held before this change moves only the seven `tests/ui` fixtures
+there that carry a ported code, each now refused where it was lowered; the three fixtures the
+change adds carry one too, and each is refused by all five drivers.
+
+**Previously (2026-09-26, second slice) — a struct literal that names a field twice is refused
 (register D96).** [ADR 0013](decisions/0013-concrete-c1-4-struct-syntax.md) A1: the checker
 looked for a missing field only when a literal gave fewer values than its struct has fields, so
 a repeated name that made up the count filled one slot twice. `P { lo: 1, lo: 2 }` left `hi`

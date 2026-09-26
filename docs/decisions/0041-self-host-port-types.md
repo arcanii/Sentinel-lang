@@ -522,6 +522,63 @@ ADR-0040 A1 discipline — `docs/agent-protocol.md`). See ## Amendments A1.
     types → HIR/MIR → codegen; the remaining analysis passes borrow-check / effect-check
     are separate crates). The specific next stage warrants its own kickoff ADR (the
     cadence of 0039/0040/0041).
+- **A14 — (2026-09-26, register D97) the self-hosted typer refuses a first set of the
+  programs the oracle refuses.** D7 put type-error parity out of scope: the Sentinel stage
+  ran only where the oracle type-checks cleanly, and every differential skips a program the
+  oracle refuses. But `scg` is a compiler in its own right, and it typed such a program
+  anyway, so the stages after the typer lowered whatever its walk made of it. A14 ports the
+  oracle's refusals of: a struct literal that names a field its struct does not declare
+  (`unknown_field`), names one twice (`duplicate_field`, ADR 0013 A1) or leaves one out
+  (`missing_field`); a field access that names a field its struct or class does not declare
+  (`unknown_field`); `vec_to_array` over an element that owns memory or a refcount
+  (`vec_to_array_element_not_plain`, ADR 0034 C1); and a class `init` that holds a `return`
+  (`return_in_init`, register D60), does not assign every field on every path before its
+  end (`init_field_maybe_unassigned`), or reads a field or uses `self` before assigning it
+  (`init_field_read_before_assign`, `init_self_used_before_assigned`, ADR 0022 A3). They
+  live in a new part, `selfhost/types/refuse.sentinel`. The walk records the first refusal
+  it meets and runs on; `run` then answers the refusal in place of its output (the code on
+  a line of its own, as `snc`'s report begins, then `scg: ` and the oracle's message for
+  the construct refused) and 1, which each of the five drivers returns as its exit code.
+  The `init` check walks a disposable copy of the body, re-parsed from its first token
+  because the typer's walk consumes the one it types; it mirrors
+  `check_init_definite_assignment` rule for rule, its walkers exhaustive over the AST with
+  no catch-all arm, and walks a struct literal's fields in declaration order, as the
+  oracle's typed tree has them. Every other type error is still out of scope under D7.
+  Its limits are registered. A program with more than one refused construct can be
+  refused for a different one than the oracle names (D145): `scg` types a class's methods
+  in source order where the oracle types the `init` first, and checks a struct literal's
+  field set before typing its values, in declaration order, where the oracle checks each
+  name and types its value before the next; the verdict is the same. The code generator
+  types a generic fn's body only at its instances (D142), so a construct in a generic fn
+  that is never instantiated is not checked there (and no code is emitted for it), and
+  `vec_to_array` over an abstract `Vec<T>` is checked at each instance's element rather
+  than refused outright; the other four drivers type the body itself. On some refused
+  programs the code generator stops before `run` answers (D143, older than A14): a method
+  called on the value of an unknown field aborts it on an out-of-range index, which fails
+  the build without the message. And three verdicts differ from the oracle's.
+  `vec_to_array` over a `Vec<T>` reached through a generic call's result or a generic
+  instance's field is refused even when `T` is plain (D147): `subst_type` does not
+  substitute inside a `Vec`, so the element stays abstract. (A first remedy made it
+  substitute; the second review round showed the oracle keeps `Vec<T>` whenever the
+  substituted element cannot be a `Vec` element, and that the new substitution moved the
+  typed dump, MIR and the code generator's type-definition order, so it was withdrawn in
+  favour of the over-refusal.) An empty struct literal nested in another,
+  `P { u: U { }, n: 2 }`, is misparsed by `scg`, and the field-set check refuses the
+  misparse with "no field `{`" where the oracle accepts the program (D144). And
+  `vec_to_array` over a generic instance whose field is `secret T` is accepted where the
+  oracle refuses it (D146).
+  Pinned in both directions. Each self-hosted driver's test file runs
+  `common::assert_refuses_what_the_oracle_refuses`: every `tests/ui` fixture whose snapshot
+  carries a ported code (ten, three of them new: `c14_struct_literal_unknown_field`,
+  `c14_struct_literal_missing_field`, `c14_field_access_unknown_field`) must be refused by
+  the driver with the same code and message, in exactly two lines.
+  `sentinel_typer_refusals_match_the_oracle_on_shapes` compares the typer's verdict with the
+  oracle's on 58 programs, the oracle's own `init` unit-test cases among them. The corpus differentials hold the other direction for
+  corpus programs: a refusal replaces a driver's output, so it cannot match the oracle's
+  on a program the oracle accepts. Twenty-eight mutations are
+  caught; a twenty-ninth, which disables the walk's `return` rule, is equivalent, because a
+  `return` in an `init` is refused (`return_in_init`) before the walk runs, in the oracle as
+  here. `scg`-only: the oracle and inkwell move no byte.
 
 ## Context
 
@@ -760,7 +817,8 @@ category) — types only adds the `:bool` on `Cmp`/`Logic` and the operand types
 Type **error/diagnostic parity** (the **57** `TypeError` variants, lib.rs:2496–3290)
 — happy-path typed-AST production first; the Sentinel stage is run only where the
 oracle type-checks cleanly (parse-error / resolve-error / **type-error** fixtures are
-skipped, exactly as the resolve corpus test skips the oracle's failures).
+skipped, exactly as the resolve corpus test skips the oracle's failures). (Amended by
+A14: a first set of the refusals is ported, and tested on programs the oracle refuses.)
 **Effect-check** (the separate `sentinel-effect-check` crate — D1). **Cross-module**
 (`use`-bearing fixtures — resolve already rejects them today, so naturally excluded).
 **Full generic-inference edge cases** (ambiguous-null retry loops, deep nested

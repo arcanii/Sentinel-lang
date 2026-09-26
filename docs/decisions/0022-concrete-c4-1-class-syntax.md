@@ -557,7 +557,7 @@ in the corpus, the examples or the self-hosted compiler is refused. Pinned by th
 `tests/ui/c41_init_field_assigned_on_one_path.sentinel`,
 `c41_init_field_read_before_assign.sentinel` and
 `c41_init_self_used_before_assigned.sentinel`; each of sixteen mutations is caught. `scg`
-has no rejection path and does not refuse these yet (register D97). A rule that refuses
+refuses these too since register D97 (ADR 0041 A14). A rule that refuses
 programs that compiled before is at least a minor version (ADR 0076 D2).
 
 ## Revisit

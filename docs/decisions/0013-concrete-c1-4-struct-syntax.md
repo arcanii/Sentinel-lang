@@ -39,8 +39,8 @@ struct production)
   and `tests/ui/c14_struct_literal_duplicate_field.sentinel`. No
   program that type-checked before and named each field once moves.
   It refuses programs that compiled before, so it is at least a minor
-  version (ADR 0076 D2). The self-hosted checker does not refuse
-  either shape yet; register D97 tracks the missing rejection there.
+  version (ADR 0076 D2). The self-hosted checker refuses both shapes
+  too since register D97 (ADR 0041 A14).
 
 ## Context
 
