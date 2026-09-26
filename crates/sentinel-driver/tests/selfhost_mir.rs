@@ -16,6 +16,8 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+mod common;
+
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("..")
@@ -809,4 +811,30 @@ fn sentinel_ctverifier_matches_oracle_on_real_programs() {
         13,
     );
     let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// ADR 0041 A14 (register D97): the self-hosted MIR lowerer refuses what the oracle refuses,
+/// for the refusals `scg` ports (`common::assert_refuses_what_the_oracle_refuses`).
+#[test]
+fn sentinel_mir_refuses_what_the_oracle_refuses() {
+    let tmp = std::env::temp_dir()
+        .join(format!("snc_selfhost_mir_refusals_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).expect("create temp dir");
+    let driver = build_sentinel_mir_lowerer(&tmp);
+    let checked = common::assert_refuses_what_the_oracle_refuses(&driver, &tmp.join("refusals"));
+    assert!(checked >= 10, "expected at least ten pinned refusals, got {checked}");
+}
+
+/// ADR 0041 A14 (register D97): the self-hosted const-time verifier refuses what the oracle refuses,
+/// for the refusals `scg` ports (`common::assert_refuses_what_the_oracle_refuses`).
+#[test]
+fn sentinel_ctverifier_refuses_what_the_oracle_refuses() {
+    let tmp = std::env::temp_dir()
+        .join(format!("snc_selfhost_ctverifier_refusals_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).expect("create temp dir");
+    let driver = build_sentinel_ctverifier(&tmp);
+    let checked = common::assert_refuses_what_the_oracle_refuses(&driver, &tmp.join("refusals"));
+    assert!(checked >= 10, "expected at least ten pinned refusals, got {checked}");
 }

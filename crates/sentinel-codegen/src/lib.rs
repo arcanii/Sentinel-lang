@@ -9085,8 +9085,8 @@ impl<'ctx, 'plan, 'm> CodegenCtx<'ctx, 'plan, 'm> {
                 // programs BEFORE `scg` is ever run; only `snc build` runs them.
                 //
                 // ⚠ DO NOT READ THAT AS TWO SAFETY NETS. `scg` does NOT refuse
-                // this shape and CANNOT: it has no error channel in codegen mode
-                // (register D38), and its `cg_widen` carries no struct/GI guard
+                // this shape: its refusal channel (ADR 0041 A14) carries only the
+                // typer's ported refusals, and its `cg_widen` carries no struct/GI guard
                 // at all — it emits the inline `insertvalue` chain for every
                 // nullable, exits 0 with empty stderr, and produces a module
                 // `llvm-as` rejects. The oracle's refusal is the SINGLE point of

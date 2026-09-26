@@ -39,6 +39,7 @@ part cg_effects;
 part cg_chained;
 part mir_emit;
 part mir;
+part refuse;
 
 use parser::Expr;
 use parser::Stmts;
@@ -613,6 +614,22 @@ struct TyCtx {
     cg_h_floor: i64,  // (ADR 0075 D2) the ARM floor: `len(cgdv)` before the arm's body is
                       //   lowered. A `k(v)` bubble LEAVES the arm, so it drains the drop
                       //   records at or above it before branching (register D87).
+    // (ADR 0041 A14, register D97) the first refusal the walk meets: whether there is one,
+    // and its text (the oracle's diagnostic code, then a message). `run` answers it in
+    // place of its output.
+    rfd: bool,
+    rfm: Vec<u8>,
+    // (ADR 0041 A14, register D60's refusal) the walk is inside a class `init`'s body: a
+    // `return` there is refused, as the oracle's `in_init` refuses it.
+    rf_init: bool,
+    // (ADR 0041 A14) the `init` definite-assignment walk's one-node flags (see
+    // `types/refuse.sentinel`): the node being walked is a field access's target
+    // (`da_tgt`), and it was `self` (`da_self_tgt`); the node is an assignment's place
+    // (`da_asg`), and it was `self.f` for field `da_asg_f`.
+    da_tgt: bool,
+    da_self_tgt: bool,
+    da_asg: bool,
+    da_asg_f: i64,
 }
 
 fn tbase() -> i64 { 100 }
@@ -1410,9 +1427,9 @@ pub fn run(src: [u8], mode: i64, result: &mut Vec<u8>) -> i64 {
         // lines took the pre-change compiler 0.1s and 846 bytes and took the uncapped
         // version into a STACK OVERFLOW after ~60 seconds. The oracle caps the identical
         // walk at MAX_MONO_INSTANCES and returns a diagnostic
-        // (`collect_mono_instantiations`); scg is dump-only and has no diagnostic channel
-        // here, so it stops instead — the oracle refuses such a program first, so the
-        // truncated output is never compared.
+        // (`collect_mono_instantiations`); scg's walk does not refuse (register D38: the
+        // refusal channel ADR 0041 A14 added is not used here), so it stops instead — the
+        // oracle refuses such a program first, so the truncated output is never compared.
         //
         // This cap is the same rule the D25 comment in `cg.sentinel` states, and I wrote
         // that sentence and then did not apply it to the loop THIS item added. If you are
@@ -1462,8 +1479,8 @@ pub fn run(src: [u8], mode: i64, result: &mut Vec<u8>) -> i64 {
         ctx.cg_mute = false;
         // If the cap stopped the drain, the instance set is NON-CONVERGENT: the program
         // instantiates a generic at a strictly larger type argument for ever. The oracle
-        // returns `Err` and emits NOTHING for such a program, and the closest scg can get
-        // without a diagnostic channel is to emit no mono defines at all. Emitting a
+        // returns `Err` and emits NOTHING for such a program, and the closest scg gets
+        // without refusing here (register D38) is to emit no mono defines at all. Emitting a
         // truncated arbitrary prefix is worse than useless — capping alone (without this)
         // turned a stack overflow into a 70 MB module, where the pre-change compiler
         // produced 846 bytes. The oracle refuses these programs, so nothing here is ever
@@ -1906,7 +1923,21 @@ pub fn run(src: [u8], mode: i64, result: &mut Vec<u8>) -> i64 {
     };
     let _it: [u8] = vec_to_array(itembuf);
     let _g: [u8] = vec_to_array(garbage);
-    0
+    // (ADR 0041 A14, register D97) a refusal replaces the output (`types/refuse.sentinel`),
+    // and the answer is 1, which each driver returns as its exit code. Copied byte by byte,
+    // as above: moving a `Vec` field out of the context and then dropping it double-frees.
+    if ctx.rfd {
+        clear_u8(result);
+        let rn: i64 = len(ctx.rfm);
+        let mut ri: i64 = 0;
+        while ri < rn {
+            push(result, ctx.rfm[ri]);
+            ri = ri + 1;
+        }
+        1
+    } else {
+        0
+    }
 }
 
 // (6/N) dump each user fn's moved-source set (ADR 0043 D2): `(fn #<id> <name> #<vid>…)`,

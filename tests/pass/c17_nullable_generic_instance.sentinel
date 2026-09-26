@@ -23,7 +23,7 @@
 // `let o: ?Bx<i64> = b;` emits `insertvalue { i1, ptr } …, %Bx_i64 %v2, 1`. The ORACLE
 // refuses every such program ("widen-to-nullable of a struct/generic payload (heap-box)
 // deferred"), so the differential skips it before `scg` runs and no fixture can reach
-// it — `scg` itself cannot refuse (register D38), so that oracle refusal is the only
+// it — `scg` itself does not refuse the shape, so that oracle refusal is the only
 // thing keeping invalid IR out. inkwell's half of the widen IS fixed (register D42,
 // pinned by `c17_nullable_generic_instance_widen.sentinel`); see `cg_widen`'s comment
 // for what un-deferring the oracle requires first.

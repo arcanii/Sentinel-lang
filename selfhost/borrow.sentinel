@@ -16,8 +16,9 @@ fn main() -> i64 {
     let inp_path: [u8] = "input.sentinel";
     let inp: [u8] = read_file(inp_path);
     let mut result: Vec<u8> = vec_new();
-    run(inp, 1, &mut result);
+    // (ADR 0041 A14, register D97) 1 when the typer refused the program.
+    let rc: i64 = run(inp, 1, &mut result);
     let arr: [u8] = vec_to_array(result);
     print_bytes(arr);
-    0
+    rc
 }

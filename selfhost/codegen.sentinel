@@ -25,8 +25,9 @@ use merge::merge_source;
 fn main() -> i64 {
     let inp: [u8] = merge_source();
     let mut result: Vec<u8> = vec_new();
-    run(inp, 4, &mut result);
+    // (ADR 0041 A14, register D97) 1 when the typer refused the program.
+    let rc: i64 = run(inp, 4, &mut result);
     let arr: [u8] = vec_to_array(result);
     print_bytes(arr);
-    0
+    rc
 }

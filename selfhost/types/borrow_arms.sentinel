@@ -1304,6 +1304,35 @@ fn dump_te_field(out: &mut Vec<u8>, ft: Expr, fdn: [u8], exp: i64, src: &[u8], c
             } else {
                 class_field_index(c, ccid, &fdn)
             };
+            // (ADR 0041 A14, register D97) a field its struct or class does not declare:
+            // the oracle refuses it (`unknown_field`, whose message says "struct" for a
+            // class too), and so does this. A target that is neither is another refusal.
+            if fidx < 0 {
+                if sid >= 0 || ccid >= 0 {
+                    let mut ufm: Vec<u8> = vec_new();
+                    append_str(&mut ufm, "struct `");
+                    let ufs: i64 = if sid >= 0 {
+                        (*c).sts[sid]
+                    } else {
+                        (*c).clns[ccid]
+                    };
+                    let ufe: i64 = if sid >= 0 {
+                        (*c).ste[sid]
+                    } else {
+                        (*c).clne[ccid]
+                    };
+                    rf_put_snb(c, ufs, ufe, &mut ufm);
+                    append_str(&mut ufm, "` has no field `");
+                    rf_put(&mut ufm, &fdn);
+                    push(&mut ufm, '`');
+                    refuse(c, "sentinel::types::unknown_field", vec_to_array(ufm));
+                    0
+                } else {
+                    0
+                }
+            } else {
+                0
+            };
             let fty0: i64 = if sid >= 0 {
                 field_type(c, sid, &fdn)
             } else {

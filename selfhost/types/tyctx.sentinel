@@ -296,5 +296,12 @@ fn new_tyctx(mode: i64) -> TyCtx {
         cg_h_btok: 0,
         cg_h_kont: 0,
         cg_h_floor: 0,
+        rfd: false,
+        rfm: vec_new(),
+        rf_init: false,
+        da_tgt: false,
+        da_self_tgt: false,
+        da_asg: false,
+        da_asg_f: 0 - 1,
     }
 }

@@ -1472,9 +1472,9 @@ fn type_of_typeexpr(c: &mut TyCtx, t: TypeE, gb: &mut Vec<u8>) -> i64 {
                 // changing for that: this arm was already element-generic.
                 //
                 // One oracle-rejection this still does NOT re-enforce (snc-only,
-                // like the guard/return pins — scg is dump-only and trusts
-                // oracle-valid input; the differential skips whatever the oracle
-                // rejects): depth > 1 (`Channel<Channel<Channel<…>>>`), where the
+                // like the guard/return pins — outside the refusals ADR 0041 A14
+                // ports, scg trusts oracle-valid input; the differential skips whatever
+                // the oracle rejects): depth > 1 (`Channel<Channel<Channel<…>>>`), where the
                 // oracle caps nesting at one level (`channel_chanid_for`) and scg
                 // interns any depth structurally.
                 let mut cav: Vec<i64> = vec_new();
@@ -1500,8 +1500,9 @@ fn type_of_typeexpr(c: &mut TyCtx, t: TypeE, gb: &mut Vec<u8>) -> i64 {
                 // for the same reason.
                 //
                 // The oracle's own rejections stay snc-only, per the house convention
-                // for this file (scg is dump-only over oracle-valid input, and the
-                // differential skips whatever the oracle rejects): a wrong ARITY
+                // for this file (outside the refusals ADR 0041 A14 ports, scg trusts
+                // oracle-valid input, and the differential skips whatever the oracle
+                // rejects): a wrong ARITY
                 // (`TypeArgCountMismatch`) and a non-`secret i64` element
                 // (`SealedChannelElementNotSupported`) are both refused upstream before
                 // any program reaches here.

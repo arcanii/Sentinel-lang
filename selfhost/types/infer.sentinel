@@ -688,6 +688,19 @@ fn dump_gcall(out: &mut Vec<u8>, fid: i64, ca: Args, exp: i64, src: &[u8], c: &m
     // (ADR 0034 D8) `push` (fid 8) consumes its element (the arg after the first).
     let firstty: i64 = dump_args_capture_first(&mut abuf, ca, fid == 8, src, c, gb);
     let targ: i64 = targ_of_builtin(c, fid, firstty, exp);
+    // (ADR 0041 A14 / ADR 0034 C1, registers D97 and D125) `vec_to_array` copies the
+    // elements and leaves the Vec holding them, so its element must own nothing.
+    if fid == 10 {
+        let mut vta_seen: Vec<i64> = vec_new();
+        if vta_plain(c, targ, &mut vta_seen) {
+            0
+        } else {
+            refuse(c, "sentinel::types::vec_to_array_element_not_plain", "`vec_to_array` is not supported for this element type");
+            0
+        }
+    } else {
+        0
+    };
     append_str(out, " (targs ");
     render_type(out, targ, c);
     push(out, ')');

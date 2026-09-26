@@ -380,6 +380,9 @@ fn tclass_init(buf: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src:
     append_str(buf, " (");
     emit_tparams(buf, k, s, e, src, cur, c, gb, true);
     append_str(buf, ") ");
+    // (ADR 0041 A14 / ADR 0022 A3, registers D97 and D129) the body's first token, for the
+    // definite-assignment walk's disposable copy below.
+    let ib_tok: i64 = *cur;
     let ibody: Expr = parse_block(k, s, e, src, cur);
     // (register D61) key this body's move records the way the oracle's borrow checker
     // now keys a METHOD: it has no fn index, so it gets `1000000 + selfvid` — unique
@@ -399,7 +402,10 @@ fn tclass_init(buf: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src:
     let svcons_i: bool = (*c).consuming;
     (*c).curfn = 1000000 + selfvid;
     (*c).consuming = true;
+    // (ADR 0041 A14, register D60's refusal) a `return` in this body is refused.
+    (*c).rf_init = true;
     dump_texpr(buf, ibody, 0 - 1, src, c, gb);
+    (*c).rf_init = false;
     push(buf, ')');
     // (Bar B / classes) cg: the init DEFINE (`void @Class__init(ptr out, params)`; the
     // `0`-placeholder tail is NOT lowered). Appended to cgcls (after the fns).
@@ -416,6 +422,13 @@ fn tclass_init(buf: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src:
     };
     (*c).curfn = svcf_i;
     (*c).consuming = svcons_i;
+    // (ADR 0041 A14 / ADR 0022 A3, registers D97 and D129) every field assigned on every
+    // path before the end or a `return`, and none read, nor `self` used, before that: the
+    // oracle checks this once the body has type-checked, and so does this, over a copy of
+    // the body re-parsed from its first token (the walk above consumed the one it typed).
+    let mut da_cur: i64 = ib_tok;
+    let da_body: Expr = parse_block(k, s, e, src, &mut da_cur);
+    da_init(c, cid, da_body);
     0
 }
 

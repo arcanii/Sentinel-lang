@@ -273,8 +273,9 @@ fn parse_postfix_rest(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur:
 // `PtrOfArity` for the other three — so `snc ast` exits nonzero and the
 // comparison is skipped before scg ever runs (verified: `sqrt()`,
 // `sqrt(1.0, 2.0)`, `ptr_of()` and `is_null(a, b)` all print a parse error). It
-// still returns a well-formed node rather than aborting, on the standing "scg is
-// dump-only and trusts oracle-valid input" contract.
+// still returns a well-formed node rather than aborting, on the standing "scg trusts
+// oracle-valid input" contract (the typer refuses a first set of programs, ADR 0041 A14;
+// the parser none).
 fn reserved_unary(uop: i64, a: Args) -> Expr {
     match a {
         Args::End => Expr::Unary(uop, Expr::Int(0)),

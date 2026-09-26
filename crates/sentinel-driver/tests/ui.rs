@@ -103,6 +103,11 @@ ui_snapshot!(c37_perform_outside_handle, "c37_perform_outside_handle.sentinel");
 // Register D96 (ADR 0013 A1): a field named twice is refused (DuplicateField) rather than
 // panicking the type checker.
 ui_snapshot!(c14_struct_literal_duplicate_field, "c14_struct_literal_duplicate_field.sentinel");
+// Register D97 (ADR 0041 A14): refusals `snc` always made, pinned here so the self-hosted
+// drivers' refusal tests (`common::assert_refuses_what_the_oracle_refuses`) cover them too.
+ui_snapshot!(c14_struct_literal_unknown_field, "c14_struct_literal_unknown_field.sentinel");
+ui_snapshot!(c14_struct_literal_missing_field, "c14_struct_literal_missing_field.sentinel");
+ui_snapshot!(c14_field_access_unknown_field, "c14_field_access_unknown_field.sentinel");
 
 // ---- C4.1 class definite-assignment rejection ----
 ui_snapshot!(c41_init_field_unassigned, "c41_init_field_unassigned.sentinel");

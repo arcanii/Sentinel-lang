@@ -1,0 +1,11 @@
+// Register D97 (ADR 0041 A14): a struct literal must name every field its struct
+// declares. `snc` has always refused this; the self-hosted typer now refuses it too, with
+// the same code, where it used to type the literal anyway.
+// Surfaces MissingField for `hi`.
+
+struct P { lo: i64, hi: i64 }
+
+fn main() -> i64 {
+    let p = P { lo: 1 };
+    p.lo
+}

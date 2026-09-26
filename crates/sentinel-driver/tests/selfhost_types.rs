@@ -24,6 +24,8 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+mod common;
+
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("..")
@@ -724,4 +726,151 @@ fn sentinel_typer_matches_oracle_on_real_programs() {
     // "the floor is set to today's actual count" rule).
     real_program_differential("types", &typer, &work, 13, 13);
     let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// ADR 0041 A14 (register D97): the self-hosted typer refuses what the oracle refuses,
+/// for the refusals `scg` ports (`common::assert_refuses_what_the_oracle_refuses`).
+#[test]
+fn sentinel_typer_refuses_what_the_oracle_refuses() {
+    let tmp = std::env::temp_dir()
+        .join(format!("snc_selfhost_typer_refusals_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).expect("create temp dir");
+    let driver = build_sentinel_typer(&tmp);
+    let checked = common::assert_refuses_what_the_oracle_refuses(&driver, &tmp.join("refusals"));
+    assert!(checked >= 10, "expected at least ten pinned refusals, got {checked}");
+}
+
+/// ADR 0041 A14 (register D97): the self-hosted typer's refusals agree with the oracle's,
+/// program by program, on the shapes each ported rule turns on: every `init`
+/// definite-assignment case of the oracle's own unit tests (`sentinel-types`, ADR 0022 A3),
+/// a struct literal whose fields are written out of declaration order, a nested field, a
+/// reference to `self` or to a field, `delegate` fields and their order, the struct-literal
+/// field-set refusals, an unknown field access, and `vec_to_array`'s element. For each, the
+/// same outcome: both accept, or both refuse with the same message (the oracle's line after
+/// `snc: `, the typer's after `scg: `). The few programs here with more than one refused
+/// construct are ones where the two name the same one; in general they need not (register
+/// D145), and only the verdict is the same.
+#[test]
+fn sentinel_typer_refusals_match_the_oracle_on_shapes() {
+    const DA_CLASS: &str = "enum E { A, B(i64) }\nclass K { let e: E; let n: i64;\n pub init(c: bool, m: E) { @ }\n pub fn get(self: &Self) -> i64 { self.n } }\nfn main() -> i64 { 0 }";
+    const DA_BODIES: &[&str] = &[
+        "if c { self.e = E::A; 0 } else { 0 }; self.n = 1; 0",
+        "let mut i = 0; while i < 1 { self.e = E::A; i = i + 1; } self.n = 1; 0",
+        "match m { E::A => { self.e = E::A; 0 }, E::B(_) => 0 }; self.n = 1; 0",
+        "let b = c && { self.e = E::A; true }; self.n = 1; 0",
+        "scope concurrent { self.e = E::A; 0 }; self.n = 1; 0",
+        "self.n = 1; { self.e = E::A; 0 }",
+        "let x = self.n; self.e = E::A; self.n = x; 0",
+        "if c { self.n = 1; 0 } else { 0 }; self.e = E::A; self.n = self.n + 1; 0",
+        "self.n = 1; let x = self.get(); self.e = E::A; 0",
+        "self.e = E::A; self.n = self.n + 1; 0",
+        "let mut a = [0]; a[{ self.n = 1; 0 }] = self.n; self.e = E::A; 0",
+        "let mut a = [0]; a[self.n] = { self.n = 0; 0 }; self.e = E::A; 0",
+        "let mut a = [0]; a[{ self.n = 1; 0 }] = 5; self.e = E::A; 0",
+        "let mut a = [0]; a[0] = { self.n = 1; 0 }; self.e = E::A; 0",
+        "self.e = E::A; self.n = 1; let x = self.n; self.n = x + 1; 0",
+        "if c { self.e = E::A; 0 } else { self.e = E::B(2); 0 }; self.n = 1; 0",
+        "match m { E::A => { self.e = E::A; 0 }, E::B(x) => { self.e = E::B(x); 0 } }; self.n = 1; 0",
+        "self.e = E::A; self.n = 1; let x = self.get(); self.n = x; 0",
+        "self.e = E::A; self.n = 1; let mut i = 0; while i < 2 { self.n = self.n + i; i = i + 1; } 0",
+        "match m { E::A => { self.e = E::A; 0 }, _ => { self.e = E::B(1); 0 } }; self.n = 1; 0",
+        "let b = c || { self.e = E::A; true }; self.n = 1; 0",
+        "while self.n < 1 { self.n = 1; } self.e = E::A; 0",
+        "self.e = E::A; self.n = 1; self.n",
+        "self.e = E::A; self.n + 0",
+        "{ self.e = E::A; 0 }; self.n = 1; 0",
+        "if { self.e = E::A; true } { self.n = 1; 0 } else { self.n = 2; 0 }; 0",
+        "self.e = E::A; self.n = { self.n = 5; self.n + 1 }; 0",
+        "self.e = E::A; if c { return 0 } else { 0 }; self.n = 1; 0",
+    ];
+    const OTHER: &[&str] = &[
+        "class J { let xs: [i64];\n pub init() { self.xs[0] = 1; self.xs = [1]; 0 } }\nfn main() -> i64 { 0 }",
+        "effect Io { read() -> i64; }\nclass K { let n: i64;\n pub init() { handle { self.n = 1; 0 } with { Io.read(k) => k(0) }; 0 } }\nfn main() -> i64 { 0 }",
+        "effect Io { read() -> i64; }\nclass K { let n: i64;\n pub init() { let v = handle { perform Io.read() } with { Io.read(k) => 0, return r => { self.n = r; r } }; 0 } }\nfn main() -> i64 { 0 }",
+        "fn f(x: i64) -> i64 { x }\nclass K { let n: i64; let m: i64;\n pub init() { let t = spawn f({ self.n = 1; 0 }); self.m = t.await; 0 } }\nfn main() -> i64 { 0 }",
+        "struct P { a: i64, b: i64 }\nclass K { let n: i64; let p: P;\n pub init() { self.p = P { b: { self.n = 1; 0 }, a: self.n }; 0 } }\nfn main() -> i64 { 0 }",
+        "struct P { a: i64, b: i64 }\nclass K { let n: i64; let p: P;\n pub init() { self.p = P { b: self.n, a: { self.n = 1; 0 } }; 0 } }\nfn main() -> i64 { 0 }",
+        "struct I { x: i64 }\nclass K { let i: I; let n: i64;\n pub init() { self.n = self.i.x; self.i = I { x: 1 }; 0 } }\nfn main() -> i64 { 0 }",
+        "struct I { x: i64 }\nclass K { let i: I;\n pub init() { self.i.x = 1; self.i = I { x: 2 }; 0 } }\nfn main() -> i64 { 0 }",
+        "fn look(k: &K) -> i64 { 0 }\nclass K { let n: i64; let m: i64;\n pub init() { self.n = 1; let r = look(&self); self.m = 2; 0 } }\nfn main() -> i64 { 0 }",
+        "fn look(k: &i64) -> i64 { 0 }\nclass K { let n: i64; let m: i64;\n pub init() { self.m = look(&self.n); self.n = 2; 0 } }\nfn main() -> i64 { 0 }",
+        "class K { let v: [i64]; let n: i64;\n pub init() { self.n = self.v[0]; self.v = [1]; 0 } }\nfn main() -> i64 { 0 }",
+        "class K { pub init() { 0 } }\nfn main() -> i64 { 0 }",
+        "class K { let n: i64;\n pub init() { self.n = 1; 0 }\n pub fn get(self: &Self, c: bool) -> i64 { if c { return 5 } else { 0 }; self.n } }\nfn later(c: bool) -> i64 { if c { return 7 } else { 0 }; 1 }\nfn main() -> i64 { 0 }",
+        "trait Writer { fn write(self: &mut Self, data: i64) -> i64; }\nclass FileSink { let count: i64;\n pub init() { self.count = 0; 0 } }\nimpl as Writer for FileSink { fn write(self: &mut Self, data: i64) -> i64 { self.count = self.count + data; self.count } }\nclass Logger { delegate writer: FileSink to Writer; let n: i64;\n pub init(w: FileSink) { self.n = 1; 0 } }\nfn main() -> i64 { 0 }",
+        "trait Writer { fn write(self: &mut Self, data: i64) -> i64; }\nclass FileSink { let count: i64;\n pub init() { self.count = 0; 0 } }\nimpl as Writer for FileSink { fn write(self: &mut Self, data: i64) -> i64 { self.count = self.count + data; self.count } }\nclass Logger { delegate writer: FileSink to Writer; let n: i64;\n pub init(w: FileSink) { 0 } }\nfn main() -> i64 { 0 }",
+        "trait Writer { fn write(self: &mut Self, data: i64) -> i64; }\nclass FileSink { let count: i64;\n pub init() { self.count = 0; 0 } }\nimpl as Writer for FileSink { fn write(self: &mut Self, data: i64) -> i64 { self.count = self.count + data; self.count } }\nclass Logger { delegate writer: FileSink to Writer; let n: i64;\n pub init(w: FileSink) { self.writer = w; let z = self.write(1); self.n = z; 0 } }\nfn main() -> i64 { 0 }",
+        "struct P { lo: i64, hi: i64 }\nfn main() -> i64 { let p = P { lo: 1, lo: 2, hi: 3 }; p.lo }",
+        "struct P { lo: i64, hi: i64 }\nfn main() -> i64 { let p = P { zzz: 1, lo: 1, lo: 2 }; p.lo }",
+        "struct P { lo: i64, hi: i64 }\nfn main() -> i64 { let p = P { lo: 1, lo: 2, zzz: 3 }; p.lo }",
+        "struct P { lo: i64, hi: i64 }\nfn main() -> i64 { let p = P { hi: 1 }; p.hi }",
+        "struct B<T> { v: T, w: i64 }\nfn main() -> i64 { let b: B<i64> = B { v: 1 }; b.v }",
+        "struct P { lo: i64, hi: i64 }\nfn main() -> i64 { let mut p = P { lo: 1, hi: 2 }; p.zzz = 5; p.lo }",
+        "class K { let n: i64;\n pub init() { self.n = 1; 0 }\n pub fn get(self: &Self) -> i64 { self.zzz } }\nfn main() -> i64 { 0 }",
+        "struct H { e: [i64] }\nfn main() -> i64 { let v: Vec<H> = vec_new(); let a = vec_to_array(v); 0 }",
+        "fn main() -> i64 { let v: Vec<bool> = vec_new(); let a = vec_to_array(v); 0 }",
+        "struct H { e: [i64] }\nstruct H2 { n: i64, h: H }\nfn main() -> i64 { let v: Vec<H2> = vec_new(); let a = vec_to_array(v); 0 }",
+        "struct Q { a: i64, b: ?i64, c: secret i64 }\nfn main() -> i64 { let v: Vec<Q> = vec_new(); let a = vec_to_array(v); 0 }",
+        "fn first<T>(v: Vec<T>) -> i64 { let a = vec_to_array(v); 0 }\nfn main() -> i64 { 0 }",
+        // A `Vec<T>` reached through a generic call's result keeps an abstract element, and
+        // both refuse: the oracle when `T` is not a `Vec` element (its substitution then keeps
+        // `Vec<T>`), `scg` always, which over-refuses a plain `T` (register D147).
+        "struct E2 { e: [i64] }\nfn pass<T>(v: Vec<T>) -> Vec<T> { v }\nfn main() -> i64 { let v: Vec<E2> = vec_new(); let a = vec_to_array(pass(v)); len(a) }",
+        "enum E { A, B }\nfn mk<T>(x: T) -> Vec<T> { vec_new() }\nfn main() -> i64 { let a = vec_to_array(mk(E::A)); len(a) }",
+    ];
+    let mut sources: Vec<String> = DA_BODIES.iter().map(|b| DA_CLASS.replace('@', b)).collect();
+    sources.extend(OTHER.iter().map(|s| s.to_string()));
+
+    let tmp =
+        std::env::temp_dir().join(format!("snc_selfhost_types_shapes_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).expect("create temp dir");
+    let typer = build_sentinel_typer(&tmp);
+    let work = tmp.join("work");
+    std::fs::create_dir_all(&work).expect("create work dir");
+    let input = work.join("input.sentinel");
+    let mut refused = 0usize;
+    let mut failures: Vec<String> = Vec::new();
+    for src in &sources {
+        std::fs::write(&input, src).expect("stage source");
+        let oracle = Command::new(env!("CARGO_BIN_EXE_snc"))
+            .arg("types")
+            .arg(&input)
+            .output()
+            .expect("run snc types");
+        let oracle_err = String::from_utf8_lossy(&oracle.stderr);
+        let want = if oracle.status.success() {
+            None
+        } else {
+            Some(oracle_err.lines().find_map(|l| l.strip_prefix("snc: ")).unwrap_or("").to_string())
+        };
+        let out = Command::new(&typer)
+            .current_dir(&work)
+            .output()
+            .expect("run the Sentinel typer");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        // A refusal is exactly two lines: the code, then the message.
+        let got = if out.status.success() {
+            None
+        } else if stdout.lines().count() != 2 {
+            Some(format!("<{} lines>", stdout.lines().count()))
+        } else {
+            Some(stdout.lines().nth(1).and_then(|l| l.strip_prefix("scg: ")).unwrap_or("").to_string())
+        };
+        if want.is_some() {
+            refused += 1;
+        }
+        if want != got {
+            failures.push(format!("  {src:?}:\n    oracle {want:?}\n    typer  {got:?}"));
+        }
+    }
+    assert!(refused >= 30, "expected at least thirty refused shapes, got {refused}");
+    assert!(
+        failures.is_empty(),
+        "the Sentinel typer's refusals differ from the oracle's on {}/{} shape(s):\n{}",
+        failures.len(),
+        sources.len(),
+        failures.join("\n")
+    );
 }

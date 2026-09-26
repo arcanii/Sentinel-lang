@@ -1,0 +1,11 @@
+// Register D97 (ADR 0041 A14): a field access may not name a field its struct does not
+// declare. `snc` has always refused this; the self-hosted typer now refuses it too, with
+// the same code, where it used to type the access anyway.
+// Surfaces UnknownField at `zzz`.
+
+struct P { lo: i64, hi: i64 }
+
+fn main() -> i64 {
+    let p = P { lo: 1, hi: 2 };
+    p.zzz
+}

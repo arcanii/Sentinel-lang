@@ -1,0 +1,990 @@
+module types;
+
+// ===== (ADR 0041 A14, register D97) the refusals `scg` ports ======================
+//
+// Until A14 `scg` typed every input: type-error parity was out of scope (ADR 0041 D7), so
+// a program the oracle refuses was typed anyway, and the stages after the typer lowered
+// what the walk made of it. A14 ports a first set of the oracle's refusals: a struct
+// literal that names a field its struct does not declare, names one twice (ADR 0013 A1) or
+// leaves one out; `vec_to_array` over an element that owns memory or a refcount (ADR 0034
+// C1); a class `init` that does not assign every field on every path before its end, or
+// that reads a field or uses `self` before assigning it (ADR 0022 A3), or that holds a
+// `return` (register D60); and a field access naming a field its struct or class does not
+// declare. Every other type error is still out of scope.
+//
+// The walk records the first refusal it meets and runs on; `run` then answers the refusal
+// in place of its output, and 1, which each driver returns as its exit code. The text is
+// the oracle's diagnostic code on a line of its own, as `snc`'s report begins, then `scg: `
+// and the oracle's message for the construct refused.
+//
+// The limits, each registered. A program with more than one refused construct can be
+// refused for a different one of them (D145): the walk types a class's methods in source
+// order where the oracle types the `init` first, and it checks a struct literal's field set
+// before typing its values, in declaration order, where the oracle checks each name and
+// types its value before the next. The code generator types a generic fn's body only at its
+// instances, so it refuses there (D142): a construct in a generic fn that is never
+// instantiated is not checked, and no code is emitted for it, and `vec_to_array` over an
+// abstract `Vec<T>` is checked at each instance's element rather than refused outright.
+// Running on can stop the code generator before `run` answers: a method called on the value
+// of an unknown field aborts it on an out-of-range index (D143, which predates A14). And
+// three verdicts differ from the oracle's: `vec_to_array` over a `Vec<T>` reached through a
+// generic call's result or a generic instance's field is refused even when `T` is plain,
+// because `subst_type` does not substitute inside a `Vec` (D147); an empty struct literal
+// nested in another, `P { u: U { }, n: 2 }`, is misparsed, and the misparse is refused with
+// "no field `{`" (D144); and `vec_to_array` over a generic instance whose field is `secret T`
+// is accepted where the oracle refuses (D146).
+
+// Record the refusal `code` with the message `msg`, unless one is recorded already.
+fn refuse(c: &mut TyCtx, code: [u8], msg: [u8]) -> i64 {
+    if (*c).rfd {
+        let _rc: [u8] = code;
+        let _rm: [u8] = msg;
+        0
+    } else {
+        (*c).rfd = true;
+        append_str(&mut (*c).rfm, code);
+        push(&mut (*c).rfm, '\n');
+        append_str(&mut (*c).rfm, "scg: ");
+        append_str(&mut (*c).rfm, msg);
+        push(&mut (*c).rfm, '\n');
+        0
+    }
+}
+
+// Append `q` to `out`.
+fn rf_put(out: &mut Vec<u8>, q: &[u8]) -> i64 {
+    let n: i64 = len(*q);
+    let mut i: i64 = 0;
+    while i < n {
+        push(out, (*q)[i]);
+        i = i + 1;
+    }
+    0
+}
+
+// Append the `snb` blob `bs`..`be` (a declared name) to `out`.
+fn rf_put_snb(c: &mut TyCtx, bs: i64, be: i64, out: &mut Vec<u8>) -> i64 {
+    let mut i: i64 = bs;
+    while i < be {
+        push(out, (*c).snb[i]);
+        i = i + 1;
+    }
+    0
+}
+
+// Whether `v` holds `x`.
+fn rf_has(v: &mut Vec<i64>, x: i64) -> bool {
+    let n: i64 = len(*v);
+    let mut i: i64 = 0;
+    let mut found: bool = false;
+    while i < n {
+        if (*v)[i] == x {
+            found = true;
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    found
+}
+
+// ----- a struct literal's fields ----------------------------------------------------
+
+// The number of fields struct `sid` declares.
+fn struct_nfields(c: &mut TyCtx, sid: i64) -> i64 {
+    let n: i64 = len((*c).fldo);
+    let mut i: i64 = 0;
+    let mut k: i64 = 0;
+    while i < n {
+        if (*c).fldo[i] == sid {
+            k = k + 1;
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    k
+}
+
+// Append the name of struct `sid`'s field `fi` (declaration order) to `out`.
+fn struct_field_name(c: &mut TyCtx, sid: i64, fi: i64, out: &mut Vec<u8>) -> i64 {
+    let n: i64 = len((*c).fldo);
+    let mut i: i64 = 0;
+    let mut k: i64 = 0;
+    while i < n {
+        if (*c).fldo[i] == sid {
+            if k == fi {
+                let bs: i64 = (*c).flds[i];
+                let be: i64 = (*c).flde[i];
+                rf_put_snb(c, bs, be, out);
+                0
+            } else {
+                0
+            };
+            k = k + 1;
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    0
+}
+
+// The oracle's `StructLit` checks: each field the literal names must be declared
+// (`unknown_field`) and named once (`duplicate_field`, ADR 0013 A1), both in source order,
+// and every declared field must be named (`missing_field`, the first in declaration order
+// that is not). The oracle checks each name and types its value before the next name;
+// this runs before any value is typed, so which refusal a literal with several gets can
+// differ (D145). Consumes `f` and hands it back unchanged, for `sort_fields`. An unknown
+// struct (`sid < 0`) is not this check's to refuse.
+fn check_sfields(c: &mut TyCtx, sid: i64, snm: &[u8], f: Fields) -> Fields {
+    if sid < 0 {
+        f
+    } else {
+        let mut seen: Vec<i64> = vec_new();
+        let back: Fields = check_sfields_walk(c, sid, snm, f, &mut seen);
+        let nf: i64 = struct_nfields(c, sid);
+        let mut i: i64 = 0;
+        let mut missing: i64 = 0 - 1;
+        while i < nf {
+            if missing < 0 {
+                if rf_has(&mut seen, i) {
+                    0
+                } else {
+                    missing = i;
+                    0
+                };
+                0
+            } else {
+                0
+            };
+            i = i + 1;
+        }
+        if missing >= 0 {
+            let mut m: Vec<u8> = vec_new();
+            append_str(&mut m, "struct literal `");
+            rf_put(&mut m, snm);
+            append_str(&mut m, "` is missing field `");
+            struct_field_name(c, sid, missing, &mut m);
+            push(&mut m, '`');
+            refuse(c, "sentinel::types::missing_field", vec_to_array(m));
+            0
+        } else {
+            0
+        };
+        back
+    }
+}
+
+fn check_sfields_walk(c: &mut TyCtx, sid: i64, snm: &[u8], f: Fields, seen: &mut Vec<i64>) -> Fields {
+    match f {
+        Fields::FieldEnd => Fields::FieldEnd,
+        Fields::FieldCell(fnm, fv, fr) => {
+            let fi: i64 = field_index(c, sid, &fnm);
+            if fi < 0 {
+                let mut m: Vec<u8> = vec_new();
+                append_str(&mut m, "struct `");
+                rf_put(&mut m, snm);
+                append_str(&mut m, "` has no field `");
+                rf_put(&mut m, &fnm);
+                push(&mut m, '`');
+                refuse(c, "sentinel::types::unknown_field", vec_to_array(m));
+                0
+            } else if rf_has(seen, fi) {
+                let mut m2: Vec<u8> = vec_new();
+                append_str(&mut m2, "struct literal `");
+                rf_put(&mut m2, snm);
+                append_str(&mut m2, "` names field `");
+                rf_put(&mut m2, &fnm);
+                append_str(&mut m2, "` twice");
+                refuse(c, "sentinel::types::duplicate_field", vec_to_array(m2));
+                0
+            } else {
+                push(seen, fi);
+                0
+            };
+            let rest: Fields = check_sfields_walk(c, sid, snm, fr, seen);
+            Fields::FieldCell(fnm, fv, rest)
+        },
+    }
+}
+
+// ----- `vec_to_array`'s element -----------------------------------------------------
+
+// (ADR 0034 C1, register D125) may `vec_to_array` copy an element of type `h`? It copies
+// the Vec's buffer byte for byte and leaves the Vec holding its elements, so the oracle's
+// `vec_to_array_elem_is_plain` admits only a value that owns nothing: a scalar, a `secret`
+// one, a nullable scalar or `?Channel`, a `Copy` handle no drop frees (`Task`, `Channel`,
+// `Process`, `SealedChannel`, `Fn`), a payload-free enum, and a struct or generic instance
+// built only from those. An abstract type parameter is refused, as there: nothing
+// re-checks a generic body once it is instantiated.
+//
+// ⚠ FAIL-CLOSED: an interner kind this does not list answers false. The scalar codes are
+// i64 0, i32 1, bool 2, u8 3, f64 4 and ptr 5.
+fn vta_plain(c: &mut TyCtx, h: i64, seen: &mut Vec<i64>) -> bool {
+    if h < 0 {
+        false
+    } else if h < tbase() {
+        h <= 5
+    } else {
+        let k: i64 = (*c).tk[h - tbase()];
+        if k == 3 {
+            let si: i64 = (*c).ta[h - tbase()];
+            vta_plain(c, si, seen)
+        } else if k == 4 {
+            let ni: i64 = (*c).ta[h - tbase()];
+            if ni < 0 {
+                false
+            } else if ni < tbase() {
+                ni <= 5
+            } else {
+                (*c).tk[ni - tbase()] == 13
+            }
+        } else if k == 12 || k == 13 || k == 14 || k == 15 || k == 16 {
+            true
+        } else if k == 6 {
+            if rf_has(seen, h) {
+                true
+            } else {
+                push(seen, h);
+                let ssid: i64 = (*c).ta[h - tbase()];
+                let noargs: Vec<i64> = vec_new();
+                vta_fields_plain(c, ssid, false, &noargs, seen)
+            }
+        } else if k == 10 {
+            if rf_has(seen, h) {
+                true
+            } else {
+                push(seen, h);
+                let gsid: i64 = (*c).ta[h - tbase()];
+                let gas: i64 = gi_argstart(c, h);
+                let gae: i64 = gi_argend(c, h);
+                let mut gargs: Vec<i64> = vec_new();
+                let mut j: i64 = gas;
+                while j < gae {
+                    let ga: i64 = (*c).gia[j];
+                    push(&mut gargs, ga);
+                    j = j + 1;
+                }
+                vta_fields_plain(c, gsid, true, &gargs, seen)
+            }
+        } else if k == 7 {
+            let eid: i64 = (*c).ta[h - tbase()];
+            vta_enum_plain(c, eid)
+        } else {
+            false
+        }
+    }
+}
+
+// Every field of struct `sid` (substituted by `gargs` for a generic instance) is plain.
+fn vta_fields_plain(c: &mut TyCtx, sid: i64, gen: bool, gargs: &Vec<i64>, seen: &mut Vec<i64>) -> bool {
+    let n: i64 = len((*c).fldo);
+    let mut i: i64 = 0;
+    let mut ok: bool = true;
+    while i < n {
+        if ok {
+            if (*c).fldo[i] == sid {
+                let ft0: i64 = (*c).fldty[i];
+                let ft: i64 = if gen {
+                    subst_type(c, ft0, gargs)
+                } else {
+                    ft0
+                };
+                if vta_plain(c, ft, seen) {
+                    0
+                } else {
+                    ok = false;
+                    0
+                };
+                0
+            } else {
+                0
+            };
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    ok
+}
+
+// No variant of enum `eid` carries a payload.
+fn vta_enum_plain(c: &mut TyCtx, eid: i64) -> bool {
+    let n: i64 = len((*c).varo);
+    let mut i: i64 = 0;
+    let mut ok: bool = true;
+    while i < n {
+        if (*c).varo[i] == eid {
+            if (*c).varps[i] != (*c).varpe[i] {
+                ok = false;
+                0
+            } else {
+                0
+            };
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    ok
+}
+
+// ----- a class `init`'s definite assignment ------------------------------------------
+//
+// (ADR 0022 A3, register D129) the oracle's `check_init_definite_assignment`: every field
+// is assigned on every path before `init` ends or returns, and no path reads a field, or
+// uses `self` itself, before assigning it. `a[i]` is 1 when field `i` is assigned on every
+// path to the current point; the fields are in the oracle's order, a class's regular
+// fields and then its `delegate` fields, which is the order `clfo`'s rows are pushed in.
+// An `if` or `match` keeps what all its arms assign; nothing assigned inside a `while`
+// body, a `handle`, a `scope`, a `spawn` or the right operand of `&&` / `||` counts
+// afterwards; a `return` needs every field assigned; a read of `self.f` needs `f`, and a
+// reference to it or a write into part of it reads it first; any other use of `self`
+// needs every field; for an assignment, the value's reads are checked against the state
+// before it and the place's against the same state, and what either assigns counts
+// afterwards (the back ends do not share that statement's order); the body's tail is
+// walked for its reads, and its assignments do not count.
+//
+// It walks a DISPOSABLE copy of the body, re-parsed from its first token (the
+// `cg_ar_count` idiom), because the typer's walk consumes the one it types; a struct
+// literal's fields are walked in declaration order, the order of the oracle's typed tree.
+// Each walker answers 0, or 1 once it has recorded a refusal, and its caller stops there,
+// as the oracle's `?` does. `selfhost/` does not index-assign a `Vec`, so the state is
+// rebuilt instead. Payloads are rebound into `let`s so that they are dropped.
+//
+// ⚠ The walkers are EXHAUSTIVE over `Expr`, `Stmt`, `Args`, `Fields`, `Arms` and `HArms`,
+// with no catch-all arm, like the oracle's match: a new `Expr` variant must decide here
+// whether it can assign or read a field. (The one `_` arm is `da_init`'s, over the shape
+// `parse_block` answers, which is always a block.)
+
+// The number of fields class `cid` declares.
+fn da_nfields(c: &mut TyCtx, cid: i64) -> i64 {
+    let n: i64 = len((*c).clfo);
+    let mut i: i64 = 0;
+    let mut k: i64 = 0;
+    while i < n {
+        if (*c).clfo[i] == cid {
+            k = k + 1;
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    k
+}
+
+// The position of field `q` among class `cid`'s fields, or -1.
+fn da_field_index(c: &mut TyCtx, cid: i64, q: &[u8]) -> i64 {
+    let n: i64 = len((*c).clfo);
+    let mut i: i64 = 0;
+    let mut k: i64 = 0;
+    let mut found: i64 = 0 - 1;
+    while i < n {
+        if (*c).clfo[i] == cid {
+            if found < 0 {
+                if snb_eq(c, (*c).clfs[i], (*c).clfe[i], q) {
+                    found = k;
+                    0
+                } else {
+                    0
+                };
+                0
+            } else {
+                0
+            };
+            k = k + 1;
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    found
+}
+
+// Append the name of class `cid`'s field `fi` to `out`.
+fn da_field_name(c: &mut TyCtx, cid: i64, fi: i64, out: &mut Vec<u8>) -> i64 {
+    let n: i64 = len((*c).clfo);
+    let mut i: i64 = 0;
+    let mut k: i64 = 0;
+    while i < n {
+        if (*c).clfo[i] == cid {
+            if k == fi {
+                let bs: i64 = (*c).clfs[i];
+                let be: i64 = (*c).clfe[i];
+                rf_put_snb(c, bs, be, out);
+                0
+            } else {
+                0
+            };
+            k = k + 1;
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    0
+}
+
+// Record the refusal `kind` naming field `fi` of class `cid`: 1, a field not assigned by
+// the end of `init` or at a `return`; 2, a field read before it is assigned; 3, `self`
+// used before every field is assigned (`fi` the first that is not).
+fn da_refuse(c: &mut TyCtx, cid: i64, kind: i64, fi: i64) -> i64 {
+    let mut m: Vec<u8> = vec_new();
+    let cns: i64 = (*c).clns[cid];
+    let cne: i64 = (*c).clne[cid];
+    if kind == 1 {
+        append_str(&mut m, "class `");
+        rf_put_snb(c, cns, cne, &mut m);
+        append_str(&mut m, "` field `");
+        da_field_name(c, cid, fi, &mut m);
+        append_str(&mut m, "` is not assigned by the end of `init`");
+        refuse(c, "sentinel::types::init_field_maybe_unassigned", vec_to_array(m));
+        0
+    } else if kind == 2 {
+        append_str(&mut m, "`init` of class `");
+        rf_put_snb(c, cns, cne, &mut m);
+        append_str(&mut m, "` reads `self.");
+        da_field_name(c, cid, fi, &mut m);
+        append_str(&mut m, "` before it is assigned");
+        refuse(c, "sentinel::types::init_field_read_before_assign", vec_to_array(m));
+        0
+    } else {
+        append_str(&mut m, "`init` of class `");
+        rf_put_snb(c, cns, cne, &mut m);
+        append_str(&mut m, "` uses `self` before `");
+        da_field_name(c, cid, fi, &mut m);
+        append_str(&mut m, "` is assigned");
+        refuse(c, "sentinel::types::init_self_used_before_assigned", vec_to_array(m));
+        0
+    }
+}
+
+// A copy of the state.
+fn da_copy(a: &mut Vec<i64>) -> Vec<i64> {
+    let mut r: Vec<i64> = vec_new();
+    let n: i64 = len(*a);
+    let mut i: i64 = 0;
+    while i < n {
+        push(&mut r, (*a)[i]);
+        i = i + 1;
+    }
+    r
+}
+
+// The first field not assigned, or -1.
+fn da_first_unset(a: &mut Vec<i64>) -> i64 {
+    let n: i64 = len(*a);
+    let mut i: i64 = 0;
+    let mut u: i64 = 0 - 1;
+    while i < n {
+        if u < 0 {
+            if (*a)[i] == 0 {
+                u = i;
+                0
+            } else {
+                0
+            };
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    u
+}
+
+// Rebuild `a` from `b` (element `k` set to 1 when `k >= 0`).
+fn da_load(a: &mut Vec<i64>, b: &mut Vec<i64>, k: i64) -> i64 {
+    let n: i64 = len(*b);
+    clear_i64(a);
+    let mut i: i64 = 0;
+    while i < n {
+        if i == k {
+            push(a, 1);
+            0
+        } else {
+            push(a, (*b)[i]);
+            0
+        };
+        i = i + 1;
+    }
+    0
+}
+
+// `a[k] = 1`.
+fn da_set(a: &mut Vec<i64>, k: i64) -> i64 {
+    let mut t: Vec<i64> = da_copy(a);
+    da_load(a, &mut t, k)
+}
+
+// `a[i] = a[i] && b[i]` (`both`) or `a[i] = a[i] || b[i]`, for every field.
+fn da_merge(a: &mut Vec<i64>, b: &mut Vec<i64>, both: bool) -> i64 {
+    let n: i64 = len(*a);
+    let mut t: Vec<i64> = vec_new();
+    let mut i: i64 = 0;
+    while i < n {
+        let x: i64 = (*a)[i];
+        let y: i64 = (*b)[i];
+        let v: i64 = if both {
+            if x == 1 {
+                y
+            } else {
+                0
+            }
+        } else if x == 1 {
+            1
+        } else {
+            y
+        };
+        push(&mut t, v);
+        i = i + 1;
+    }
+    da_load(a, &mut t, 0 - 1)
+}
+
+// Every field assigned, or refusal `kind` (1 or 3) naming the first that is not.
+fn da_need_all(a: &mut Vec<i64>, c: &mut TyCtx, cid: i64, kind: i64) -> i64 {
+    let u: i64 = da_first_unset(a);
+    if u < 0 {
+        0
+    } else {
+        da_refuse(c, cid, kind, u);
+        1
+    }
+}
+
+// The entry: class `cid`'s `init` body, as `parse_block` answers it.
+fn da_init(c: &mut TyCtx, cid: i64, body: Expr) -> i64 {
+    let nf: i64 = da_nfields(c, cid);
+    let mut a: Vec<i64> = vec_new();
+    let mut i: i64 = 0;
+    while i < nf {
+        push(&mut a, 0);
+        i = i + 1;
+    }
+    match body {
+        Expr::Block(bs, bt) => {
+            let r1: i64 = da_stmts(bs, &mut a, c, cid);
+            if r1 != 0 {
+                let _dbt: Expr = bt;
+                1
+            } else {
+                // The tail's assignments do not count: check its reads only.
+                let mut tl: Vec<i64> = da_copy(&mut a);
+                let r2: i64 = da_expr(bt, &mut tl, c, cid);
+                if r2 != 0 {
+                    1
+                } else {
+                    da_need_all(&mut a, c, cid, 1)
+                }
+            }
+        },
+        // `parse_block` always answers a `Block`.
+        _ => 0,
+    }
+}
+
+// Walk something that may not run: its reads are checked, its assignments dropped.
+fn da_maybe(e: Expr, a: &mut Vec<i64>, c: &mut TyCtx, cid: i64) -> i64 {
+    let mut s: Vec<i64> = da_copy(a);
+    da_expr(e, &mut s, c, cid)
+}
+
+fn da_expr(e: Expr, a: &mut Vec<i64>, c: &mut TyCtx, cid: i64) -> i64 {
+    // The one-node flags apply to this node only: take them before any child is walked.
+    let tgt: bool = (*c).da_tgt;
+    let asg: bool = (*c).da_asg;
+    (*c).da_tgt = false;
+    (*c).da_asg = false;
+    match e {
+        Expr::Var(vn) => {
+            let is_self: bool = name_eq_lit(&vn, "self");
+            let _dvn: [u8] = vn;
+            if is_self {
+                if tgt {
+                    // The base of a field access: the field arm decides.
+                    (*c).da_self_tgt = true;
+                    0
+                } else {
+                    da_need_all(a, c, cid, 3)
+                }
+            } else {
+                0
+            }
+        },
+        Expr::Field(ft, fnm) => {
+            (*c).da_tgt = true;
+            (*c).da_self_tgt = false;
+            let rf: i64 = da_expr(ft, a, c, cid);
+            let st: bool = (*c).da_self_tgt;
+            (*c).da_self_tgt = false;
+            if rf != 0 {
+                let _dfa: [u8] = fnm;
+                1
+            } else if st {
+                let fi: i64 = da_field_index(c, cid, &fnm);
+                let _dfb: [u8] = fnm;
+                if fi < 0 {
+                    // Not a declared field: not this check's to refuse.
+                    0
+                } else if asg {
+                    // `self.f = ..`: assigned, not read.
+                    (*c).da_asg_f = fi;
+                    0
+                } else if (*a)[fi] == 1 {
+                    0
+                } else {
+                    da_refuse(c, cid, 2, fi);
+                    1
+                }
+            } else {
+                let _dfc: [u8] = fnm;
+                0
+            }
+        },
+        Expr::Unary(uo, ux) => {
+            let _duo: i64 = uo;
+            da_expr(ux, a, c, cid)
+        },
+        Expr::Binary(bo, bl, br) => {
+            let rl: i64 = da_expr(bl, a, c, cid);
+            if rl != 0 {
+                let _dbr: Expr = br;
+                1
+            } else if bo == 14 || bo == 15 {
+                // The right operand of `&&` / `||` may not run.
+                da_maybe(br, a, c, cid)
+            } else {
+                da_expr(br, a, c, cid)
+            }
+        },
+        Expr::Call(cn, ca) => {
+            let _dcn: [u8] = cn;
+            da_args(ca, a, c, cid)
+        },
+        Expr::Method(mt, mn, ma) => {
+            let _dmn: [u8] = mn;
+            let rm: i64 = da_expr(mt, a, c, cid);
+            if rm != 0 {
+                let _dma: Args = ma;
+                1
+            } else {
+                da_args(ma, a, c, cid)
+            }
+        },
+        Expr::Index(it, ix) => {
+            let ri: i64 = da_expr(it, a, c, cid);
+            if ri != 0 {
+                let _dix: Expr = ix;
+                1
+            } else {
+                da_expr(ix, a, c, cid)
+            }
+        },
+        Expr::Qcall(qb, qn, qa) => {
+            let _dqb: [u8] = qb;
+            let _dqn: [u8] = qn;
+            da_args(qa, a, c, cid)
+        },
+        Expr::ClassInit(cin, cia) => {
+            let _dcin: [u8] = cin;
+            da_args(cia, a, c, cid)
+        },
+        Expr::Array(aa) => da_args(aa, a, c, cid),
+        Expr::If(ic, ith, iel) => {
+            let rc: i64 = da_expr(ic, a, c, cid);
+            if rc != 0 {
+                let _dith: Expr = ith;
+                let _diel: Expr = iel;
+                1
+            } else {
+                let mut ta: Vec<i64> = da_copy(a);
+                let rt: i64 = da_expr(ith, &mut ta, c, cid);
+                if rt != 0 {
+                    let _diel2: Expr = iel;
+                    1
+                } else {
+                    let mut ea: Vec<i64> = da_copy(a);
+                    let re: i64 = da_expr(iel, &mut ea, c, cid);
+                    if re != 0 {
+                        1
+                    } else {
+                        da_merge(&mut ta, &mut ea, true);
+                        da_load(a, &mut ta, 0 - 1);
+                        0
+                    }
+                }
+            }
+        },
+        Expr::Block(bs, bt) => {
+            let rs: i64 = da_stmts(bs, a, c, cid);
+            if rs != 0 {
+                let _dbt: Expr = bt;
+                1
+            } else {
+                da_expr(bt, a, c, cid)
+            }
+        },
+        Expr::Match(ms, marms) => {
+            let rs: i64 = da_expr(ms, a, c, cid);
+            if rs != 0 {
+                let _dmarms: Arms = marms;
+                1
+            } else {
+                let mut acc: Vec<i64> = vec_new();
+                let mut have: bool = false;
+                let ra: i64 = da_arms(marms, a, &mut acc, &mut have, c, cid);
+                if ra != 0 {
+                    1
+                } else if have {
+                    da_load(a, &mut acc, 0 - 1);
+                    0
+                } else {
+                    0
+                }
+            }
+        },
+        Expr::StructLit(sn, sf) => {
+            // The typed literal's fields are in declaration order, and so is the walk.
+            let ssid: i64 = struct_lookup(c, &sn);
+            let _dsn: [u8] = sn;
+            if ssid < 0 {
+                da_fields(sf, a, c, cid)
+            } else {
+                let sord: Fields = sort_fields(c, ssid, sf);
+                da_fields(sord, a, c, cid)
+            }
+        },
+        Expr::Declassify(di) => da_expr(di, a, c, cid),
+        Expr::Return(rx) => {
+            let rr: i64 = da_expr(rx, a, c, cid);
+            if rr != 0 {
+                1
+            } else {
+                let rn: i64 = da_need_all(a, c, cid, 1);
+                if rn != 0 {
+                    1
+                } else {
+                    // Nothing after a `return` runs on this path.
+                    let na: i64 = len(*a);
+                    clear_i64(a);
+                    let mut ri: i64 = 0;
+                    while ri < na {
+                        push(a, 1);
+                        ri = ri + 1;
+                    }
+                    0
+                }
+            }
+        },
+        Expr::Cast(ce, ct) => {
+            let _dct: [u8] = ct;
+            da_expr(ce, a, c, cid)
+        },
+        Expr::Perform(pe, po, pa) => {
+            let _dpe: [u8] = pe;
+            let _dpo: [u8] = po;
+            da_args(pa, a, c, cid)
+        },
+        Expr::Scope(sx) => da_maybe(sx, a, c, cid),
+        Expr::Spawn(spx) => da_maybe(spx, a, c, cid),
+        Expr::Await(awx) => da_expr(awx, a, c, cid),
+        Expr::Handle(hb, ha, hr) => {
+            // A handled body may not run to its end, and its arms and `return` arm may not
+            // run: their reads are checked, their assignments do not count.
+            let rb: i64 = da_maybe(hb, a, c, cid);
+            if rb != 0 {
+                let _dha: HArms = ha;
+                let _dhr: Ret = hr;
+                1
+            } else {
+                let rh: i64 = da_harms(ha, a, c, cid);
+                if rh != 0 {
+                    let _dhr2: Ret = hr;
+                    1
+                } else {
+                    match hr {
+                        Ret::NoRet => 0,
+                        Ret::YesRet(rvn, rbody, rt1, rt2) => {
+                            let _drvn: [u8] = rvn;
+                            let _drt1: i64 = rt1;
+                            let _drt2: i64 = rt2;
+                            da_maybe(rbody, a, c, cid)
+                        },
+                    }
+                }
+            }
+        },
+        Expr::Int(iv) => {
+            let _div: i64 = iv;
+            0
+        },
+        Expr::Float(fv) => {
+            let _dfv: [u8] = fv;
+            0
+        },
+        Expr::Bool(bv) => {
+            let _dbv: bool = bv;
+            0
+        },
+        Expr::Null => 0,
+        Expr::Char(cv) => {
+            let _dcv: i64 = cv;
+            0
+        },
+        Expr::Str(sv) => {
+            let _dsv: [u8] = sv;
+            0
+        },
+        Expr::SynthZero => 0,
+    }
+}
+
+fn da_args(x: Args, a: &mut Vec<i64>, c: &mut TyCtx, cid: i64) -> i64 {
+    match x {
+        Args::End => 0,
+        Args::Cell(xe, xr) => {
+            let r: i64 = da_expr(xe, a, c, cid);
+            if r != 0 {
+                let _dxr: Args = xr;
+                1
+            } else {
+                da_args(xr, a, c, cid)
+            }
+        },
+    }
+}
+
+fn da_fields(f: Fields, a: &mut Vec<i64>, c: &mut TyCtx, cid: i64) -> i64 {
+    match f {
+        Fields::FieldEnd => 0,
+        Fields::FieldCell(fnm, fe, fr) => {
+            let _dfnm: [u8] = fnm;
+            let r: i64 = da_expr(fe, a, c, cid);
+            if r != 0 {
+                let _dfr: Fields = fr;
+                1
+            } else {
+                da_fields(fr, a, c, cid)
+            }
+        },
+    }
+}
+
+// The arms of a `match`: each walked from the state before it (`base`), and `acc` keeps
+// what every arm assigns (`have` once one has been walked).
+fn da_arms(m: Arms, base: &mut Vec<i64>, acc: &mut Vec<i64>, have: &mut bool, c: &mut TyCtx, cid: i64) -> i64 {
+    match m {
+        Arms::ArmEnd => 0,
+        Arms::ArmCell(mp, me, mr) => {
+            let _dmp: Pattern = mp;
+            let mut arm_a: Vec<i64> = da_copy(base);
+            let r: i64 = da_expr(me, &mut arm_a, c, cid);
+            if r != 0 {
+                let _dmr: Arms = mr;
+                1
+            } else {
+                if *have {
+                    da_merge(acc, &mut arm_a, true);
+                    0
+                } else {
+                    da_load(acc, &mut arm_a, 0 - 1);
+                    *have = true;
+                    0
+                };
+                da_arms(mr, base, acc, have, c, cid)
+            }
+        },
+    }
+}
+
+// The op arms of a `handle`: each may not run.
+fn da_harms(h: HArms, a: &mut Vec<i64>, c: &mut TyCtx, cid: i64) -> i64 {
+    match h {
+        HArms::HEnd => 0,
+        HArms::HCell(hef, hop, hp, hb, hbt, hr) => {
+            let _dhef: [u8] = hef;
+            let _dhop: [u8] = hop;
+            let _dhp: Binds = hp;
+            let _dhbt: i64 = hbt;
+            let r: i64 = da_maybe(hb, a, c, cid);
+            if r != 0 {
+                let _dhr: HArms = hr;
+                1
+            } else {
+                da_harms(hr, a, c, cid)
+            }
+        },
+    }
+}
+
+fn da_stmts(st: Stmts, a: &mut Vec<i64>, c: &mut TyCtx, cid: i64) -> i64 {
+    match st {
+        Stmts::SEnd => 0,
+        Stmts::SCell(s1, sr) => {
+            let r: i64 = match s1 {
+                Stmt::SLet(lm, ln, lt, le) => {
+                    let _dlm: bool = lm;
+                    let _dln: [u8] = ln;
+                    let _dlt: TyOpt = lt;
+                    da_expr(le, a, c, cid)
+                },
+                Stmt::SAssign(at, av) => {
+                    // The value's reads against the state before it, then the place's
+                    // against the same state (a direct `self.f` reads nothing and reports
+                    // `f`); then what either assigned, and `f`.
+                    let mut after_value: Vec<i64> = da_copy(a);
+                    let rv: i64 = da_expr(av, &mut after_value, c, cid);
+                    if rv != 0 {
+                        let _dat: Expr = at;
+                        1
+                    } else {
+                        (*c).da_asg = true;
+                        (*c).da_asg_f = 0 - 1;
+                        let rt: i64 = da_expr(at, a, c, cid);
+                        let sf: i64 = (*c).da_asg_f;
+                        (*c).da_asg_f = 0 - 1;
+                        if rt != 0 {
+                            1
+                        } else {
+                            da_merge(a, &mut after_value, false);
+                            if sf >= 0 {
+                                da_set(a, sf);
+                                0
+                            } else {
+                                0
+                            }
+                        }
+                    }
+                },
+                Stmt::SWhile(wc, wb) => {
+                    let rw: i64 = da_expr(wc, a, c, cid);
+                    if rw != 0 {
+                        let _dwb: Expr = wb;
+                        1
+                    } else {
+                        da_maybe(wb, a, c, cid)
+                    }
+                },
+                Stmt::SBreak => 0,
+                Stmt::SContinue => 0,
+                Stmt::SExpr(se) => da_expr(se, a, c, cid),
+            };
+            if r != 0 {
+                let _dsr: Stmts = sr;
+                1
+            } else {
+                da_stmts(sr, a, c, cid)
+            }
+        },
+    }
+}

@@ -192,8 +192,8 @@ fn mir_widen(c: &mut TyCtx, w: bool, exp: i64) -> i64 {
 // initializer, a struct-literal field and a call argument — each clean before and
 // rejected after; nothing observes the change, because the ORACLE refuses every one of
 // them ("widen-to-nullable of a struct/generic payload (heap-box) deferred"), so the
-// differential skips them before scg runs, and scg has no refusal channel of its own
-// (register D38).
+// differential skips them before scg runs, and scg does not refuse them (its refusal
+// channel, ADR 0041 A14, carries only the typer's ported refusals).
 //
 // ⚠ FIXING IT NEEDS TWO BACK ENDS — inkwell's half is ALREADY DONE (register D42). Its
 // `WidenToNullable` used to match `NullableInner::Struct(_)` alone and pass the instance
@@ -203,7 +203,7 @@ fn mir_widen(c: &mut TyCtx, w: bool, exp: i64) -> i64 {
 // heap box (alloc + store + pointer payload), then mirror it HERE.
 //
 // ⚠ AND THIS FUNCTION IS THE ONLY THING STANDING BETWEEN THAT SLICE AND SILENTLY
-// INVALID IR. `scg` cannot refuse (register D38) and `cg_widen` has no struct/GI guard,
+// INVALID IR. `scg` does not refuse the shape and `cg_widen` has no struct/GI guard,
 // so the ONLY reason no `?GI` widen reaches the differential is the oracle's refusal.
 // Lift that refusal without mirroring this function and `scg` emits an unassemblable
 // module, exit 0, empty stderr, nothing red. Mirror first, un-defer second.

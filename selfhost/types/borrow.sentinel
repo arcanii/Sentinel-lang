@@ -613,6 +613,9 @@ fn dump_texpr_arm(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyC
         // `(struct-lit #sid Name <v0> <v1>… :Name)`.
         Expr::StructLit(snm, fields) => {
             let sid: i64 = struct_lookup(c, &snm);
+            // (ADR 0041 A14, register D97) the oracle's field-set refusals: a field the
+            // struct does not declare, one named twice, one left out.
+            let sl_chk: Fields = check_sfields(c, sid, &snm, fields);
             // (4h) a GENERIC struct-lit takes its type (and its type-args) from the
             // expected type `exp` (a GenericInstance of this struct — threaded from a
             // `let` annotation / fn return). The arg Vec is built ONCE here, so
@@ -678,7 +681,7 @@ fn dump_texpr_arm(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyC
             };
             // (register D95) reorder into DECLARED field order before the walk — see
             // `sort_fields`. The walk itself then stays the plain positional one.
-            let sl_ord: Fields = sort_fields(c, sid, fields);
+            let sl_ord: Fields = sort_fields(c, sid, sl_chk);
             dump_sfields(out, sl_ord, sid, sl_isg, &gargs, src, c, gb);
             (*c).consuming = sl_svc;
             close_ty(out, sty, c);
@@ -1365,6 +1368,14 @@ fn dump_texpr_arm(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyC
         //   block for the now-unreachable remainder. The produced operand is a
         //   `zeroinitializer` placeholder (only ever consumed in the dead block).
         Expr::Return(ri) => {
+            // (ADR 0041 A14, register D60's refusal) the oracle refuses a `return` inside a
+            // class `init` before it checks the operand, and so does this.
+            if (*c).rf_init {
+                refuse(c, "sentinel::types::return_in_init", "`return` is not allowed inside an `init`");
+                0
+            } else {
+                0
+            };
             append_str(out, "(return ");
             let svc: bool = (*c).consuming;
             (*c).consuming = true;

@@ -1,0 +1,14 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c14_struct_literal_unknown_field.sentinel\")"
+---
+sentinel::types::unknown_field
+
+  × struct `P` has no field `zzz`
+    ╭─[tests/ui/c14_struct_literal_unknown_field.sentinel:9:17]
+  8 │ fn main() -> i64 {
+  9 │     let p = P { zzz: 1, lo: 2, hi: 3 };
+    ·                 ─┬─
+    ·                  ╰── 
+ 10 │     p.lo
+    ╰────
