@@ -124,6 +124,14 @@ reference as you work through the milestones.
 > confirming nothing pre-existing is newly refused; oracle-vs-scg byte-equality on the new
 > fixture at types, mir and llvm; and the secret-taint check in both directions.
 
+### ▶ RESUME HERE (2026-09-26a — `origin/main` was `0496d4f` when this was written, and this session's commits sit on top of it, unpushed; read `git reflog show refs/remotes/origin/main` and `git log --oneline origin/main..HEAD` at the START and AGAIN before writing either down. This session: **register D131 CLOSED** (`0644835` fix, then this docs commit) — `scg` types a method's, an impl method's, a qualified call's and a class `init`'s arguments with their parameters' types, as the oracle does. The parameter types are interned right after Pass 1.5 (`resolve_member_params`), among themselves in the oracle's order: interning them inside Pass 1.5's source-order walk reordered generic-instance type declarations on programs that matched the oracle. Filed **D132–D136** (D132 a `perform`'s arguments, the same gap; D133 invalid IR for an effecting fn that `let`s a plain value and ends in a `perform`; D134 fields, method return types, enum payloads and effect-op types still interned in source order; D135 codegen interns what a generic fn's body names only when it monomorphises the fn; D136 an array literal's elements get no expected type); D118 re-scoped, D71 (c) and D45 widened, D45's status lines corrected. `scg`-only, so a patch by ADR 0076 D2; the next version is still at least 0.2.0 from the earlier slices, and `Cargo.toml` says 0.1.0. Three bounded review rounds (`wf_b0d35dac-a9b`, `wf_a5ffc499-6a9`, `wf_d48e6c08-f90`): the first found the interning-order regression, the last two only prose. Register: **135 distinct ids, 55 whose heading opens `**D<n> — DONE`** (the 2026-09-22 block's rule; the id D130 is reserved and not in the public register). Four-check: **2,089 passed with exactly the 18 known Windows failures**, doctests and clippy clean, every `selfhost_*` differential green including both bootstrap fixed points. A matched `scg`-driver sweep (types, borrow, mir, ctverify, codegen) over all 500 `.sentinel` files, each compiled directly, moves only the two new fixtures (115 fail in both builds at codegen, 20 of them at every stage, and were not compared there); eleven mutations caught. ⚠ **Traps this session:** a reviewer's corrected text is new text too — the fix a verifier suggested for one sentence named the wrong walks, and a second verifier caught it; and a `.sentinel` file can be CRLF (the drivers are, most parts are not), so a scripted edit must keep each file's line endings.)
+
+> **NEXT:** continue the approved order:
+> 1. item 4, the rest: D96 (staged in this session's scratchpad, `d96work/apply_d96.py`) + D97 (`scg`'s first rejection path, ADR 0041 A14 — built and probed in the scratchpad's `wt97/`, tests in `d97tests/`; it carries D125's and D129's refusals, the struct-literal field set and an unknown field access); then register the leaks re-verified on 2026-09-26 — a class instance's heap fields, an enum payload's own heap, an effecting let-shape fn's heap parameter — and `==` between two arrays (drafts in the scratchpad's `draft_register_d135_d138.md`, whose ids must move to D137–D140). ADR 0076's D2 table lists D96 as a patch, but D96 refuses `P { lo: 1, lo: 2, hi: 3 }`, which compiles today — correct the table when D96 lands.
+> 2. ADR 0077's implementation, with the draft's proposed answers to Q1–Q5.
+>
+> D117 is not yet scheduled; it is the maintainer's call. Owed by the maintainer: D102, D103, ADR 0077's Q6, D36's decision, and when to bump the version (at least 0.2.0; `Cargo.toml` still says 0.1.0).
+
 ### ▶ RESUME HERE (2026-09-25e — `origin/main` was `707c456` when this was written, and this session's commits sit on top of it, unpushed; read `git reflog show refs/remotes/origin/main` and `git log --oneline origin/main..HEAD` at the START and AGAIN before writing either down. This session's third slice (`52598ce`, `9570d7a`, `3f8b35d`, `1a5c672`, then this docs commit): **register D92 CLOSED** — [ADR 0032](decisions/0032-sum-types-and-pattern-matching.md) **A5**: a `match` on a temporary frees the temporary's payload box, in an arm for a payload-carrying variant once its bindings have copied the payload out and in a `_` arm, in all three back ends — landed after three prerequisites, each its own commit: **D124** ([ADR 0043](decisions/0043-self-host-port-borrow-check.md) **A3**: `scg` walks a block's tail and a `match` arm's body as consuming, as the oracle's checker does), **D125** ([ADR 0034](decisions/0034-growable-collections.md) **C1**: `vec_to_array` is refused unless its element is plain data) and **D129** ([ADR 0022](decisions/0022-concrete-c4-1-class-syntax.md) **A3**: a class `init`'s definite assignment is checked path by path and fail-closed, with the new errors `InitFieldReadBeforeAssign` and `InitSelfUsedBeforeAssigned`). Filed **D126–D128**; D117 and D122 updated. Five bounded review rounds: the first found C1's hole and the second D129's, the third an evaluation-order gap in the new check (`place = value` is lowered value-first by inkwell and place-first by the oracle and `scg`, so both orders are now checked), and the last two only prose, one of them a disclosure that two neutral entries made together. Register: **129 distinct ids, 54 whose heading opens `**D<n> — DONE`** (the 2026-09-22 block's rule; `3805915` gives 123 and 50). Four-check: **2,087 passed with exactly the 18 known Windows failures**, doctests and clippy clean, every `selfhost_*` differential green including both bootstrap fixed points. Sweeps, HEAD (`3805915`) against the final tree: `snc llvm` over all 498 `.sentinel` files leaves 328 programs byte-identical, changes exactly the six A5 names (`c43_block_tail_read_is_a_move`, `c5d1_match_frees_a_temporary`, `c5d5_loop_cond_slot_reuse`, `c65_match_join`, `c65_return_gaps`, and the ui program `c65_secret_join_guarded`), newly refuses only the four new refusal fixtures (160 fail under both), and leaves the ten self-hosted module roots, merged from this tree, byte-identical; a matched `scg`-driver sweep over 1,976 rows changes only the programs A3 and A5 name plus the oracle-rejected `c71_guard_deref_computed`. Mutations: A 2, B 12, C 17, D 16, all caught. A5 moves emitted IR and ADR 0022 A3 and ADR 0034 C1 refuse programs that compiled before, so the next version is at least 0.2.0 (ADR 0076 D2); `Cargo.toml` still says 0.1.0. ⚠ **Traps this session:** two of the three prerequisites were found by reviews of the fix they protect — a fix that frees memory is only as sound as every way a value can be shared or left unassigned, so ask that question of the whole checker, not of the new code; the back ends do not agree on evaluation order everywhere, so a rule that walks "in evaluation order" must name the order it assumes; and a disclosure can hide in two neutral sentences that sit next to each other.)
 
 > **NEXT:** continue the approved order:
@@ -757,7 +765,12 @@ reference as you work through the milestones.
 >      into an ADR and three comments (see STATE);
 >      (iii) every argument path except a plain `f(x)` — method, impl-method, qualified,
 >      class `init`, enum construct, `spawn`, and generic — where the oracle widens a plain
->      literal and scg does not.
+>      literal and scg does not. (The method, impl-method, qualified and class-`init` paths
+>      pass their parameters' types since D131, 2026-09-26, and a generic fn's has since D45,
+>      apart from its null-first residue; a `spawn` argument never needs a widen, since the
+>      oracle refuses a `?T` or `secret` one, though `scg`'s codegen walk still passes it no
+>      expectation, which D45's null-first residue can reach; the types and MIR walk take the
+>      call as a plain `f(x)`, so only the LLVM output diverges.)
 >
 >      **D4 — DONE (this slice).** `dump_generic_call` was the one call sub-path that never
 >      received `exp`, so it could not seed the substitution from the expected RETURN type
@@ -2057,16 +2070,22 @@ reference as you work through the milestones.
 >      withdrawn here: changing only the oracle's drop plan removed the three leaks (9.2-9.3 MB each)
 >      but made the oracle disagree with `scg` in the first kind of position.
 >
->      **D118 — `scg` emits invalid IR for a `null` passed directly as an enum payload.** Found
+>      **D118 — `scg` gives an enum payload argument no expected type, so a `null` or a value
+>      that needs a `?T` widen, passed directly, is invalid IR.** Found
 >      2026-09-25 while building D114's fixtures. For `H::A(null)` with `enum H { A(?S1), B }`,
 >      `scg`'s typer gives the literal the type `?T`, where the oracle gives it the payload's
 >      declared `?S1`, and `scg`'s codegen then writes the payload operand as
 >      `i64 { i1 0, i64 0 }` inside an `insertvalue` whose slot is `{ i1, ptr }`; `llvm-as`
 >      rejects it ("constant expression type mismatch"). A scalar payload (`G::A(null)` with
->      `A(?i64)`) fails the same way. The oracle is right in both. Binding the `null` first
->      (`let s: ?S1 = null; H::A(s)`) avoids it. No corpus program passes a `null` directly as a
->      payload, so the differentials are green; the typer, MIR and codegen differentials each
->      diverge on a fixture that does.
+>      `A(?i64)`) fails the same way, and so does a non-`null` payload that needs a `?T` widen:
+>      `G::A(40)`, or `G::A(v)` with `v: i64`, against `A(?i64)` is IR `llc` rejects. A
+>      `secret` widen does not reach the IR: `H::A(40)` against `A(secret i64)` moves only the
+>      typed dump and the MIR. The oracle is right in all of them. Binding the `null` first
+>      (`let s: ?S1 = null; H::A(s)`) avoids it. Of the 500 `.sentinel` files in the tree only
+>      `tests/ui/c25_payload_used_after_scrutinee_moved.sentinel` declares an enum payload of a
+>      `?T` or `secret` type, and it binds the `null` first, so the differentials are green;
+>      the typer, MIR and codegen differentials each diverge on a fixture that passes the
+>      payload unbound.
 >
 >      **D119 — inkwell never drops a method's or a class init's by-value parameters.** Found
 >      2026-09-25 while designing D121. `snc build` pushes a method's or an init's parameters
@@ -2251,6 +2270,109 @@ reference as you work through the milestones.
 >      tests and three ui fixtures (`c41_init_field_assigned_on_one_path`,
 >      `c41_init_field_read_before_assign`, `c41_init_self_used_before_assigned`); sixteen
 >      mutations caught. `scg` does not refuse these yet (D97). ADR 0032 A5 relies on it.
+>
+>      **D131 — DONE (2026-09-26). `scg` typed a method's, an impl method's, a qualified
+>      call's and a class `init`'s arguments without their parameters' types.** Found
+>      2026-09-25 by a review of ADR 0071 D2 amendment A1; pre-existing. The oracle checks each
+>      such argument against its parameter's type (the receiver of a qualified call excepted),
+>      so an `i64` literal passed to a `?i64` parameter is widened, a `null` passed to one is
+>      typed `?i64`, and a literal passed to a `secret i64` parameter is made secret, as for a
+>      fn's argument. `scg`'s Pass 1.5 skipped a method's, a trait method's and an `init`'s
+>      parameter list, so it had no types to push down and passed the bare value: with
+>      `pub fn take(self: &Self, x: ?i64) -> i64 { unwrap_or(x, 0) + self.n }` and
+>      `k = K::init(5)`, `k.take(10)` answered 15 in inkwell and the oracle and a wrong value in
+>      `scg`'s output, and the typed dump, the MIR and the IR all differed from the oracle's.
+>      `scg` now records those parameter lists in Pass 1.5 and interns their types right after
+>      it (`resolve_member_params`: each class's `init`, then its methods, then every trait's
+>      methods — the oracle's Pass 3.5 then 3c), into `mpp` with a slice per `init` and method,
+>      and pushes them down as the arguments' expectations, as `dump_targs` does for a fn.
+>      Interning them there, and not while Pass 1.5 walks the items in source order, keeps
+>      them after every fn signature, field and return type, where they were before: the
+>      order of first interning is the order a generic struct instance's named LLVM type is
+>      declared in, and interning them earlier moved that order on programs that matched the
+>      oracle. Fields, class and trait methods' return types, enum payloads and effect-op
+>      types are still interned in Pass 1.5's source order, which is not the oracle's (D134,
+>      pre-existing). An enum construct's and a `perform`'s arguments are unchanged (an enum
+>      payload: D118 and ADR 0051 A5; a `perform`'s: D132). Pinned by
+>      `tests/pass/c41_method_args_take_param_types.sentinel`, through the types, MIR and
+>      codegen differentials on each of which the previous `scg` differs from the oracle, and
+>      by `tests/pass/c41_member_param_types_interning_order.sentinel`, through the codegen
+>      differential; eleven mutations caught. Over the 500 `.sentinel` files in the tree, each
+>      compiled directly, those two fixtures are the only programs whose `scg` types, MIR,
+>      borrow, ctverify or codegen output moves wherever both builds produce output. 115
+>      files produce no codegen output in either build (97 need a file a lone file cannot
+>      load: 96 import a module and `selfhost/parser.sentinel` declares its parts; 14 are
+>      self-host module parts; 4 are `tests/ui` rejects), 20 of them no output at any stage,
+>      so the sweep compared nothing for them there.
+>
+>      **D132 — `scg` types a `perform`'s arguments without the operation's parameter
+>      types.** Found 2026-09-25 by the review of D131; pre-existing. The oracle checks each
+>      argument of a `perform` against the operation's parameter type, so
+>      `perform Io.write(40)` with `write(x: secret i64)` types the literal
+>      `(widen-secret (int 40 :i64) :secret i64)`; `scg` types it `(int 40 :i64)`. The typed
+>      dump and the MIR differ; the IR does not. The fix is D131's for the `perform` arm, with
+>      the operation's parameter types recorded where `scan_effect_ops` reads the effect.
+>
+>      **D133 — `scg` emits invalid IR for an effecting fn whose body `let`s a plain value and
+>      then ends in a `perform`.** Found 2026-09-25 by the review of D131; pre-existing.
+>      `fn w() -> i64 ! { Io } { let s: i64 = 40; perform Io.write(s) }`: the oracle emits
+>      valid IR and inkwell answers 42, while `scg` emits
+>      `call void @sentinel_kont_push(ptr 40, ptr @__resume_w, ptr null)` and `ret ptr 40`,
+>      which `llc` rejects ("integer constant must have integer type"). It fails loud. Close
+>      to D12 (c)'s sticky `cg_tailk` and D67's let-shape capture set, but neither names this
+>      shape.
+>
+>      **D134 — `scg` interns fields, method return types, enum payloads and effect-op types
+>      in source order where the oracle interns them by kind, so it can declare two generic
+>      struct instances' named LLVM types in the opposite order.** Found 2026-09-25 by the
+>      second review of D131; pre-existing (the `scg` before D131 diverges identically). The
+>      oracle interns enum payloads (its Pass 0.5), struct fields (Pass 1) and effect
+>      operations first, then every fn signature (Pass 3), then each class's fields, its
+>      init's parameters and each method's parameters and then its return type (Pass 3.5),
+>      then each trait method's parameters and return type (3c). `scg`'s Pass 1.5 interns fn
+>      signatures, struct and class fields, class and trait methods' return types, enum
+>      payloads and effect-op types in one walk, in source order; D131 moved only the member
+>      parameter types after it. The order of first interning is the order a generic struct
+>      instance's named LLVM type is declared in, so two instances first named by items that
+>      `scg` reaches in the opposite order from the oracle's passes are declared in the
+>      opposite order (`scg` reaches Pass 1.5's items in source order, then every member
+>      parameter). Examples, not the extent: an enum, a struct or an effect declared after a
+>      fn whose signature names another instance; a struct declared before an enum; a trait
+>      whose method return type names an instance, declared before a class whose field or
+>      method return type names another; a class whose field or method return type names an instance,
+>      declared before such a fn (a trait's method return type likewise); a class or trait
+>      method whose parameter and return type name two instances; a method's parameter
+>      against a later method's return type or any trait method's; and a class init's or
+>      method's parameter against a later class's field. Only the order of the
+>      `%Name = type` lines moves: on nine such probes the IR has the same lines as the
+>      oracle's, assembles and runs with the oracle's answer, and the typed dump and the MIR
+>      match. No `tests/pass` or `tests/ui` program reaches it: the corpus codegen
+>      differential, which compares every one the oracle emits and defers none, is green. The fix is to intern in the
+>      oracle's order, deferring each kind's interning after Pass 1.5 as D131 did the member
+>      parameters'.
+>
+>      **D135 — in codegen, `scg` interns an instance a generic fn's body names only when it
+>      monomorphises the fn; the oracle interns it while checking the body.** Found
+>      2026-09-26 by the third review of D131; pre-existing (the `scg` before D131 is
+>      identical). The oracle checks every fn body in source order, a generic one included,
+>      and interns what it names; `scg` in codegen mode skips a generic fn in its item walk
+>      and walks it again once per recorded instance, after every other body. With
+>      `fn g<T>(x: T) -> T { let q: Box<u8> = Box { v: i64_to_u8(1) }; x }` declared before
+>      `fn h() -> i64 { let r: Box<i32> = Box { v: 1 as i32 }; 1 }`, the oracle declares
+>      `%Box_u8` first and `scg` `%Box_i32` first; when nothing calls `g`, `scg` never
+>      declares `%Box_u8` at all. The typed dump and the MIR match, and each IR assembles and
+>      runs with the oracle's answer. Not D41 (an instance born in a transitively discovered
+>      mono body) and not D134 (declarations).
+>
+>      **D136 — `scg` gives an array literal's elements no expected type, so a generic
+>      struct literal inside an annotated array literal is typed as the bare declaration.**
+>      Found 2026-09-26 by the third review of D131 (the second saw it and did not file it);
+>      pre-existing. `let a: [Box<i64>] = [Box { v: 40 }];`: the oracle types the element
+>      from the annotation, and its IR assembles and answers 42 for `a[0].v + 2`; `scg`
+>      emits `insertvalue %Struct.0 undef, i64 40, 0` against a `%Struct.0` it never declares,
+>      which `llc` rejects ("invalid indices for insertvalue"), and its typed dump and MIR
+>      differ too. It fails loud. `dump_array_elems` walks every element with no expectation;
+>      ADR 0051 A5 records the same missing thread for a `secret` array element.
 >
 >      **D78 — stale corpus fixture counts in `llvm.rs` and `README.md`, at six sites, stale
 >      before this change.** Found by D74's reviews. `crates/sentinel-driver/tests/llvm.rs`
@@ -2441,7 +2563,9 @@ reference as you work through the milestones.
 >      the `perform`'s pointer in `sentinel_kont_pure(i64 ..)`, which `llvm-as` rejects.
 >      (c) A class that declares a method before its `init`: the oracle emits `@C__init` first
 >      and scg keeps source order, a byte difference whose size depends on the program (both
->      assemble), so that layout cannot pin anything yet. (d) Found by the fifth review: an
+>      assemble), so that layout cannot pin anything yet. The typed dump differs too (found
+>      2026-09-26 by the third review of D131): `scg` numbers the method's VarIds before the
+>      init's, so the types differential diverges as well; the MIR does not. (d) Found by the fifth review: an
 >      embedded-perform tail whose `perform` sits in an `if` CONDITION (`if perform Io.read()
 >      == 5 { 42 } else { n }`, a faithful shape `snc build` runs): scg compares the `perform`'s
 >      pointer (`icmp eq i64` on a `ptr`), which `llvm-as` rejects; the oracle lowers it
@@ -2975,7 +3099,8 @@ reference as you work through the milestones.
 >
 >      **LANDED (2026-09-06):** the pushdown, and — in the following slice — Step 2, the
 >      return-type seed (with D4 and D43, which were the same change). What remains is the
->      null-FIRST residue and the class-`init` walker.
+>      null-FIRST residue; the class-`init` walker, the other remainder named here, takes its
+>      parameters' types since D131 (2026-09-26).
 >      **The pushdown:** `dump_args_capture_all` now carries the callee's
 >      param span and the in-progress bindings, computes each argument's expected type from
 >      the parameter substituted under what the arguments to its LEFT bound, and unifies
@@ -3005,12 +3130,22 @@ reference as you work through the milestones.
 >      of that argument's text — which needs an INDEX ASSIGNMENT into a `TyCtx` `Vec`
 >      field. There are currently ZERO such assignments anywhere in `selfhost/`, so that
 >      slice would be the first, exercising an `scg` codegen path `scg`'s own sources have
->      never used. Verify it against both fixed points before trusting it.
->      **Also still open:** class `init` (`dump_cargs` family) is a parallel walker and
->      untouched by this slice; and seeding the substitution from the expected RETURN type
->      (the oracle does it before the argument walk) is its own slice, because it RENAMES
->      emitted symbols for null-free programs (`let s: secret i64 = idg(7)` →
->      `@idg__sec_i64`) and needs its own corpus sweep.
+>      never used. Verify it against both fixed points before trusting it. A `spawn` argument
+>      reaches the residue where a plain call's does not, because the spawn arm's codegen walk
+>      passes its target's arguments no expectation (`dump_targs(out, sca, 0 - 1, …)`); its
+>      types and MIR walk takes the call as a plain `f(x)`, so unlike the residue above, this
+>      reach moves only the LLVM output (found 2026-09-26 by the third review of D131): with
+>      `fn pick<T>(a: ?T, d: T) -> T` and `fn h(x: bool) -> i64`, `spawn h(pick(null, true))`
+>      gives `scg`'s `call i64 @pick__i64(i64 { i1 0, i64 0 }, i1 1)`, which `llc` rejects,
+>      where the oracle calls `@pick__bool`, while its typed dump and MIR match the oracle's;
+>      `h(pick(null, true))` matches at every stage.
+>      **No longer open:** class `init` (`dump_cargs` family), a parallel walker this slice
+>      left untouched, takes its parameters' types since D131 (2026-09-26), as do the method,
+>      impl-method and qualified-call walkers beside it (the enum-construct and `perform`
+>      walkers, which share `dump_cargs`, still pass none: D118, D132); and seeding the substitution from the
+>      expected RETURN type (the oracle does it before the argument walk), which this entry
+>      first held back as its own slice because it RENAMES emitted symbols for null-free
+>      programs (`let s: secret i64 = idg(7)` → `@idg__sec_i64`), landed with D4 and D43.
 >
 >      **D46 — a `?&T` or `?Channel<T>` `null` constant is JOINT invalid IR: the oracle
 >      emits `ptr 0` and `scg` reproduces it byte-for-byte.**

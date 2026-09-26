@@ -5,7 +5,7 @@ HANDOVER.md, STATE.md is the source of truth. New contributors (or
 new chat sessions) should be able to read this file and understand
 the current state of the workspace without re-reading every commit.
 
-## Current State (2026-09-25)
+## Current State (2026-09-26)
 
 > **Phase C closed at the bootstrap milestone (2026-05-30); Phase D self-hosts; the
 > per-unit separate-compilation back end is functionally complete.**
@@ -14,7 +14,33 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
-**Latest (2026-09-25, third slice) — a `match` on a temporary frees its payload box (register
+**Latest (2026-09-26) — `scg` types a method's, an impl method's, a qualified call's and a
+class `init`'s arguments with their parameters' types (register D131).** The oracle checks
+each such argument against its parameter's type (a qualified call's receiver excepted), so a
+literal passed to a `?i64` parameter is widened, a `null` passed to one is typed `?i64`, and a
+literal passed to a `secret i64` parameter is made secret, as for a fn's argument. `scg`
+skipped those parameter lists in its signature pass and passed the bare value, so its typed
+dump, MIR and IR differed from the oracle's: `k.take(10)`, with `k = K::init(5)` and
+`take(self: &Self, x: ?i64) -> i64 { unwrap_or(x, 0) + self.n }`, answered 15 in inkwell and
+the oracle and a wrong value in `scg`'s output. `scg` now records where each list sits in its Pass 1.5 and interns the types
+right after that pass, among themselves in the oracle's order (each class's `init`, then its
+methods, then every trait's methods), and pushes them down as the arguments' expectations.
+Interning them after Pass 1.5's source-order walk rather than inside it matters: the order of
+first interning is the order a generic struct instance's named LLVM type is declared in, and
+interning them inside the walk reordered those declarations on programs that matched the
+oracle. Two new `tests/pass` fixtures pin it through the types, MIR and codegen
+differentials. `scg`-only: the oracle and inkwell move no byte, so it is a patch by ADR 0076
+D2, as D95 was. Filed D132 (a `perform`'s arguments, the same gap), D133 (`scg` emits invalid
+IR for an effecting fn that `let`s a plain value and then ends in a `perform`), D134 (fields,
+method return types, enum payloads and effect-op types are still interned in source order, so
+two instances' type declarations can come out in the opposite order from the oracle's; only
+that order differs), D135 (in codegen, `scg` interns what a generic fn's body names only when
+it monomorphises the fn) and D136 (`scg` gives an array literal's elements no expected type,
+so a generic struct literal inside one is invalid IR); D118 now also covers a non-`null`
+payload that needs a `?T` widen, D71 (c) the typed dump as well as the IR, and D45 a `spawn`
+argument's reach into its null-first residue.
+
+**Previously (2026-09-25, third slice) — a `match` on a temporary frees its payload box (register
 D92); a class `init` must assign every field on every path before using it (register D129);
 `vec_to_array` is admitted only for an element that owns nothing (register D125); and `scg`
 records a block's tail as a move where the oracle does (register D124).**

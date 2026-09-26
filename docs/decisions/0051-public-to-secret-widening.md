@@ -209,7 +209,11 @@ are unaffected. A new fixture exercises the widen (Phase 2) and `scg` mirrors it
   trait call, a CLASS `init`, an enum construct, a `spawn` target, and a GENERIC user fn
   (which routes through `dump_generic_call`). The oracle widens at those too, for a plain
   literal — `C::init(2)` against `init(v: ?i64)` emits a `widen-null` that scg omits. None is
-  covered and none is claimed to be.
+  covered and none is claimed to be. (2026-09-26: the method, impl-method, qualified and
+  class-`init` paths now pass their parameters' types, register D131, and a generic user
+  fn's arguments have taken theirs since D45, apart from its null-first residue; the
+  enum-construct and `perform` paths still do not, D118 and D132. A `spawn` argument never
+  needs a widen: the oracle refuses a `?T` or `secret` one.)
 
   **And the residual ARM family is not cosmetic at these positions.** Those arms discard the
   expectation they now receive; at a `let` that costs only the wrapper, but at the ASSIGN and

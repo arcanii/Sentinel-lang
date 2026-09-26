@@ -131,7 +131,8 @@ variant — **the constant-time verifier is IN scope** (not the "drop verifier" 
   forms → 123/123). The mechanisms (all fused, mode-2-guarded):
   - **A `margs` operand STACK** + `mir_emit_va` (op 6 `call` / op 7 `opaque`): the arg-list
     walkers (`dump_targs`/`dump_sfields`/`dump_array_elems`/`dump_args_capture_*`/`dump_cargs`
-    →`dump_targs`/`dump_tarms`) push each child's MirValue while a `mir_collecting` flag is
+    →`dump_mtargs` (`dump_targs` before register D131)/`dump_tarms`) push each child's
+    MirValue while a `mir_collecting` flag is
     set (so a shared walker in a non-collecting context can't pollute the stack); a variadic
     arm snapshots `len(margs)`, walks, then `emit_va` copies `margs[snap..]` into the flat
     `miargs` pool and truncates. Receivers/scrutinees are pushed manually (first), then the
