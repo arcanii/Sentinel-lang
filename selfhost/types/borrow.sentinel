@@ -439,12 +439,20 @@ fn dump_texpr_arm(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyC
         //     verifier failure. Read stderr anyway — the harness does — but the exit
         //     code is usable here.)
         //
-        // "Call argument" means a plain `f(x)` ONLY. Every other argument path still
-        // passes no expectation and still diverges — a METHOD or impl-method argument,
-        // a QUALIFIED trait call, a CLASS `init`, an enum construct, a `spawn` target,
-        // and a GENERIC user fn (which routes through `dump_generic_call`). The oracle
-        // widens at those too, for a plain literal — `C::init(2)` against
-        // `init(v: ?i64)` emits `widen-null` and scg does not.
+        // "Call argument" first meant a plain `f(x)` ONLY. A METHOD, impl-method,
+        // QUALIFIED and CLASS `init` argument now takes its parameter's type too
+        // (register D131: `dump_cargs` over `mpp`), and a GENERIC user fn's has since
+        // register D45 (`dump_args_capture_all`), apart from D45's null-first residue.
+        // An enum construct's and a `perform`'s still take none (D118, D132), and the
+        // oracle widens there for a plain literal: `G::A(40)` against `A(?i64)` emits
+        // `widen-null` and scg does not. A `spawn` argument never needs a widen: the
+        // oracle refuses a `?T` or `secret` one. But the spawn arm's CODEGEN walk still
+        // passes it no expectation (its `dump_targs(out, sca, 0 - 1, ...)`; the types and
+        // MIR walk dumps the call as a plain `f(x)`, which passes one), so a generic call
+        // that would take its return-type seed from that parameter loses it at codegen
+        // (D45's null-first residue): `spawn h(pick(null, true))` with `h(x: bool)` emits
+        // `@pick__i64` where the oracle emits `@pick__bool`, though its typed dump and MIR
+        // match; `h(pick(null, true))` matches at every stage.
         //
         // ADR 0051 A1 had deferred the `secret` call-arg and return widens BY DESIGN;
         // A5 amends that rather than contradicting it silently, because the same
@@ -920,7 +928,7 @@ fn dump_texpr_arm(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyC
                 } else {
                     0
                 };
-                dump_cargs(out, qa, src, c, gb);
+                dump_cargs(out, qa, 0 - 1, 0 - 1, 0, src, c, gb);
                 if cg_on(c) {
                     (*c).cg_collecting = cg_ec_col;
                     cg_emit_enum_construct(c, qeid, vidx, cg_ec_snap);
@@ -938,6 +946,19 @@ fn dump_texpr_arm(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyC
                 let qtid: i64 = impl_trait_of(c, iid);
                 let qmidx: i64 = trait_method_index(c, qtid, &qm);
                 let qmret: i64 = trait_method_ret(c, qtid, &qm);
+                // The trait method's param types are the arguments' expectations; the first
+                // argument is the receiver, which has none.
+                let qrow: i64 = trait_method_row(c, qtid, &qm);
+                let qps: i64 = if qrow >= 0 {
+                    (*c).trmps[qrow]
+                } else {
+                    0 - 1
+                };
+                let qpe: i64 = if qrow >= 0 {
+                    (*c).trmpe[qrow]
+                } else {
+                    0 - 1
+                };
                 append_str(out, "(qcall-impl #");
                 append_int(out, iid);
                 push(out, ' ');
@@ -963,7 +984,7 @@ fn dump_texpr_arm(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyC
                 };
                 // (ADR 0071 D2 amendment A1) the callee drops its parameters: owning args.
                 (*c).cg_ownargs = true;
-                dump_cargs(out, qa, src, c, gb);
+                dump_cargs(out, qa, qps, qpe, 0 - 1, src, c, gb);
                 close_ty(out, qmret, c);
                 if cg_on(c) {
                     (*c).cg_collecting = cg_q_col;
@@ -1187,7 +1208,19 @@ fn dump_texpr_arm(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyC
             };
             // (ADR 0071 D2 amendment A1) the init drops its parameters: owning args.
             (*c).cg_ownargs = true;
-            dump_cargs(out, ca, src, c, gb);
+            // The init's param types are the arguments' expectations.
+            let cirow: i64 = class_init_row(c, cid);
+            let cips: i64 = if cirow >= 0 {
+                (*c).cips[cirow]
+            } else {
+                0 - 1
+            };
+            let cipe: i64 = if cirow >= 0 {
+                (*c).cipe[cirow]
+            } else {
+                0 - 1
+            };
+            dump_cargs(out, ca, cips, cipe, 0, src, c, gb);
             close_ty(out, cty, c);
             if mir_on(c) {
                 (*c).mir_collecting = ci_col;
@@ -1253,7 +1286,7 @@ fn dump_texpr_arm(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyC
             } else {
                 0
             };
-            dump_cargs(out, pa, src, c, gb);
+            dump_cargs(out, pa, 0 - 1, 0 - 1, 0, src, c, gb);
             close_ty(out, pret, c);
             if mir_on(c) {
                 (*c).mir_collecting = pf_col;

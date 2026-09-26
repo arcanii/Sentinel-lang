@@ -1241,6 +1241,28 @@ fn pass_c41_method_moves_tracked() {
 }
 
 #[test]
+fn pass_c41_method_args_take_param_types() {
+    // A method's, an impl method's, a qualified call's and a class init's arguments take
+    // their parameters' types as expectations (a literal widened to `?i64`, a `null` typed
+    // `?i64`, a literal made `secret`). inkwell and the oracle always did; the exit code is not the
+    // check -- the fixture is in the corpus so the types, MIR and codegen differentials
+    // hold `scg` to the oracle on each call form. Exit 42.
+    assert_eq!(run_exit("c41_method_args_take_param_types.sentinel"), 42);
+}
+
+#[test]
+fn pass_c41_member_param_types_interning_order() {
+    // `scg` interns a class init's, a class method's and a trait method's parameter types
+    // after every fn signature and before any body, as the oracle does, so the instances
+    // this fixture names get their named LLVM types in the oracle's order. Not every
+    // program's do: `scg` still interns struct and class fields, class and trait methods'
+    // return types, enum payloads and effect-op types in source order alongside the fn
+    // signatures, and the oracle does not (register D134). The exit code is not the check;
+    // the codegen differential holds `scg`'s declaration order to the oracle's. Exit 42.
+    assert_eq!(run_exit("c41_member_param_types_interning_order.sentinel"), 42);
+}
+
+#[test]
 fn pass_c43_delegate_forwards_move_param() {
     // Register D61: a delegate forwarder passes a heap param on by value. inkwell was
     // always right here (it never dropped a method's param frame), so this exit code is

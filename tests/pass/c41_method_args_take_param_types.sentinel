@@ -1,0 +1,62 @@
+// tests/pass/c41_method_args_take_param_types.sentinel — a method's, a trait method's and a
+// class init's arguments take their parameters' types as expectations, in `scg` as in the
+// oracle.
+//
+// The oracle checks each argument of a method call, an impl-method call, a qualified call
+// and a class `init` against its parameter's type (the receiver of a qualified call has
+// none), so an `i64` literal passed to a `?i64` parameter is widened, a `null` passed to
+// one is typed `?i64`, and an `i64` literal passed to a `secret i64` parameter is made
+// secret, exactly as for a fn's argument. `scg` gave these arguments no expectation and
+// passed the bare value. This fixture puts each
+// call form in the corpus, where the types, MIR and codegen differentials hold `scg` to the
+// oracle on it.
+//
+// Exit 42.
+
+struct P { n: i64 }
+
+trait T {
+    fn eat(self: &Self, x: ?i64) -> i64;
+    fn pin(self: &Self, s: secret i64, q: ?i64) -> i64;
+}
+
+impl as T for P {
+    fn eat(self: &Self, x: ?i64) -> i64 { unwrap_or(x, 100) + self.n }
+    fn pin(self: &Self, s: secret i64, q: ?i64) -> i64 {
+        let d: i64 = declassify(s);
+        if is_some(q) { d } else { d + 1000 }
+    }
+}
+
+impl Direct as T for P {
+    fn eat(self: &Self, x: ?i64) -> i64 { unwrap_or(x, 200) }
+    fn pin(self: &Self, s: secret i64, q: ?i64) -> i64 { declassify(s) }
+}
+
+class K {
+    let n: i64;
+    let m: i64;
+    pub init(n: ?i64, m: secret i64) {
+        self.n = unwrap_or(n, 7);
+        self.m = declassify(m);
+        0
+    }
+    pub fn take(self: &Self, x: ?i64, y: ?i64) -> i64 { unwrap_or(x, 0) + unwrap_or(y, 3) + self.n }
+    pub fn hide(self: &Self, s: secret i64) -> i64 { declassify(s) + self.m }
+}
+
+fn main() -> i64 {
+    let k = K::init(null, 2);
+    let p = P { n: 1 };
+    // 7 + 0 + 3 = 10 (a `null` and a literal to `?i64`)
+    let a = k.take(null, 3);
+    // 4 + 2 = 6 (a literal to `secret i64`)
+    let b = k.hide(4);
+    // 5 + 1 = 6 (impl method, a literal to `?i64`)
+    let c = p.eat(5);
+    // 3 (impl method, a literal to `secret i64` and one to `?i64`)
+    let d = p.pin(3, 8);
+    // 200 via the qualified call's `null`, minus 183
+    let e = Direct::eat(&p, null) - 183;
+    a + b + c + d + e
+}

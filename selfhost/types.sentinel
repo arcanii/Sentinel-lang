@@ -147,6 +147,9 @@ struct TyCtx {
     clms: Vec<i64>,   // method-name blob start (into `snb`)
     clme: Vec<i64>,   // method-name blob end
     clmr: Vec<i64>,   // method return-type handle
+    clmpc: Vec<i64>,  // method param-list cursor (past the receiver), for `resolve_member_params`
+    clmps: Vec<i64>,  // method param-type slice start (into `mpp`; the receiver excluded)
+    clmpe: Vec<i64>,  // method param-type slice end
     // --- (4f) trait table: names in `snb`; TraitId = index ---
     trns: Vec<i64>,
     trne: Vec<i64>,
@@ -155,6 +158,19 @@ struct TyCtx {
     trms: Vec<i64>,
     trme: Vec<i64>,
     trmr: Vec<i64>,
+    trmpc: Vec<i64>,  // trait-method param-list cursor (past the receiver)
+    trmps: Vec<i64>,  // trait-method param-type slice start (into `mpp`; the receiver excluded)
+    trmpe: Vec<i64>,  // trait-method param-type slice end
+    // class inits (one entry per class that declares one): owner ClassId + param slice
+    cio: Vec<i64>,
+    cipc: Vec<i64>,
+    cips: Vec<i64>,
+    cipe: Vec<i64>,
+    // flat param-type handles for inits, methods and trait methods, in
+    // `resolve_member_params`'s order (each class's init, then its methods, then every
+    // trait's methods): the argument expectations `dump_cargs` pushes down, as `ufpp`
+    // does for a fn
+    mpp: Vec<i64>,
     // --- (4f) impl table: ImplId = index ---
     imns: Vec<i64>,   // impl name start (0,0 slot for a default/unnamed impl)
     imne: Vec<i64>,   // impl name end
@@ -1102,6 +1118,15 @@ pub fn run(src: [u8], mode: i64, result: &mut Vec<u8>) -> i64 {
         };
         q = q + 1;
     }
+
+    // The param types of class inits, class methods and trait methods are interned here,
+    // after every fn signature, field and return type, and among themselves in the
+    // oracle's order (its Pass 3.5, then 3c): interning order is the order a generic
+    // struct instance's named LLVM type is declared in. The oracle interns enum payloads,
+    // struct fields and effect ops before every fn signature, and a class's fields and
+    // its methods' return types (a trait's, in 3c) among these; Pass 1.5 interns all of
+    // those in source order instead (register D134).
+    resolve_member_params(&kinds, &starts, &ends, &src, &mut ctx, &mut garbage);
 
     // (4f-delegate) register the SYNTHESISED delegate impls (ImplId continues AFTER
     // all user impls; an unnamed `impl _` → a 0,0 name slot). Done before pass-2 so the

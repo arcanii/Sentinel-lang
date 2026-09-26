@@ -1571,6 +1571,18 @@ fn dump_te_method(out: &mut Vec<u8>, mt: Expr, mn: [u8], ma: Args, exp: i64, src
             let mrt: i64 = if class_has_method(c, rcid, &mn) {
                 let midx: i64 = class_method_index(c, rcid, &mn);
                 let mret: i64 = class_method_ret(c, rcid, &mn);
+                // The method's param types are the arguments' expectations.
+                let mrow: i64 = class_method_row(c, rcid, &mn);
+                let mps: i64 = if mrow >= 0 {
+                    (*c).clmps[mrow]
+                } else {
+                    0 - 1
+                };
+                let mpe: i64 = if mrow >= 0 {
+                    (*c).clmpe[mrow]
+                } else {
+                    0 - 1
+                };
                 append_str(out, "(method #");
                 append_int(out, rcid);
                 push(out, ' ');
@@ -1581,7 +1593,7 @@ fn dump_te_method(out: &mut Vec<u8>, mt: Expr, mn: [u8], ma: Args, exp: i64, src
                 append_str(out, mn);
                 // (ADR 0071 D2 amendment A1) the method drops its parameters: owning args.
                 (*c).cg_ownargs = true;
-                dump_cargs(out, ma, src, c, gb);
+                dump_cargs(out, ma, mps, mpe, 0, src, c, gb);
                 close_ty(out, mret, c);
                 if cg_on(c) {
                     (*c).cg_collecting = cg_m_col;
@@ -1596,6 +1608,18 @@ fn dump_te_method(out: &mut Vec<u8>, mt: Expr, mn: [u8], ma: Args, exp: i64, src
                 let mtid: i64 = impl_trait_of(c, idef);
                 let midx2: i64 = trait_method_index(c, mtid, &mn);
                 let mret2: i64 = trait_method_ret(c, mtid, &mn);
+                // The trait method's param types are the arguments' expectations.
+                let trow: i64 = trait_method_row(c, mtid, &mn);
+                let tps: i64 = if trow >= 0 {
+                    (*c).trmps[trow]
+                } else {
+                    0 - 1
+                };
+                let tpe: i64 = if trow >= 0 {
+                    (*c).trmpe[trow]
+                } else {
+                    0 - 1
+                };
                 append_str(out, "(impl-method #");
                 append_int(out, idef);
                 push(out, ' ');
@@ -1606,7 +1630,7 @@ fn dump_te_method(out: &mut Vec<u8>, mt: Expr, mn: [u8], ma: Args, exp: i64, src
                 append_str(out, mn);
                 // (ADR 0071 D2 amendment A1) the method drops its parameters: owning args.
                 (*c).cg_ownargs = true;
-                dump_cargs(out, ma, src, c, gb);
+                dump_cargs(out, ma, tps, tpe, 0, src, c, gb);
                 close_ty(out, mret2, c);
                 if cg_on(c) {
                     (*c).cg_collecting = cg_m_col;

@@ -1,0 +1,43 @@
+// tests/pass/c41_member_param_types_interning_order.sentinel — `scg` interns a class init's,
+// a class method's and a trait method's parameter types where the oracle does.
+//
+// The order in which a generic struct's instances are first interned is the order their
+// named LLVM types are declared in, so `scg` must intern them in the oracle's order to emit
+// its IR byte for byte. After the enum payloads, struct fields and effect operations, the
+// oracle interns every fn signature, then each class's fields, init and methods, then each
+// trait's methods, and only then any body. Here a fn body names one instance ahead of the
+// class, the class's init, its method and the trait's method each name another, and a
+// later fn signature names a fifth. `scg` interns those three parameter types after its
+// signature pass and before any body, which puts them between the fifth and the first,
+// where the oracle has them. Nothing calls the init or any method: a declaration is enough
+// to intern. (`scg` still interns fields, method return types, enum payloads and effect-op
+// types in source order: register D134.)
+//
+// Exit 42.
+
+struct Pair<A, B> { a: A, b: B }
+
+fn early() -> i64 {
+    let q: Pair<i64, bool> = Pair { a: 40, b: true };
+    q.a
+}
+
+class K {
+    let n: i64;
+    pub init(p: Pair<u8, u8>) { self.n = 1; 0 }
+    pub fn get(self: &Self) -> i64 { self.n }
+    pub fn put(self: &Self, p: Pair<i64, i64>) -> i64 { p.a }
+}
+
+trait T { fn t(self: &Self, p: Pair<i32, i32>) -> i64; }
+
+struct P { n: i64 }
+
+impl as T for P { fn t(self: &Self, p: Pair<i32, i32>) -> i64 { self.n } }
+
+fn z(p: Pair<bool, i64>) -> i64 { p.b }
+
+fn main() -> i64 {
+    let w: Pair<bool, i64> = Pair { a: true, b: 2 };
+    early() + z(w)
+}

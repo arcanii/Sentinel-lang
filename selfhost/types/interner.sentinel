@@ -892,6 +892,82 @@ fn class_method_index(c: &mut TyCtx, cid: i64, q: &[u8]) -> i64 {
     found
 }
 
+// The row of class method `q` of class `cid` in the class-method table, or -1.
+fn class_method_row(c: &mut TyCtx, cid: i64, q: &[u8]) -> i64 {
+    let n: i64 = len((*c).clmo);
+    let mut i: i64 = 0;
+    let mut found: i64 = 0 - 1;
+    while i < n {
+        if found < 0 {
+            if (*c).clmo[i] == cid {
+                if snb_eq(c, (*c).clms[i], (*c).clme[i], q) {
+                    found = i;
+                    0
+                } else {
+                    0
+                };
+                0
+            } else {
+                0
+            };
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    found
+}
+
+// The row of method `q` of trait `tid` in the trait-method table, or -1.
+fn trait_method_row(c: &mut TyCtx, tid: i64, q: &[u8]) -> i64 {
+    let n: i64 = len((*c).trmo);
+    let mut i: i64 = 0;
+    let mut found: i64 = 0 - 1;
+    while i < n {
+        if found < 0 {
+            if (*c).trmo[i] == tid {
+                if snb_eq(c, (*c).trms[i], (*c).trme[i], q) {
+                    found = i;
+                    0
+                } else {
+                    0
+                };
+                0
+            } else {
+                0
+            };
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    found
+}
+
+// The row of class `cid`'s `init` in the init table, or -1.
+fn class_init_row(c: &mut TyCtx, cid: i64) -> i64 {
+    let n: i64 = len((*c).cio);
+    let mut i: i64 = 0;
+    let mut found: i64 = 0 - 1;
+    while i < n {
+        if found < 0 {
+            if (*c).cio[i] == cid {
+                found = i;
+                0
+            } else {
+                0
+            };
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    found
+}
+
 // The return-type handle of class method `q` in class `cid`, or i64 default.
 fn class_method_ret(c: &mut TyCtx, cid: i64, q: &[u8]) -> i64 {
     let n: i64 = len((*c).clmo);

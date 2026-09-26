@@ -17,7 +17,12 @@ fn close_ty(out: &mut Vec<u8>, ty: i64, c: &mut TyCtx) -> i64 {
 
 // (6/N) dump an arg list in a CONSUMING context (constructor / method / perform /
 // enum-construct args — moved into the callee). Sets `consuming` true around the args.
-fn dump_cargs(out: &mut Vec<u8>, a: Args, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
+// `ps`..`pe` is the callee's param-type slice in `mpp` (a method's, a trait method's or an
+// init's), pushed down onto the arguments as their expectations as `dump_targs` does for
+// a fn; `pidx` is the first argument's position in it (-1 for a qualified call, whose
+// first argument is the receiver). `ps < 0` pushes nothing (an enum construct, a
+// `perform`).
+fn dump_cargs(out: &mut Vec<u8>, a: Args, ps: i64, pe: i64, pidx: i64, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
     let svc: bool = (*c).consuming;
     (*c).consuming = true;
     // (ADR 0071 D2 amendment A1) the arguments of a class init, a method or a qualified
@@ -29,7 +34,7 @@ fn dump_cargs(out: &mut Vec<u8>, a: Args, src: &[u8], c: &mut TyCtx, gb: &mut Ve
     (*c).cg_ownargs = false;
     let svu: bool = (*c).cg_ufarg;
     (*c).cg_ufarg = own_args;
-    dump_targs(out, a, 0 - 1, 0, src, c, gb);
+    dump_mtargs(out, a, ps, pe, pidx, src, c, gb);
     (*c).cg_ufarg = svu;
     (*c).consuming = svc;
     0
@@ -37,8 +42,11 @@ fn dump_cargs(out: &mut Vec<u8>, a: Args, src: &[u8], c: &mut TyCtx, gb: &mut Ve
 
 // `pfid` = the callee's user FnId when its declared param types should be pushed down
 // onto the arguments as expectations (ADR 0014 D3's `?T` pushdown and ADR 0051 A5's
-// `secret` one), or -1 for every other caller — an array literal, a construct, a builtin,
-// a spawn target. `pidx` is the current argument's position.
+// `secret` one), or -1 for every other caller — an array literal, a builtin, a spawn
+// target. `pidx` is the current argument's position. (A class init's, a method's, a
+// qualified call's, an enum construct's and a `perform`'s arguments go through
+// `dump_cargs` and `dump_mtargs` instead, register D131; a generic user fn's through
+// `dump_args_capture_all`.)
 //
 // The expectation is what makes `takes(5)` against `takes(p: ?i64)` emit
 // `(widen-null (int 5 :i64) :?i64)` instead of the bare literal. Passing -1 here is what
@@ -59,6 +67,34 @@ fn dump_targs(out: &mut Vec<u8>, a: Args, pfid: i64, pidx: i64, src: &[u8], c: &
             mir_collect(c);
             cg_collect(c, cg_argty);
             dump_targs(out, rest, pfid, pidx + 1, src, c, gb)
+        },
+    }
+}
+
+// `dump_targs` with the expectation taken from `mpp[ps + pidx]` (see `dump_cargs`).
+fn dump_mtargs(out: &mut Vec<u8>, a: Args, ps: i64, pe: i64, pidx: i64, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
+    match a {
+        Args::End => 0,
+        Args::Cell(x, rest) => {
+            push(out, ' ');
+            let aexp: i64 = if ps >= 0 {
+                if pidx >= 0 {
+                    if ps + pidx < pe {
+                        (*c).mpp[ps + pidx]
+                    } else {
+                        0 - 1
+                    }
+                } else {
+                    0 - 1
+                }
+            } else {
+                0 - 1
+            };
+            (*c).cg_own = (*c).cg_ufarg;
+            let cg_argty: i64 = dump_texpr(out, x, aexp, src, c, gb);
+            mir_collect(c);
+            cg_collect(c, cg_argty);
+            dump_mtargs(out, rest, ps, pe, pidx + 1, src, c, gb)
         },
     }
 }

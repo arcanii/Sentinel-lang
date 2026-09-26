@@ -28,13 +28,99 @@ fn tparse_self_kind(k: &Vec<i64>, cur: &mut i64) -> bool {
     excl
 }
 
-// Skip a `( … )` list (no nested parens in Sentinel param/type syntax). Cursor at `(`.
-fn skip_paren_list(k: &Vec<i64>, cur: &mut i64) -> i64 {
-    *cur = *cur + 1;             // skip `(`
+// Walk a method / trait-method / init param list recording each param's type handle into
+// `mpp` — `scan_paramtypes` with `mpp` for `ufpp`. Cursor past `(` (and past the receiver,
+// for a method); ends past `)`.
+fn scan_mparamtypes(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64, c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
+    let t: i64 = (*k)[*cur];
+    if t == 5 {
+        *cur = *cur + 1;
+        0
+    } else if t == 29 {
+        *cur = *cur + 1;
+        scan_mparamtypes(k, s, e, src, cur, c, gb)
+    } else {
+        let pm: bool = (*k)[*cur] == 46;
+        if pm {
+            *cur = *cur + 1;
+            0
+        } else {
+            0
+        };
+        *cur = *cur + 1;           // skip name
+        *cur = *cur + 1;           // skip `:`
+        let pte: TypeE = parse_type(k, s, e, src, cur);
+        let pty: i64 = type_of_typeexpr(c, pte, gb);
+        push(&mut (*c).mpp, pty);
+        scan_mparamtypes(k, s, e, src, cur, c, gb)
+    }
+}
+
+// Skip to past the `)` that closes a param list. Cursor inside the list.
+fn skip_to_rparen(k: &Vec<i64>, cur: &mut i64) -> i64 {
     while (*k)[*cur] != 5 {
         *cur = *cur + 1;
     }
     *cur = *cur + 1;             // skip `)`
+    0
+}
+
+// Intern the param types of every class init, class method and trait method into `mpp`,
+// in the oracle's order — each class in turn (its init's, then its methods' in
+// declaration order: the oracle's Pass 3.5), then every trait's methods (Pass 3c) — and
+// push each one's slice. Runs after Pass 1.5, so these types are interned after every fn
+// signature, field and return type, as they were when only Pass 2 interned them;
+// interning order is the order a generic struct instance's named LLVM type is declared
+// in. (The oracle interleaves each class's fields and each method's return type with
+// these; Pass 1.5 has already interned those, in source order: register D134.) The slices
+// are pushed in row order: `cio` holds at most one row per class, in class order, and
+// `clmo`'s rows are grouped by class in class order.
+fn resolve_member_params(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
+    let ncl: i64 = len((*c).clns);
+    let nci: i64 = len((*c).cio);
+    let ncm: i64 = len((*c).clmo);
+    let mut cid: i64 = 0;
+    while cid < ncl {
+        let mut r: i64 = 0;
+        while r < nci {
+            if (*c).cio[r] == cid {
+                let mut icur: i64 = (*c).cipc[r];
+                let ips: i64 = len((*c).mpp);
+                scan_mparamtypes(k, s, e, src, &mut icur, c, gb);
+                push(&mut (*c).cips, ips);
+                push(&mut (*c).cipe, len((*c).mpp));
+                0
+            } else {
+                0
+            };
+            r = r + 1;
+        }
+        let mut m: i64 = 0;
+        while m < ncm {
+            if (*c).clmo[m] == cid {
+                let mut mcur: i64 = (*c).clmpc[m];
+                let mps: i64 = len((*c).mpp);
+                scan_mparamtypes(k, s, e, src, &mut mcur, c, gb);
+                push(&mut (*c).clmps, mps);
+                push(&mut (*c).clmpe, len((*c).mpp));
+                0
+            } else {
+                0
+            };
+            m = m + 1;
+        }
+        cid = cid + 1;
+    }
+    let ntm: i64 = len((*c).trmo);
+    let mut t: i64 = 0;
+    while t < ntm {
+        let mut tcur: i64 = (*c).trmpc[t];
+        let tps: i64 = len((*c).mpp);
+        scan_mparamtypes(k, s, e, src, &mut tcur, c, gb);
+        push(&mut (*c).trmps, tps);
+        push(&mut (*c).trmpe, len((*c).mpp));
+        t = t + 1;
+    }
     0
 }
 
@@ -98,7 +184,13 @@ fn scan_cmethod(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut 
     let mn_s: i64 = (*s)[*cur];
     let mn_e: i64 = (*e)[*cur];
     *cur = *cur + 1;             // skip name
-    skip_paren_list(k, cur);     // skip `( self… params )`
+    // The param types after the receiver become the arguments' expectations at a call
+    // (`mpp`), as a fn's do (`ufpp`); `resolve_member_params` interns them later, so only
+    // the list's position is recorded here.
+    *cur = *cur + 1;             // skip `(`
+    let _cm_excl: bool = tparse_self_kind(k, cur);
+    push(&mut (*c).clmpc, *cur);
+    skip_to_rparen(k, cur);
     *cur = *cur + 1;             // skip `->`
     let mret: TypeE = parse_type(k, s, e, src, cur);
     let mrth: i64 = type_of_typeexpr(c, mret, gb);
@@ -220,7 +312,10 @@ fn scan_cmem_loop(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mu
         scan_cmem_loop(k, s, e, src, cur, cid, c, gb)
     } else if is_init_slice(src, (*s)[*cur], (*e)[*cur]) {
         *cur = *cur + 1;         // skip `init`
-        skip_paren_list(k, cur);
+        *cur = *cur + 1;         // skip `(`
+        push(&mut (*c).cio, cid);
+        push(&mut (*c).cipc, *cur);
+        skip_to_rparen(k, cur);
         skip_brace_block(k, cur);
         scan_cmem_loop(k, s, e, src, cur, cid, c, gb)
     } else {
@@ -638,7 +733,10 @@ fn scan_trm_loop(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut
         let mn_s: i64 = (*s)[*cur];
         let mn_e: i64 = (*e)[*cur];
         *cur = *cur + 1;         // skip name
-        skip_paren_list(k, cur);
+        *cur = *cur + 1;         // skip `(`
+        let _tm_excl: bool = tparse_self_kind(k, cur);
+        push(&mut (*c).trmpc, *cur);
+        skip_to_rparen(k, cur);
         *cur = *cur + 1;         // skip `->`
         let mret: TypeE = parse_type(k, s, e, src, cur);
         let mrth: i64 = type_of_typeexpr(c, mret, gb);
