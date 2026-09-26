@@ -1,0 +1,14 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c14_struct_literal_duplicate_field.sentinel\")"
+---
+sentinel::types::duplicate_field
+
+  × struct literal `P` names field `lo` twice
+    ╭─[tests/ui/c14_struct_literal_duplicate_field.sentinel:10:24]
+  9 │ fn main() -> i64 {
+ 10 │     let p = P { lo: 1, lo: 2 };
+    ·                        ─┬
+    ·                         ╰── 
+ 11 │     p.lo
+    ╰────

@@ -1,0 +1,12 @@
+// Register D96 (ADR 0013 A1): a struct literal may not name a field twice. The duplicate
+// used to fill one slot twice, which either kept the second value and never evaluated the
+// first or, as here, left `hi` unfilled past the field-count check and panicked the type
+// checker.
+// Surfaces DuplicateField at the second `lo`.
+
+struct P { lo: i64, hi: i64 }
+
+fn main() -> i64 {
+    let p = P { lo: 1, lo: 2 };
+    p.lo
+}

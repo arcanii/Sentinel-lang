@@ -4055,6 +4055,18 @@ pub enum TypeError {
         span: miette::SourceSpan,
     },
 
+    /// ADR 0013 A1, register D96: a struct literal names the same field twice. Before
+    /// this check a duplicate filled one slot twice, so the literal either never evaluated
+    /// its first value or, when that left another field unfilled, panicked the checker.
+    #[error("struct literal `{struct_name}` names field `{field}` twice")]
+    #[diagnostic(code(sentinel::types::duplicate_field))]
+    DuplicateField {
+        struct_name: String,
+        field: String,
+        #[label("`{field}` is already given")]
+        span: miette::SourceSpan,
+    },
+
     /// C1.4 / ADR 0013 D3: struct literal omits a field that the
     /// declaration requires (no defaults at C1.4).
     #[error("struct literal `{struct_name}` is missing field `{field}`")]
@@ -10391,6 +10403,15 @@ fn check_expr(
                         field: fi.name.clone(),
                         span: to_source_span(&fi.name_span),
                     })?;
+                // Register D96: a second value for a field would overwrite the first
+                // below (or leave another field unfilled and panic the `expect`).
+                if provided.iter().any(|(idx, _)| *idx == decl_idx) {
+                    return Err(TypeError::DuplicateField {
+                        struct_name: decl.name.clone(),
+                        field: fi.name.clone(),
+                        span: to_source_span(&fi.name_span),
+                    });
+                }
                 // Field type, substituted by the instance's type-
                 // args when the struct is generic.
                 let raw_field_ty = decl.fields[decl_idx].ty;
@@ -12465,6 +12486,11 @@ fn type_error_to_diagnostic(err: &TypeError) -> Diagnostic {
             format!("struct `{struct_name}` has no field `{field}`"),
             span.offset()..(span.offset() + span.len()),
         ),
+        TypeError::DuplicateField { struct_name, field, span } => (
+            "sentinel::types::duplicate_field",
+            format!("struct literal `{struct_name}` names field `{field}` twice"),
+            span.offset()..(span.offset() + span.len()),
+        ),
         TypeError::MissingField { struct_name, field, span } => (
             "sentinel::types::missing_field",
             format!("struct literal `{struct_name}` is missing field `{field}`"),
@@ -14211,6 +14237,25 @@ fn main() -> i64 {
             matches!(err, TypeError::MissingField { ref field, ref struct_name, .. } if field == "y" && struct_name == "P"),
             "got {err:?}"
         );
+    }
+
+    // Register D96 (ADR 0013 A1): a field named twice. The first shape used to panic the
+    // checker (the duplicate left `y` unfilled past the count check); the second, whose
+    // count is high enough, used to keep the second `x` and never evaluate the first.
+    #[test]
+    fn struct_literal_duplicate_field_errors() {
+        for src in [
+            "struct P { x: i64, y: i64 }
+fn main() -> i64 { let p = P { x: 1, x: 2 }; 0 }",
+            "struct P { x: i64, y: i64 }
+fn main() -> i64 { let p = P { x: 1, x: 2, y: 3 }; 0 }",
+        ] {
+            let err = check_err(src);
+            assert!(
+                matches!(err, TypeError::DuplicateField { ref field, ref struct_name, .. } if field == "x" && struct_name == "P"),
+                "got {err:?}"
+            );
+        }
     }
 
     #[test]

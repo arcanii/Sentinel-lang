@@ -99,6 +99,11 @@ ui_snapshot!(c35_effecting_narrow_capture, "c35_effecting_narrow_capture.sentine
 // ---- C3.7 effect-check rejection ----
 ui_snapshot!(c37_perform_outside_handle, "c37_perform_outside_handle.sentinel");
 
+// ---- C1.4 struct literal rejection ----
+// Register D96 (ADR 0013 A1): a field named twice is refused (DuplicateField) rather than
+// panicking the type checker.
+ui_snapshot!(c14_struct_literal_duplicate_field, "c14_struct_literal_duplicate_field.sentinel");
+
 // ---- C4.1 class definite-assignment rejection ----
 ui_snapshot!(c41_init_field_unassigned, "c41_init_field_unassigned.sentinel");
 // ADR 0022 A3 (register D129): definite assignment is path by path — a field assigned on

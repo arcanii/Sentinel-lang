@@ -8,8 +8,8 @@ literal, field access). The C1.4 phase-go program at
 `tests/pass/c14_go_no_go.sentinel` produces stdout `7\n`, exit 0
 through the full pipeline. ADR fully landed.
 Date: 2026-05-26
-Last touched: 2026-05-26 (C1.4 landed; status flipped to
-ACCEPTED with the per-decision audit trail in commit messages)
+Last touched: 2026-09-26 (amendment A1: a field named twice in a
+literal is refused, register D96)
 Related: 0011 (Phase C1 kickoff; D3 commits to `struct` as part of
 the C1 primitive set, D6 schedules C1.4 after C1.3), 0012 (concrete
 C1 surface — established the D3 "primitives are identifiers, not
@@ -18,6 +18,29 @@ names; D6's non-associative comparison rule informs the comparable-
 struct question), 0010 (concrete C0 surface — established the
 recursive-descent parser shape that C1.4 extends with a top-level
 struct production)
+
+## Amendments
+
+- **A1 (2026-09-26, register D96) — a literal that names a field twice
+  is refused.** D3 requires every field to be present and the literal's
+  set of named fields to match the declaration's set "exactly"; it does
+  not say a name may appear only once. The checker looked for a missing
+  field only when the literal gave fewer values than the struct has
+  fields, so a repeated name that made up the count slipped through
+  and filled its field's slot twice: `P { lo: 1, lo: 2, hi: 3 }`
+  type-checked, kept the second `lo` and never evaluated the first, and
+  `P { lo: 1, lo: 2 }` left `hi` unfilled past the count check and
+  panicked the checker in `snc types`, `snc llvm` and `snc build`.
+  A1 adds the rule that a literal names each field at most once: the
+  second naming now surfaces
+  `TypeError::DuplicateField { struct_name, field, span }`
+  (`sentinel::types::duplicate_field`) at the repeated name. Pinned by
+  the unit test `struct_literal_duplicate_field_errors` (both shapes)
+  and `tests/ui/c14_struct_literal_duplicate_field.sentinel`. No
+  program that type-checked before and named each field once moves.
+  It refuses programs that compiled before, so it is at least a minor
+  version (ADR 0076 D2). The self-hosted checker does not refuse
+  either shape yet; register D97 tracks the missing rejection there.
 
 ## Context
 
