@@ -14,7 +14,23 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
-**Latest (2026-09-26) — `scg` types a method's, an impl method's, a qualified call's and a
+**Latest (2026-09-26, second slice) — a struct literal that names a field twice is refused
+(register D96).** [ADR 0013](decisions/0013-concrete-c1-4-struct-syntax.md) A1: the checker
+looked for a missing field only when a literal gave fewer values than its struct has fields, so
+a repeated name that made up the count filled one slot twice. `P { lo: 1, lo: 2 }` left `hi`
+unfilled and panicked `snc types`, `snc llvm` and `snc build` (exit 101 and a Rust panic
+message, not a diagnostic), and
+`P { lo: 1, lo: 2, hi: 3 }` compiled, keeping the second `lo` and never evaluating the first.
+The second naming is now refused with `DuplicateField`. It refuses a program that compiled
+before, so it is at least a minor version (ADR 0076 D2, whose example table listed D96 as a
+patch and is corrected). Filed D137-D140, each re-verified on 2026-09-26: a class instance's
+heap fields are never freed, nor an enum payload's own heap, nor the heap parameters of an
+effecting fn in ADR 0072's let shape (leaks, about 100 MB where the control peaks at 8.4 MB),
+and `==` between two arrays type-checks and then fails in every back end, a panic in `snc build`;
+and D141, found by D96's review: a struct DECLARATION may name a field twice, and a literal
+naming that field once still panics the checker.
+
+**Previously (2026-09-26) — `scg` types a method's, an impl method's, a qualified call's and a
 class `init`'s arguments with their parameters' types (register D131).** The oracle checks
 each such argument against its parameter's type (a qualified call's receiver excepted), so a
 literal passed to a `?i64` parameter is widened, a `null` passed to one is typed `?i64`, and a

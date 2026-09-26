@@ -110,9 +110,12 @@ Three versions, three contracts, three lifetimes. That is correct and this ADR p
 
 | Bump | What it means | Examples from the current register |
 |---|---|---|
-| **patch** — `0.1.0` → `0.1.1` | A fix with no user-visible surface change and no emitted-IR change for a program that already compiled. | D95 (a `scg`-only transposition), D96, D97 |
-| **minor** — `0.1.x` → `0.2.0` | Anything user-visible. In 0.x this is where breaking changes live: a new language feature, a new or changed CLI flag, a new runtime symbol, an `abi-v1` amendment, or a rule that now REJECTS a program that previously compiled. | ADR 0075 (a new symbol and a changed answer), ADR 0074, ADR 0071's milestones |
+| **patch** — `0.1.0` → `0.1.1` | A fix with no user-visible surface change and no emitted-IR change for a program that already compiled. | D95 (a `scg`-only transposition), D97 |
+| **minor** — `0.1.x` → `0.2.0` | Anything user-visible. In 0.x this is where breaking changes live: a new language feature, a new or changed CLI flag, a new runtime symbol, an `abi-v1` amendment, or a rule that now REJECTS a program that previously compiled. | ADR 0075 (a new symbol and a changed answer), ADR 0074, ADR 0071's milestones, D96 (a refusal) |
 | **major** — `0.x` → `1.0.0` | Reserved. See D3. | — |
+
+(Corrected 2026-09-26: the table first listed D96 as a patch. D96's fix, ADR 0013 A1, refuses
+`P { lo: 1, lo: 2, hi: 3 }`, which compiled before, so by the minor row it is a minor.)
 
 **The bump test rides vocabulary the project already has: an ORACLE-MOVING change is at least
 a minor.** `CLAUDE.md` and `docs/project-context.md` already define oracle-moving as anything

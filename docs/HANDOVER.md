@@ -124,6 +124,14 @@ reference as you work through the milestones.
 > confirming nothing pre-existing is newly refused; oracle-vs-scg byte-equality on the new
 > fixture at types, mir and llvm; and the secret-taint check in both directions.
 
+### ▶ RESUME HERE (2026-09-26b — `origin/main` was `0496d4f` when this was written, and this session's commits sit on top of it, unpushed; read `git reflog show refs/remotes/origin/main` and `git log --oneline origin/main..HEAD` at the START and AGAIN before writing either down. This session so far: **register D131 CLOSED** (`0644835` fix + `aac48e4` docs; see the 2026-09-26a block below) and **register D96 CLOSED** (`3df92f5` fix, then this docs commit) — [ADR 0013](decisions/0013-concrete-c1-4-struct-syntax.md) **A1**: a struct literal that names a field twice is refused with `DuplicateField` at the repeated name, where `P { lo: 1, lo: 2 }` panicked `snc types`, `snc llvm` and `snc build` and `P { lo: 1, lo: 2, hi: 3 }` compiled, keeping the second `lo` and never evaluating the first. It refuses a program that compiled before, so it is a minor by ADR 0076 D2, whose example table listed D96 as a patch and is corrected. Filed **D137–D141**, D137–D140 each re-verified on 2026-09-26: a class instance's heap fields, an enum payload's own heap and an effecting let-shape fn's heap parameters are never freed (leaks), `==` between two arrays type-checks, then fails in every back end, and (D141, found by the review) a struct declaration may name a field twice and a literal of it panics the checker. Register: **140 distinct ids, 56 whose heading opens `**D<n> — DONE`** (the 2026-09-22 block's rule; the id D130 is reserved and not in the public register). One bounded review round (`wf_4e54627e-043`). Four-check: **2,091 passed with exactly the 18 known Windows failures**, doctests and clippy clean, every `selfhost_*` differential green including both bootstrap fixed points. A matched sweep of `snc types` and `snc llvm` over all 501 `.sentinel` files moves only the new fixture (a panic before, a refusal after); four mutations caught. The next version is at least 0.2.0; `Cargo.toml` says 0.1.0.)
+
+> **NEXT:** continue the approved order:
+> 1. D97 (`scg`'s first rejection path, ADR 0041 A14): built and probed in this session's scratchpad (`wt97/` holds the selfhost tree plus D97; `d97tests/` the harness, fixtures, docs script and mutation suite — 28 of 29 caught, the 29th equivalent). It ports the struct-literal field set, an unknown field access, D125's and D129's refusals and D60's `return` in an `init`.
+> 2. ADR 0077's implementation, with the draft's proposed answers to Q1–Q5.
+>
+> D117 is not yet scheduled; it is the maintainer's call. Owed by the maintainer: D102, D103, ADR 0077's Q6, D36's decision, and when to bump the version (at least 0.2.0; `Cargo.toml` still says 0.1.0).
+
 ### ▶ RESUME HERE (2026-09-26a — `origin/main` was `0496d4f` when this was written, and this session's commits sit on top of it, unpushed; read `git reflog show refs/remotes/origin/main` and `git log --oneline origin/main..HEAD` at the START and AGAIN before writing either down. This session: **register D131 CLOSED** (`0644835` fix, then this docs commit) — `scg` types a method's, an impl method's, a qualified call's and a class `init`'s arguments with their parameters' types, as the oracle does. The parameter types are interned right after Pass 1.5 (`resolve_member_params`), among themselves in the oracle's order: interning them inside Pass 1.5's source-order walk reordered generic-instance type declarations on programs that matched the oracle. Filed **D132–D136** (D132 a `perform`'s arguments, the same gap; D133 invalid IR for an effecting fn that `let`s a plain value and ends in a `perform`; D134 fields, method return types, enum payloads and effect-op types still interned in source order; D135 codegen interns what a generic fn's body names only when it monomorphises the fn; D136 an array literal's elements get no expected type); D118 re-scoped, D71 (c) and D45 widened, D45's status lines corrected. `scg`-only, so a patch by ADR 0076 D2; the next version is still at least 0.2.0 from the earlier slices, and `Cargo.toml` says 0.1.0. Three bounded review rounds (`wf_b0d35dac-a9b`, `wf_a5ffc499-6a9`, `wf_d48e6c08-f90`): the first found the interning-order regression, the last two only prose. Register: **135 distinct ids, 55 whose heading opens `**D<n> — DONE`** (the 2026-09-22 block's rule; the id D130 is reserved and not in the public register). Four-check: **2,089 passed with exactly the 18 known Windows failures**, doctests and clippy clean, every `selfhost_*` differential green including both bootstrap fixed points. A matched `scg`-driver sweep (types, borrow, mir, ctverify, codegen) over all 500 `.sentinel` files, each compiled directly, moves only the two new fixtures (115 fail in both builds at codegen, 20 of them at every stage, and were not compared there); eleven mutations caught. ⚠ **Traps this session:** a reviewer's corrected text is new text too — the fix a verifier suggested for one sentence named the wrong walks, and a second verifier caught it; and a `.sentinel` file can be CRLF (the drivers are, most parts are not), so a scripted edit must keep each file's line endings.)
 
 > **NEXT:** continue the approved order:
@@ -1681,17 +1689,23 @@ reference as you work through the milestones.
 >      files and the new fixture was not yet added; `--cached --others --exclude-standard` is
 >      what makes a new-file sweep mean anything.)
 >
->      **D96 — the Rust type checker PANICS on a struct literal that names a field twice.**
+>      **D96 — DONE (2026-09-26, ADR 0013 A1). The Rust type checker PANICKED on a struct
+>      literal that names a field twice.** Closed: the second naming of a field is refused
+>      with `DuplicateField` (`sentinel::types::duplicate_field`) at the repeated name, pinned
+>      by the unit test `struct_literal_duplicate_field_errors` and
+>      `tests/ui/c14_struct_literal_duplicate_field.sentinel`; four mutations caught. It also
+>      refuses `P { lo: 1, lo: 2, hi: 3 }`, which used to compile (keeping the second `lo`
+>      and never evaluating the first), so it is at least a minor version (ADR 0076 D2).
 >      Found 2026-09-22 by D95's review; pre-existing, and independent of D95.
->      `crates/sentinel-types/src/lib.rs:10107` builds `by_index` and then
->      `.expect("every field was provided")`: a duplicate fills one slot twice and leaves
->      another `None`, so the count check above it passes and the `expect` fires.
->      `struct P { lo: i64, hi: i64 }` + `let p = P { lo: 1, lo: 2 };` panics all three entry
->      points — `snc types`, `snc llvm` and `snc build` — with exit 101 and a Rust backtrace
->      rather than a `miette` diagnostic, which the project's own rule against `unwrap` /
->      `panic!` on user-program input forbids. `scg` does not panic; it emits IR. The fix is a
->      `DuplicateField` diagnostic where the missing-field check already is, plus a
->      `tests/ui` fixture.
+>      The `StructLit` arm of `check_expr` in `crates/sentinel-types/src/lib.rs` built
+>      `by_index` and then `.expect("every field was provided")`: a duplicate filled one slot
+>      twice and left another `None`, so the count check above it passed and the `expect`
+>      fired. `struct P { lo: i64, hi: i64 }` + `let p = P { lo: 1, lo: 2 };` panicked every
+>      stage that runs the type checker — `snc types`, `borrow`, `effects`, `mir`,
+>      `ctverify`, `llvm` and `build` — with exit 101 and a Rust panic message rather than a
+>      `miette` diagnostic, which the project's own rule against
+>      `unwrap` / `panic!` on user-program input forbids. `scg` does not panic; it emits IR
+>      (D97).
 >
 >      **D97 — `scg` ACCEPTS a struct literal naming a field the struct does not declare,
 >      where the oracle rejects it.** Found 2026-09-22 by D95's review; pre-existing.
@@ -1702,7 +1716,12 @@ reference as you work through the milestones.
 >      same blind spot that hid D95. It is a missing REJECTION rather than a wrong answer, and
 >      the compiler that ships is the one that rejects, so it is a divergence and not a
 >      miscompile. The fix is a `field_type` / `field_index` -1 check at the `dump_sfields`
->      call site.
+>      call site. D97 also has to carry D96's refusal (ADR 0013 A1), which `scg` lacks: it
+>      exits 0 on `P { lo: 1, lo: 2 }` and on `P { lo: 1, lo: 2, hi: 3 }`, and for the second
+>      it emits a third `insertvalue`, at index 2, into a two-field struct, which `llc`
+>      rejects ("invalid indices for insertvalue"); for the first it puts the second `lo` in
+>      `hi`'s slot and `llc` accepts the module, so that shape is the silent one. A -1 check
+>      does not catch a duplicate, so the rejection path needs a seen-field check as well.
 >
 >      **D98 — an `if` written inside a handler ARM diverges in the MIR stage: the
 >      self-hosted lowerer descends into the arm and emits its branch blocks, the Rust oracle
@@ -2373,6 +2392,48 @@ reference as you work through the milestones.
 >      which `llc` rejects ("invalid indices for insertvalue"), and its typed dump and MIR
 >      differ too. It fails loud. `dump_array_elems` walks every element with no expectation;
 >      ADR 0051 A5 records the same missing thread for a `secret` array element.
+>
+>      **D137 — a class instance's heap fields are never freed (a leak).** Found 2026-09-23 by
+>      the D93 investigation; re-verified 2026-09-26. ADR 0022 D9 says a class-valued binding's
+>      scope-exit drop follows the struct rules (recursive field drops), but none of the three
+>      back ends frees them: the oracle's `needs_drop` and `scg`'s `cg_needs_drop` classify a
+>      class as needing no drop, and inkwell's class arm in `emit_drop_for_binding` hands it to
+>      `emit_drop_struct_fields`, which handles only a struct or a generic-struct instance and
+>      returns without freeing anything for a class. `class K { let v: [i64]; pub init(n: i64) {
+>      self.v = [n, n, n, n]; 0 } }`, built and dropped 2,000,000 times, peaks at about 101 MB in
+>      inkwell, the oracle's IR and `scg`'s IR, against 8.4 MB for the same field in a struct.
+>      The fix is to walk a class's fields as the struct drop does, in all three back ends.
+>
+>      **D138 — an enum payload's own heap is never freed (a leak).** Found 2026-09-23 by the
+>      D93 investigation; re-verified 2026-09-26. ADR 0032's drop frees an enum value's box but
+>      not what its payload owns: `let e = E::V([i + 1, 2, 3, 4]);`, matched or not, 2,000,000
+>      times, peaks at 100.5 MB in all three back ends, against 8.4 MB for the same array in a
+>      struct. The fix is ADR 0032's recorded payload-ownership model.
+>
+>      **D139 — an effecting fn in ADR 0072's let shape never frees its heap parameters (a
+>      leak).** Found 2026-09-23 by the D93 investigation; re-verified 2026-09-26.
+>      `fn eff(a: [i64]) -> i64 ! { Io } { let x: i64 = perform Io.read(); x + 1 }`, handled
+>      2,000,000 times, peaks at 100.5 MB in all three back ends; the direct shape with the same
+>      parameter (`{ perform Io.read() }`) peaks at 8.4 MB. (`scg`'s IR for it also differs from
+>      the oracle's: it captures the parameter into a frame where the oracle captures nothing,
+>      a D67 instance.)
+>
+>      **D140 — `==` between two arrays type-checks and borrow-checks, then fails in every back
+>      end.** Found 2026-09-25 by a review of the checker slice; re-verified 2026-09-26.
+>      `let a: [i64] = [1, 2]; let b: [i64] = [1, 2]; if a == b { 42 } else { 1 }`: `snc build`
+>      panics in inkwell (exit 101, "Found StructValue ... but expected the IntValue variant"),
+>      against the rule that user input gets a diagnostic, not a panic; the oracle and `scg`
+>      emit `icmp eq { i64, ptr }`, which `llc` rejects ("icmp requires integer operands"). It
+>      fails loud in all three. The fix is to refuse `==` / `!=` on an aggregate operand in the
+>      type checker, with a `tests/ui` fixture, or to lower it (`str_eq` exists for `[u8]`).
+>
+>      **D141 — a struct declaration may name a field twice, and a literal of it panics the
+>      Rust type checker.** Found 2026-09-26 by the review of D96; pre-existing, before D96
+>      and after it. `struct Q { a: i64, a: i64 }` type-checks; `let q = Q { a: 1 };` then
+>      panics `snc types` and `snc llvm` (exit 101, "every field was provided"), because the
+>      missing-field check matches fields by name, so the second `a`'s slot is never reported
+>      missing and stays `None`. (`Q { a: 1, a: 2 }` is refused, as D96's duplicate.) The fix
+>      is to refuse a repeated field name in the declaration, with a `tests/ui` fixture.
 >
 >      **D78 — stale corpus fixture counts in `llvm.rs` and `README.md`, at six sites, stale
 >      before this change.** Found by D74's reviews. `crates/sentinel-driver/tests/llvm.rs`
