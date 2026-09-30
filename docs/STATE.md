@@ -5,7 +5,7 @@ HANDOVER.md, STATE.md is the source of truth. New contributors (or
 new chat sessions) should be able to read this file and understand
 the current state of the workspace without re-reading every commit.
 
-## Current State (2026-09-30)
+## Current State (2026-10-01)
 
 > **Phase C closed at the bootstrap milestone (2026-05-30); Phase D self-hosts; the
 > per-unit separate-compilation back end is functionally complete.**
@@ -14,7 +14,21 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
-**Latest (2026-09-30) — the MIR lowers a `handle`'s arms and what a store's place computes,
+**Latest (2026-10-01) — `scg` binds a handler arm's parameters with the operation's
+declared types (register D150).** [ADR 0041](decisions/0041-self-host-port-types.md) A15:
+the self-hosted typer bound every arm parameter as `i64`, where the oracle binds each with
+the operation's declared type. `scg` now records each operation's parameter types at the
+effect-op scan and binds an arm's parameters with them, so its typed dump, borrow dump, MIR
+and constant-time verifier agree with the oracle's on `u8`, `bool`, `secret`, array and
+struct parameters; its verifier had missed a secret-dependent branch on a `secret`
+parameter, which `snc build`'s gate has refused since D148. Under codegen the parameters
+stay `i64`, so the emitted IR does not move; the text oracle loads them at their declared
+types, and what that leaves is register D152. Pinned by
+`tests/pass/c36_arm_param_takes_its_declared_type`, ten seed programs and a codegen test;
+five mutations caught. `scg`-only, so a patch by ADR 0076 D2; the next version is still at
+least 0.2.0 from the earlier slices.
+
+**Previously (2026-09-30) — the MIR lowers a `handle`'s arms and what a store's place computes,
 and the constant-time gate checks method bodies (register D148; D98 closed).**
 [ADR 0026](decisions/0026-hir-mir-pipeline-and-constant-time-secret-codegen.md) A1 and A2,
 [ADR 0050](decisions/0050-index-assignment.md) A7. Three kinds of code did not reach the MIR
@@ -23,7 +37,8 @@ computes (an index expression, the operand of a `*` store); and class `init`s, c
 and impl methods, which `lower_to_mir` does not hold. Both compilers now lower the arms and the
 place, so the MIR dumps of 57 corpus programs move (54 with a handler arm, 3 with an element
 store), `scg` agrees byte for byte, and D98's divergence closes (off the corpus, the typers'
-remaining differences on an arm — D7, D150, D151 — now reach the MIR too); every `snc build`
+remaining differences on an arm — D7, D150, D151 — now reach the MIR too; D150 is closed by
+the slice above); every `snc build`
 gate lowers the method bodies too (`lower_all_bodies`), while the `snc mir` and `snc ctverify`
 dumps still list the free fns, so `scg`'s verification port does not cover method bodies
 (register D149).

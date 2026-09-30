@@ -124,6 +124,12 @@ reference as you work through the milestones.
 > confirming nothing pre-existing is newly refused; oracle-vs-scg byte-equality on the new
 > fixture at types, mir and llvm; and the secret-taint check in both directions.
 
+### ▶ RESUME HERE (2026-10-01 — `origin/main` was `b3e4de9` when this was written (the maintainer has pushed everything through D148), and this slice's two commits sit on top of it, unpushed; read `git reflog show refs/remotes/origin/main` and `git log --oneline origin/main..HEAD` at the START and AGAIN before writing either down. This slice: **register D150 CLOSED** (`2563d0b` fix, then this docs commit) — [ADR 0041](decisions/0041-self-host-port-types.md) **A15**: `scg`'s typer binds a handler arm's parameters with the operation's declared types, recorded at the effect-op scan, where it bound every one as `i64`, so its typed dump, borrow dump, MIR and constant-time verifier agree with the oracle's on `u8`, `bool`, `secret`, array and struct parameters. Under codegen every binder stays `i64`, as it was, so `scg`'s emitted IR does not move. That is a stop, not parity: the text oracle loads a parameter at its declared type, and binding it under codegen too matched the oracle on most arms, but the first review round (`wf_5d3c5e0f-794`) found it made `scg` read a `?i64` parameter as 16 bytes from its 8-byte slot in a module that assembled (`scg`'s `perform` does not widen its argument, D132) and changed an arm-remainder replay verdict. The narrow second round (`wf_577d2707-92d`) showed the guard's first rationale was wrong — it is the text oracle's own load that the guard declines to copy — so the prose says what the guard is, and what it leaves is filed as **D152** (IR that differs from the oracle's on an arm reading a parameter that is not `i64`-wide; a refusal about an arm parameter that the code generator does not make); a third, prose-only round (`wf_eda95ee8-b8f`) corrected the rewritten text. Also: D68(c) is widened (a program that performs an operation whose parameter is not `i64`-wide does not build, and an arm that tests a nullable parameter or reads a struct parameter's field panics inkwell though the operation is never performed), D67 notes a single effecting `let`'s over-capture, and D132 notes that the parameter types it needs are now recorded. Register: **151 distinct ids, 60 whose heading opens `**D<n> — DONE`** (the 2026-09-22 block's rule; the id D130 is reserved and not in the public register). Four-check: **2,115 passed with exactly the 18 known Windows failures**, doctests and clippy clean, every `selfhost_*` differential green including both bootstrap fixed points. A matched sweep of the five self-hosted drivers, before and after, over all 513 `.sentinel` files moves only the new fixture's typed dump and MIR; the emitted IR moves nowhere. Five mutations caught, the baseline surviving. `scg`-only, so a patch by ADR 0076 D2; the next version is still at least 0.2.0 from the earlier slices, and `Cargo.toml` says 0.1.0.)
+
+> **NEXT:** ADR 0077's implementation (Q1–Q5 approved), from the scratchpad's `a77park/` (the tree diff it was parked from, the seven `c77_*` fixtures, the ACCEPTED ADR text); then its review, four-check, sweeps and commit. D152 is the natural follow-on to D150, after D132's `perform` half.
+>
+> Owed by the maintainer: D102, D103, ADR 0077's Q6, D36's decision, D146's direction, and when to bump the version (at least 0.2.0; `Cargo.toml` still says 0.1.0).
+
 ### ▶ RESUME HERE (2026-09-30b — `origin/main` was `f727299` when this was written (the maintainer has pushed everything through D97), and this slice's two commits sit on top of it, unpushed; read `git reflog show refs/remotes/origin/main` and `git log --oneline origin/main..HEAD` at the START and AGAIN before writing either down. This slice: **register D148 CLOSED, and D98 with it** (`cc477f1` fix, then this docs commit) — [ADR 0026](decisions/0026-hir-mir-pipeline-and-constant-time-secret-codegen.md) **A1/A2** and [ADR 0050](decisions/0050-index-assignment.md) **A7**: the MIR lowers a `handle`'s operation arms and its `return` arm and what a store's place computes, in both compilers (their MIR is byte-identical over the corpus), and every `snc build` constant-time gate — single file, merged, `--separate`, `--lib` / `--shared` — verifies a new `lower_all_bodies`, which adds class `init`s, class methods and impl methods to the free fns. The `snc mir` / `snc ctverify` dumps still list the free fns, so `scg`'s verification port does not cover method bodies (**D149**, filed). [`ct-model.md`](ct-model.md), the constant-time contract, is updated to match, and now lists the shift-amount sink the pass already checked. Seven `tests/ui/c52_secret_via_*` fixtures pin the single-file gate and four driver tests the merged, `--separate` and `--lib` gates (each refusal with a leak-free twin that builds); sixteen mutations caught, each baseline surviving. Two review rounds: `wf_1ba41744-544` (coverage and prose; stopped at the 2026-09-27 pause, its five blocking prose findings fixed here) and `wf_58c9e2b3-648` (the regress-parity lens the first never ran). The second found no false refusal and no crash; it found that the two typers' older differences on an arm — an arm parameter that is not `i64`, a resume's type, a `handle`'s type — now reach the MIR dump as well as the typed one, on programs outside the corpus. Those are registered (**D150**, **D151** and a note on D7), the parity claims are scoped to the corpus, and this was reported to the maintainer. Register: **150 distinct ids, 59 whose heading opens `**D<n> — DONE`** (the 2026-09-22 block's rule; the id D130 is reserved and not in the public register). Four-check: **2,113 passed with exactly the 18 known Windows failures**, doctests and clippy clean, every `selfhost_*` differential green including both bootstrap fixed points. Sweeps, the `snc` before this change (HEAD `f727299`'s; D97 did not change it) against the final tree: `snc mir` / `snc ctverify` over all 512 `.sentinel` files move 61 MIR dumps — the 57 D148 names and the 4 new arm and place fixtures — and the `ctverify` output of those 4 fixtures only; a matched `snc build` over the same 512 files plus 47 wrapper programs (one per library module) changes only the 7 new fixtures, each accepted before and refused after. It refuses programs that compiled before, so it is at least a minor version (ADR 0076 D2); `Cargo.toml` still says 0.1.0.)
 
 > **NEXT:** ADR 0077's implementation (Q1–Q5 approved), from the scratchpad's `a77park/` (the tree diff it was parked from, the seven `c77_*` fixtures, the ACCEPTED ADR text); then its review, four-check, sweeps and commit.
@@ -1754,8 +1760,8 @@ reference as you work through the milestones.
 >      emitted its branch blocks, the Rust oracle treated the whole `handle` as one opaque
 >      node.** Closed by register D148: both compilers now lower an arm's body, and their MIR
 >      for this program agrees, the bare-`v` terminator operand noted below included (it is
->      `v3` in both). The typers still differ on some arm shapes (D7, D150, D151), and since
->      D148 those differences reach the MIR too.
+>      `v3` in both). The typers still differ on some arm shapes (D7, D151; D150 until ADR
+>      0041 A15), and since D148 those differences reach the MIR too.
 >      Found 2026-09-22 by ADR 0075 slice 2's
 >      new fixture, which used an `if` for its class (A) shape and failed
 >      `sentinel_mir_matches_oracle_on_corpus` at 1/252. Pre-existing and independent of
@@ -2360,8 +2366,12 @@ reference as you work through the milestones.
 >      argument of a `perform` against the operation's parameter type, so
 >      `perform Io.write(40)` with `write(x: secret i64)` types the literal
 >      `(widen-secret (int 40 :i64) :secret i64)`; `scg` types it `(int 40 :i64)`. The typed
->      dump and the MIR differ; the IR does not. The fix is D131's for the `perform` arm, with
+>      dump and the MIR differ; for this `secret` argument the IR does not, but for a nullable
+>      or generic-instance parameter the `perform`'s IR differs too, and the oracle's is then
+>      rejected there (D68(c)). The fix is D131's for the `perform` arm, with
 >      the operation's parameter types recorded where `scan_effect_ops` reads the effect.
+>      Since D150 they are recorded (`efpt`, read by `op_param_ty`), so what remains is typing
+>      each argument against them, which is also what D152 waits on.
 >
 >      **D133 — `scg` emits invalid IR for an effecting fn whose body `let`s a plain value and
 >      then ends in a `perform`.** Found 2026-09-25 by the review of D131; pre-existing.
@@ -2553,7 +2563,8 @@ reference as you work through the milestones.
 >      element store, and `scg` agrees byte for byte; no program's constant-time verdict
 >      changes; D98 closes with it), and every `snc build` gate lowers the method bodies too
 >      (`lower_all_bodies`). Off the corpus, the typers' remaining differences on an arm (D7,
->      D150, D151) now reach the MIR dump too. Pinned by seven new `tests/ui` fixtures —
+>      D150, D151; D150 is closed since) now reach the MIR dump too. Pinned by seven new
+>      `tests/ui` fixtures —
 >      `c52_secret_via_handler_arm`, `_return_arm`, `_index_place`, `_deref_place`, `_method`,
 >      `_class_init` and `_impl_method` — for the single-file gate, and by tests in
 >      `modules.rs` (the merged and `--separate` gates) and `export.rs` (`--lib`), each with a
@@ -2569,8 +2580,20 @@ reference as you work through the milestones.
 >      in a shipped gate. The fix is to put the method bodies in both dumps, with `scg`
 >      mirroring them.
 >
->      **D150 — `scg` types a handler arm's parameters as `i64` whatever the operation
->      declares.** Filed 2026-09-30 by D148's review; pre-existing. The oracle binds each
+>      **D150 — DONE (2026-10-01, `2563d0b`, ADR 0041 A15). `scg` typed a handler arm's
+>      parameters as `i64` whatever the operation declared.** `scg` now records each
+>      operation's parameter types at the effect-op scan (the half of the fix it shares with
+>      D132) and binds an arm's parameters with them; the continuation keeps `i64`. Its typed
+>      dump, borrow dump, MIR and constant-time verifier agree with the oracle's on `u8`,
+>      `bool`, `secret`, array and struct parameters, where its verifier had missed a
+>      secret-dependent branch on a `secret` parameter. Under codegen every binder stays
+>      `i64`, so the emitted IR does not move: binding the declared type there too made `scg`
+>      read a `?i64` parameter as 16 bytes from its 8-byte slot, in IR `llvm-as` accepts, and
+>      changed whether an arm's remainder is replayed (both caught by D150's review before it
+>      landed). What the `i64` binding leaves is D152. Pinned by
+>      `tests/pass/c36_arm_param_takes_its_declared_type`, ten seed programs and
+>      `sentinel_codegen_reads_an_arm_parameter_within_its_slot`.
+>      As filed: Filed 2026-09-30 by D148's review; pre-existing. The oracle binds each
 >      parameter of an arm to the operation's declared parameter type; `scg`'s
 >      `dump_thparams` binds each to `i64`. With `effect Io { ask(b: u8) -> i64; }`, the arm
 >      `Io.ask(b, k) => k(b as i64)` types the parameter `(var #1 :u8)` in the oracle and
@@ -2588,6 +2611,30 @@ reference as you work through the milestones.
 >      :i64) :?i64)`). Their typed and MIR dumps differed before D148 and still do. The fix
 >      site is `dump_te_handle`'s `close_ty(out, bty, c)`, which closes the handle with the
 >      body's type.
+>
+>      **D152 — `scg`'s code generator binds a handler arm's parameters as `i64`, where the
+>      text oracle loads each at its declared type.** Filed 2026-10-01 by D150's review; the
+>      binding is older than D150, which kept it on purpose (ADR 0041 A15). The text oracle
+>      keeps an operation's argument in an `i64` slot and loads the parameter at its declared
+>      type (`load i1` for a `bool`); inkwell loads an `i64`, and so does `scg`'s code
+>      generator. So on an arm that reads a parameter that is not `i64`-wide (one other than
+>      `i64` or `secret i64`), `scg`'s IR differs from `snc llvm`'s: with `effect Io { ask(flag: bool) -> i64; }`, `perform
+>      Io.ask(true)` and the arm `Io.ask(flag, k) => if flag { k(42) } else { k(2) }`, the
+>      oracle's module assembles (it passes the constant as `i64 1`) and `scg`'s does not
+>      (`'%v10' defined with type 'i64' but expected 'i1'`). The binding also splits `scg`'s
+>      refusals: one whose subject is an arm parameter — an unknown field of a struct
+>      parameter, `vec_to_array` over a `Vec<[i64]>` one — is made by the typer, borrow, MIR
+>      and verifier drivers, which bind the declared type, and not by the code generator,
+>      which emits IR (no driver refused it before D150). And a remainder that reads the
+>      arm's parameter still reaches D101 in the code generator (an abort, or IR `llc`
+>      rejects). Binding the declared type
+>      under codegen needs two things first: D132's `perform` half, so that `scg` widens an
+>      argument as the oracle does (without it, a `?i64` parameter was read as 16 bytes from
+>      its 8-byte slot in a module that assembled), and an `i64` for the parameter in the
+>      remainder verdict (`cg_ar_caps_fit`), as both Rust back ends have. The oracle's own
+>      arm reads a parameter wider than the slot past it too; in the review's probes its
+>      module assembled only when the operation was never performed, so that read never ran
+>      (D68(c)).
 >
 >      **D78 — stale corpus fixture counts in `llvm.rs` and `README.md`, at six sites, stale
 >      before this change.** Found by D74's reviews. `crates/sentinel-driver/tests/llvm.rs`
@@ -2867,7 +2914,20 @@ reference as you work through the milestones.
 >      nothing checks the value against the continuation's `i64` seam; ADR 0072 A1 checks it only
 >      in the embedded shape. An operation with an `f64` PARAMETER panics too, in every shape.
 >      Each breaks the rule that user input surfaces a diagnostic. No corpus program reaches any
->      of them.
+>      of them. (c) is wider than the `f64` parameter (found 2026-09-30 by D150's review): a
+>      program that performs an operation whose parameter is not `i64`-wide does not build
+>      either. `snc build` fails LLVM verification for a `u8`, `i32` or `bool` parameter and
+>      panics in inkwell for an array, struct, nullable, generic-instance or `Shared` one.
+>      The text oracle hands the argument to `sentinel_perform_op(i32, i64)` as it is, so its
+>      IR is rejected at the `perform` unless the argument is a constant it prints as an
+>      `i64` literal (`perform Io.ask(true)`). A `secret i64` parameter builds, and so can a
+>      program that handles such an operation without performing it, unless its arm uses the
+>      parameter where inkwell, which binds it as an `i64`, cannot: an arm that tests a
+>      nullable parameter or reads a struct parameter's field (`is_some(x)`, `p.a`) panics
+>      inkwell though the operation is never performed (found 2026-10-01 by D150's third
+>      review). The fix is a refusal at the operation's declaration, like ADR 0073 D1's for
+>      references; it would also refuse the programs of this kind that build today, so it is
+>      at least a minor version (ADR 0076 D2).
 >
 >      **D67 — scg's effecting chained-let and let-shape emitters capture a different variable
 >      set from the oracle.** Found by D59/D60's review, at the ADR 0072 continuation seam.
@@ -2880,7 +2940,11 @@ reference as you work through the milestones.
 >      the oracle captures nothing where scg captures `c` — an 8-byte `load i64` from `c`'s
 >      1-byte `alloca i1`. Pre-existing: on the review's probes HEAD scg emits the same output.
 >      scg-only; no corpus program has the shape (`c65_return_in_resumer`'s chained fn avoids
->      it on purpose).
+>      it on purpose). A single effecting `let` over-captures too (found 2026-09-30 while
+>      writing D150's fixture): for `fn body(s: i64) -> i64 ! { Mix } { let r: i64 = perform
+>      Mix.mix(s); r }` the oracle pushes the continuation with no frame, while `scg`
+>      allocates an 8-byte frame and stores `s` in it, though nothing after the `perform`
+>      reads `s`.
 >
 >      **D66 — DONE (2026-09-11, with D59). The text oracle, and scg with it, stored every
 >      `match` arm at the MATCH's type, so an arm whose divergent value is a register of another
