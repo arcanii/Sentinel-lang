@@ -311,6 +311,38 @@ fn sentinel_codegen_matches_oracle_on_seeds() {
     );
 }
 
+/// Registers D150 and D152 (ADR 0041 A15): under codegen `scg` binds a handler arm's
+/// parameters as `i64`. Bound as the declared `?i64`, this program's parameter was read as
+/// a 16-byte `{ i1, i64 }` from its 8-byte slot, in a module `llvm-as` accepts, because
+/// `scg`'s `perform` passes the `5` unwidened (register D132). The oracle's `main` makes the
+/// same read, but its `perform` widens the `5` and its module fails there (register
+/// D68(c)). This holds the `i64` binding until D132's `perform` half lands (register D152).
+#[test]
+fn sentinel_codegen_reads_an_arm_parameter_within_its_slot() {
+    let tmp =
+        std::env::temp_dir().join(format!("snc_selfhost_cg_arm_slot_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).expect("create temp dir");
+    let cg = build_sentinel_codegen(&tmp);
+
+    let work = tmp.join("work");
+    std::fs::create_dir_all(&work).expect("create work dir");
+    std::fs::write(
+        work.join("input.sentinel"),
+        "effect Io { w(x: ?i64) -> i64; }\n\
+         fn one() -> i64 ! { Io } { perform Io.w(5) }\n\
+         fn main() -> i64 { handle one() with { Io.w(x, k) => if is_some(x) { k(1) } else { k(2) } } }\n",
+    )
+    .expect("stage the program");
+    let out = Command::new(&cg).current_dir(&work).output().expect("run the Sentinel codegen");
+    let ir = String::from_utf8_lossy(&out.stdout);
+    assert!(ir.contains("@main("), "expected IR from the Sentinel codegen:\n{ir}");
+    assert!(
+        !ir.contains("load { i1, i64 }"),
+        "the arm's parameter was read wider than its `i64` slot:\n{ir}"
+    );
+}
+
 /// ADR 0074 (register D79): the five `handler_arm_exits` programs, built from the
 /// `snc llvm` oracle's IR and run. `scg` emits that IR byte-for-byte (they are seeds
 /// above), so this runs the text back ends' releases; `tests/handler_arm_exits.rs`

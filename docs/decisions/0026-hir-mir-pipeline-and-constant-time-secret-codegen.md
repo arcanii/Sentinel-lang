@@ -299,9 +299,10 @@ the escape hatch (D3) bounds the downside.
   binding — in the oracle, its declared type, which carries its `secret` qualifier, as a
   `match` binding's does. The two compilers' MIR for an arm agrees wherever their typers
   agree on it, which is every corpus program, and D98's divergence (branch blocks `scg`
-  alone emitted) is closed. The typers still differ on an arm parameter that is not `i64`
-  (register D150), on a resume's type (D7) and on a `handle`'s type (D151), and since this
-  amendment those differences show in the MIR as well as the typed dump. Pinned by
+  alone emitted) is closed. The typers still differ on a resume's type (D7) and on a
+  `handle`'s type (D151), and on an arm parameter that is not `i64` until register D150
+  (ADR 0041 A15), and since this amendment those differences show in the MIR as well as
+  the typed dump. Pinned by
   `tests/ui/c52_secret_via_handler_arm` and `c52_secret_via_return_arm`.
 - **A2 (2026-09-30, register D148) — the constant-time gate checks method bodies.**
   `lower_to_mir` lowers `program.fns`, and class `init`s, class methods and impl methods

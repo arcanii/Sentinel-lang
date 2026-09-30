@@ -1,0 +1,25 @@
+// Register D150 (ADR 0041 A15): a handler arm's parameter takes the operation's declared
+// parameter type. `mix`'s parameter is `secret i64`, so in the arm `x` is a secret: the
+// arm computes with it as one and resumes with a declassified value. The self-hosted
+// typer bound every arm parameter as `i64`, so its typed dump and MIR differed from the
+// oracle's here; the differentials over this corpus compare them.
+//
+// Exits 42: 21 * 2.
+effect Mix { mix(x: secret i64) -> i64; }
+
+fn body(s: secret i64) -> i64 ! { Mix } {
+    perform Mix.mix(s)
+}
+
+fn run(s: secret i64) -> i64 {
+    handle body(s) with {
+        Mix.mix(x, k) => {
+            let y: secret i64 = x * 2;
+            k(declassify(y))
+        }
+    }
+}
+
+fn main() -> i64 {
+    run(21)
+}

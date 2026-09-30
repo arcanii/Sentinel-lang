@@ -163,6 +163,15 @@ const SEEDS: &[&str] = &[
     "effect Io { read() -> i64; }\nfn main() -> i64 { handle perform Io.read() with { Io.read(k) => k(42) } }\n",
     "effect Io { write(msg: i64) -> i64; }\nfn w() -> i64 ! { Io } { perform Io.write(7) }\nfn main() -> i64 { handle w() with { Io.write(m, k) => k(m + 1) } }\n",
     "effect Io { read() -> i64; }\nfn r() -> i64 ! { Io } { perform Io.read() }\nfn main() -> i64 { handle r() with { Io.read(k) => k(0), return v => v * 2 } }\n",
+    // Register D150 (ADR 0041 A15): a handler arm's parameters take the operation's
+    // declared types (`u8`, `bool`, `secret i64`, an array, a struct; two operations,
+    // one with two parameters), where the typer bound every one as `i64`.
+    "effect Io { ask(b: u8) -> i64; }\nfn one() -> i64 ! { Io } { perform Io.ask(3 as u8) }\nfn main() -> i64 { handle one() with { Io.ask(b, k) => k(b as i64) } }\n",
+    "effect Io { ask(flag: bool) -> i64; }\nfn one(f: bool) -> i64 ! { Io } { perform Io.ask(f) }\nfn main() -> i64 { handle one(true) with { Io.ask(flag, k) => if flag { k(1) } else { k(2) } } }\n",
+    "effect Io { w(x: secret i64) -> i64; }\nfn body(s: secret i64) -> i64 ! { Io } { perform Io.w(s) }\nfn run(s: secret i64) -> i64 { handle body(s) with { Io.w(x, k) => { let y: secret i64 = x * 2; k(declassify(y)) } } }\nfn main() -> i64 { run(21) }\n",
+    "effect S { put(xs: [i64]) -> i64; }\nfn one(v: [i64]) -> i64 ! { S } { perform S.put(v) }\nfn main() -> i64 { handle one([1, 2, 3]) with { S.put(xs, k) => k(len(xs)) } }\n",
+    "struct P { a: i64, b: i64 }\neffect Io { w(p: P) -> i64; }\nfn one() -> i64 ! { Io } { perform Io.w(P { a: 1, b: 2 }) }\nfn main() -> i64 { handle one() with { Io.w(p, k) => k(p.a + p.b) } }\n",
+    "effect Io { a(x: u8) -> i64; b(n: i64, s: secret i64) -> i64; }\nfn one(s: secret i64) -> i64 ! { Io } { perform Io.b(1, s) }\nfn main() -> i64 { handle one(5) with { Io.a(x, k) => k(x as i64), Io.b(n, s, k) => { let y: secret i64 = s + n; k(n) } } }\n",
     // (4h) generics: a generic fn (`<T>`) typed as `<T#0>` in its params/body/return,
     // type-arg inference at call sites (`(targs …)` + the substituted return), two
     // distinct instantiations of one fn, generic structs (`Box<T>` / `Pair<A,B>` →

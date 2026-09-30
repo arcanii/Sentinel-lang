@@ -1160,6 +1160,13 @@ fn pass_c36a_return_arm_after_resume() {
     assert_eq!(r.stdout, "");
 }
 
+#[test]
+fn pass_c36_arm_param_takes_its_declared_type() {
+    // Register D150 (ADR 0041 A15): the arm's `x` is `mix`'s declared `secret i64`; the arm
+    // doubles it as a secret and resumes with it declassified. 21 * 2 = 42.
+    assert_eq!(run_exit("c36_arm_param_takes_its_declared_type.sentinel"), 42);
+}
+
 // ============================================================================
 // C3.6(b) / ADR 0020 D3: nested handles. When an inner handle's body emits
 // an op the inner doesn't catch, the inner's switch default propagates the

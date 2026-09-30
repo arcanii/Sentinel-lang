@@ -76,6 +76,10 @@ const SEEDS: &[&str] = &[
     "fn take(a: [i64]) -> i64 { a[0] }\nfn main() -> i64 { let xs = [1, 2, 3]; take(xs) }\n",
     "struct P { x: i64 }\nfn pick(c: bool, p: P, q: P) -> P { if c { p } else { q } }\nfn main() -> i64 { let r = pick(true, P { x: 1 }, P { x: 2 }); r.x }\n",
     "struct P { x: i64 }\nenum W { Wrap(P) }\nfn unwrap(w: W) -> P { match w { W::Wrap(p) => p } }\nfn main() -> i64 { let pp: P = P { x: 5 }; let r: P = unwrap(W::Wrap(pp)); r.x }\n",
+    // Register D150 (ADR 0041 A15): a handler arm moves an owned parameter, which the
+    // typer binds with the operation's declared type (an array; a struct holding one).
+    "fn consume(v: [i64]) -> i64 { len(v) }\neffect S { put(xs: [i64]) -> i64; }\nfn one(v: [i64]) -> i64 ! { S } { perform S.put(v) }\nfn main() -> i64 { handle one([1, 2, 3]) with { S.put(xs, k) => { let n: i64 = consume(xs); k(n) } } }\n",
+    "struct Q { a: [i64] }\nfn take(q: Q) -> i64 { len(q.a) }\neffect Io { w(q: Q) -> i64; }\nfn one(q: Q) -> i64 ! { Io } { perform Io.w(q) }\nfn main() -> i64 { handle one(Q { a: [1, 2] }) with { Io.w(q, k) => { let n: i64 = take(q); k(n) } } }\n",
 ];
 
 #[test]

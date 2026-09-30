@@ -268,11 +268,15 @@ fn dump_tarms(out: &mut Vec<u8>, a: Arms, exp: i64, own: bool, src: &[u8], c: &m
     }
 }
 
-// (4g) A handler arm's params: each binds a fresh VarId (source order) → `#vid`. ⚠
-// bound with `i64` (every corpus op param is `i64`; the continuation `k` is only ever
-// used as a resume-kont callee, never a typed var). A non-`i64` op param would need
-// the op's param-type table (a follow-up).
-fn dump_thparams(out: &mut Vec<u8>, b: Binds, c: &mut TyCtx, first: bool) -> i64 {
+// (4g) A handler arm's params: each binds a fresh VarId (source order) → `#vid`, with
+// the op's declared parameter type (D150), as the oracle binds `param_var_ids`. The
+// continuation `k`, the last binder, keeps `i64`: it is only ever used as a resume-kont
+// callee, never a typed var. Under codegen every binder keeps `i64`, as before D150
+// (register D152): the text oracle loads a parameter at its declared type from its `i64`
+// slot, but `scg`'s `perform` does not yet widen an argument to the parameter's type
+// (D132), and its remainder verdict must see `i64` for the parameter, as the Rust back
+// ends' does.
+fn dump_thparams(out: &mut Vec<u8>, b: Binds, c: &mut TyCtx, first: bool, eid: i64, oidx: i64, pi: i64) -> i64 {
     match b {
         Binds::BindEnd => 0,
         Binds::BindCell(nm, rest) => {
@@ -284,10 +288,15 @@ fn dump_thparams(out: &mut Vec<u8>, b: Binds, c: &mut TyCtx, first: bool) -> i64
             };
             let pvid: i64 = (*c).nextvid;
             (*c).nextvid = (*c).nextvid + 1;
-            bind_name(c, nm, pvid, 0);
+            let pty: i64 = if cg_on(c) {
+                0
+            } else {
+                op_param_ty(c, eid, oidx, pi)
+            };
+            bind_name(c, nm, pvid, pty);
             push(out, '#');
             append_int(out, pvid);
-            dump_thparams(out, rest, c, false)
+            dump_thparams(out, rest, c, false, eid, oidx, pi + 1)
         },
     }
 }
@@ -366,7 +375,7 @@ fn dump_tharms(out: &mut Vec<u8>, a: HArms, src: &[u8], c: &mut TyCtx, gb: &mut 
             append_str(out, " (");
             let mark: i64 = len((*c).scs);
             let cg_pv0: i64 = (*c).nextvid;
-            dump_thparams(out, hparams, c, true);
+            dump_thparams(out, hparams, c, true, heid, hoidx, 0);
             let cg_pvn: i64 = (*c).nextvid;
             append_str(out, ") ");
             // (cg) bind the arm's op-param (kont.arg @8) + continuation (a slot holding ck).

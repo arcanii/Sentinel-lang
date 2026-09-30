@@ -307,7 +307,8 @@ fn synth_delegate_impl(buf: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i6
 // --- (4g) effect decl scanning + emit --------------------------------------
 
 // PASS-1.5: scan an effect's op params (counting them into `voff` — they consume
-// global VarIds before any fn body, ADR 0020 — + disposing their types). Cursor at `(`.
+// global VarIds before any fn body, ADR 0020 — + recording their types into `efpt`,
+// D150). Cursor at `(`.
 fn scan_op_params(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64, c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
     *cur = *cur + 1;             // skip `(`
     scan_opp_loop(k, s, e, src, cur, c, gb)
@@ -331,14 +332,15 @@ fn scan_opp_loop(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut
         *cur = *cur + 1;         // skip name
         *cur = *cur + 1;         // skip `:`
         let pte: TypeE = parse_type(k, s, e, src, cur);
-        type_of_typeexpr(c, pte, gb);
+        let pth: i64 = type_of_typeexpr(c, pte, gb);
+        push(&mut (*c).efpt, pth);
         (*c).voff = (*c).voff + 1;
         scan_opp_loop(k, s, e, src, cur, c, gb)
     }
 }
 
 // PASS-1.5 effect-op scan: record each op `(EffectId, name, return-type)` into the
-// op table + count its params into `voff`.
+// op table, its parameter types into `efpt` (D150) + count its params into `voff`.
 fn scan_effect_ops(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], p1: i64, eid: i64, c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
     let mut cur: i64 = p1 + 1;   // skip `effect`
     cur = cur + 1;               // skip name
@@ -358,7 +360,10 @@ fn scan_eop_loop(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut
         let on_s: i64 = (*s)[*cur];
         let on_e: i64 = (*e)[*cur];
         *cur = *cur + 1;         // skip op name
+        let p0: i64 = len((*c).efpt);
         scan_op_params(k, s, e, src, cur, c, gb);
+        push(&mut (*c).efp0, p0);
+        push(&mut (*c).efpn, len((*c).efpt) - p0);
         let rth: i64 = if (*k)[*cur] == 8 {
             *cur = *cur + 1;     // skip `->`
             let rt: TypeE = parse_type(k, s, e, src, cur);

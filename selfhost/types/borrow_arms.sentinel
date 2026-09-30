@@ -1810,8 +1810,7 @@ fn dump_te_handle(out: &mut Vec<u8>, hb: Expr, ha: HArms, hr: Ret, exp: i64, src
             // Opaque([body]). An arm's parameters, its continuation and the `return` value
             // are unbound here, so each use lowers to a fresh Opaque of the type this typer
             // gave it, as the oracle's `lookup_var` does with the oracle's. The two typers
-            // still differ on an arm parameter that is not i64 (register D150), a resume's
-            // type (D7) and a handle's type (D151).
+            // still differ on a resume's type (D7) and a handle's type (D151).
             dump_tharms(out, ha, src, c, gb, is_nested);
             dump_tret(out, hr2, bty, src, c, gb);
             close_ty(out, bty, c);

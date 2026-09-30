@@ -1220,6 +1220,43 @@ fn op_index_lookup(c: &mut TyCtx, src: &[u8], eid: i64, q: &[u8]) -> i64 {
     found
 }
 
+// (D150) The type handle of parameter `pi` of the `oidx`-th op of effect `eid`, or i64
+// (0) when there is no such parameter — a handler arm's continuation, its last binder.
+fn op_param_ty(c: &mut TyCtx, eid: i64, oidx: i64, pi: i64) -> i64 {
+    let n: i64 = len((*c).efoo);
+    let mut i: i64 = 0;
+    let mut idx: i64 = 0;
+    let mut found: i64 = 0;
+    let mut hit: bool = false;
+    while i < n {
+        if (*c).efoo[i] == eid {
+            if hit {
+                0
+            } else {
+                if idx == oidx {
+                    if pi < (*c).efpn[i] {
+                        found = (*c).efpt[(*c).efp0[i] + pi];
+                        0
+                    } else {
+                        0
+                    };
+                    hit = true;
+                    0
+                } else {
+                    0
+                };
+                idx = idx + 1;
+                0
+            };
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    found
+}
+
 // The return-type handle of the `oidx`-th op of effect `eid`, or i64 default.
 fn op_ret(c: &mut TyCtx, eid: i64, oidx: i64) -> i64 {
     let n: i64 = len((*c).efoo);

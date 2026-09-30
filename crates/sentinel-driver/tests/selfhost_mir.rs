@@ -107,6 +107,15 @@ const SEEDS: &[&str] = &[
     "fn ch() -> u8 { 'a' }\nfn st() -> [u8] { \"hi\" }\nfn main() -> i64 { 0 }\n",
     "fn pushy(n: i64) -> [i64] { let mut v: Vec<i64> = vec_new(); push(&mut v, n); vec_to_array(v) }\nfn ln(a: [i64]) -> i64 { len(a) }\nfn main() -> i64 { 0 }\n",
     "fn id<T>(x: T) -> T { x }\nfn use_g() -> i64 { id(5) }\nfn main() -> i64 { 0 }\n",
+    // Register D150 (ADR 0041 A15): a handler arm's parameters take the operation's
+    // declared types (`u8`, `bool`, `secret i64`, an array, a struct; two operations,
+    // one with two parameters), where the typer bound every one as `i64`.
+    "effect Io { ask(b: u8) -> i64; }\nfn one() -> i64 ! { Io } { perform Io.ask(3 as u8) }\nfn main() -> i64 { handle one() with { Io.ask(b, k) => k(b as i64) } }\n",
+    "effect Io { ask(flag: bool) -> i64; }\nfn one(f: bool) -> i64 ! { Io } { perform Io.ask(f) }\nfn main() -> i64 { handle one(true) with { Io.ask(flag, k) => if flag { k(1) } else { k(2) } } }\n",
+    "effect Io { w(x: secret i64) -> i64; }\nfn body(s: secret i64) -> i64 ! { Io } { perform Io.w(s) }\nfn run(s: secret i64) -> i64 { handle body(s) with { Io.w(x, k) => { let y: secret i64 = x * 2; k(declassify(y)) } } }\nfn main() -> i64 { run(21) }\n",
+    "effect S { put(xs: [i64]) -> i64; }\nfn one(v: [i64]) -> i64 ! { S } { perform S.put(v) }\nfn main() -> i64 { handle one([1, 2, 3]) with { S.put(xs, k) => k(len(xs)) } }\n",
+    "struct P { a: i64, b: i64 }\neffect Io { w(p: P) -> i64; }\nfn one() -> i64 ! { Io } { perform Io.w(P { a: 1, b: 2 }) }\nfn main() -> i64 { handle one() with { Io.w(p, k) => k(p.a + p.b) } }\n",
+    "effect Io { a(x: u8) -> i64; b(n: i64, s: secret i64) -> i64; }\nfn one(s: secret i64) -> i64 ! { Io } { perform Io.b(1, s) }\nfn main() -> i64 { handle one(5) with { Io.a(x, k) => k(x as i64), Io.b(n, s, k) => { let y: secret i64 = s + n; k(n) } } }\n",
 ];
 
 #[test]
@@ -261,6 +270,9 @@ const CTVERIFY_SEEDS: &[&str] = &[
     "fn f(a: secret i64, b: secret i64) -> i64 { declassify(a + b) }\nfn main() -> i64 { 0 }\n",
     "fn f(a: secret i64, b: secret i64) -> secret bool { a == b }\nfn main() -> i64 { 0 }\n",
     "fn f(a: secret i64) -> secret i64 { a * 2 }\nfn main() -> i64 { 0 }\n",
+    // Register D150: a secret-dependent branch on a handler arm's `secret` parameter.
+    "effect Io { w(x: secret i64) -> i64; }\nfn body(s: secret i64) -> i64 ! { Io } { perform Io.w(s) }\nfn run(s: secret i64) -> i64 { handle body(s) with { Io.w(x, k) => { let t: secret bool = (x == 1) && (x == 2); k(1) } } }\nfn main() -> i64 { 0 }\n",
+    "effect S { put(x: secret bool) -> i64; }\nfn one(a: secret bool) -> i64 ! { S } { perform S.put(a) }\nfn run(s: secret bool, b: secret bool) -> i64 { handle one(s) with { S.put(x, k) => { let t: secret bool = x && b; k(1) } } }\nfn main() -> i64 { 0 }\n",
 ];
 
 #[test]

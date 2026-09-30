@@ -211,6 +211,9 @@ struct TyCtx {
     efos: Vec<i64>,   // op name src start
     efoe: Vec<i64>,   // op name src end
     efor: Vec<i64>,   // op return-type handle
+    efp0: Vec<i64>,   // (D150) op's first parameter-type index into `efpt`
+    efpn: Vec<i64>,   // (D150) op's parameter count
+    efpt: Vec<i64>,   // (D150) op parameter-type handles, every op's in turn
     voff: i64,        // effect-op-param count → the fn-region VarId base (ADR 0020)
     // --- (4h) generics ---------------------------------------------------------
     // Type-param scope: active while a generic decl's signature/body is typed; the

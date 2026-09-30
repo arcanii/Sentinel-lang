@@ -26,7 +26,9 @@ module types;
 // instantiated is not checked, and no code is emitted for it, and `vec_to_array` over an
 // abstract `Vec<T>` is checked at each instance's element rather than refused outright.
 // Running on can stop the code generator before `run` answers: a method called on the value
-// of an unknown field aborts it on an out-of-range index (D143, which predates A14). And
+// of an unknown field aborts it on an out-of-range index (D143, which predates A14). The
+// code generator binds a handler arm's parameters as `i64` (A15), so it does not make a
+// refusal whose subject is an arm parameter, which the other four drivers make (D152). And
 // three verdicts differ from the oracle's: `vec_to_array` over a `Vec<T>` reached through a
 // generic call's result or a generic instance's field is refused even when `T` is plain,
 // because `subst_type` does not substitute inside a `Vec` (D147); an empty struct literal

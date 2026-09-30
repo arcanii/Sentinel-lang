@@ -413,7 +413,7 @@ ADR-0040 A1 discipline — `docs/agent-protocol.md`). See ## Amendments A1.
   first real binding must land at `env[voff]` (without the phantoms, `env[voff]` was an
   out-of-bounds crash). ⚠ handler-arm op params bind as `i64` (every corpus op param is
   `i64`; the continuation `k` is only ever a resume-kont callee, never a typed var) — a
-  non-`i64` op param would need the op-param-type table, a follow-up. **Next: (4h)
+  non-`i64` op param would need the op-param-type table, a follow-up (done: A15). **Next: (4h)
   generics** (generic-fn calls via `unify_one` bidirectional inference, `GenericInstance`
   interning, `type_args` on calls — the c17 fixtures), then (4i) the full-corpus phase-go.
 
@@ -579,6 +579,44 @@ ADR-0040 A1 discipline — `docs/agent-protocol.md`). See ## Amendments A1.
   caught; a twenty-ninth, which disables the walk's `return` rule, is equivalent, because a
   `return` in an `init` is refused (`return_in_init`) before the walk runs, in the oracle as
   here. `scg`-only: the oracle and inkwell move no byte.
+- **A15 — (2026-10-01, register D150) a handler arm's parameters take the operation's
+  declared types, except under codegen.** A11 bound every arm parameter as `i64`, which
+  every operation parameter in `tests/pass` then was, and left the operation-parameter-type
+  table as a follow-up. The effect-op scan (`scan_op_params`) already interned each
+  parameter's type and dropped it; it now records it (`efpt`, with each operation's first
+  index and count in `efp0` / `efpn`), and `dump_thparams` binds an arm's i-th binder with
+  the operation's i-th parameter type (`op_param_ty`), as the oracle binds
+  `param_var_ids`. The continuation, the last binder, keeps `i64`. The scan interns nothing
+  it did not intern before; outside codegen, an arm body that infers a type from a
+  parameter now interns what the oracle interns (`Wrap<Box<u8>>` for `wrap(p)` with
+  `p: Box<u8>`, where it interned `Wrap<i64>`). On an arm whose operation takes a `u8`, `bool`, `secret`, array or
+  struct parameter the typed dump, the borrow dump, the MIR and the constant-time verifier
+  now agree with the oracle's: the typed dump differed before, the borrow dump where the
+  arm moves an owned parameter, and, since ADR 0026 A1 lowered an arm's body, the MIR too;
+  and `scg`'s verifier did not report a secret-dependent branch on a `secret` parameter
+  that the oracle's reports. Under codegen every binder stays `i64`, as it was, so the
+  emitted IR does not move. That is a stop, not parity: the text oracle keeps the argument
+  in an `i64` slot and loads the parameter at its declared type (`load i1` for a `bool`,
+  `load { i1, i64 }` for a `?i64`), while inkwell loads an `i64`. Binding the declared type
+  under codegen as well matched the text oracle byte for byte on most arms, but two other
+  parts of `scg` are not ready for it. Its `perform` passes an argument unwidened (register
+  D132), so for `perform Io.w(5)` with `w(x: ?i64)` its module read the parameter as a
+  16-byte `{ i1, i64 }` from the 8-byte slot and still assembled, where the oracle widens
+  the `5` and its module fails at the `perform`. And its remainder verdict (ADR 0075 D6)
+  reads the binder's type, where both Rust back ends give the parameter `i64`, so a `bool`
+  parameter read after `k(v)` made `scg` emit the panic path where the oracle replays the
+  remainder; with the binder kept `i64`, that remainder reaches register D101 (an abort,
+  or IR `llc` rejects), as it did before. What the `i64` binding leaves is register D152: IR that differs from the
+  oracle's on an arm that reads a parameter that is not `i64`-wide (for a constant `bool`
+  argument the oracle's module assembles and `scg`'s does not), and a refusal about an arm
+  parameter that the typer, borrow, MIR and verifier drivers make and the code generator
+  does not. Pinned by `tests/pass/c36_arm_param_takes_its_declared_type` (a `secret i64`
+  parameter, through every differential); by seeds in `selfhost_types.rs` and
+  `selfhost_mir.rs` — six shapes, one of them two operations with two parameters on one —
+  two verifier seeds with a secret-dependent branch on the parameter, and two borrow seeds
+  in `selfhost_borrow.rs` whose arm moves an owned parameter; and by
+  `sentinel_codegen_reads_an_arm_parameter_within_its_slot`, which holds the codegen
+  binding. `scg`-only: the oracle and inkwell move no byte, so a patch by ADR 0076 D2.
 
 ## Context
 
