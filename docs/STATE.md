@@ -5,7 +5,7 @@ HANDOVER.md, STATE.md is the source of truth. New contributors (or
 new chat sessions) should be able to read this file and understand
 the current state of the workspace without re-reading every commit.
 
-## Current State (2026-09-26)
+## Current State (2026-09-30)
 
 > **Phase C closed at the bootstrap milestone (2026-05-30); Phase D self-hosts; the
 > per-unit separate-compilation back end is functionally complete.**
@@ -14,7 +14,26 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
-**Latest (2026-09-26, third slice) — `scg` refuses a first set of the programs the oracle
+**Latest (2026-09-30) — the MIR lowers a `handle`'s arms and what a store's place computes,
+and the constant-time gate checks method bodies (register D148; D98 closed).**
+[ADR 0026](decisions/0026-hir-mir-pipeline-and-constant-time-secret-codegen.md) A1 and A2,
+[ADR 0050](decisions/0050-index-assignment.md) A7. Three kinds of code did not reach the MIR
+passes: a `handle`'s operation arms and its `return` arm; what a non-`Var` store's place
+computes (an index expression, the operand of a `*` store); and class `init`s, class methods
+and impl methods, which `lower_to_mir` does not hold. Both compilers now lower the arms and the
+place, so the MIR dumps of 57 corpus programs move (54 with a handler arm, 3 with an element
+store), `scg` agrees byte for byte, and D98's divergence closes (off the corpus, the typers'
+remaining differences on an arm — D7, D150, D151 — now reach the MIR too); every `snc build`
+gate lowers the method bodies too (`lower_all_bodies`), while the `snc mir` and `snc ctverify`
+dumps still list the free fns, so `scg`'s verification port does not cover method bodies
+(register D149).
+No corpus program's constant-time verdict changes. [`ct-model.md`](ct-model.md), the
+constant-time contract, is updated to match. Pinned by seven new `tests/ui/c52_secret_via_*`
+fixtures (the single-file gate) and by driver tests for the merged, `--separate` and `--lib`
+gates; the fix refuses programs that compiled before, so it is at least a minor version
+(ADR 0076 D2).
+
+**Previously (2026-09-26, third slice) — `scg` refuses a first set of the programs the oracle
 refuses (register D97).** [ADR 0041](decisions/0041-self-host-port-types.md) A14: the
 self-hosted typer typed a program the oracle refuses, and the stages after it lowered whatever
 its walk made of it; `P { zzz: 1, lo: 2, hi: 3 }` against `struct P { lo: i64, hi: i64 }`, for

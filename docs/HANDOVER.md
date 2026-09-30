@@ -124,6 +124,12 @@ reference as you work through the milestones.
 > confirming nothing pre-existing is newly refused; oracle-vs-scg byte-equality on the new
 > fixture at types, mir and llvm; and the secret-taint check in both directions.
 
+### ▶ RESUME HERE (2026-09-30b — `origin/main` was `f727299` when this was written (the maintainer has pushed everything through D97), and this slice's two commits sit on top of it, unpushed; read `git reflog show refs/remotes/origin/main` and `git log --oneline origin/main..HEAD` at the START and AGAIN before writing either down. This slice: **register D148 CLOSED, and D98 with it** (`cc477f1` fix, then this docs commit) — [ADR 0026](decisions/0026-hir-mir-pipeline-and-constant-time-secret-codegen.md) **A1/A2** and [ADR 0050](decisions/0050-index-assignment.md) **A7**: the MIR lowers a `handle`'s operation arms and its `return` arm and what a store's place computes, in both compilers (their MIR is byte-identical over the corpus), and every `snc build` constant-time gate — single file, merged, `--separate`, `--lib` / `--shared` — verifies a new `lower_all_bodies`, which adds class `init`s, class methods and impl methods to the free fns. The `snc mir` / `snc ctverify` dumps still list the free fns, so `scg`'s verification port does not cover method bodies (**D149**, filed). [`ct-model.md`](ct-model.md), the constant-time contract, is updated to match, and now lists the shift-amount sink the pass already checked. Seven `tests/ui/c52_secret_via_*` fixtures pin the single-file gate and four driver tests the merged, `--separate` and `--lib` gates (each refusal with a leak-free twin that builds); sixteen mutations caught, each baseline surviving. Two review rounds: `wf_1ba41744-544` (coverage and prose; stopped at the 2026-09-27 pause, its five blocking prose findings fixed here) and `wf_58c9e2b3-648` (the regress-parity lens the first never ran). The second found no false refusal and no crash; it found that the two typers' older differences on an arm — an arm parameter that is not `i64`, a resume's type, a `handle`'s type — now reach the MIR dump as well as the typed one, on programs outside the corpus. Those are registered (**D150**, **D151** and a note on D7), the parity claims are scoped to the corpus, and this was reported to the maintainer. Register: **150 distinct ids, 59 whose heading opens `**D<n> — DONE`** (the 2026-09-22 block's rule; the id D130 is reserved and not in the public register). Four-check: **2,113 passed with exactly the 18 known Windows failures**, doctests and clippy clean, every `selfhost_*` differential green including both bootstrap fixed points. Sweeps, the `snc` before this change (HEAD `f727299`'s; D97 did not change it) against the final tree: `snc mir` / `snc ctverify` over all 512 `.sentinel` files move 61 MIR dumps — the 57 D148 names and the 4 new arm and place fixtures — and the `ctverify` output of those 4 fixtures only; a matched `snc build` over the same 512 files plus 47 wrapper programs (one per library module) changes only the 7 new fixtures, each accepted before and refused after. It refuses programs that compiled before, so it is at least a minor version (ADR 0076 D2); `Cargo.toml` still says 0.1.0.)
+
+> **NEXT:** ADR 0077's implementation (Q1–Q5 approved), from the scratchpad's `a77park/` (the tree diff it was parked from, the seven `c77_*` fixtures, the ACCEPTED ADR text); then its review, four-check, sweeps and commit.
+>
+> Owed by the maintainer: D102, D103, ADR 0077's Q6, D36's decision, D146's direction, and when to bump the version (at least 0.2.0; `Cargo.toml` still says 0.1.0).
+
 ### ▶ RESUME HERE (2026-09-26c — `origin/main` was `04c592b` when this was written (the maintainer pushed D131 and D96), and this slice's two commits sit on top of it, unpushed; read `git reflog show refs/remotes/origin/main` and `git log --oneline origin/main..HEAD` at the START and AGAIN before writing either down. This session's third slice: **register D97 CLOSED** (`14e1031` fix, then this docs commit) — [ADR 0041](decisions/0041-self-host-port-types.md) **A14**, `scg`'s first rejection path. The self-hosted typer refuses, with the oracle's code and message, a struct literal naming a field its struct lacks, naming one twice or leaving one out; a field access naming a field its struct or class lacks; `vec_to_array` over an element that owns memory (D125's refusal); and a class `init` holding a `return` (D60's) or failing D129's definite assignment. New part `selfhost/types/refuse.sentinel`; `run` answers a refusal in place of its output and each driver exits 1. Two bounded review rounds (`wf_97d6dc74-ed0`, four lenses; `wf_6643aec4-0ec`, two). The first found that a program with several refused constructs can be refused for a different one than the oracle names — a recurring family, so the rule claimed and tested is verdict parity and the order is registered (D145) — and a false refusal: `vec_to_array` over a `Vec<T>` reached through generic substitution, because `subst_type` does not substitute inside a `Vec`. The remedy (substitute there) was reviewed in the second round and moved the typed dump, MIR and the code generator's type-definition order, so it was withdrawn and the over-refusal registered (D147) — **both reported to the maintainer**. Also filed: **D142** (the code generator checks a generic body only at its instances), **D143** (it aborts on some refused programs before printing the refusal; older than D97), **D144** (`scg` does not parse an empty struct literal; D97 turns one nested misparse into a bogus refusal), **D146** (`vec_to_array` over a `secret T` field: the oracle refuses, `scg` accepts). Register: **146 distinct ids, 57 whose heading opens `**D<n> — DONE`** (the 2026-09-22 block's rule; the id D130 is reserved and not in the public register). Four-check: **2,100 passed with exactly the 18 known Windows failures**, doctests and clippy clean, every `selfhost_*` differential green including both bootstrap fixed points. A matched sweep of the five drivers over the 501 `.sentinel` files the tree held before the change moves only the seven `tests/ui` fixtures there that carry a ported code; twenty-eight mutations caught, a twenty-ninth equivalent. `scg`-only, so a patch by ADR 0076 D2; the next version is still at least 0.2.0 from the earlier slices, and `Cargo.toml` says 0.1.0.)
 
 > **NEXT:** ADR 0077's implementation, with the draft's proposed answers to Q1–Q5 — built and probed in this session's scratchpad (`wt77/` holds the Rust half, `a77/scg77.py` the `scg` mirror, `a77fx/` and `a77fx2/` seven `c77_*` fixtures, `a77pin/` the IR pins, `a77/docs77.py` the amendments to the other ADRs).
@@ -845,7 +851,12 @@ reference as you work through the milestones.
 >      computation, so a `secret i64`-returning effecting fn gives `:i64` where the oracle gives
 >      `:secret i64`. Fix site: the resume-kont branch of `dump_te_call`,
 >      `selfhost/types/borrow_arms.sentinel` ~997-1002. No effects fixture has a
->      `secret`-returning effecting fn, which is why nothing saw it.
+>      `secret`-returning effecting fn, which is why nothing saw it. Since D148 (2026-09-30)
+>      lowers an arm's body, the difference reaches the MIR dump as well: with
+>      `effect Q { ask() -> bool; }`, the arm `Q.ask(k) => { let t: bool = 1 < 2; k(t) }`
+>      under a `handle` of an `i64` computation types `k(t)` `:i64` in the oracle and `:bool`
+>      in `scg`, and with a `secret` operation result under a public `handle`, `scg`'s verifier
+>      reports a branch on the resumed value that the oracle's does not.
 >
 >      **D9 — DONE (`4ac7bdc`, ADR 0023 A5).** The two Rust back ends disagreed about
 >      whether `impl as Trait for <struct>` was compilable: inkwell compiled and ran it,
@@ -1131,7 +1142,8 @@ reference as you work through the milestones.
 >      `c41_method_move_out_of_self`, `c41_method_move_self_whole`; 8 unit tests.
 >
 >      NOT covered, deliberately: MIR still lowers only `program.fns` (`lower_to_mir`, a
->      documented deferral), so the MIR passes never see a method body. scg's borrow stage
+>      documented deferral), so the MIR passes never see a method body (the constant-time gate
+>      has lowered method bodies since D148, ADR 0026 A2). scg's borrow stage
 >      still reports no errors for methods; error parity is out of scope for that
 >      differential (ADR 0043 D5/D7), and the shipping compiler is `snc`.
 >
@@ -1737,9 +1749,14 @@ reference as you work through the milestones.
 >      `hi`'s slot and `llc` accepted the module, so that shape was the silent one. A -1 check
 >      does not catch a duplicate, so the rejection path has a seen-field check as well.
 >
->      **D98 — an `if` written inside a handler ARM diverges in the MIR stage: the
->      self-hosted lowerer descends into the arm and emits its branch blocks, the Rust oracle
->      treats the whole `handle` as one opaque node.** Found 2026-09-22 by ADR 0075 slice 2's
+>      **D98 — DONE (2026-09-30, `cc477f1`, ADR 0026 A1). An `if` written inside a handler
+>      ARM diverged in the MIR stage: the self-hosted lowerer descended into the arm and
+>      emitted its branch blocks, the Rust oracle treated the whole `handle` as one opaque
+>      node.** Closed by register D148: both compilers now lower an arm's body, and their MIR
+>      for this program agrees, the bare-`v` terminator operand noted below included (it is
+>      `v3` in both). The typers still differ on some arm shapes (D7, D150, D151), and since
+>      D148 those differences reach the MIR too.
+>      Found 2026-09-22 by ADR 0075 slice 2's
 >      new fixture, which used an `if` for its class (A) shape and failed
 >      `sentinel_mir_matches_oracle_on_corpus` at 1/252. Pre-existing and independent of
 >      everything in that slice — reduced to a program with no resume, no struct literal
@@ -1759,7 +1776,7 @@ reference as you work through the milestones.
 >      stage, not emitted code: MIR is lowered only for `secret_leak` and friends, and both
 >      bootstrap fixed points are byte-identical. The slice-2 fixture works around it by using
 >      the other class (A) shape (`side() + k(5)`, something evaluated before the resume), so
->      the workaround is what currently keeps the differential green.
+>      the workaround is what kept the differential green until D148.
 >
 >      **D99 — DONE (2026-09-23). An arm-remainder resumer did not take its name, its drop plan
 >      and its place in the output from its parent definition.** Found 2026-09-23 by D93's
@@ -2523,6 +2540,54 @@ reference as you work through the milestones.
 >      miscompiled. The fix is the oracle's rule in one helper for the `Vec`, array and
 >      nullable arms (`subst_type`'s array and nullable arms rebuild unconditionally too, a
 >      divergence older than D97), with the code generator's interning order checked.
+>
+>      **D148 — DONE (2026-09-30, `cc477f1`, ADR 0026 A1/A2, ADR 0050 A7). Three kinds of
+>      code did not reach the MIR passes.** A `handle`'s operation arms and its `return` arm
+>      were not lowered (the oracle skipped them; `scg` walked them with its emits switched
+>      off, which is D98); a non-`Var` store lowered only the stored value, not what its place
+>      computed (an index expression, the operand of a `*` store); and the constant-time gate
+>      lowered `program.fns` only, which holds no class `init`, class method or impl method.
+>      Found 2026-09-27 while landing ADR 0077, whose fixture put an `if` inside an index
+>      place and diverged in the MIR stage. Both compilers now lower the arms and the place
+>      (over the corpus the MIR dumps of 57 programs move, 54 with a handler arm and 3 with an
+>      element store, and `scg` agrees byte for byte; no program's constant-time verdict
+>      changes; D98 closes with it), and every `snc build` gate lowers the method bodies too
+>      (`lower_all_bodies`). Off the corpus, the typers' remaining differences on an arm (D7,
+>      D150, D151) now reach the MIR dump too. Pinned by seven new `tests/ui` fixtures —
+>      `c52_secret_via_handler_arm`, `_return_arm`, `_index_place`, `_deref_place`, `_method`,
+>      `_class_init` and `_impl_method` — for the single-file gate, and by tests in
+>      `modules.rs` (the merged and `--separate` gates) and `export.rs` (`--lib`), each with a
+>      twin without the leak that builds; sixteen mutations caught, each baseline surviving. It
+>      refuses programs that compiled before, so it is at least a minor version (ADR 0076 D2).
+>
+>      **D149 — `scg`'s constant-time verifier does not check method bodies.** Filed
+>      2026-09-30 with D148. Every `snc build` gate checks class `init`s, class methods and
+>      impl methods (ADR 0026 A2), but the `snc mir` and `snc ctverify` dumps list the free fns
+>      only, and `scg`'s MIR and verifier ports mirror those dumps, so they lower no method
+>      body. `scg`'s code generator runs no constant-time check before it emits (a program the
+>      verifier reports still compiles there), so this is a gap in the verification port, not
+>      in a shipped gate. The fix is to put the method bodies in both dumps, with `scg`
+>      mirroring them.
+>
+>      **D150 — `scg` types a handler arm's parameters as `i64` whatever the operation
+>      declares.** Filed 2026-09-30 by D148's review; pre-existing. The oracle binds each
+>      parameter of an arm to the operation's declared parameter type; `scg`'s
+>      `dump_thparams` binds each to `i64`. With `effect Io { ask(b: u8) -> i64; }`, the arm
+>      `Io.ask(b, k) => k(b as i64)` types the parameter `(var #1 :u8)` in the oracle and
+>      `(var #1 :i64)` in `scg`. The typed dumps differed before D148; since D148 lowers an
+>      arm's body, the MIR dumps differ as well. No corpus operation takes a parameter that is
+>      not `i64`, so no differential sees it. It is the arm-side twin of D132, and the fix is
+>      D132's: record the operation's parameter types, bind an arm's parameters with them, and
+>      add a fixture whose operation takes a parameter that is not `i64`.
+>
+>      **D151 — `scg` types a `handle` by its body's type where the oracle uses the `return`
+>      arm's type or the expected type.** Filed 2026-09-30 by D148's review; pre-existing.
+>      For `let x: ?i64 = handle 5 with { return v => v };` the oracle types the handle `?i64`
+>      and widens inside the `return` arm (`(return #0 (widen-null (var #0 :i64) :?i64))
+>      :?i64`), while `scg` types it `i64` and widens the whole handle (`(widen-null (handle …
+>      :i64) :?i64)`). Their typed and MIR dumps differed before D148 and still do. The fix
+>      site is `dump_te_handle`'s `close_ty(out, bty, c)`, which closes the handle with the
+>      body's type.
 >
 >      **D78 — stale corpus fixture counts in `llvm.rs` and `README.md`, at six sites, stale
 >      before this change.** Found by D74's reviews. `crates/sentinel-driver/tests/llvm.rs`
