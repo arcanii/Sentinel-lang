@@ -11,7 +11,8 @@
 //   - `refuses` captures a `bool` param, so its remainder must not be replayed. `one()`
 //     performs once, so the bubble is never taken at run time; its emitted form is what
 //     is under test, through the text back ends' differential. (It reads `flag` through
-//     `pick` because an `if` inside an arm trips register D98 in the MIR stage.)
+//     `pick` because an `if` inside an arm tripped register D98 in the MIR stage when this
+//     was written; D98 is closed since.)
 //
 // The declaration ORDER is load-bearing: a lookup by scope position lands on whichever
 // binding happens to sit there, and this layout makes both captures land on a binding of

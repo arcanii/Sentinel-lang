@@ -581,8 +581,11 @@ fn dump_tstmt(out: &mut Vec<u8>, s: Stmt, src: &[u8], c: &mut TyCtx, gb: &mut Ve
             // the (dump-only) target walk. A plain-Var target sets `mir_lastvid`; a
             // field/`*`-deref/index place sets it -1 (the wrapper arms).
             let as_sup: bool = (*c).mir_suppress;
+            let as_place: bool = (*c).mir_place;
             if mir_on(c) {
                 (*c).mir_suppress = true;
+                // (ADR 0050 A7) but what the place computes is lowered: see `mir_place`.
+                (*c).mir_place = true;
                 0
             } else {
                 0
@@ -599,6 +602,7 @@ fn dump_tstmt(out: &mut Vec<u8>, s: Stmt, src: &[u8], c: &mut TyCtx, gb: &mut Ve
             let ttgt: i64 = dump_texpr(out, atgt, 0 - 1, src, c, gb);
             let tvid: i64 = if mir_on(c) {
                 (*c).mir_suppress = as_sup;
+                (*c).mir_place = as_place;
                 (*c).mir_lastvid
             } else {
                 0 - 1

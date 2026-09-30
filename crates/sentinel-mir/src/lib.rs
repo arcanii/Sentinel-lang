@@ -60,8 +60,8 @@
 use sentinel_ast::{BinOp, CmpOp, LogicOp, Span, UnaryOp};
 use sentinel_resolve::VarId;
 use sentinel_types::{
-    Type, TypedBlock, TypedExpr, TypedExprKind, TypedFnDef, TypedPattern, TypedProgram, TypedStmt,
-    TypedStmtKind,
+    Type, TypedBlock, TypedExpr, TypedExprKind, TypedFnDef, TypedParam, TypedPattern, TypedProgram,
+    TypedStmt, TypedStmtKind,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -197,11 +197,11 @@ pub enum MirTerminator {
 /// per free function in `program.fns`, each function's body walked into
 /// SSA/CFG form (see the module docs for the shape).
 ///
-/// **Scope at this increment.** Only top-level functions are lowered.
-/// Class / impl / init method bodies live in `program.class_decls` /
-/// `program.impl_decls` (not `fns`); lowering them is a mechanical
-/// follow-on (seed `self` + params, lower the body the same way) deferred
-/// until the D5 verification needs it. Generic function *definitions* are
+/// **Scope.** Only top-level functions are lowered: this is the set the
+/// `snc mir` and `snc ctverify` dumps print. Class / impl / init method
+/// bodies live in `program.class_decls` / `program.impl_decls` (not `fns`);
+/// the constant-time gate lowers them too, through [`lower_all_bodies`]
+/// (ADR 0026 A2). Generic function *definitions* are
 /// lowered as-is, with `Type::TypeParam` flowing through unchanged — they
 /// are never `secret`, so they are inert for the taint analysis, and no
 /// monomorphisation happens here (consistent with the D3 escape hatch:
@@ -210,6 +210,53 @@ pub fn lower_to_mir(program: &TypedProgram) -> MirProgram {
     MirProgram {
         functions: program.fns.iter().map(|f| lower_fn(program, f)).collect(),
     }
+}
+
+/// ADR 0026 A2: every body the constant-time gate checks — the free fns
+/// [`lower_to_mir`] lowers (the ones the `snc mir` and `snc ctverify` dumps
+/// print), then each class's `init` and methods and each impl's methods, in
+/// declaration order. `snc build` verifies this set, so a method's body is
+/// held to the same constant-time rule as a free fn's. `self` — a reference
+/// to the object in a method, the object under construction in an `init` —
+/// is never `secret`: its uses resolve to a fresh `Opaque` of their declared
+/// type, like a `match` binding's.
+pub fn lower_all_bodies(program: &TypedProgram) -> MirProgram {
+    let mut functions: Vec<MirFunction> = program.fns.iter().map(|f| lower_fn(program, f)).collect();
+    for cd in &program.class_decls {
+        if let Some(init) = &cd.init {
+            functions.push(lower_method(
+                program,
+                format!("{}::init", cd.name),
+                init.self_var_id,
+                &init.params,
+                &init.body,
+                init.body.tail.ty,
+            ));
+        }
+        for m in &cd.methods {
+            functions.push(lower_method(
+                program,
+                format!("{}::{}", cd.name, m.name),
+                m.self_var_id,
+                &m.params,
+                &m.body,
+                m.return_type,
+            ));
+        }
+    }
+    for imp in &program.impl_decls {
+        for m in &imp.methods {
+            functions.push(lower_method(
+                program,
+                format!("{}::{}", imp.type_name, m.name),
+                m.self_var_id,
+                &m.params,
+                &m.body,
+                m.return_type,
+            ));
+        }
+    }
+    MirProgram { functions }
 }
 
 /// A basic block under construction: like [`MirBlock`] but with a
@@ -234,9 +281,11 @@ struct FnBuilder {
     /// merge-parameter order is deterministic across runs.
     var_defs: BTreeMap<VarId, MirValue>,
     /// ADR 0026 D5 / review F4: the VarIds that may legitimately be
-    /// *unbound* in `var_defs` at use — `match`-arm pattern bindings, which
-    /// are arm-scoped and not modeled by this minimal lowering (their use
-    /// resolves to a fresh `Opaque`). Used ONLY by `lookup_var`'s
+    /// *unbound* in `var_defs` at use — the bindings this minimal lowering
+    /// does not model: `match`-arm pattern bindings, a handler arm's
+    /// parameters and continuation, a `return` arm's value (ADR 0026 A1) and
+    /// a method's or `init`'s `self` (A2). Each use resolves to a fresh `Opaque` of its
+    /// declared type. Used ONLY by `lookup_var`'s
     /// debug-build assertion to distinguish that benign case from a genuine
     /// resolver/lowering bug; it never affects emitted IR.
     expected_unbound: BTreeSet<VarId>,
@@ -319,9 +368,12 @@ impl FnBuilder {
     }
 
     /// Look up a variable's current SSA value. A well-typed body binds every
-    /// regular VarId before use; the one legitimate unbound case is a
-    /// `match`-arm pattern binding (arm-scoped, not modeled here — recorded
-    /// in [`expected_unbound`]), which resolves to a fresh `Opaque`.
+    /// regular VarId before use; the legitimate unbound cases are the
+    /// bindings this lowering does not model — a `match`-arm pattern
+    /// binding, a handler arm's parameters and continuation, a `return`
+    /// arm's value and a method's or `init`'s `self`, all recorded in
+    /// [`expected_unbound`] — and each resolves to a fresh `Opaque` of its
+    /// declared type.
     ///
     /// ADR 0026 D5 / review F4: any OTHER unbound VarId is a resolver/lowering
     /// bug. Its taint-free empty `Opaque` could mask a `secret` and
@@ -334,9 +386,10 @@ impl FnBuilder {
             None => {
                 debug_assert!(
                     self.expected_unbound.contains(&id),
-                    "lower_to_mir: unbound VarId {id:?} is not a match-arm pattern binding — a \
-                     resolver/lowering bug; its taint-free Opaque could mask a secret leak \
-                     (ADR 0026 D5 / review F4)"
+                    "MIR lowering: unbound VarId {id:?} is not a binding the lowering leaves \
+                     unmodeled (a match-arm or handler-arm binding, a return arm's value, \
+                     a method's or init's self) — a resolver/lowering bug; its taint-free \
+                     Opaque could mask a secret leak (ADR 0026 D5 / review F4)"
                 );
                 self.emit(MirOp::Opaque(Vec::new()), ty, span)
             }
@@ -359,6 +412,31 @@ fn lower_fn(program: &TypedProgram, f: &TypedFnDef) -> MirFunction {
     b.finish(f.name.clone(), entry, f.return_type)
 }
 
+/// ADR 0026 A2: lower a method body (a class `init` or method, or an impl
+/// method) for the constant-time gate: its declared parameters are the entry
+/// block's SSA parameters, as a free fn's are, and its `self` is unbound.
+fn lower_method(
+    program: &TypedProgram,
+    name: String,
+    self_var: VarId,
+    params: &[TypedParam],
+    body: &TypedBlock,
+    ret_ty: Type,
+) -> MirFunction {
+    let mut b = FnBuilder::new();
+    let entry = b.new_block();
+    b.current = entry;
+    b.expected_unbound.insert(self_var);
+    for p in params {
+        let v = b.add_param(entry, p.ty);
+        b.var_defs.insert(p.id, v);
+    }
+    let ret = b.lower_block(program, body);
+    let exit = b.current;
+    b.terminate(exit, MirTerminator::Return(Some(ret)));
+    b.finish(name, entry, ret_ty)
+}
+
 impl FnBuilder {
     /// Lower a block: its statements for effect, then its tail for value.
     fn lower_block(&mut self, program: &TypedProgram, block: &TypedBlock) -> MirValue {
@@ -374,24 +452,29 @@ impl FnBuilder {
                 let v = self.lower_expr(program, value);
                 self.var_defs.insert(*id, v);
             }
-            TypedStmtKind::Assign { target, value } => {
-                let v = self.lower_expr(program, value);
-                match &target.kind {
-                    // `x = v;` rebinds the variable's current SSA value.
-                    TypedExprKind::Var(id) => {
-                        self.var_defs.insert(*id, v);
-                    }
-                    // A store to a field / deref lvalue. The minimal IR
-                    // has no `Store` op; record the value as consumed into
-                    // opaque memory so taint does not vanish (a store
-                    // target is not itself a D5 sink — mutable indexing is
-                    // out of scope per ADR 0017 D12, so no secret address
-                    // is hidden here).
-                    _ => {
-                        self.emit(MirOp::Opaque(vec![v]), target.ty, target.span.clone());
-                    }
+            TypedStmtKind::Assign { target, value } => match &target.kind {
+                // `x = v;` rebinds the variable's current SSA value.
+                TypedExprKind::Var(id) => {
+                    let v = self.lower_expr(program, value);
+                    self.var_defs.insert(*id, v);
                 }
-            }
+                // A store to a field / index / deref lvalue. The place's own
+                // computation — an index expression, a deref's operand, any
+                // computed root — is lowered, so what it computes reaches the
+                // pass like any other expression (ADR 0050 A7). It is lowered
+                // before the value, the order `snc llvm` and `scg` evaluate a
+                // store in; inkwell evaluates the value first, and the verdict
+                // does not depend on the order, since taint is read off types.
+                // The store itself is not a D5 sink (the type checker keeps an
+                // index public); the minimal IR has no `Store` op, so the value
+                // is recorded as consumed into opaque memory, and taint does not
+                // vanish.
+                _ => {
+                    self.lower_place(program, target);
+                    let v = self.lower_expr(program, value);
+                    self.emit(MirOp::Opaque(vec![v]), target.ty, target.span.clone());
+                }
+            },
             TypedStmtKind::While { cond, body } => {
                 // Phase D.5 / ADR 0036: the flat taint IR lowers the
                 // condition + the body once. A `secret`-typed `while`
@@ -557,13 +640,26 @@ impl FnBuilder {
                     args.iter().map(|a| self.lower_expr(program, a)).collect();
                 self.emit(MirOp::Opaque(vals), ty, span)
             }
-            // A handler's arms bind their own (handler-scoped) `VarId`s
-            // that this walk does not model, so lower only the body — its
-            // straight-line secret-relevant ops still surface. (A
-            // minimal-lowering boundary; handler arms are not on the 1.0
-            // constant-time path.)
-            TypedExprKind::Handle { body, .. } => {
+            // A handle lowers its body, then each operation arm's body in
+            // source order, then the `return` arm's wherever it is written
+            // (ADR 0026 A1), so what an arm computes reaches the pass like any
+            // other expression. An arm's parameters,
+            // its continuation and the `return` arm's value are handler-scoped
+            // `VarId`s this walk does not model: each use resolves to a fresh
+            // `Opaque` of its declared type, which carries its taint. The
+            // handle's value stays the body's.
+            TypedExprKind::Handle { body, arms, return_arm, .. } => {
                 let v = self.lower_expr(program, body);
+                for arm in arms {
+                    for p in &arm.param_var_ids {
+                        self.expected_unbound.insert(*p);
+                    }
+                    self.lower_expr(program, &arm.body);
+                }
+                if let Some(ra) = return_arm {
+                    self.expected_unbound.insert(ra.value_var_id);
+                    self.lower_expr(program, &ra.body);
+                }
                 self.emit(MirOp::Opaque(vec![v]), ty, span)
             }
             // `scope concurrent { .. }` is value-transparent (its value is
@@ -609,6 +705,28 @@ impl FnBuilder {
                     vals.push(self.lower_expr(program, &arm.body));
                 }
                 self.emit(MirOp::Opaque(vals), ty, span)
+            }
+        }
+    }
+
+    /// ADR 0050 A7: lower what an assignment's place computes — an index
+    /// expression, a deref's operand, any root that is not a binding — in the
+    /// order `snc llvm` and `scg` evaluate the place (an index step's base
+    /// path, then its index). A binding, a field step and an index step's
+    /// base path compute nothing of their own.
+    fn lower_place(&mut self, program: &TypedProgram, place: &TypedExpr) {
+        match &place.kind {
+            TypedExprKind::Var(_) => {}
+            TypedExprKind::FieldAccess { target, .. } => self.lower_place(program, target),
+            TypedExprKind::Index { target, index, .. } => {
+                self.lower_place(program, target);
+                self.lower_expr(program, index);
+            }
+            TypedExprKind::Unary(UnaryOp::Deref, inner) => {
+                self.lower_expr(program, inner);
+            }
+            _ => {
+                self.lower_expr(program, place);
             }
         }
     }
@@ -825,9 +943,10 @@ fn secret_leak(sink: SinkKind, span: &Span) -> SecretLeak {
 /// (ADR 0026 D5): no `secret` value may reach the condition of a
 /// conditional branch, the index or base address of a memory load, or
 /// the divisor of an integer division. Returns one [`SecretLeak`] per
-/// violation — an empty result means the program is constant-time at the
-/// MIR level. This is the machine-checkable expression of ADR 0008's
-/// guarantee, and the first consumer of [`lower_to_mir`].
+/// violation — an empty result means the lowered bodies are constant-time
+/// at the MIR level (for `snc build`, every body: [`lower_all_bodies`]).
+/// This is the machine-checkable expression of ADR 0008's guarantee, and
+/// the first consumer of [`lower_to_mir`].
 ///
 /// **Taint oracle.** Each SSA value carries its [`Type`], and the type
 /// checker's operator-secret-preserving rules already computed the taint

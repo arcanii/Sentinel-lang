@@ -146,6 +146,7 @@ fn new_tyctx(mode: i64) -> TyCtx {
         miargs: vec_new(),
         mir_collecting: false,
         mir_suppress: false,
+        mir_place: false,
         mirout: vec_new(),
         cgnext: 0,
         cglk: 0,

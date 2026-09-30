@@ -16,8 +16,8 @@
 //                   that bubble is not taken at run time — what this pins is the
 //                   emitted abort, which the differentials compare, not a crash.
 //                   (An `if` around the resume is the other class (A) shape and reads
-//                   more directly, but an `if` anywhere inside a handler ARM diverges in
-//                   the MIR stage, independently of anything here — register D98.)
+//                   more directly, but an `if` inside a handler ARM diverged in the MIR
+//                   stage when this was written — register D98, closed since.)
 //
 // Exits 42: 22 + 202 + 8 + 5 - 195.
 effect Io { read() -> i64; }

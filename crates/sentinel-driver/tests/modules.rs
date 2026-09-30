@@ -1198,3 +1198,65 @@ fn lib_path_separate_resolves_module_outside_entry_dir() {
     );
     assert_eq!(run_built(&entry), 42);
 }
+
+// ===== ADR 0026 A2: every build mode's constant-time gate checks method bodies =====
+//
+// tests/ui's `c52_secret_via_{method,class_init,impl_method}` pin the single-file
+// `snc build` gate. These pin the merged-graph and `--separate` gates, with the method in
+// an imported module; `export.rs` pins the `--lib` gate. Each refusal has a twin without
+// the leak that builds and runs, so a refusal is the leak's and not the project's.
+
+/// A library module whose class method computes `idb(a) && b` on two `secret` operands
+/// when `leak` (a secret-dependent branch that only the MIR pass sees), or `idb(a)` when
+/// not, and an entry that imports the module's `run`. The built program exits 1.
+fn write_method_body_project(dir: &Path, leak: bool) -> PathBuf {
+    let rhs = if leak { "idb(a) && b" } else { "idb(a)" };
+    write(
+        dir.join("lib.sentinel"),
+        &format!(
+            "fn idb(s: secret bool) -> secret bool {{ s }}\n\
+             class K {{\n\
+             \x20   let n: i64;\n\
+             \x20   pub init() {{ self.n = 1; 0 }}\n\
+             \x20   pub fn m(self: &Self, a: secret bool, b: secret bool) -> i64 {{\n\
+             \x20       let t: secret bool = {rhs};\n\
+             \x20       self.n\n\
+             \x20   }}\n\
+             }}\n\
+             pub fn run(a: secret bool, b: secret bool) -> i64 {{ let k = K::init(); k.m(a, b) }}\n"
+        ),
+    );
+    let entry = dir.join("main.sentinel");
+    write(entry.clone(), "use lib::run;\nfn main() -> i64 { run(true, false) }\n");
+    entry
+}
+
+const METHOD_BODY_LEAK: &str = "a `secret` value reaches a conditional branch";
+
+#[test]
+fn merged_build_refuses_a_method_body_leak_in_an_imported_module() {
+    let dir = temp_project("method_body_leak_merged");
+    let (ok, stderr) = build(write_method_body_project(&dir, true));
+    assert!(!ok, "a secret-dependent branch in an imported method body must be refused");
+    assert!(stderr.contains(METHOD_BODY_LEAK), "expected the constant-time refusal; stderr:\n{stderr}");
+}
+
+#[test]
+fn merged_build_accepts_the_method_body_without_the_leak() {
+    let dir = temp_project("method_body_ok_merged");
+    assert_eq!(build_and_run(write_method_body_project(&dir, false)), 1);
+}
+
+#[test]
+fn separate_build_refuses_a_method_body_leak_in_an_imported_module() {
+    let dir = temp_project("method_body_leak_separate");
+    let (ok, stderr) = build_separate(write_method_body_project(&dir, true));
+    assert!(!ok, "a secret-dependent branch in an imported method body must be refused");
+    assert!(stderr.contains(METHOD_BODY_LEAK), "expected the constant-time refusal; stderr:\n{stderr}");
+}
+
+#[test]
+fn separate_build_accepts_the_method_body_without_the_leak() {
+    let dir = temp_project("method_body_ok_separate");
+    assert_eq!(build_and_run_separate(write_method_body_project(&dir, false)), 1);
+}

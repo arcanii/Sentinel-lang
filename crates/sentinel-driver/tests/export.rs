@@ -505,3 +505,59 @@ fn export_demonstrator_files_present() {
     // register D54: header-only demonstrator (no C driver — it needs no `cc`).
     assert!(root.join("examples/export/mut_buffer_lib.sentinel").exists());
 }
+
+/// ADR 0026 A2: `snc build --lib`'s constant-time gate checks method bodies (the
+/// single-file, merged and `--separate` gates are pinned in `tests/ui` and `modules.rs`).
+/// An impl method reached from an `export "C"` fn computes `idb(a) && b` on two `secret`
+/// operands when `leak` — a secret-dependent branch only the MIR pass sees — and
+/// `idb(a)` when not. Returns (success, stderr).
+fn build_lib_with_impl_method(name: &str, leak: bool) -> (bool, String) {
+    let dir = temp_dir(name);
+    let rhs = if leak { "idb(a) && b" } else { "idb(a)" };
+    let src = dir.join("leaky.sentinel");
+    std::fs::write(
+        &src,
+        format!(
+            "fn idb(s: secret bool) -> secret bool {{ s }}\n\
+             struct P {{ n: i64 }}\n\
+             trait T {{ fn m(self: &Self, a: secret bool, b: secret bool) -> i64; }}\n\
+             impl as T for P {{\n\
+             \x20   fn m(self: &Self, a: secret bool, b: secret bool) -> i64 {{\n\
+             \x20       let t: secret bool = {rhs};\n\
+             \x20       self.n\n\
+             \x20   }}\n\
+             }}\n\
+             export \"C\" fn ly(c: i64) -> i64 {{\n\
+             \x20   let a: secret bool = c > 0;\n\
+             \x20   let p = P {{ n: 1 }};\n\
+             \x20   p.m(a, a)\n\
+             }}\n"
+        ),
+    )
+    .expect("write library source");
+    let out = Command::new(env!("CARGO_BIN_EXE_snc"))
+        .arg("build")
+        .arg("--lib")
+        .arg(&src)
+        .arg("-o")
+        .arg(dir.join("libleaky.a"))
+        .output()
+        .expect("run snc build --lib");
+    (out.status.success(), String::from_utf8_lossy(&out.stderr).into_owned())
+}
+
+#[test]
+fn export_lib_refuses_a_method_body_leak() {
+    let (ok, stderr) = build_lib_with_impl_method("method_body_leak", true);
+    assert!(!ok, "a secret-dependent branch in an impl method body must be refused");
+    assert!(
+        stderr.contains("a `secret` value reaches a conditional branch"),
+        "expected the constant-time refusal; stderr:\n{stderr}"
+    );
+}
+
+#[test]
+fn export_lib_accepts_the_method_body_without_the_leak() {
+    let (ok, stderr) = build_lib_with_impl_method("method_body_ok", false);
+    assert!(ok, "snc build --lib failed; stderr:\n{stderr}");
+}

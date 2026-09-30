@@ -534,7 +534,25 @@ fn dump_te_unary(out: &mut Vec<u8>, uop: i64, inner: Expr, exp: i64, src: &[u8],
             } else {
                 0
             };
+            // (ADR 0050 A7) in an assignment's place, a deref's operand is a value the place
+            // computes: lowered, as the oracle's `lower_place` lowers it.
+            let un_mplace: bool = (*c).mir_place && uop == 3;
+            let un_msup: bool = (*c).mir_suppress;
+            if un_mplace {
+                (*c).mir_place = false;
+                (*c).mir_suppress = false;
+                0
+            } else {
+                0
+            };
             let it: i64 = dump_texpr(out, inner, 0 - 1, src, c, gb);
+            if un_mplace {
+                (*c).mir_place = true;
+                (*c).mir_suppress = un_msup;
+                0
+            } else {
+                0
+            };
             let iv: i64 = if mir_on(c) {
                 (*c).lastval
             } else {
@@ -1787,23 +1805,15 @@ fn dump_te_handle(out: &mut Vec<u8>, hb: Expr, ha: HArms, hr: Ret, exp: i64, src
                     Ret::YesRet(rn, rb, rnt, rt0)
                 },
             };
-            // (7c) MIR: a handle lowers ONLY its body -> Opaque([body]); the handler arms
-            // + return arm are walked for the dump but NOT lowered (suppress their emits).
-            let h_sup: bool = (*c).mir_suppress;
-            if mir_on(c) {
-                (*c).mir_suppress = true;
-                0
-            } else {
-                0
-            };
+            // (7c, ADR 0026 A1) MIR: a handle lowers its body, then each operation arm's body
+            // in source order, then the `return` arm's wherever it is written; its value is
+            // Opaque([body]). An arm's parameters, its continuation and the `return` value
+            // are unbound here, so each use lowers to a fresh Opaque of the type this typer
+            // gave it, as the oracle's `lookup_var` does with the oracle's. The two typers
+            // still differ on an arm parameter that is not i64 (register D150), a resume's
+            // type (D7) and a handle's type (D151).
             dump_tharms(out, ha, src, c, gb, is_nested);
             dump_tret(out, hr2, bty, src, c, gb);
-            if mir_on(c) {
-                (*c).mir_suppress = h_sup;
-                0
-            } else {
-                0
-            };
             close_ty(out, bty, c);
             // (cg) the PURE_RETURN check (the chain's tail) + the merge; restore state.
             if cg_on(c) {

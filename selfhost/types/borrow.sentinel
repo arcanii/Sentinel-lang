@@ -816,7 +816,25 @@ fn dump_texpr_arm(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyC
                 0
             };
             push(out, ' ');
+            // (ADR 0050 A7) in an assignment's place the index is a value the place
+            // computes: lowered, as the oracle's `lower_place` lowers it.
+            let ix_mplace: bool = (*c).mir_place;
+            let ix_msup: bool = (*c).mir_suppress;
+            if ix_mplace {
+                (*c).mir_place = false;
+                (*c).mir_suppress = false;
+                0
+            } else {
+                0
+            };
             dump_texpr(out, ii, 0 - 1, src, c, gb);
+            if ix_mplace {
+                (*c).mir_place = true;
+                (*c).mir_suppress = ix_msup;
+                0
+            } else {
+                0
+            };
             let iidx: i64 = if mir_on(c) {
                 (*c).lastval
             } else {

@@ -144,7 +144,10 @@ variant — **the constant-time verifier is IN scope** (not the "drop verifier" 
     `handle`'s arms/return) walks for the dump but emits NOTHING (the emit helpers early-out).
     A field/`*`-deref/index **store** → `Opaque([value])` (the target suppressed); a plain-Var
     target still rebinds `var_defs` (detected via `mir_lastvid`, which the place-wrapper arms
-    reset to −1). A `handle` lowers ONLY its body → `Opaque([body])`.
+    reset to −1). A `handle` lowers ONLY its body → `Opaque([body])`. (Amended 2026-09-30,
+    ADR 0026 A1 and ADR 0050 A7: a `handle`'s arms are lowered, and a store's place is
+    walked with `mir_place` set, which lowers what it computes; only the place itself stays
+    suppressed.)
   - **An UNBOUND Var** (a match/handler payload binding the IR doesn't model) → a fresh
     `Opaque([])`, matching the Rust `lookup_var`. ⚠ Flat-namespace catch: the `Expr::Call`
     arm's two branches (kont vs fn-call) needed distinct `let` names (`kmc`/`kd`) for their
@@ -440,6 +443,9 @@ clean fixtures — a richer surface than borrow's tiny VarId set.
 ### Neutral
 - Diagnostic/span parity stays deferred (D7), as every prior stage.
 - Class/impl-method-body lowering deferred (the Rust `lower_to_mir` defers it too, D7).
+  (Since ADR 0026 A2 the Rust `snc build` gate lowers method bodies through
+  `lower_all_bodies`, while the `snc mir` / `snc ctverify` dumps this port mirrors still
+  list the free fns; the port's gap is register D149.)
 - Codegen is the separate (8/N) — the bootstrap-critical transform + the fixed-point.
 
 ## Revisit

@@ -287,6 +287,15 @@ ui_snapshot!(c25_use_after_partial_move, "c25_use_after_partial_move.sentinel");
 // index, and secret divisor. The accept side is
 // tests/pass/c52_secret_through_constructs_ok.
 ui_snapshot!(c52_secret_via_call, "c52_secret_via_call.sentinel");
+// ADR 0026 A1 / ADR 0050 A7: a handler arm and an assignment's place are lowered to MIR.
+ui_snapshot!(c52_secret_via_handler_arm, "c52_secret_via_handler_arm.sentinel");
+ui_snapshot!(c52_secret_via_return_arm, "c52_secret_via_return_arm.sentinel");
+ui_snapshot!(c52_secret_via_index_place, "c52_secret_via_index_place.sentinel");
+ui_snapshot!(c52_secret_via_deref_place, "c52_secret_via_deref_place.sentinel");
+// ADR 0026 A2: the build gate checks method, init and impl bodies.
+ui_snapshot!(c52_secret_via_method, "c52_secret_via_method.sentinel");
+ui_snapshot!(c52_secret_via_class_init, "c52_secret_via_class_init.sentinel");
+ui_snapshot!(c52_secret_via_impl_method, "c52_secret_via_impl_method.sentinel");
 ui_snapshot!(c52_secret_via_field, "c52_secret_via_field.sentinel");
 ui_snapshot!(c52_secret_via_match, "c52_secret_via_match.sentinel");
 ui_snapshot!(c52_secret_or_leak, "c52_secret_or_leak.sentinel");

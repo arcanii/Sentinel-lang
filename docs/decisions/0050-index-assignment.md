@@ -1,6 +1,6 @@
 # ADR 0050: Mutable index assignment `a[i] = v`
 
-Status: **ACCEPTED-WITH-AMENDMENTS** (A1–A6) — the feature is in `snc` (Phase 1: inkwell + the
+Status: **ACCEPTED-WITH-AMENDMENTS** (A1–A7) — the feature is in `snc` (Phase 1: inkwell + the
 `snc llvm` textual oracle) AND mirrored into the self-hosted `scg` (Phase 2); the corpus
 fixture `tests/pass/c55_index_assign` validates `scg == snc` byte-for-byte across all 8
 selfhost stage differentials, both bootstrap fixed points hold, and the full nextest (1553
@@ -205,3 +205,14 @@ construct is added (Phase 2), at which point both sides emit it identically.
   neither does the emitted IR, and `scg` (which records moves and never rejects, ADR 0043)
   needs no mirror. It refuses programs that compiled before, so it is at least a minor version
   (ADR 0076 D2).
+
+- **A7 (2026-09-30, register D148) — what a place computes is lowered to MIR.** A2 held for
+  the stored value and for the index's own type, but the MIR lowering of a non-`Var` store
+  lowered only the value, so what the place computed — an index expression, the operand of
+  a `*` store — did not reach the MIR passes. Both compilers now lower the place (an index
+  step's base path, then its index; a deref's operand), then the value, then
+  `Opaque([value])` as before. That is the order `snc llvm` and `scg` evaluate a store in;
+  inkwell evaluates the value first, and the verdict does not depend on the order, since
+  taint is read off types. A binding, a field step and an index step's base path compute
+  nothing of their own. Pinned by `tests/ui/c52_secret_via_index_place` and
+  `c52_secret_via_deref_place`.

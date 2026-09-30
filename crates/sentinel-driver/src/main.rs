@@ -544,8 +544,11 @@ fn run_mir(path: &str) -> ExitCode {
 /// Phase D self-host port (7/N) / ADR 0044 D6: `snc ctverify <file>` — the
 /// constant-time verifier oracle. Runs parse → resolve → `check` → `lower_to_mir`
 /// → `verify_constant_time` and prints its leak set, one `(leak <SinkKind>)` per
-/// line in iteration order (fn → block → inst → terminator). An empty result means
-/// the program is constant-time at the MIR level. Exits nonzero only on an upstream
+/// line in iteration order (fn → block → inst → terminator). Like the `snc mir`
+/// dump it covers the free fns, so an empty result means the program's free fns
+/// are constant-time at the MIR level; the `snc build` gate also checks method,
+/// class `init` and impl bodies (`lower_all_bodies`, ADR 0026 A2), which this
+/// dump does not print (register D149). Exits nonzero only on an upstream
 /// parse/resolve/type error (as `run_mir`); the verifier itself never rejects here
 /// (it reports — the `snc build` gate is what rejects a leaking program).
 fn run_ctverify(path: &str) -> ExitCode {
@@ -1326,9 +1329,9 @@ fn run_build(
     // the machine-checkable form of ADR 0008's guarantee, gating codegen.
     // (Codegen still consumes the typed program via the HIR seam per the
     // D3 escape hatch; MIR is analysis-only, so this sits between
-    // type-check and codegen.) `lower_to_mir` borrows `typed`, returning
+    // type-check and codegen.) `lower_all_bodies` borrows `typed`, returning
     // an owned MirProgram, so `typed` stays usable for the HIR below.
-    let mir = sentinel_mir::lower_to_mir(typed);
+    let mir = sentinel_mir::lower_all_bodies(typed);
     let leaks = sentinel_mir::verify_constant_time(&mir);
     if !leaks.is_empty() {
         for leak in leaks {
@@ -1418,7 +1421,7 @@ fn run_build_merged(merged: Program, path: &str, output: Option<&str>, link_libs
         return ExitCode::from(1);
     }
     // C5.2 / ADR 0026: the constant-time verification gates codegen.
-    let mir = sentinel_mir::lower_to_mir(&typed);
+    let mir = sentinel_mir::lower_all_bodies(&typed);
     let leaks = sentinel_mir::verify_constant_time(&mir);
     if !leaks.is_empty() {
         for leak in &leaks {
@@ -1591,7 +1594,7 @@ fn run_build_lib(
         }
         return ExitCode::from(1);
     }
-    let mir = sentinel_mir::lower_to_mir(&typed);
+    let mir = sentinel_mir::lower_all_bodies(&typed);
     let leaks = sentinel_mir::verify_constant_time(&mir);
     if !leaks.is_empty() {
         for leak in &leaks {
@@ -2553,7 +2556,7 @@ fn run_build_separate(path: &str, output: Option<&str>, lib_paths: &[String]) ->
             }
             return ExitCode::from(1);
         }
-        let mir = sentinel_mir::lower_to_mir(&typed);
+        let mir = sentinel_mir::lower_all_bodies(&typed);
         let leaks = sentinel_mir::verify_constant_time(&mir);
         if !leaks.is_empty() {
             for leak in &leaks {

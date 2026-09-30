@@ -17,10 +17,11 @@ report the drift as a bug.
 
 ## The guarantee, precisely
 
-`snc build` lowers each function's type-checked body to a minimal SSA MIR
-([`lower_to_mir`]) and runs [`verify_constant_time`], which **rejects** the
-program (`sentinel::mir::secret_leak`) if a `secret`-typed value reaches any of
-**four sinks**:
+`snc build` lowers every type-checked body — each free fn, class `init`, class
+method and impl method ([`lower_all_bodies`], ADR 0026 A2) — to a minimal SSA
+MIR and runs [`verify_constant_time`], which **rejects** the program
+(`sentinel::mir::secret_leak`) if a `secret`-typed value reaches any of
+**five sinks**:
 
 | Sink                       | MIR site                              | Source shape |
 | -------------------------- | ------------------------------------- | ------------ |
@@ -28,8 +29,13 @@ program (`sentinel::mir::secret_leak`) if a `secret`-typed value reaches any of
 | `SinkKind::MemoryIndex`    | a `Load`'s index operand              | `a[s]` |
 | `SinkKind::MemoryAddress`  | a `Load`'s base (pointer) operand     | `*p` where `p` is secret |
 | `SinkKind::Division`       | a `Binary(Div)`'s divisor operand     | `x / s` |
+| `SinkKind::ShiftAmount`    | a `Binary(Shl/Shr)`'s amount operand  | `x << s`, `x >> s` |
 
-An empty result means the program is **constant-time at the MIR level**.
+An empty result means the program is **constant-time at the MIR level**. The
+`snc mir` and `snc ctverify` dumps lower the free fns only ([`lower_to_mir`]),
+so an empty `snc ctverify` says that of the free fns, not of method bodies (see
+Known gaps).
+
 `declassify(e)` is the one sanctioned escape: it produces a non-secret-typed
 value, so anything downstream of it may branch/index/divide freely (you are
 asserting the value is safe to treat as public).
@@ -68,7 +74,8 @@ Three tiers:
   the carried operands are there for the future post-optimization pass. Soundness
   here rests entirely on the type checker propagating `secret` correctly through
   the construct — see "What conservative means" below.
-- **Off the 1.0 CT path** — not lowered, so not analyzed.
+- **Off the 1.0 CT path** — not lowered, so not analyzed. No construct is in
+  this tier today; handler arm bodies were, until ADR 0026 A1.
 
 | Construct (`TypedExprKind`)                         | MIR lowering                          | Tier |
 | --------------------------------------------------- | ------------------------------------- | ---- |
@@ -91,7 +98,13 @@ Three tiers:
 | `MethodCall` / `ImplMethodCall` / `QualifiedCall` / `ClassInit` | `Opaque(receiver?, args)` | Conservative |
 | `EnumConstruct` / `Match`                           | `Opaque(args / scrutinee + arm bodies)` | Conservative |
 | `Perform` / `ResumeKont` / `Spawn` / `Await`        | `Opaque(operands)`                    | Conservative |
-| `Handle` **arm bodies**                             | **not lowered** (only the handle body is) | **Off the 1.0 CT path** |
+| `Handle`                                            | the body, then each operation arm's body, then the `return` arm's; value `Opaque(body)` | Conservative (an arm's parameters, continuation and `return` value: a fresh `Opaque` of the declared type) |
+
+Among statements, `let` and `x = v` bind the value's SSA value to the
+variable. A store to a field, index or deref place lowers what the place
+computes (an index expression, a deref's operand) and then the value, and
+records the value as `Opaque(value)` (ADR 0050 A7); the store itself is not a
+sink, since the type checker refuses a `secret` index.
 
 ## What "conservative" means for soundness
 
@@ -115,10 +128,12 @@ reader of a verdict computed elsewhere.
 
 ## Known gaps (stated honestly)
 
-- **Handler arm bodies are not on the 1.0 CT path.** `Handle` lowers only its
-  body, not its arms (the arms bind handler-scoped variables this minimal
-  lowering does not model). A secret used *inside a handler arm body* is not
-  CT-checked. Effects-carrying secret handling is out of the 1.0 CT scope.
+- **The dumps and the self-hosted verifier cover free fns only.** `snc build`
+  checks every body ([`lower_all_bodies`]), but `snc mir` and `snc ctverify`
+  print the free fns ([`lower_to_mir`]), and the self-hosted `scg` verifier
+  mirrors those dumps, so it checks no class `init`, class method or impl
+  method (register D149). `scg`'s code generator runs no constant-time check
+  before it emits.
 - **The type checker is the single point of trust.** Per the boundary above, a
   secret-propagation bug in the type checker would false-negative this pass. The
   conformance suite is the mitigation; an independent secret-dataflow oracle is
@@ -140,7 +155,8 @@ reader of a verdict computed elsewhere.
 
 ## References
 
-- `crates/sentinel-mir/src/lib.rs` — `lower_to_mir`, `verify_constant_time`,
+- `crates/sentinel-mir/src/lib.rs` — `lower_all_bodies` (the `snc build` gate's
+  set), `lower_to_mir` (the dumps'), `verify_constant_time`,
   `MirFunction::is_secret` (the implementation; the source of truth).
 - [`decisions/0026-hir-mir-pipeline-and-constant-time-secret-codegen.md`](decisions/0026-hir-mir-pipeline-and-constant-time-secret-codegen.md)
   — ADR 0026 D5 (the CT verification design) + the type-as-oracle /
@@ -149,7 +165,10 @@ reader of a verdict computed elsewhere.
   guarantee.
 - The secret-flow conformance suite — `tests/ui/c52_secret_via_{call,field,match}`
   + `c52_secret_or_leak` (taint survives the conservative funnels → caught by the
-  MIR pass), `c52_secret_{in_if,array_index,divisor}` (the type checker's
+  MIR pass), `c52_secret_via_{handler_arm,return_arm,index_place,deref_place}`
+  (a handler arm and what a store's place computes are lowered),
+  `c52_secret_via_{method,class_init,impl_method}` (the `snc build` gate checks
+  method bodies), `c52_secret_{in_if,array_index,divisor}` (the type checker's
   source-level sink rejections), and `tests/pass/c52_secret_through_constructs_ok`
   (the accept side) — plus `tests/ui/c52_secret_leak` and the `tests/pass/c5*`
   constant-time go/no-go programs. The behavioral evidence.

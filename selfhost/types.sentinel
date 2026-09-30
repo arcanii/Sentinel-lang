@@ -351,7 +351,12 @@ struct TyCtx {
     mir_collecting: bool, // true while a variadic arm walks its args (gates the margs push,
                           // so a shared arg-walker in a non-collecting context can't pollute)
     mir_suppress: bool,   // true while walking a PLACE the IR doesn't lower as a value (an
-                          // assign target, a handle arm) — emits are no-ops there
+                          // assign target) — emits are no-ops there
+    // (ADR 0050 A7) true while walking an assignment's PLACE: `mir_suppress` keeps the
+    // place itself out of the IR, but what it computes — an index expression, a deref's
+    // operand — is lowered, as the oracle's `lower_place` lowers it (see the `Index` arm
+    // and `dump_te_unary`).
+    mir_place: bool,
     mirout: Vec<u8>,  // accumulated per-fn MIR dump (the mode-2 result)
     // --- (8/N) codegen .ll emission (ADR 0045) — built ONLY under `mode == 4`, a fused
     //     side-build mirroring the mode-2 MIR machinery. PER-FN state reset in `type_fn`

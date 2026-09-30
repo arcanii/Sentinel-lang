@@ -286,6 +286,37 @@ Total: ~4-7 sessions — consistent with ADR 0025's C5.1 (2-4) + C5.2
 (2-3) band. C5.1a (the codegen re-target) is the single riskiest step;
 the escape hatch (D3) bounds the downside.
 
+## Amendments
+
+- **A1 (2026-09-30, register D148) — a `handle`'s arms are lowered.** The oracle's MIR
+  lowered a `handle`'s body only; `scg`'s walked the operation arms and the `return` arm
+  with its emits switched off, which still emitted an arm's branch blocks (register D98).
+  Neither lowered what an arm computed, so it did not reach the MIR passes. Both compilers
+  now lower the body, then each operation arm's body in source order, then the `return`
+  arm's wherever it is written; the handle's value stays `Opaque([body])`. An arm's
+  parameters, its continuation and the `return` value are handler-scoped bindings the
+  lowering does not model: each use is a fresh `Opaque` of the type the typer gave the
+  binding — in the oracle, its declared type, which carries its `secret` qualifier, as a
+  `match` binding's does. The two compilers' MIR for an arm agrees wherever their typers
+  agree on it, which is every corpus program, and D98's divergence (branch blocks `scg`
+  alone emitted) is closed. The typers still differ on an arm parameter that is not `i64`
+  (register D150), on a resume's type (D7) and on a `handle`'s type (D151), and since this
+  amendment those differences show in the MIR as well as the typed dump. Pinned by
+  `tests/ui/c52_secret_via_handler_arm` and `c52_secret_via_return_arm`.
+- **A2 (2026-09-30, register D148) — the constant-time gate checks method bodies.**
+  `lower_to_mir` lowers `program.fns`, and class `init`s, class methods and impl methods
+  are not in it, so the gate did not check their bodies. Every `snc build` gate (a single
+  file, a merged module graph, `--separate`, `--lib` / `--shared`) now verifies
+  `lower_all_bodies`: the free fns, then each class's `init` and methods and each impl's
+  methods, in declaration order, with `self` unbound. The `snc mir` and `snc ctverify`
+  dumps keep listing the free fns only, so the self-hosted verifier, which mirrors those
+  dumps, does not check method bodies (register D149). Pinned by
+  `tests/ui/c52_secret_via_method`, `c52_secret_via_class_init` and
+  `c52_secret_via_impl_method` (the single-file gate), and by tests in
+  `crates/sentinel-driver/tests/modules.rs` (the merged and `--separate` gates) and
+  `export.rs` (`--lib`). It refuses programs that compiled before, so it is at least a
+  minor version (ADR 0076 D2).
+
 ## Reasoning
 
 **Why HIR is lower-risk than it looks.** The desugar hoists work
