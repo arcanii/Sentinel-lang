@@ -775,9 +775,10 @@ The rule now, in all three back ends:
   temporary (`mk().s`), which nothing drops.
 - The new owners are a `let`, an assignment (to a binding, through a reference, or to a
   struct field), a user-fn, generic or spawn argument, a method, qualified-call or class-init
-  argument where the callee drops its parameters, the argument a delegating class's
-  synthesised method forwards, a struct-literal field, a `return` operand, and a
-  non-effecting fn's or a method's body value.
+  argument where the callee releases its `Shared` / `Mutex` parameters (the oracle and
+  `scg`; inkwell's releases none, A2), the argument a delegating class's synthesised method
+  forwards, a struct-literal field, a `return` operand, and a non-effecting fn's or a
+  method's body value.
 - A block, an `if`, a `match` or a `scope` in one of those positions hands the context on to
   its tail — each branch's, each arm's, the scope body's — and to nothing else, so `if c { s }
   else { shared_new(3) }` clones on the `s` path only.
@@ -810,8 +811,9 @@ stays held — a leak, and never a release too many:
   inkwell, D2's missing clone had handed that unit to the reader. Register D122.
 - A struct literal that nothing drops — read in place (`H { s: s, n: 1 }.n`), or stored where
   it is never released (an array literal, `push`, an enum constructor) — still counts its
-  fields, so the units they took stay held. So does one inkwell never drops: a method,
-  qualified-call or class-init argument (D119). Register D122.
+  fields, so the units they took stay held. So does a method, qualified-call or class-init
+  argument in inkwell, whose parameter frame releases no handle (A2, register D154; before
+  A2 that frame was dropped only at a method's `return`, D119). Register D122.
 - A call's result that nothing drops — read in place by a builtin (`shared_get(getf(&h))`)
   or discarded (`getf(&h);`) — keeps the unit its callee counted into the returned value, now
   that a returned place read (`(*r).s`, `self.s`) is cloned. Register D122.
@@ -835,18 +837,20 @@ closes (`fn f<U>(x: U, c: bool) -> i64 { if c { sink(x) } else { sink(x) + 1 } }
 `Shared<i64>`, 2,000,000 calls: 70.8 MB before, 9.3 after). No corpus program has that
 shape, so no pre-existing corpus program's emitted IR changes.
 
-The back ends differ in three places. inkwell does not drop a method's or a class init's
-parameters (register D119, a leak), so its method, qualified-call and class-init arguments
-stay out of the context; the oracle and `scg` clone into them. inkwell lowers a block's own
-`let`-local returned as its tail without a clone; in an owning position all three balance
-(register D123 for inkwell elsewhere). And a generic body is lowered differently (register
-D36): the oracle and inkwell hand a moved type-parameter binding on, while `scg` clones it and
-releases the parameter. Where the binding is moved on every path both balance. Where it is
-moved on only some, the oracle and inkwell leave its unit held on the others (D93, as before
-A1), and `scg` does too when a field of it is read on another path (`if c { Bx { v: b.v, n:
-0 } } else { b }`). The IR differs, so the corpus carries no such program. An assignment
-still does not release the value it overwrites (register D120, a leak), so `v = s` now
-leaves one unit held rather than releasing one too many.
+The back ends differ in three places. inkwell did not drop a method's or a class init's
+parameters (register D119, a leak; a method's `return` drained them, which A2 corrects), so
+its method, qualified-call and class-init arguments stay out of the context; the oracle and
+`scg` clone into them. (Since A2 inkwell drops those parameters on every exit but releases no
+handle among them, which is why those arguments can stay out of the context.) inkwell lowers
+a block's own `let`-local returned as its tail without a clone; in an owning position all
+three balance (register D123 for inkwell elsewhere). And a generic body is lowered
+differently (register D36): the oracle and inkwell hand a moved type-parameter binding on,
+while `scg` clones it and releases the parameter. Where the binding is moved on every path
+both balance. Where it is moved on only some, the oracle and inkwell leave its unit held on
+the others (D93, as before A1), and `scg` does too when a field of it is read on another path
+(`if c { Bx { v: b.v, n: 0 } } else { b }`). The IR differs, so the corpus carries no such
+program. An assignment still does not release the value it overwrites (register D120, a
+leak), so `v = s` now leaves one unit held rather than releasing one too many.
 
 Pinned by `tests/pass/c71_shared_place_duplications.sentinel`, which reads a `Shared` out of
 a place into every owner above (a `Mutex` into two of them), three times over, and answers
@@ -869,3 +873,35 @@ program that spells a `secret`-qualified handle, so it is at least a minor versi
 D2). A matched `snc llvm` sweep of the corpus and of the ten self-hosted module roots, merged
 from this tree, changes no byte except on the new fixture and newly refuses only the two
 refusal fixtures, and both bootstrap fixed points hold.
+
+## D2 amendment A2 (2026-10-03) — inkwell drops a method's and an init's parameters, but releases no handle among them (register D153)
+
+inkwell dropped the parameter frame of a class method, an impl method and a class `init` only
+when a method left through `return`, which drained every frame; otherwise it popped the frame
+without its drops (an `init`'s statements are lowered into that frame too, and an `init`
+cannot `return`), so a heap value passed there by value leaked (registers D63 and D119). A1
+kept those calls' arguments out of the owning context on the ground that inkwell never dropped
+such a parameter, but at a `return` a `Shared` / `Mutex` parameter the call had not cloned was
+released: one release too many when the caller kept owning the handle, and the cell was freed
+while the caller still held it.
+
+inkwell now drops that frame on every exit, as a free fn's, but releases no handle in it: not
+a `Shared` / `Mutex` bound there directly, and not one held in a field of a struct bound
+there, at any depth. The calls' arguments stay out of the owning context, so a handle the
+caller passes from a place it keeps owning balances. A unit that reaches the frame with no
+other owner stays held: a counted temporary passed directly, a handle a struct argument
+brought in, an `init`'s own `Shared` / `Mutex` local its statements bind, or a handle in a
+field of such a struct local. That is a leak, and never a release too many (register D154).
+It leaked before on a method's fall-through and in an `init`; on a method's `return`, where
+the drained frame used to release such a unit, the leak is new. Everything else the frame
+holds is dropped, as a free fn's is — an array, a string, a `Vec`, a struct's other fields, a
+nullable struct's or an enum's box — which closes D63 and D119 but for those units. The
+oracle and `scg`, which clone such an argument and release the parameter, are unchanged, so
+the IR they emit does not move; inkwell's does. Pinned by
+`tests/pass/c71_method_handle_param`, four of whose cases aborted on a refcount underflow
+before, and by the inkwell IR test `d153_a_method_drops_its_parameters_but_not_a_handle`
+(each array the frame holds freed on every exit, a struct parameter's included, and no handle
+released, a struct's included). It changes what `snc build` emits for a method with a heap
+parameter, for a method with a `Shared` / `Mutex` parameter (bound directly or in a struct
+parameter's field) that leaves through `return`, and for an `init` with a heap parameter or
+local, so it is at least a minor version (ADR 0076 D2).

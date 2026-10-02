@@ -1,0 +1,185 @@
+// Register D153: inkwell passes a `Shared` / `Mutex` argument to a class method, an impl
+// method (called directly, through a qualified call or through a `delegate`) or a class
+// `init` without a clone (ADR 0071 A1), so where the caller keeps owning the handle, as
+// every case here does, the callee must not release it on any exit, `return` included.
+// inkwell released it at a `return`: one release too many, so the cell was freed while the
+// caller still held it, and the caller's next use read freed memory. Before the fix
+// `plain_return`, `mutex_return`, `qualified` and `delegated` each aborted on a refcount
+// underflow (the first of them to run ends the program). The text back ends clone such an
+// argument and release the parameter, so they answer the same.
+//
+// Each case loops 1,000 times and then reads the cell. Four of them (`class_holder`,
+// `impl_holder`, `mutex_holder`, `holder_elsewhere`) also build a struct holding a clone of
+// the cell and move it on one path only. They passed before the fix, because nothing
+// dropped that struct and its unit covered the extra release; they matter once a struct
+// moved on one path only is dropped on the other (ADR 0077). `init_param` checks that an
+// `init` keeps a handle parameter too.
+//
+// Exit 42 = every case held.
+
+struct H { s: Shared<i64>, a: [i64] }
+struct HM { m: Mutex<i64>, a: [i64] }
+
+fn eat_h(h: H) -> i64 { h.a[0] }
+fn eat_hm(h: HM) -> i64 { h.a[0] }
+
+class C {
+    let z: i64;
+    pub init(z: i64) { self.z = z; 0 }
+    pub fn early(self: &Self, n: i64, sh: Shared<i64>) -> i64 {
+        if n < 0 { return 1 } else { 0 };
+        2
+    }
+    pub fn held(self: &Self, n: i64, sh: Shared<i64>) -> i64 {
+        let h: H = H { s: sh, a: [1, 2] };
+        let r: i64 = if n > 5 { eat_h(h) } else { 0 };
+        if n < 0 { return 1 } else { 0 };
+        r
+    }
+    pub fn lk(self: &Self, n: i64, mx: Mutex<i64>) -> i64 {
+        if n < 0 { return 1 } else { 0 };
+        2
+    }
+    pub fn locked(self: &Self, n: i64, mx: Mutex<i64>) -> i64 {
+        let h: HM = HM { m: mx, a: [1, 2] };
+        let r: i64 = if n > 5 { eat_hm(h) } else { 0 };
+        if n < 0 { return 1 } else { 0 };
+        r
+    }
+}
+
+class D {
+    let v: i64;
+    pub init(z: i64, sh: Shared<i64>) { self.v = z + shared_get(sh); 0 }
+    pub fn get(self: &Self) -> i64 { self.v }
+}
+
+trait T { fn f(self: &Self, n: i64, sh: Shared<i64>) -> i64; }
+struct J { z: i64 }
+impl as T for J {
+    fn f(self: &Self, n: i64, sh: Shared<i64>) -> i64 {
+        let h: H = H { s: sh, a: [1, 2] };
+        let r: i64 = if n > 5 { eat_h(h) } else { 0 };
+        if n < 0 { return 1 } else { 0 };
+        r
+    }
+}
+
+trait Q { fn q(self: &Self, n: i64, sh: Shared<i64>) -> i64; }
+struct K { z: i64 }
+impl Named as Q for K {
+    fn q(self: &Self, n: i64, sh: Shared<i64>) -> i64 {
+        if n < 0 { return 1 } else { 0 };
+        2
+    }
+}
+
+trait W { fn w(self: &Self, n: i64, sh: Shared<i64>) -> i64; }
+class Inner { let v: i64; pub init() { self.v = 0; 0 } }
+impl as W for Inner {
+    fn w(self: &Self, n: i64, sh: Shared<i64>) -> i64 {
+        if n < 0 { return 1 } else { 0 };
+        2
+    }
+}
+class Outer { delegate inner: Inner to W; pub init(i: Inner) { self.inner = i; 0 } }
+
+fn hold(sh: Shared<i64>, n: i64) -> i64 {
+    let h: H = H { s: sh, a: [1, 2] };
+    if n > 5 { eat_h(h) } else { 0 }
+}
+
+fn plain_return() -> i64 {
+    let sh: Shared<i64> = shared_new(5);
+    let cc: C = C::init(0);
+    let mut i: i64 = 0;
+    let mut acc: i64 = 0;
+    while i < 1000 { acc = acc + cc.early(0 - 1, sh) + cc.early(1, sh); i = i + 1; }
+    if acc == 3000 && shared_get(sh) == 5 { 1 } else { 0 }
+}
+
+fn mutex_return() -> i64 {
+    let mx: Mutex<i64> = mutex_new(5);
+    let cc: C = C::init(0);
+    let mut i: i64 = 0;
+    let mut acc: i64 = 0;
+    while i < 1000 { acc = acc + cc.lk(0 - 1, mx); i = i + 1; }
+    let g = lock(mx);
+    let v: i64 = if is_some(g) { *g } else { 0 };
+    if acc == 1000 && v == 5 { 1 } else { 0 }
+}
+
+fn class_holder() -> i64 {
+    let sh: Shared<i64> = shared_new(5);
+    let cc: C = C::init(0);
+    let mut i: i64 = 0;
+    let mut acc: i64 = 0;
+    while i < 1000 { acc = acc + cc.held(0 - 1, sh); i = i + 1; }
+    if acc == 1000 && shared_get(sh) == 5 { 1 } else { 0 }
+}
+
+fn impl_holder() -> i64 {
+    let sh: Shared<i64> = shared_new(5);
+    let j: J = J { z: 0 };
+    let mut i: i64 = 0;
+    let mut acc: i64 = 0;
+    while i < 1000 { acc = acc + j.f(0 - 1, sh); i = i + 1; }
+    if acc == 1000 && shared_get(sh) == 5 { 1 } else { 0 }
+}
+
+fn mutex_holder() -> i64 {
+    let mx: Mutex<i64> = mutex_new(5);
+    let cc: C = C::init(0);
+    let mut i: i64 = 0;
+    let mut acc: i64 = 0;
+    while i < 1000 { acc = acc + cc.locked(0 - 1, mx); i = i + 1; }
+    let g = lock(mx);
+    let v: i64 = if is_some(g) { *g } else { 0 };
+    if acc == 1000 && v == 5 { 1 } else { 0 }
+}
+
+fn holder_elsewhere() -> i64 {
+    let sh: Shared<i64> = shared_new(5);
+    let cc: C = C::init(0);
+    let mut i: i64 = 0;
+    let mut acc: i64 = 0;
+    while i < 1000 {
+        let gv: i64 = hold(sh, 0);
+        acc = acc + gv + cc.early(0 - 1, sh);
+        i = i + 1;
+    }
+    if acc == 1000 && shared_get(sh) == 5 { 1 } else { 0 }
+}
+
+fn qualified() -> i64 {
+    let sh: Shared<i64> = shared_new(5);
+    let k: K = K { z: 0 };
+    let mut i: i64 = 0;
+    let mut acc: i64 = 0;
+    while i < 1000 { acc = acc + Named::q(&k, 0 - 1, sh); i = i + 1; }
+    if acc == 1000 && shared_get(sh) == 5 { 1 } else { 0 }
+}
+
+fn init_param() -> i64 {
+    let sh: Shared<i64> = shared_new(5);
+    let mut i: i64 = 0;
+    let mut acc: i64 = 0;
+    while i < 1000 { let d: D = D::init(1, sh); acc = acc + d.get(); i = i + 1; }
+    if acc == 6000 && shared_get(sh) == 5 { 1 } else { 0 }
+}
+
+fn delegated() -> i64 {
+    let sh: Shared<i64> = shared_new(5);
+    let x: Inner = Inner::init();
+    let o: Outer = Outer::init(x);
+    let mut i: i64 = 0;
+    let mut acc: i64 = 0;
+    while i < 1000 { acc = acc + o.w(0 - 1, sh); i = i + 1; }
+    if acc == 1000 && shared_get(sh) == 5 { 1 } else { 0 }
+}
+
+fn main() -> i64 {
+    let n: i64 = plain_return() + mutex_return() + class_holder() + impl_holder()
+        + mutex_holder() + holder_elsewhere() + qualified() + init_param() + delegated();
+    if n == 9 { 42 } else { n }
+}

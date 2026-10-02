@@ -1271,10 +1271,11 @@ fn pass_c41_member_param_types_interning_order() {
 
 #[test]
 fn pass_c43_delegate_forwards_move_param() {
-    // Register D61: a delegate forwarder passes a heap param on by value. inkwell was
-    // always right here (it never dropped a method's param frame), so this exit code is
-    // not the check: the fixture is in the corpus so the codegen differential compares
-    // scg's hand-emitted forwarder against the oracle. Exit 42.
+    // Register D61: a delegate forwarder passes a heap param on by value. Since D153 inkwell
+    // drops the forwarder's parameter frame, as it does any impl method's, so this exit code
+    // also checks that the forwarder skips the param it moved on; the fixture is in the
+    // corpus so the codegen differential compares scg's hand-emitted forwarder against the
+    // oracle. Exit 42.
     assert_eq!(run_exit("c43_delegate_forwards_move_param.sentinel"), 42);
 }
 
@@ -2422,10 +2423,21 @@ fn pass_c71_shared_place_duplications() {
     // released one unit more than it took on 19 of the fixture's 24 shapes — the debug
     // runtime's refcount check turns that into an abort; balanced, the program answers 94.
     // inkwell leaves method, qualified-call and class-init arguments out of the rule (it never
-    // drops those parameters, register D119), so those shapes pin the oracle and `scg`:
+    // releases a `Shared` / `Mutex` parameter of a method or an init, register D153), so those
+    // shapes pin the oracle and `scg`:
     // `selfhost_codegen::oracle_ir_of_the_shared_duplication_program_runs` runs the oracle's
     // IR of the same file, and the codegen differential holds `scg` to it.
     assert_eq!(run_exit("c71_shared_place_duplications.sentinel"), 94);
+}
+
+#[test]
+fn pass_c71_method_handle_param() {
+    // Register D153: inkwell passes a `Shared` / `Mutex` argument to a class method, an impl
+    // method, a qualified call or a class `init` without a clone, so where the caller keeps
+    // owning the handle the callee must not release it on any exit, `return` included; it
+    // released it at a `return`, which aborted four of the fixture's cases on a refcount
+    // underflow. Nine cases, 1 each; 42 = all held.
+    assert_eq!(run_exit("c71_method_handle_param.sentinel"), 42);
 }
 
 #[test]

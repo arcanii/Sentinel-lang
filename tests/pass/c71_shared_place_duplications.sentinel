@@ -6,7 +6,8 @@
 // the argument a delegating class forwards, a struct-literal field and a returned value; a
 // block's, an `if`'s or a `match` arm's tail passes its value through to one of those. The
 // ADR lists what the rule leaves out — among them inkwell's method, qualified-call and
-// class-init arguments, whose parameters inkwell never drops (register D119).
+// class-init arguments, whose `Shared` / `Mutex` parameters inkwell never releases
+// (register D153).
 //
 // Before the amendment the oracle released one unit more than it took on every shape below,
 // inkwell on all but five (block_local, class_field, method_arg, qualified_arg and

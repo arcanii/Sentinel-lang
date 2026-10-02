@@ -1782,10 +1782,19 @@ struct HandleContext<'ctx> {
 /// bulk-frees it — replacing the per-binding `sentinel_free`s of exactly
 /// the arena-routed bindings (the [`CodegenCtx::arena_routed`] set drives
 /// both the routing and the free-skip, so they cannot diverge).
+///
+/// `keeps_handles` marks the parameter frame of a class `init`, a class method or an impl
+/// method (register D153). Its drops run on every exit, as a free fn's parameter frame's do,
+/// but release no handle, bound there directly or held in a field of a struct bound there.
+/// The caller passes a handle argument without a clone (ADR 0071 A1), and this frame
+/// releases none of the units that reach it: a leak where nothing else owns one (register
+/// D154), and never a release too many. An `init`'s statements are lowered into this frame
+/// too, so the handles of the locals those statements bind are kept the same way.
 #[derive(Default, Clone)]
 struct ScopeFrame<'ctx> {
     vars: Vec<VarId>,
     arena: Option<PointerValue<'ctx>>,
+    keeps_handles: bool,
 }
 
 impl<'ctx> ScopeFrame<'ctx> {
@@ -3718,7 +3727,8 @@ impl<'ctx, 'plan, 'm> CodegenCtx<'ctx, 'plan, 'm> {
             self.scope_stack.clear();
             let entry = self.context.append_basic_block(fn_value, "entry");
             self.builder.position_at_end(entry);
-            self.scope_stack.push(ScopeFrame::default());
+            // Register D153: the parameter frame, dropped on every exit as a free fn's is.
+            self.scope_stack.push(ScopeFrame { keeps_handles: true, ..ScopeFrame::default() });
 
             // self_ptr = first arg. Bind self_var_id directly to
             // this pointer (no extra alloca + store) so field
@@ -3756,6 +3766,8 @@ impl<'ctx, 'plan, 'm> CodegenCtx<'ctx, 'plan, 'm> {
             for stmt in &init_def.body.stmts {
                 self.lower_stmt(stmt, program)?;
             }
+            // Register D153: drop the parameters and the statements' locals.
+            self.emit_scope_drops(None, program)?;
             self.scope_stack.pop();
             self.builder
                 .build_return(None)
@@ -3774,7 +3786,8 @@ impl<'ctx, 'plan, 'm> CodegenCtx<'ctx, 'plan, 'm> {
             self.scope_stack.clear();
             let entry = self.context.append_basic_block(fn_value, "entry");
             self.builder.position_at_end(entry);
-            self.scope_stack.push(ScopeFrame::default());
+            // Register D153: the parameter frame, dropped on every exit as a free fn's is.
+            self.scope_stack.push(ScopeFrame { keeps_handles: true, ..ScopeFrame::default() });
 
             // self_ptr = first arg. Bind self_var_id directly.
             let self_ptr = fn_value
@@ -3803,6 +3816,9 @@ impl<'ctx, 'plan, 'm> CodegenCtx<'ctx, 'plan, 'm> {
             }
             // ADR 0071 D2 amendment A1: the caller is a new owner of the returned value.
             let body_val = self.lower_block(&m.body, program, true)?;
+            // Register D153: drop the parameters, as `compile_fn` does.
+            let tail_returned = tail_returned_var(&m.body.tail);
+            self.emit_scope_drops(tail_returned, program)?;
             self.scope_stack.pop();
             self.builder
                 .build_return(Some(&body_val))
@@ -3841,7 +3857,8 @@ impl<'ctx, 'plan, 'm> CodegenCtx<'ctx, 'plan, 'm> {
             self.scope_stack.clear();
             let entry = self.context.append_basic_block(fn_value, "entry");
             self.builder.position_at_end(entry);
-            self.scope_stack.push(ScopeFrame::default());
+            // Register D153: the parameter frame, dropped on every exit as a free fn's is.
+            self.scope_stack.push(ScopeFrame { keeps_handles: true, ..ScopeFrame::default() });
 
             // self_ptr = first arg; bind directly (no extra
             // alloca + store) so self.field reads/writes GEP
@@ -3872,6 +3889,9 @@ impl<'ctx, 'plan, 'm> CodegenCtx<'ctx, 'plan, 'm> {
             }
             // ADR 0071 D2 amendment A1: the caller is a new owner of the returned value.
             let body_val = self.lower_block(&m.body, program, true)?;
+            // Register D153: drop the parameters, as `compile_fn` does.
+            let tail_returned = tail_returned_var(&m.body.tail);
+            self.emit_scope_drops(tail_returned, program)?;
             self.scope_stack.pop();
             self.builder
                 .build_return(Some(&body_val))
@@ -5168,6 +5188,9 @@ impl<'ctx, 'plan, 'm> CodegenCtx<'ctx, 'plan, 'm> {
     ///   - The binding returned via the tail expression (if the tail is a
     ///     `Var(id)`) — passed via `tail_returned`.
     ///   - Arena-routed bindings (bulk-freed by the arena exit below).
+    ///   - In a method's or an init's parameter frame, every handle release: a
+    ///     `Shared` / `Mutex` binding's, and one held in a struct binding's field
+    ///     (register D153, [`ScopeFrame`]'s `keeps_handles`).
     ///
     /// C2.5(a): takes `program` so [`emit_drop_struct_fields`] can resolve
     /// struct decls + generic-instance args to recurse through heap-backed
@@ -5219,7 +5242,9 @@ impl<'ctx, 'plan, 'm> CodegenCtx<'ctx, 'plan, 'm> {
                 .iter()
                 .filter_map(|(b, f)| (*b == id).then_some(*f))
                 .collect();
-            self.emit_drop_for_binding(ptr, ty, program, &id_moved_fields)?;
+            // Register D153: a method's or an init's parameter frame releases no handle
+            // (see [`ScopeFrame`]).
+            self.emit_drop_for_binding(ptr, ty, program, &id_moved_fields, scope.keeps_handles)?;
         }
         // C5.4 (2/N) / ADR 0028: if this scope lazily created an arena
         // (i.e. routed ≥1 allocation), bulk-free it in one call. The
@@ -5359,6 +5384,9 @@ impl<'ctx, 'plan, 'm> CodegenCtx<'ctx, 'plan, 'm> {
         // owned + freed by the consumer); `emit_drop_struct_fields` skips them. Empty for
         // a fully-live binding and for every nested (recursive) field drop.
         moved_fields: &BTreeSet<u32>,
+        // Register D153: release no `Shared` / `Mutex`, here or in a field at any depth
+        // (a method's or an init's parameter frame, [`ScopeFrame`]'s `keeps_handles`).
+        keep_handles: bool,
     ) -> Result<(), CodegenError> {
         // C3 / ADR 0019 D5 (C3.1): unwrap one layer of `secret T`
         // before dispatching on shape. Drop semantics of secrets
@@ -5499,7 +5527,7 @@ impl<'ctx, 'plan, 'm> CodegenCtx<'ctx, 'plan, 'm> {
                 // dispatch on the field's type — handles Array,
                 // ?Struct/?GenericInstance, nested structs, and
                 // nested generic instances.
-                self.emit_drop_struct_fields(ptr, ty, program, moved_fields)?;
+                self.emit_drop_struct_fields(ptr, ty, program, moved_fields, keep_handles)?;
             }
             Type::Nullable(_)
             | Type::I64
@@ -5536,6 +5564,9 @@ impl<'ctx, 'plan, 'm> CodegenCtx<'ctx, 'plan, 'm> {
             Type::Channel(_) => {
                 // ADR 0066 M1.2: Channel cleanup is the runtime's job;
                 // no codegen-emitted drop (the handle is a Copy pointer).
+            }
+            Type::Shared(_) | Type::Mutex(_) if keep_handles => {
+                // Register D153: kept, in a method's or an init's parameter frame.
             }
             Type::Shared(_) => {
                 // ADR 0071 M1.4a slice 3: the refcount `--` at scope exit. Load the
@@ -5598,7 +5629,7 @@ impl<'ctx, 'plan, 'm> CodegenCtx<'ctx, 'plan, 'm> {
                 // C4.1 / ADR 0022 D9: class drop reuses struct
                 // recursive field drop machinery. Classes own
                 // their fields and follow the standard pattern.
-                self.emit_drop_struct_fields(ptr, ty, program, moved_fields)?;
+                self.emit_drop_struct_fields(ptr, ty, program, moved_fields, keep_handles)?;
             }
             Type::Enum(_) => {
                 // Phase D.1 / ADR 0032 D6 (4/N): an enum owns its
@@ -5672,6 +5703,8 @@ impl<'ctx, 'plan, 'm> CodegenCtx<'ctx, 'plan, 'm> {
         // (the consumer owns + freed them) — skip their drop. Non-empty only at the top
         // level of a partially-moved binding; a nested struct field carries no moves yet.
         moved_fields: &BTreeSet<u32>,
+        // Register D153: passed down from [`Self::emit_drop_for_binding`].
+        keep_handles: bool,
     ) -> Result<(), CodegenError> {
         // Resolve (decl, concrete_field_types, llvm_struct_ty).
         let (decl, field_tys, struct_llvm_ty): (
@@ -5739,7 +5772,7 @@ impl<'ctx, 'plan, 'm> CodegenCtx<'ctx, 'plan, 'm> {
                 .map_err(|e| CodegenError::Builder(e.to_string()))?;
             // ADR 0046: nested struct fields carry no tracked moves at the MVP (deep
             // paths deferred — D5), so the recursive drop gets an empty move set.
-            self.emit_drop_for_binding(field_ptr, *field_ty, program, &BTreeSet::new())?;
+            self.emit_drop_for_binding(field_ptr, *field_ty, program, &BTreeSet::new(), keep_handles)?;
         }
         let _ = decl; // captured for clarity; field types are what we used
         Ok(())
@@ -13560,6 +13593,91 @@ fn main() -> i64 {
             1,
             "@read_then_move: the field read before the move must clone:\n{body}"
         );
+    }
+
+    // ===== Register D153: a method's or an init's parameter frame is dropped, but not its handles =====
+    //
+    // inkwell lowers a class method's, an impl method's and a class init's parameters into
+    // a frame of their own, and an init's statements into it too. It drops that frame on
+    // every exit, as a free fn's, `return` included, but releases no handle there: not a
+    // `Shared` / `Mutex` binding, which the caller passes without a clone, and not one held
+    // in a field of a struct bound there, at any depth (its unit stays held, register
+    // D154). The frees and releases are memory, not an exit code, so this reads the IR.
+
+    const D153_FRAMES: &str = r#"
+struct HS { s: Shared<i64>, m: Mutex<i64>, a: [i64] }
+struct HN { inner: HS, n: i64 }
+class K {
+    let n: i64;
+    pub init(a: [i64], s: Shared<i64>, hn: HN) {
+        let t: [i64] = [a[0], 2];
+        let h: Shared<i64> = shared_new(1);
+        let hs: HS = HS { s: shared_new(3), m: mutex_new(3), a: [4] };
+        self.n = t[0] + shared_get(s) + shared_get(h) + hs.a[0] + hn.n;
+        0
+    }
+    pub fn eat(self: &Self, a: [i64], s: Shared<i64>, mx: Mutex<i64>) -> i64 { a[0] + shared_get(s) }
+    pub fn early(self: &Self, a: [i64], s: Shared<i64>, c: bool) -> i64 {
+        if c { return 1 } else { 0 };
+        a[0] + shared_get(s)
+    }
+    pub fn held(self: &Self, h: HS, c: bool) -> i64 {
+        if c { return 1 } else { 0 };
+        h.a[0]
+    }
+}
+struct P { n: i64 }
+trait T { fn m(self: &Self, a: [i64], s: Shared<i64>, hn: HN) -> i64; }
+impl as T for P {
+    fn m(self: &Self, a: [i64], s: Shared<i64>, hn: HN) -> i64 { a[0] + shared_get(s) + self.n + hn.n }
+}
+fn main() -> i64 {
+    let s: Shared<i64> = shared_new(5);
+    let mx: Mutex<i64> = mutex_new(6);
+    let k: K = K::init([1, 2], s, HN { inner: HS { s: s, m: mx, a: [9] }, n: 1 });
+    let p = P { n: 1 };
+    k.eat([3, 4], s, mx) + k.early([5, 6], s, true) + k.held(HS { s: s, m: mx, a: [1] }, false)
+        + p.m([7, 8], s, HN { inner: HS { s: s, m: mx, a: [2] }, n: 1 })
+}
+"#;
+
+    #[test]
+    fn d153_a_method_drops_its_parameters_but_not_a_handle() {
+        let ir = compile_src_ir_with_moves(D153_FRAMES);
+        // (fn, frees of its arrays: its parameters', its struct parameters' and, in an init,
+        // its locals'; one set per exit for `early` and `held`)
+        for (f, frees) in [
+            ("K__init", 4),
+            ("K__eat", 1),
+            ("K__early", 2),
+            ("K__held", 2),
+            ("default__P__T__m", 2),
+        ] {
+            // The `define`, not a call site, which can come first in the module.
+            let head = format!("@{f}(");
+            let body: String = ir
+                .lines()
+                .skip_while(|l| !(l.starts_with("define ") && l.contains(&head)))
+                .take_while(|l| *l != "}")
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(!body.is_empty(), "no define for @{f} in:\n{ir}");
+            assert_eq!(
+                body.matches("@sentinel_free(").count(),
+                frees,
+                "@{f} must free every array its parameter frame holds, on every exit:\n{body}"
+            );
+            assert_eq!(
+                body.matches("@sentinel_shared_release(").count(),
+                0,
+                "@{f} releases a `Shared` in its parameter frame:\n{body}"
+            );
+            assert_eq!(
+                body.matches("@sentinel_mutex_release(").count(),
+                0,
+                "@{f} releases a `Mutex` in its parameter frame:\n{body}"
+            );
+        }
     }
 
     // ===== Register D92 / ADR 0032 A5: a `match` on a temporary frees its payload box =====
