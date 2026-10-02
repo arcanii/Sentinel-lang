@@ -5,7 +5,7 @@ HANDOVER.md, STATE.md is the source of truth. New contributors (or
 new chat sessions) should be able to read this file and understand
 the current state of the workspace without re-reading every commit.
 
-## Current State (2026-10-01)
+## Current State (2026-10-03)
 
 > **Phase C closed at the bootstrap milestone (2026-05-30); Phase D self-hosts; the
 > per-unit separate-compilation back end is functionally complete.**
@@ -14,7 +14,24 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
-**Latest (2026-10-01) — `scg` binds a handler arm's parameters with the operation's
+**Latest (2026-10-03) — inkwell drops a method's and an init's parameters,
+but releases no handle among them (register D153; D63 and D119 closed).**
+[ADR 0071](decisions/0071-shared-ownership-and-mutex.md) D2 amendment A2: inkwell released a
+class method's, an impl method's or a qualified call's `Shared` / `Mutex` parameter at a
+`return`, though the call had not cloned it — one release too many when the caller kept
+owning the handle, so the cell was freed while the caller still held it. It now drops a
+method's, an impl method's and a class `init`'s parameter frame on every exit, as a free
+fn's, but releases no handle there, bound directly or held in a field of a struct bound
+there: a handle the caller passes from a place it keeps owning balances, and a unit that
+reaches the frame with no other owner stays held, a leak registered as D154 — new on a
+method's `return`, which used to release it. Everything else in that frame is dropped,
+which closes the leaks D63 and D119 but for those units: 2,000,000 method calls with a
+four-element array parameter peak at 9.3 MB, against 101.4 MB before. The oracle and `scg`
+are unchanged, so the IR they emit does not move. Pinned by
+`tests/pass/c71_method_handle_param`, four of whose cases aborted before, and by an inkwell
+IR test. It changes what `snc build` emits, so it is at least a minor version (ADR 0076 D2).
+
+**Previously (2026-10-01) — `scg` binds a handler arm's parameters with the operation's
 declared types (register D150).** [ADR 0041](decisions/0041-self-host-port-types.md) A15:
 the self-hosted typer bound every arm parameter as `i64`, where the oracle binds each with
 the operation's declared type. `scg` now records each operation's parameter types at the
@@ -837,12 +854,14 @@ always a borrow (`SelfKind` is only `&Self` / `&mut Self`), so moving it, or any
 field path rooted at it, is refused — which also closes the class-field move finding raised
 privately on 2026-09-05/06, for the shape it was reported in.
 
-⚠ **A LEAK in the same paths is filed, not fixed (D63).** inkwell's method and init paths
-pop their param frame without dropping it, so every by-value heap param of every method, and
-every heap param or local of every init, leaks — 146.6 MB for a million method calls against
-a flat 8.4 MB free-fn control, 99.0 MB for 600k inits. A drop was written and withdrawn
-before commit: the review constructed regressions it caused on the shipping back end, one of
-them through a path tracked privately, so the fix waits on a maintainer decision.
+⚠ **A LEAK in the same paths is filed, not fixed (D63).** inkwell's method and init paths pop
+their param frame without dropping it unless a method leaves through `return`, so a method's
+by-value heap param leaks on every other exit, and every heap param of every init, and every
+heap local its statements bind, leaks — 146.6 MB for a million method calls against a flat
+8.4 MB free-fn control, 99.0 MB for 600k inits. A drop was written and withdrawn before
+commit: the review constructed regressions it caused on the shipping back end, one of them
+through a path tracked privately, so the fix waits on a maintainer decision. (Closed
+2026-10-03 by D153; what it leaves is D154.)
 
 **Zero** of the 363 corpus programs change borrow verdict — a bound on breakage, not on
 reach, since no corpus method or init had a heap local or param before this. The borrow-stage dump is

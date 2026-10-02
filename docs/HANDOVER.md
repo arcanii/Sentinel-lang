@@ -124,6 +124,12 @@ reference as you work through the milestones.
 > confirming nothing pre-existing is newly refused; oracle-vs-scg byte-equality on the new
 > fixture at types, mir and llvm; and the secret-taint check in both directions.
 
+### ▶ RESUME HERE (2026-10-03 — `origin/main` was `b3e4de9` when this was written, and D150's two commits (`2563d0b`, `aff4a2b`) and this slice's two sit on top of it, unpushed; read `git reflog show refs/remotes/origin/main` and `git log --oneline origin/main..HEAD` at the START and AGAIN before writing either down. This slice: **register D153 CLOSED, and D63 and D119 with it** (`d25d196` fix, then this docs commit) — [ADR 0071](decisions/0071-shared-ownership-and-mutex.md) **D2 amendment A2**: inkwell drops a class method's, an impl method's and a class `init`'s parameter frame on every exit, as a free fn's, but releases no handle in it, neither a `Shared` / `Mutex` binding nor one held in a field of a struct bound there, at any depth. A `return` in a method used to release a handle parameter the call had not cloned, which freed the cell while the caller still held it. The units the rule keeps are a leak, filed as **D154**. Found by ADR 0077's review (`wf_f44939ca-b9f`); ADR 0077's implementation stays parked in the scratchpad (`a77park2/`) until this lands. Two bounded review rounds. `wf_9abc7097-513` (three lenses, each with a construct-the-input verifier; about 650 constructed programs, no use-after-free, double free or over-release) found that the rule's kept units include a new leak on a method's `return` exit, where the drained frame used to release a unit a temporary or a struct argument brought in: kept as the price of the fail-closed rule, registered with the rest in D154 and reported to the maintainer; it also found prose and fixture gaps, all fixed. `wf_9d0686c1-fc0` (the remedy text only; its first run died on a usage limit and was re-run) found six more prose points, all fixed. Register: **153 distinct ids, 63 whose heading opens `**D<n> — DONE`** (the 2026-09-22 block's rule; the id D130 is reserved and not in the public register). Four-check: **2,117 passed with exactly the 18 known Windows failures**, doctests and clippy clean, every `selfhost_*` differential green including both bootstrap fixed points. Sweeps, the `snc` before this change against the final code: `snc llvm` over all 514 `.sentinel` files changes no byte on the 345 it emits and no verdict on the other 169; a matched `snc build` and run over those files and 47 library wrappers (561 entries) changes only the new fixture (an abort before, 42 after). Eleven mutations: the baseline survives and the ten others are caught. It moves inkwell's emitted IR, so at least a minor version (ADR 0076 D2); `Cargo.toml` still says 0.1.0.)
+
+> **NEXT:** ADR 0077's implementation, re-applied from the scratchpad's `a77park2/` on top of this, with its first review's findings fixed; then its review, four-check, sweeps and commit. D152 after D132's `perform` half.
+>
+> Owed by the maintainer: D102, D103, ADR 0077's Q6, D36's decision, D146's direction, and when to bump the version (at least 0.2.0; `Cargo.toml` still says 0.1.0).
+
 ### ▶ RESUME HERE (2026-10-01 — `origin/main` was `b3e4de9` when this was written (the maintainer has pushed everything through D148), and this slice's two commits sit on top of it, unpushed; read `git reflog show refs/remotes/origin/main` and `git log --oneline origin/main..HEAD` at the START and AGAIN before writing either down. This slice: **register D150 CLOSED** (`2563d0b` fix, then this docs commit) — [ADR 0041](decisions/0041-self-host-port-types.md) **A15**: `scg`'s typer binds a handler arm's parameters with the operation's declared types, recorded at the effect-op scan, where it bound every one as `i64`, so its typed dump, borrow dump, MIR and constant-time verifier agree with the oracle's on `u8`, `bool`, `secret`, array and struct parameters. Under codegen every binder stays `i64`, as it was, so `scg`'s emitted IR does not move. That is a stop, not parity: the text oracle loads a parameter at its declared type, and binding it under codegen too matched the oracle on most arms, but the first review round (`wf_5d3c5e0f-794`) found it made `scg` read a `?i64` parameter as 16 bytes from its 8-byte slot in a module that assembled (`scg`'s `perform` does not widen its argument, D132) and changed an arm-remainder replay verdict. The narrow second round (`wf_577d2707-92d`) showed the guard's first rationale was wrong — it is the text oracle's own load that the guard declines to copy — so the prose says what the guard is, and what it leaves is filed as **D152** (IR that differs from the oracle's on an arm reading a parameter that is not `i64`-wide; a refusal about an arm parameter that the code generator does not make); a third, prose-only round (`wf_eda95ee8-b8f`) corrected the rewritten text. Also: D68(c) is widened (a program that performs an operation whose parameter is not `i64`-wide does not build, and an arm that tests a nullable parameter or reads a struct parameter's field panics inkwell though the operation is never performed), D67 notes a single effecting `let`'s over-capture, and D132 notes that the parameter types it needs are now recorded. Register: **151 distinct ids, 60 whose heading opens `**D<n> — DONE`** (the 2026-09-22 block's rule; the id D130 is reserved and not in the public register). Four-check: **2,115 passed with exactly the 18 known Windows failures**, doctests and clippy clean, every `selfhost_*` differential green including both bootstrap fixed points. A matched sweep of the five self-hosted drivers, before and after, over all 513 `.sentinel` files moves only the new fixture's typed dump and MIR; the emitted IR moves nowhere. Five mutations caught, the baseline surviving. `scg`-only, so a patch by ADR 0076 D2; the next version is still at least 0.2.0 from the earlier slices, and `Cargo.toml` says 0.1.0.)
 
 > **NEXT:** ADR 0077's implementation (Q1–Q5 approved), from the scratchpad's `a77park/` (the tree diff it was parked from, the seven `c77_*` fixtures, the ACCEPTED ADR text); then its review, four-check, sweeps and commit. D152 is the natural follow-on to D150, after D132's `perform` half.
@@ -1139,7 +1145,8 @@ reference as you work through the milestones.
 >      and is now rejected.
 >
 >      ⚠ **inkwell's method and init paths still LEAK — see D63, deliberately left open.** A
->      drop for those frames was written in this slice and WITHDRAWN before commit.
+>      drop for those frames was written in this slice and WITHDRAWN before commit. (D153
+>      added it on 2026-10-03; what still leaks there is D154.)
 >
 >      Blast radius: ZERO of the 363 corpus programs change borrow verdict. That bounds
 >      breakage, not reach: before D61 no corpus method or init had a heap local or a heap
@@ -2143,9 +2150,14 @@ reference as you work through the milestones.
 >      the typer, MIR and codegen differentials each diverge on a fixture that passes the
 >      payload unbound.
 >
->      **D119 — inkwell never drops a method's or a class init's by-value parameters.** Found
->      2026-09-25 while designing D121. `snc build` pushes a method's or an init's parameters
->      into a scope frame, as it does a free fn's, but pops that frame without emitting its
+>      **D119 — DONE (2026-10-03, `d25d196`, register D153). inkwell dropped a method's
+>      by-value parameters only at a `return`, and a class init's never.** It drops them on
+>      every exit now, but releases no handle among them: a `Shared` / `Mutex` argument stays
+>      out of the clone rule, so a handle passed from a place the caller keeps owning balances
+>      without the clone this entry asked for, and a unit that reaches the frame with no
+>      other owner stays held (D154). Found 2026-09-25 while designing D121; as found: `snc
+>      build` pushes a method's or an init's parameters into a scope frame, as it does a
+>      free fn's, but pops that frame without emitting its
 >      drops, so a heap value passed to a method by value is never freed: `h.eat(a)` with
 >      `a: [i64]` of four elements, called 2,000,000 times from a loop, peaks at 101.4 MB,
 >      against 9.3 MB for the same call to a free fn (kernel peak working set after exit);
@@ -2215,11 +2227,13 @@ reference as you work through the milestones.
 >      on another — `if c { take(h.s) } else { eat(h) }` — leaves the field's unit held:
 >      40.1 MB in inkwell and the oracle, against 9.2–9.3 before (`scg` already leaked it,
 >      40.1). And in inkwell only, a struct literal passed as a method, qualified-call or
->      class-init argument is never dropped either (D119), so its fields' units stay held:
->      `p.use_h(H { s: s, n: 1 })` peaks at 70.9 MB, against 9.2 before. The fix is the
+>      class-init argument keeps its fields' units: before D153 because such a parameter was
+>      not dropped on a method's fall-through or in an init (D119), and since D153 because
+>      that frame releases no handle (D154). `p.use_h(H { s: s, n: 1 })` peaks at 70.9 MB,
+>      against 9.2 before A1 (70.8 MB since D153). The fix is the
 >      owners' drops: element drops for arrays and `Vec`, payload drops for enums, a drop for
 >      a temporary once its reader is done (D92's seam), drop flags for a maybe-moved binding
->      (ADR 0077), and D119. A `?Guard` moved into such a temporary — `is_some({ g })`, or
+>      (ADR 0077), and D154. A `?Guard` moved into such a temporary — `is_some({ g })`, or
 >      `{ g };` — is never unlocked for the same reason, and the debug runtime then panics when
 >      the mutex's last handle is released; since ADR 0043 A3 all three back ends agree on it.
 >
@@ -2636,6 +2650,49 @@ reference as you work through the milestones.
 >      module assembled only when the operation was never performed, so that read never ran
 >      (D68(c)).
 >
+>      **D153 — DONE (2026-10-03, `d25d196`, [ADR
+>      0071](decisions/0071-shared-ownership-and-mutex.md) D2 amendment A2). inkwell
+>      released a class method's, an impl method's or a qualified call's `Shared` / `Mutex`
+>      parameter at a `return`, though the call had not cloned it.** ADR 0071 A1 kept those
+>      calls' arguments out of the owning context on the ground that inkwell never dropped
+>      such a parameter (D119), but a `return` drained every frame, the parameter frame
+>      included: one release too many when the caller kept owning the handle, so the cell
+>      was freed while the caller still held it, and the caller's next use read freed
+>      memory. inkwell now drops a method's, an impl method's and an `init`'s parameter
+>      frame on every exit, as a free fn's, but releases no handle in it: not a `Shared` /
+>      `Mutex` bound there directly, and not one held in a field of a struct bound there, at
+>      any depth. That closes D63 and D119 but for the units it keeps, which are D154; on a
+>      method's `return`, where the drained frame used to release a unit a temporary or a
+>      struct argument brought in, that leak is new. Found 2026-10-01 by ADR 0077's review:
+>      dropping a maybe-moved struct that held a clone of the same cell, as ADR 0077 does,
+>      took away a unit that had been hiding the extra release. The oracle and `scg` clone
+>      such an argument and release the parameter, so their IR does not move. Pinned by
+>      `tests/pass/c71_method_handle_param` and the inkwell IR test
+>      `d153_a_method_drops_its_parameters_but_not_a_handle`. It changes what `snc build`
+>      emits, so it is at least a minor version (ADR 0076 D2).
+>
+>      **D154 — inkwell keeps every handle unit that reaches a method's or an init's
+>      parameter frame, so a unit nothing else owns leaks there.** Found 2026-10-01 while
+>      landing D153, whose rule is that the frame releases no handle at all, bound there
+>      directly or held in a field of a struct bound there: a leak rather than a release too
+>      many. inkwell passes a method, qualified-call or class-init argument without a clone
+>      (ADR 0071 A1), so a `Shared` / `Mutex` the caller passes from a place it keeps owning
+>      balances; a unit that reaches the frame with no other owner stays held: a counted
+>      temporary passed directly (`k.m(shared_new(i))`, a call's result), a handle in a
+>      field of a struct passed by value (the literal counted it), and, in an `init`, a
+>      `Shared` / `Mutex` local its statements bind, or one in a field of such a struct
+>      local. Measured, peak working set after exit, in inkwell, over 2,000,000 calls unless
+>      noted. Through a method's fall-through exit, and in an `init`, these leaked before
+>      D153 too: `p.use_h(H { s: s, n: 1 })` with a fresh `s` each time peaks at 70.8 MB
+>      before and after (D122), `k.m(shared_new(i))` at 70.8, `D::init(shared_new(1))` at
+>      70.8, and an `init` binding `let h: H = H { s: shared_new(b), n: 1 }` at 27.8 MB over
+>      600,000 calls. Through a method's `return`, though, the drained frame used to release
+>      them, and there the leak is new with D153: both method shapes peak at 70.8 MB,
+>      against 9.3 before, and at 101.5 MB with a `Mutex`, against 9.4. A struct's other
+>      fields are freed now: with an array field added, the first shape falls from 163.0 MB
+>      to 70.9. The oracle and `scg`, which clone a place argument and release the
+>      parameter, release all of these units. A fix is not attempted here.
+>
 >      **D78 — stale corpus fixture counts in `llvm.rs` and `README.md`, at six sites, stale
 >      before this change.** Found by D74's reviews. `crates/sentinel-driver/tests/llvm.rs`
 >      carries them three times: a comment at line 1214 saying a `tests/pass` substring filter
@@ -2986,15 +3043,18 @@ reference as you work through the milestones.
 >      is green only because no corpus program has the shape. The fix is a flow-sensitive
 >      moved-set in the drop path, and is not attempted here.
 >
->      **D63 — inkwell LEAKS every by-value heap param of a method, and every heap param or
->      local of an init.** `compile_class` / `compile_impl` pop the param frame with a bare
->      `pop()` where `compile_fn` drops it. Measured: a million method calls with a 16-element
->      array param peak at 146.6 MB against a flat 8.4 MB free-fn control; 600k inits at
->      99.0 MB. (The text oracle and scg do drop these frames.) A drop was written during D61
->      and withdrawn before commit: the D61 review constructed regressions it caused on the
->      shipping back end, one of them through a path that is tracked privately (see the
->      security note). ⚠ **Do not re-add the drop without asking** — it waits on a maintainer
->      decision.
+>      **D63 — DONE (2026-10-03, `d25d196`, register D153). inkwell LEAKED every by-value
+>      heap param of a method that did not leave through `return`, and every heap param of
+>      an init and every heap local its statements bind.** It drops those frames on every
+>      exit now (D153); what still leaks there is D154. As found: `compile_class` /
+>      `compile_impl` pop the param frame with a bare `pop()` where `compile_fn` drops it.
+>      Measured: a million method calls with a 16-element array param peak at 146.6 MB
+>      against a flat 8.4 MB free-fn control; 600k inits at 99.0 MB. (The text oracle and
+>      scg do drop these frames.) A drop was written during D61 and withdrawn before commit:
+>      the D61 review constructed regressions it caused on the shipping back end, one of
+>      them through a path that is tracked privately (see the security note). ⚠ **Do not
+>      re-add the drop without asking** — it waits on a maintainer decision. (Decided
+>      2026-10-01; D153 added it.)
 >
 >      **D62 — DONE (2026-09-20, by D88's fix). A class constructed inside a loop overflowed the
 >      STACK.** With a class whose
