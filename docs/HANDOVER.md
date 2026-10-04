@@ -124,6 +124,8 @@ reference as you work through the milestones.
 > confirming nothing pre-existing is newly refused; oracle-vs-scg byte-equality on the new
 > fixture at types, mir and llvm; and the secret-taint check in both directions.
 
+### ▶ RESUME HERE (2026-10-05 — `origin/main` was `e1895be` when this was written (the maintainer has pushed everything through D156), and this slice's two commits sit on top of it, unpushed; read `git reflog show refs/remotes/origin/main` and `git log --oneline origin/main..HEAD` at the START and AGAIN before writing either down. This slice: **registers D93, D64 and D22 CLOSED** (`3097049` fix, then this docs commit) — [ADR 0077](decisions/0077-drop-flags-for-maybe-moved-bindings.md) lands: a moved binding's drop is decided per exit, by walk order and a run-time flag. Every drop site in the oracle and inkwell had skipped a binding the borrow checker recorded as moved anywhere in its function, so a binding moved on one path was dropped on no path (a leak on the others: D93, and the wider class the ADR names), one whose only move lay after an early exit was not dropped at the exit (D64, where `scg`, which already decided by walk order, emitted different IR), and a `?Guard` moved on one branch stayed locked on the other (D22). Now a binding no move of which has been emitted yet is dropped unconditionally (D2), and after its first move only when its `i1` moved flag, set at each move site and stored back `false` after the drop, is `false` (D3); a moved field whose binding's drop does something with it gets a flag of its own (D5); an assignment into a binding with a flag drops the old value under the flag (D6); every drop action is guarded, a guard's unlock included (D7); and the borrow checker exports the move sites in the `DropPlan` (D4). All three back ends and the `scg` mirror. It lands after ADR 0071 A2 and A4: inkwell's method and init parameter frames pass their keep-handles rule to every drop in them, D6's included, and a class's drop guards a moved field by its flag. Measured over 600,000 calls, each shape in the ADR's *Measured* paragraph fell from 22–64 MiB to 8.3–8.4 MiB (in `scg` the drains before a move already measured 8.3–8.4); it also drops A4's never-dropped owner "a class, or a field holding one, moved on one path only" (69.9 MB before over 2,000,000 calls, 8.3–8.4 after), closes D122's field-read-on-one-path sub-case, and balances D36's two generic shapes in all three back ends (their IR still differs). Notes on D36, D117, D120, D122, D140 and D156. Four bounded review rounds, each lens with a construct-the-input verifier: `wf_f44939ca-b9f` (the earlier session's, on the parked slice: the oracle's copies of a `handle`'s `return` arm shared one flag where `scg` makes one per copy, a field flag was keyed on the binding's type, and prose), `wf_e9c7758e-216` (on the re-applied slice: that field-flag fix had reached the oracle and inkwell but not `scg`, so their IR diverged on accepted programs, and the oracle's new gate left a `secret`-qualified struct holding a `Shared` moved out of a class unreleased; the remedy is one rule in all three back ends — a moved field gets a flag only if its binding's drop does something with it — and, found while re-verifying it, `scg` now takes a field's base only from a binding read directly, as the oracle does: `{ s }.a` had recorded a field move of `s`, its borrow dump listing `#2.0`), `wf_1343741e-849` (the rule stopped D6 from firing after a field move that needed no flag, so an array moved out of a class holding a `Shared`, then `c = C::init(..)`, kept the old instance's handle where the round-2 tree released it; prose) and `wf_ac1776eb-a27` (letting D6 fire on a field moved without a flag made the oracle's and `scg`'s IR differ, because their records of field moves differ at register D117's positions and at a type parameter's field at a Copy instance). **So D6 stays as ADR 0077's Q3 answer has it, for a binding with a flag only — the simpler rule, per the standing instruction when a family keeps coming back — and the leak it leaves (an assignment after a move that needed no flag) is documented in ADR 0077 D10 and the D120 note, with differential seeds pinning parity on all three shapes.** Register: **159 distinct ids, 68 whose heading opens `**D<n> — DONE`** (the 2026-09-22 block's rule; the id D130 is reserved and not in the public register). Four-check: **2,139 passed with exactly the 18 known Windows failures**, doctests and clippy clean, every `selfhost_*` differential green including both bootstrap fixed points. Sweeps, HEAD's `snc` against the final one, beside the same runtime: `snc llvm` over the 523 `.sentinel` files in the tree, 87 changed (each gained flags), 267 byte-identical, 169 refused by both with identical messages; `snc build` and a run of those files and 47 library wrappers (570 entries), only `c77_guard_moved_on_one_branch` changes, from a timeout to 42. Mutations: ADR 0077's four core mutations in inkwell and the oracle and the two with an `scg` form, all caught; the class-walk guard in each back end, the return-arm copies and the field-flag gates, caught; the round-2 remedy's six, caught. Three survivors, each explained: inkwell's D6 keep flag forced off (a binding that can carry a flag owns its handle units, so the mutant only releases part of what D154 leaks), and the fail-closed check's span exclusion removed, in the oracle or in inkwell (no test reaches it). It moves the IR all three back ends emit wherever a binding whose drop does something is moved (in inkwell, wherever a framed binding is), so at least a minor version (ADR 0076 D2); `Cargo.toml` still says 0.1.0.)
+
 ### ▶ RESUME HERE (2026-10-04, second slice — `origin/main` was `7d89db7` when this was written, and this slice's two commits sit on top of it, unpushed; read `git reflog show refs/remotes/origin/main` and `git log --oneline origin/main..HEAD` at the START and AGAIN before writing either down. This slice: **register D156 CLOSED** (`2fdc3dd` fix, then this docs commit) — [ADR 0071](decisions/0071-shared-ownership-and-mutex.md) **D2 amendment A4**: a `Shared` / `Mutex` stored into a field of a class instance is counted like any other assignment, and a class's drop releases the handles its fields hold, at any depth through struct, generic-instance and class fields, `secret`-qualified or not, and frees nothing else. The store used to take no unit and nothing released a class field, so the field shared its cell with the value it was stored from; when that value's owner released the cell, the cell was freed while the field still pointed at it. All three back ends and the `scg` mirror; it also closes the leak of a handle nothing else owned stored into a class field. An overwritten field keeps its old unit (D120), and an owner that is never dropped (a temporary, a container's element or payload, a binding moved on one path only, an inkwell method's or init's frame, an effecting fn's parameter its continuation frame does not carry, an overwritten value, and in the text back ends a `secret`-qualified class or a class in a `secret`-qualified struct) now keeps the units counted into a class's fields: leaks, measured in A4 and noted in D120, D122, D139, D154 and D158. Because a class's drop now releases its fields, the text back ends also refuse an effecting fn whose continuation would capture a parameter that is not `i64` or `secret i64`, whatever its type, as inkwell does (notes on D67 and D69): the oracle's embedded shape one its resumer reads, `scg`'s chained shape one its frames carry, `scg`'s embedded and let shapes any (D159). Filed **D157** (a struct and a class that hold each other by value are accepted; `snc build` overflows its stack on one), **D158** (the oracle and `scg` drop nothing for a `secret`-qualified struct or class binding), **D159** (`scg`'s embedded and let shapes also refuse a parameter the resumer never reads) and **D160** (`scg`'s effecting-fn classifier lowers some tails the oracle refuses or lowers differently, and some of those answer wrong); D68(c) gains a class operation parameter, D108 its `match` half and D145 a fourth order. Four bounded review rounds, each lens with a construct-the-input verifier. `wf_2c5d20bf-6e7` (soundness, leaks and prose) found that the text back ends rebuilt a non-word parameter from one word of itself across a continuation (now refused, as inkwell refuses it), that the class walk skipped a `secret`-qualified field (fixed in all three back ends), and prose and unlisted-leak points, all fixed. `wf_fcb7e334-28d` (the remedies) found that `scg`'s refusal over-reached in its chained shape, two more unlisted leak shapes (now in A4, D139 and D158) and prose points, all fixed, and led to D160. `wf_776b76ff-735` (round 2's remedies) found that the narrowed chained refusal still mistook a `match` or handler-arm binding for a parameter of the same name, refusing programs HEAD's `scg` lowered to the oracle's bytes, so the rule is now the simpler one: `scg` refuses exactly the non-word parameters its frames carry (a read its frame walk does not enter still loads from `%v-1`, which `llc` rejects, as at HEAD); it also found an unpinned later-`let` case (now pinned) and prose points, all fixed, and widened D160. `wf_737a3bd4-8cf` (round 3's remedies) found no over- or under-refusal across the corpus and about 360 constructed programs, and found prose points, all fixed, and an order in which `scg` names a different refusal than the oracle (a note on D145). Register: **159 distinct ids, 65 whose heading opens `**D<n> — DONE`** (the 2026-09-22 block's rule; the id D130 is reserved and not in the public register). Four-check: **2,128 passed with exactly the 18 known Windows failures**, doctests and clippy clean, every `selfhost_*` differential green including both bootstrap fixed points. Sweeps, HEAD's `snc` against the final one, beside the same runtime: `snc llvm` over the 516 `.sentinel` files in the tree, 345 byte-identical, 169 refused by both with identical messages, and 2 changed — the new fixture and `c71_shared_place_duplications`, whose `class_field` shape now clones at its store and releases at `k`'s drop (its answer, 5 + 5, is unchanged); `snc build` and a run of those files and 47 library wrappers (563 entries, against the round-2 binary, whose `snc` differs from the final one by a comment), only the new fixture changes, from heap corruption to 42. Mutations: 38 of the change, 37 caught; the survivor removes inkwell's stop at a repeated type, which no program reaches (`snc build` overflows on such a type with or without it). It moves the IR all three back ends emit and refuses programs the text back ends lowered, so at least a minor version (ADR 0076 D2); `Cargo.toml` still says 0.1.0.)
 
 > **NEXT:** ADR 0077's implementation, re-applied from the scratchpad's `a77park2/` on top of this, with its first review's findings fixed; it must give A4's class drop the same flag-guarded field skip it gives a struct's. Then its review, four-check, sweeps and commit.
@@ -1650,8 +1652,16 @@ reference as you work through the milestones.
 >      D129 (a class `init` must assign every field on every path). The other temporaries
 >      named above stay open, with the rest of that seam in D122.
 >
->      **D93 — a drain's skip list is the drop plan's PER-FUNCTION moved-source set, so a
->      binding whose only move lies AFTER the drain is skipped at it.** Found 2026-09-21 by
+>      **D93 — DONE (2026-10-05, `3097049`, ADR 0077 D2/D3). A drain's skip list was the drop
+>      plan's PER-FUNCTION moved-source set, so a binding whose only move lay AFTER the drain
+>      was skipped at it.** Closed with D64 and D22, and with the wider class ADR 0077 names: a
+>      binding maybe moved where its scope ends (in one arm of an `if` or a `match`, in the
+>      right-hand side of `&&` / `||`, by an ADR 0046 field) or before a drain that follows a
+>      join. Each drop site now decides by the moves its back end has emitted so far and, after
+>      the first, by a run-time flag (`c77_maybe_moved_joins`,
+>      `c77_exits_before_and_after_a_move`, `c77_arm_remainders`). The static per-exit set this
+>      entry proposed would not have done: a drain after a join is reached both with the binding
+>      moved and with it not (ADR 0077's *Context*). As filed: found 2026-09-21 by
 >      ADR 0075 slice 1's review; PRE-EXISTING and shared by every drain site, not a property
 >      of the new one. `emit_frame_drops` / `cg_drop_frame` skip a binding in
 >      `moved_sources_for(fn)`, which is computed over the whole function body — so an arm (or
@@ -2147,6 +2157,12 @@ reference as you work through the milestones.
 >      A3 makes it a move into the block's value in both.) Tried and
 >      withdrawn here: changing only the oracle's drop plan removed the three leaks (9.2-9.3 MB each)
 >      but made the oracle disagree with `scg` in the first kind of position.
+>      A `?Guard` compared with `null` (`if g == null { .. }`, directly or as a generic struct's
+>      field) is the same case on a guard, found 2026-10-04 by ADR 0077's review and the same
+>      before and after it: recorded as moved, it is never unlocked, so in inkwell the next
+>      `lock` of that mutex times out (a probe that locks, compares and returns, twice, then
+>      relocks answers 101 where 42 is right), and the text back ends fail `llc` on the
+>      comparison. `is_some(g)` is the form that works.
 >
 >      **D118 — `scg` gives an enum payload argument no expected type, so a `null` or a value
 >      that needs a `?T` widen, passed directly, is invalid IR.** Found
@@ -2195,6 +2211,11 @@ reference as you work through the milestones.
 >      back ends, against 8.3 to 8.4 MB before, when the field held no unit of its own.
 >      Releasing them is this entry's drop-flag question, and for a field inkwell's lent method
 >      arguments make it unsafe (ADR 0071 A4).
+>      Since ADR 0077 (2026-10-05) D6 drops the old value of a binding that has a moved flag;
+>      an assignment into one with no flag (walked before any move of it, into a binding never
+>      moved, or into one whose only moved fields are fields its drop does nothing with, such
+>      as a struct of scalars or an array moved out of a class) still leaks it, and so does one
+>      into a field (a class field's included).
 >
 >      **D121 — DONE (2026-09-25). A `Shared` / `Mutex` duplicated out of a field, a
 >      reference or a tail, or into a struct literal, an assignment, a method argument or a
@@ -2245,17 +2266,20 @@ reference as you work through the milestones.
 >      `fn getf(r: &H) -> Shared<i64> { (*r).s }` — keeps the unit the callee now counts into
 >      its returned place read: 70.8 MB in all three back ends, against 9.2–9.3 before; an
 >      rvalue result (`shared_get(mk())`) leaked before and after. A binding moved on one
->      path is dropped on no path (D93's per-function moved set), so a field read out of it
->      on another — `if c { take(h.s) } else { eat(h) }` — leaves the field's unit held:
+>      path was dropped on no path (D93's per-function moved set), so a field read out of it
+>      on another — `if c { take(h.s) } else { eat(h) }` — left the field's unit held:
 >      40.1 MB in inkwell and the oracle, against 9.2–9.3 before (`scg` already leaked it,
->      40.1). And in inkwell only, a struct literal passed as a method, qualified-call or
+>      40.1). Closed by ADR 0077 (2026-10-05): the binding is dropped at scope exit on the
+>      path that does not move it, under its moved flag; run down `c` 2,000,000 times, the
+>      shape peaked at 69.9 MB in all three back ends before and at 8.4 after. And in inkwell
+>      only, a struct literal passed as a method, qualified-call or
 >      class-init argument keeps its fields' units: before D153 because such a parameter was
 >      not dropped on a method's fall-through or in an init (D119), and since D153 because
 >      that frame releases no handle (D154). `p.use_h(H { s: s, n: 1 })` peaks at 70.9 MB,
 >      against 9.2 before A1 (70.8 MB since D153). The fix is the
 >      owners' drops: element drops for arrays and `Vec`, payload drops for enums, a drop for
->      a temporary once its reader is done (D92's seam), drop flags for a maybe-moved binding
->      (ADR 0077), and D154. A `?Guard` moved into such a temporary — `is_some({ g })`, or
+>      a temporary once its reader is done (D92's seam), and D154. A `?Guard` moved into such
+>      a temporary — `is_some({ g })`, or
 >      `{ g };` — is never unlocked for the same reason; since ADR 0043 A3 all three back ends
 >      agree on it. Before D155 the debug runtime then panicked when the mutex's last handle was
 >      released; since D155 the guard keeps its cell, a leak of one cell per evaluation.
@@ -2263,10 +2287,12 @@ reference as you work through the milestones.
 >      into its field is counted: a class temporary — a discarded `K::init(s);`, `K::init(s).n`,
 >      a discarded call result, a struct literal holding one read in place — keeps the unit, and
 >      so does a class in an enum payload (built by an enum constructor, matched or not), in an
->      array literal or a pushed `Vec` element inside a struct or generic instance, in inkwell's
->      nullable box, and a class, or a field holding one, moved on one path only (D93): each
->      69.9 MB over 2,000,000 evaluations in all three back ends (the nullable box in inkwell
->      only), against 8.3 to 8.4 before. So does a class passed by value to an inkwell method or
+>      array literal or a pushed `Vec` element inside a struct or generic instance, and in
+>      inkwell's nullable box: each 69.9 MB over 2,000,000 evaluations in all three back ends
+>      (the nullable box in inkwell only), against 8.3 to 8.4 before. So did a class, or a
+>      field holding one, moved on one path only (D93), until ADR 0077 (2026-10-05) dropped it
+>      on the path that does not move it (69.9 MB before, 8.3–8.4 after). So does a class
+>      passed by value to an inkwell method or
 >      init, or bound by an init's top-level statements (D154). Each balanced before only
 >      because the field held no unit of its own.
 >
@@ -2530,6 +2556,9 @@ reference as you work through the milestones.
 >      emit `icmp eq { i64, ptr }`, which `llc` rejects ("icmp requires integer operands"). It
 >      fails loud in all three. The fix is to refuse `==` / `!=` on an aggregate operand in the
 >      type checker, with a `tests/ui` fixture, or to lower it (`str_eq` exists for `[u8]`).
+>      A unit-only enum value compared with a variant (`k == Kind::Word`, `t.k == Kind::Word`) is
+>      the same case (found 2026-10-04 by ADR 0077's review): inkwell panics with the same
+>      message and `llc` rejects the text back ends' IR (`icmp requires integer operands`).
 >
 >      **D141 — a struct declaration may name a field twice, and a literal of it panics the
 >      Rust type checker.** Found 2026-09-26 by the review of D96; pre-existing, before D96
@@ -2792,7 +2821,8 @@ reference as you work through the milestones.
 >      field is now a new owner like any other assignment (a place read is cloned), and a
 >      class's drop releases each handle its fields hold, at any depth through struct,
 >      generic-instance and class fields, `secret`-qualified or not, skipping a field the
->      binding was partially moved out of, and frees nothing else (the rest of D137 stays
+>      binding was partially moved out of (since ADR 0077, releasing it behind its moved flag
+>      on the paths that did not move it), and frees nothing else (the rest of D137 stays
 >      open). That also closes a leak: a handle nothing else owned stored into a class field
 >      — `self.m = mutex_new(0)` in an `init` — was never released (69.9 MB with a `Shared`,
 >      100.6 with a `Mutex`, over 2,000,000 classes in all three back ends; 8.4 to 8.5 now).
@@ -3244,8 +3274,11 @@ reference as you work through the milestones.
 >      Pre-existing, identical at HEAD `3c7aa71`; no corpus program reaches it. Fix direction:
 >      a `return` leaf is lowered for its `ret` and yields a null `Kont*` for its dead block.
 >
->      **D64 — the Rust back ends LEAK a binding on an early exit that comes before its move,
->      and scg does not, so the two text back ends emit different IR.** ⚠ D60 adds `return` as a
+>      **D64 — DONE (2026-10-05, `3097049`, ADR 0077 D2). The Rust back ends LEAKED a binding on
+>      an early exit that came before its move, and scg did not, so the two text back ends
+>      emitted different IR.** Closed: a drop site reached before a binding's first move in the
+>      emitted code drops it unconditionally, in all three back ends
+>      (`c77_exits_before_and_after_a_move`). As found: ⚠ D60 adds `return` as a
 >      route into METHOD bodies (the `break` / `continue` route reached them already): a method
 >      with an early `return` now compiles, and D60's second review found 95 generated programs,
 >      each with a class and a `return`, where the oracle `ret`s without freeing a live binding
@@ -3389,7 +3422,10 @@ reference as you work through the milestones.
 >      implementation, and neither is a mangling defect — the review found them by
 >      attacking the new FIXTURES.**
 >
->      **D22 — moving a `?Guard` into a call leaks the lock on the not-taken branch.**
+>      **D22 — DONE (2026-10-05, `3097049`, ADR 0077 D7). Moving a `?Guard` into a call leaked
+>      the lock on the not-taken branch.** Closed: the unlock is guarded by the guard's moved
+>      flag, so it runs on the branch that did not move it (`c77_guard_moved_on_one_branch`,
+>      which also moves a guard on alternate iterations of a loop). As found:
 >      The scope-exit unlock is emitted only on the branch that performed the move:
 >      `let cond: bool = false; let m: Mutex<i64> = mutex_new(2); let g = lock(m);`
 >      `let r: i64 = if cond { let h = idg(g); 2 } else { 0 }; r + 42`
@@ -4016,6 +4052,14 @@ reference as you work through the milestones.
 >      if c { Bx { v: b.v, n: 0 } } else { b } }`). The oracle hands the field on; `scg`
 >      clones it, and nothing releases the parameter, so `scg` now peaks at 40.2 MB over
 >      2,000,000 calls where all three were balanced (9.2–9.3), and the IR differs there too.
+>      Since ADR 0077 (2026-10-05) `scg` releases the parameter on the path that does not move
+>      it, so all three balance again (8.3–8.4 MB over 2,000,000 alternating calls, against
+>      39.2 for `scg` before); the IR still differs. The same split shows when a generic body
+>      passes such a parameter to a call on one path only (`fn g<T>(x: T, c: bool) -> i64 {
+>      if c { take(x) } else { 0 } }` at `Shared<i64>`): the oracle and inkwell hand it on and,
+>      since ADR 0077, release it under a moved flag on the other path, while `scg` clones it
+>      and releases it on every path. All three balance (8.3–8.4 MB; the oracle and inkwell
+>      peaked at 39.2 before), and the IR differs.
 >      **⚠ NEEDS A MAINTAINER DECISION BEFORE ANY CODE — options, costs and a
 >      recommendation are tabulated in [`open-decisions.md`](open-decisions.md).**
 >      **The question SPLITS IN TWO**

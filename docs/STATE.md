@@ -14,7 +14,35 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
-**Latest (2026-10-04, second slice) — a handle stored into a class field is counted, and a
+**Latest (2026-10-05) — a moved binding's drop is decided per exit, by walk order and a run-time
+flag (registers D93, D64 and D22).**
+[ADR 0077](decisions/0077-drop-flags-for-maybe-moved-bindings.md): every drop site in the oracle
+and inkwell skipped a binding the borrow checker recorded as moved anywhere in its function. So
+a binding moved on one path was dropped on no path, a leak on the paths that did not move it
+(D93, and the wider class the ADR names: one arm of an `if` or a `match`, the right-hand side of
+`&&` / `||`, an ADR 0046 field, a drain after a join); one whose only move lay after an early
+exit was not dropped at the exit (D64, where `scg`, which already decided by walk order, emitted
+different IR); and a `?Guard` moved on one branch stayed locked on the other (D22). Each drop
+site now decides by its back end's own walk: a binding no move of which has been emitted yet is
+dropped unconditionally, and after its first move only when its run-time moved flag, set at each
+move site and stored back `false` after the drop, is `false`. A moved field whose binding's drop
+does something with it gets a flag of its own (the one rule in all three back ends), an
+assignment into a binding with a flag drops the old value under the flag, and every drop action
+is guarded, a guard's unlock included; the borrow checker exports the move sites in the
+`DropPlan`, and `scg` takes a field's base only from a binding read directly, as the oracle
+does. Measured over 600,000 calls, each shape in the ADR's *Measured* paragraph fell from 22–64
+MiB to 8.3–8.4 MiB. It lands after ADR 0071 A2 and A4: inkwell's method and init parameter frames
+pass their keep-handles rule to every drop in them, and a class's drop guards a moved field by
+its flag as a struct's does, so the owners A4 listed as never dropped when moved on one path
+only (a class, or a field holding one) are now dropped on the other paths (69.9 MB before over
+2,000,000 calls, 8.3–8.4 after). An assignment after a move that needed no flag still leaks the
+old value (register D120), as before. All three back ends and the `scg` mirror; both bootstrap
+fixed points hold. Pinned by seven `tests/pass/c77_*` fixtures, IR tests in inkwell and the
+oracle, and differential seeds. It moves the IR all three back ends emit wherever a binding whose
+drop does something is moved (in inkwell, wherever a framed binding is), so it is at least a
+minor (ADR 0076 D2).
+
+**Previously (2026-10-04, second slice) — a handle stored into a class field is counted, and a
 class's drop releases it (register D156).**
 [ADR 0071](decisions/0071-shared-ownership-and-mutex.md) D2 amendment A4: a `Shared` / `Mutex`
 stored into a field of a class instance was not cloned, and no back end released a class's
@@ -362,7 +390,8 @@ existing resumer machinery at a new site and needs no runtime change — and is 
 Registered, not fixed: the skip list at every drain site is the drop plan's PER-FUNCTION
 moved-source set, so a binding whose only move lies after the drain is skipped there too;
 measured identical before and after, and identical at the `break` drain this one is modelled
-on.
+on. (Closed by [ADR 0077](decisions/0077-drop-flags-for-maybe-moved-bindings.md), 2026-10-05:
+each drain decides by walk order and a moved flag.)
 
 Four-check: 2,005 passed with exactly the 18 known Windows failures (9 in `examples`, 4 in
 `export`, 1 in `llvm`, 4 in `modules`), doctests and clippy clean, every `selfhost_*`
@@ -1147,7 +1176,9 @@ alone.
 **⚠ THE REVIEW FOUND A BLOCKER IN THE FIRST CUT, ON THE ONE PATH AN ATTACKER DRIVES.** With
 `key`/`nonce` taken BY VALUE they were consumed only inside the accept arm, and Sentinel
 attaches a Move's drop to the move SITE rather than to scope exit — so every REFUSED open
-stranded ~80 bytes of key and nonce. Measured: 100k refusals 16.30 MB, 800k 70.20 MB, linear,
+stranded ~80 bytes of key and nonce. (No longer true since [ADR 0077](decisions/0077-drop-flags-for-maybe-moved-bindings.md), 2026-10-05: a
+binding moved on one arm is dropped at scope exit on the others, under a moved flag, and the
+by-value shape measures flat; borrowing remains the better signature.) Measured: 100k refusals 16.30 MB, 800k 70.20 MB, linear,
 against a flat accept path; after borrowing, 9.16 and 9.09 MB. Borrowing also fixed a second
 defect the same signature caused — a caller could not open two records from one key, and the
 example's first draft built three identical key/nonce pairs to work around it. **The workaround
