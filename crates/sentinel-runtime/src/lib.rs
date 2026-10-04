@@ -2134,9 +2134,10 @@ pub extern "C" fn sentinel_mutex_clone(m: *mut SentinelMutex) -> *mut SentinelMu
 ///
 /// # Safety
 /// `m` must be a `*mut SentinelMutex` from `sentinel_mutex_new` (or null); this call
-/// consumes exactly one refcount unit owned by the caller's binding. The cell must
-/// not be locked when it is freed — a guard's scope-exit `unlock` always precedes
-/// the enclosing handle's `release` by the reverse-declaration drop order.
+/// consumes exactly one refcount unit owned by the caller's binding. Under correct
+/// refcount accounting a locked cell cannot reach zero here: a successful lock takes a
+/// unit of its own for the guard, which only the guard's `sentinel_mutex_unlock` gives
+/// back (ADR 0071 A3, register D155).
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[no_mangle]
 pub extern "C" fn sentinel_mutex_release(m: *mut SentinelMutex) {
@@ -2161,26 +2162,26 @@ fn mutex_release_impl(m: *mut SentinelMutex, detect: bool) {
     );
     if prev == 1 {
         std::sync::atomic::fence(std::sync::atomic::Ordering::Acquire);
-        // Defense-in-depth (debug-only, mirrors the underflow assert above): the
-        // caller contract guarantees a guard's `unlock` precedes the enclosing
-        // handle's `release` (reverse-declaration drop order), so the last owner
-        // must find the lock unheld. If a future codegen bug drops the handle
-        // before its guard's unlock, this fires loudly in tests rather than
-        // silently freeing a still-locked cell. rc is 0 (we are the sole owner
-        // past the Acquire fence), so this `try_lock` is uncontended; the guard
-        // temporary unlocks again immediately. Compiled out in release.
+        // Defense-in-depth (debug-only, mirrors the underflow assert above): a
+        // guard holds a unit of its own (register D155) and gives it back only
+        // after its unlock, so the last owner must find the lock unheld. If a
+        // runtime or codegen bug ever broke that, this fires loudly in tests
+        // rather than silently freeing a still-locked cell. rc is 0 (we are the
+        // sole owner past the Acquire fence), so this `try_lock` is uncontended;
+        // the guard temporary unlocks again immediately. Compiled out in release.
         debug_assert!(
             cell.lock.try_lock().is_some(),
             "sentinel_mutex_release: freeing a still-locked SentinelMutex \
-             (codegen dropped the handle before its guard's unlock)"
+             (a release beyond the units held: a refcount accounting bug)"
         );
         if detect {
             // Scrub any stale holder edge for this address before the cell is
             // freed: the allocator may reuse the address for a NEW mutex, and a
             // leftover edge would attribute the new lock to a stale thread (false
-            // cycles). A live edge here means a guard outlived its mutex — the
-            // free-while-locked debug_assert above fires in debug; this keeps the
-            // graph consistent in release builds too.
+            // cycles). A live edge here would mean a guard outlived its mutex,
+            // which, under correct accounting, the guard's own unit rules out
+            // (D155) — the free-while-locked debug_assert above fires in debug;
+            // this keeps the graph consistent in release builds too.
             wait_for_graph().lock().holders.remove(&(m as usize));
         }
         if cell.secret {
@@ -2211,8 +2212,11 @@ fn mutex_release_impl(m: *mut SentinelMutex, detect: bool) {
 /// ADR 0071 M1.4b: acquire the lock with the always-on `LockTimeout` deadline (D5).
 /// On success writes a `*mut i64` to the protected slot into `*out` and returns 0
 /// (the language-level `Guard` reads/writes through it, then calls
-/// `sentinel_mutex_unlock` at scope exit); on the deadline expiring, returns 1
-/// (`LockTimeout`) and leaves `*out` untouched. The `(status, out-ptr)` shape mirrors
+/// `sentinel_mutex_unlock` at scope exit), and takes one refcount unit on the cell
+/// for the guard, so the guard keeps the cell alive even if every other owner is
+/// dropped while it is held; the unlock gives that unit back (ADR 0071 A3, register
+/// D155). On the deadline expiring, returns 1 (`LockTimeout`), takes no
+/// unit and leaves `*out` untouched. The `(status, out-ptr)` shape mirrors
 /// `sentinel_channel_recv`, so codegen builds the `?Guard` exactly as it builds
 /// `recv`'s `?T`. The RAII guard is forgotten so the lock stays held across the C-ABI
 /// boundary until `unlock`. With the D5a `Deadlock` tier enabled
@@ -2235,7 +2239,8 @@ pub extern "C" fn sentinel_mutex_lock(m: *mut SentinelMutex, out: *mut *mut i64)
 /// `sentinel_mutex_lock`: 0 = acquired (`*out` = the protected slot), 1 =
 /// `LockTimeout` — or, with the D5a `Deadlock` tier enabled, a detected cycle
 /// (reported on stderr, returned as the same status 1). The success path forgets
-/// the RAII guard so the lock is held until `sentinel_mutex_unlock`.
+/// the RAII guard so the lock is held until `sentinel_mutex_unlock`, and takes the
+/// guard's refcount unit (register D155); a failed acquire takes none.
 ///
 /// # Safety
 /// `m` must be a `*mut SentinelMutex` from `sentinel_mutex_new` (or null); a null
@@ -2315,6 +2320,12 @@ fn mutex_try_lock_for_impl(
             // scope-exit drop calls `sentinel_mutex_unlock`).
             let data: *mut i64 = cell.lock.data_ptr();
             std::mem::forget(guard);
+            // Register D155: the guard owns a unit of its own, so the cell outlives it
+            // even when every other owner is dropped while it is held (a struct
+            // holding the `Mutex` moved away, say); `sentinel_mutex_unlock` gives it
+            // back. `Relaxed`, as in `sentinel_mutex_clone`: the caller holds a unit
+            // for the duration of this call, so the count cannot be zero here.
+            cell.rc.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             // SAFETY: `out` is non-null (checked at entry) and a valid `*mut *mut i64`
             // per the caller contract.
             unsafe {
@@ -2327,14 +2338,17 @@ fn mutex_try_lock_for_impl(
 }
 
 /// ADR 0071 M1.4b: release the lock previously acquired by `sentinel_mutex_lock` /
-/// `_try_lock_for` on this cell (the language-level `Guard`'s scope-exit drop). No
-/// refcount change — that is `sentinel_mutex_release`.
+/// `_try_lock_for` on this cell (the language-level `Guard`'s scope-exit drop), then
+/// give back the refcount unit that acquire took for the guard (ADR 0071 A3, register
+/// D155) — freeing the cell, after the unlock, if every other owner is already gone.
 ///
 /// # Safety
 /// `m` must be a `*mut SentinelMutex` from `sentinel_mutex_new` (or null) that is
 /// currently LOCKED (a guard from a successful lock is live, its RAII guard having
-/// been forgotten by the acquiring call); calling it otherwise is undefined. Null is
-/// a no-op.
+/// been forgotten by the acquiring call); calling it otherwise is undefined. Each
+/// successful acquire must be matched by exactly one unlock, which consumes the guard's
+/// unit; an acquire that is never unlocked keeps its cell, and its lock, for good. Null
+/// is a no-op.
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[no_mangle]
 pub extern "C" fn sentinel_mutex_unlock(m: *mut SentinelMutex) {
@@ -2361,6 +2375,10 @@ fn mutex_unlock_impl(m: *mut SentinelMutex, detect: bool) {
     unsafe {
         cell.lock.force_unlock();
     }
+    // Register D155: give back the guard's unit, after the unlock — the cell is
+    // freed here if every other owner is already gone, by the same last-drop path
+    // every release takes.
+    mutex_release_impl(m, detect);
 }
 
 /// ADR 0071 M1.4b slice 3c: the guard's data accessor — the protected slot pointer
@@ -3763,6 +3781,58 @@ mod tests {
         sentinel_mutex_release(m);
     }
 
+    // ---- Register D155 / ADR 0071 A3: a guard owns a unit of its mutex ----
+
+    #[test]
+    fn a_guard_keeps_its_mutex_alive() {
+        use std::sync::atomic::Ordering;
+        // A successful lock takes a unit for the guard, so dropping every other owner
+        // while the guard is held leaves the locked cell alive; the guard's unlock
+        // gives the unit back and, being the last, frees the cell. Before D155 the
+        // owner's release freed the cell while it was locked, under the guard.
+        let m = sentinel_mutex_new(42);
+        let mut slot: *mut i64 = std::ptr::null_mut();
+        assert_eq!(sentinel_mutex_lock(m, &mut slot as *mut *mut i64), 0);
+        // SAFETY: `m` is live: the owner and the guard each hold a unit.
+        assert_eq!(unsafe { (*m).rc.load(Ordering::Relaxed) }, 2);
+        sentinel_mutex_release(m); // the only other owner goes; the guard keeps the cell
+        // SAFETY: `m` is live (the guard's unit) and its lock is held.
+        unsafe {
+            assert_eq!((*m).rc.load(Ordering::Relaxed), 1);
+            assert_eq!(*slot, 42);
+            *slot = 7;
+            assert_eq!(*sentinel_mutex_data(m, 1), 7);
+        }
+        sentinel_mutex_unlock(m); // unlock, then the guard's unit: rc 1 -> 0, freed
+    }
+
+    #[test]
+    fn a_failed_lock_takes_no_unit() {
+        use std::sync::atomic::Ordering;
+        let m = sentinel_mutex_new(1);
+        // A null `out` bails before acquiring, and takes nothing.
+        assert_eq!(sentinel_mutex_lock(m, std::ptr::null_mut()), 1);
+        // SAFETY (each load below): `m` is live — its owner holds a unit throughout.
+        assert_eq!(unsafe { (*m).rc.load(Ordering::Relaxed) }, 1);
+        let mut slot: *mut i64 = std::ptr::null_mut();
+        assert_eq!(sentinel_mutex_lock(m, &mut slot as *mut *mut i64), 0);
+        assert_eq!(unsafe { (*m).rc.load(Ordering::Relaxed) }, 2);
+        // A bounded acquire from another thread times out, and takes nothing.
+        let addr = m as usize; // raw ptr isn't Send; pass the address.
+        let status = std::thread::spawn(move || {
+            let m = addr as *mut SentinelMutex;
+            let mut s2: *mut i64 = std::ptr::null_mut();
+            sentinel_mutex_try_lock_for(m, 1_000_000, &mut s2 as *mut *mut i64) // 1ms
+        })
+        .join()
+        .unwrap();
+        assert_eq!(status, 1); // LockTimeout
+        assert_eq!(unsafe { (*m).rc.load(Ordering::Relaxed) }, 2);
+        sentinel_mutex_unlock(m); // the guard's unit goes back
+        assert_eq!(unsafe { (*m).rc.load(Ordering::Relaxed) }, 1);
+        sentinel_mutex_release(m); // last owner -> freed
+    }
+
     // ---- ADR 0071 M1.4b slice 4: the D5a opt-in Deadlock wait-for-graph tier ----
     //
     // These call `mutex_try_lock_for_impl` / `mutex_unlock_impl` with
@@ -3801,7 +3871,13 @@ mod tests {
             assert_eq!(graph.holders.get(&(m as usize)), Some(&std::thread::current().id()));
             assert!(!graph.waits.contains_key(&std::thread::current().id()));
         }
+        // Register D155: the refused acquire took no unit — only the owner's and the
+        // first guard's are held.
+        // SAFETY: `m` is live (two units are held).
+        assert_eq!(unsafe { (*m).rc.load(std::sync::atomic::Ordering::Relaxed) }, 2);
         mutex_unlock_impl(m, true);
+        // SAFETY: `m` is live (the owner's unit).
+        assert_eq!(unsafe { (*m).rc.load(std::sync::atomic::Ordering::Relaxed) }, 1);
         // The unlock retired the holder edge (a stale edge would poison later
         // cycle checks if the allocator reuses this address).
         assert!(!wait_for_graph().lock().holders.contains_key(&(m as usize)));
@@ -4038,11 +4114,11 @@ mod tests {
     #[test]
     fn mutex_release_impl_scrubs_stale_holder_edge_on_free() {
         // The rc==0 ABA defense: a holder edge that pathologically survives to
-        // the free (a guard outliving its mutex — the codegen-bug class the
-        // static pins guard against) must not outlive the cell, or the reused
-        // address would attribute a NEW mutex to a dead thread. The edge is
-        // planted directly — actually locking would trip the free-while-locked
-        // debug_assert first, making the scrub untestable through the lock path.
+        // the free (a guard outliving its mutex, which its own unit — ADR 0071
+        // A3 — rules out under correct accounting) must not outlive the cell, or
+        // the reused address would attribute a NEW mutex to a dead thread. The
+        // edge is planted directly: through the lock path the guard's unit keeps
+        // the cell alive until its unlock, so no free happens while it is held.
         let m = sentinel_mutex_new(1);
         let addr = m as usize;
         wait_for_graph().lock().holders.insert(addr, std::thread::current().id());
@@ -4103,6 +4179,37 @@ mod tests {
         }
         sentinel_mutex_unlock(m);
         sentinel_mutex_release(m); // last owner -> zero + munlock + free
+    }
+
+    #[test]
+    fn secret_mutex_guard_outlives_its_owner_and_scrubs_at_its_unlock() {
+        let _guard = SECRET_PAGE_TEST_LOCK.lock();
+        // Register D155 on a secret cell: with the owner gone while the guard is held,
+        // the cell stays alive and its pages stay locked; the guard's unlock is then
+        // the last drop, which scrubs the slot and gives the pages back.
+        let m = sentinel_mutex_new_secret(0x5EC2E7);
+        let pages: Vec<usize> =
+            page_range(m.cast::<u8>(), std::mem::size_of::<SentinelMutex>()).collect();
+        let mut slot: *mut i64 = std::ptr::null_mut();
+        assert_eq!(sentinel_mutex_lock(m, &mut slot as *mut *mut i64), 0);
+        sentinel_mutex_release(m); // the owner goes; the guard's unit keeps the cell
+        {
+            let locked = secret_locked_pages().lock();
+            for p in &pages {
+                assert!(locked.contains_key(p), "the guarded secret cell must stay locked");
+            }
+        }
+        // SAFETY: the cell is live (the guard's unit) and its lock is held.
+        unsafe {
+            assert_eq!(*slot, 0x5EC2E7);
+        }
+        sentinel_mutex_unlock(m); // the last drop: scrub, give the pages back, free
+        {
+            let locked = secret_locked_pages().lock();
+            for p in &pages {
+                assert!(!locked.contains_key(p), "the freed secret cell's pages must be released");
+            }
+        }
     }
 
     #[test]

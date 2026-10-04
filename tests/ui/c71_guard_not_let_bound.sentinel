@@ -1,7 +1,7 @@
 // ADR 0071 M1.4b slice 3b (guard no-escape, the conservative pin): a `lock()` call
 // may ONLY be the direct RHS of an immutable `let` (`let g = lock(m);`). A `?Guard`
 // unlocks the mutex on its scope-exit drop, so it must stay lexically pinned to that
-// `let` — a guard that outlived its mutex would unlock a freed cell (a use-after-free).
+// `let` — otherwise a guard could hold the lock past that scope (ADR 0071 D3, A3).
 //
 // Here `lock(m)` sits in an argument position (`is_some(lock(m))`), never bound, so it
 // is rejected with `sentinel::types::guard_not_let_bound`. The sound spelling is

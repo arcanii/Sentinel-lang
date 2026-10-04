@@ -1484,12 +1484,13 @@ fn pass_c71_mutex() {
 fn pass_c71_mutex_lock() {
     // ADR 0071 M1.4b slice 3b: a BOUND-and-locked mutex is now sound. `let g =
     // lock(m)` yields a ?Guard whose scope-exit drop unlocks the cell
-    // (sentinel_mutex_unlock) BEFORE the owning Mutex's release, so binding + dropping
-    // a locked mutex no longer trips the runtime's free-while-locked debug-assert. The
-    // uncontended acquire succeeds so is_some(g) -> 42; the clean exit 42 is the
-    // unlock/leak-check (a missed unlock aborts on the debug-assert). Guard/?Guard are
-    // MOVE + a no-escape pin (lock() only as an immutable-let RHS) keep the guard from
-    // outliving its mutex. (The *g deref is slice 3c.) Exit 42.
+    // (sentinel_mutex_unlock), which since ADR 0071 A3 also gives back the unit the
+    // lock took for the guard. The uncontended acquire succeeds so is_some(g) -> 42.
+    // The clean exit no longer proves the unlock (a missed one keeps the cell instead
+    // of aborting); pass_c71_guard_outlives_its_owner's relock case checks the same
+    // unlock paths. Guard/?Guard are MOVE, and a pin (lock() only as an immutable-let
+    // RHS) keeps a fresh lock() from escaping its let. (The *g deref is slice 3c.)
+    // Exit 42.
     let r = build_and_run("c71_mutex_lock.sentinel");
     assert_eq!(r.exit, 42);
     assert_eq!(r.stdout, "");
@@ -1500,8 +1501,9 @@ fn pass_c71_mutex_deref() {
     // ADR 0071 M1.4b slice 3c: the `*g` guard deref — read + write the protected
     // value through a held lock (the motivating RMW shape: read 36, write 42, read
     // back 42 as the tail). The deref is NON-consuming on the Move-typed ?Guard
-    // (three uses), and the scope-exit drops (g's conditional unlock BEFORE m's
-    // release) keep the clean exit as the unlock/leak proof. Exit 42.
+    // (three uses), and the scope-exit drops run g's conditional unlock, then m's
+    // release (since ADR 0071 A3 the unlock itself is checked by
+    // pass_c71_guard_outlives_its_owner's relock case). Exit 42.
     let r = build_and_run("c71_mutex_deref.sentinel");
     assert_eq!(r.exit, 42);
     assert_eq!(r.stdout, "");
@@ -2438,6 +2440,18 @@ fn pass_c71_method_handle_param() {
     // released it at a `return`, which aborted four of the fixture's cases on a refcount
     // underflow. Nine cases, 1 each; 42 = all held.
     assert_eq!(run_exit("c71_method_handle_param.sentinel"), 42);
+}
+
+#[test]
+fn pass_c71_guard_outlives_its_owner() {
+    // Register D155: a successful `lock` takes a refcount unit for the guard, which its
+    // unlock gives back, so moving away the struct that owns the `Mutex` while the guard
+    // is held no longer frees the locked cell under it. Before the fix each of the first
+    // six cases aborted on the debug runtime's free-while-locked assertion; the seventh
+    // locks the same mutex again after a block, loop exits through `continue` and `break`,
+    // a callee's and a method's `return` and fall-through, and a guard handed to a generic
+    // callee, so a missed unlock there times out. Seven cases, 1 each; 42 = all held.
+    assert_eq!(run_exit("c71_guard_outlives_its_owner.sentinel"), 42);
 }
 
 #[test]

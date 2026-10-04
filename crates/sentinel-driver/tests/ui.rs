@@ -198,8 +198,8 @@ ui_snapshot!(c71_shared_return_named, "c71_shared_return_named.sentinel");
 ui_snapshot!(c71_mutex_return_named, "c71_mutex_return_named.sentinel");
 // ADR 0071 M1.4b slice 3b: the guard no-escape conservative pin — a `lock()` must be
 // the direct RHS of an immutable `let`. A `lock()` in an argument position (here
-// `is_some(lock(m))`) is rejected with GuardNotLetBound so the unlock-on-drop guard
-// cannot outlive its mutex.
+// `is_some(lock(m))`) is rejected with GuardNotLetBound, so a fresh `lock()` cannot
+// escape its `let` (here it would never be unlocked at all).
 ui_snapshot!(c71_guard_not_let_bound, "c71_guard_not_let_bound.sentinel");
 // ADR 0071 M1.4b slice 3c: taking a reference through a lock guard (`& *g`) is
 // rejected (GuardBorrowNotAllowed) — the ref would alias the mutex slot and could

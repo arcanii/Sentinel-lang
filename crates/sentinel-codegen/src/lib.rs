@@ -2345,8 +2345,8 @@ fn field_type_needs_drop_inner(
         // ADR 0071 M1.4b slice 3b: a `?Guard` IS drop-emitting — on the VALID arm
         // (a `lock()` success) its payload is a held Guard whose scope-exit drop
         // must `sentinel_mutex_unlock`; on the timeout arm nothing is dropped. This
-        // is what makes a bound-and-locked mutex sound (the guard binds, and its
-        // drop unlocks before the owning `Mutex`'s `release`).
+        // is what makes a bound-and-locked mutex sound: the guard binds, and its
+        // drop unlocks and gives back the unit the lock took for it (ADR 0071 A3).
         Type::Nullable(NullableInner::Guard(_)) => true,
         Type::Struct(id) => {
             seen.push(ty);
@@ -2420,8 +2420,8 @@ fn field_type_needs_drop_inner(
         Type::Mutex(_) => true,
         // ADR 0071 M1.4b slice 3b: a `Guard<T>` IS drop-emitting — its scope-exit
         // drop is `sentinel_mutex_unlock` (release the lock the `lock()` acquired).
-        // The guard is Move + no-escape (borrow-check), so it drops exactly once
-        // within the lock scope, before the owning `Mutex`'s `release`.
+        // The guard is Move + no-escape (borrow-check), so it drops at most once;
+        // the unlock also gives back the guard's own unit (ADR 0071 A3).
         Type::Guard(_) => true,
         Type::Process => false,
         // ADR 0066 M2.4a: a SealedChannel wraps a Process pipe — runtime-owned.
@@ -5482,11 +5482,10 @@ impl<'ctx, 'plan, 'm> CodegenCtx<'ctx, 'plan, 'm> {
                 // (Guard lowers to a single ptr = the mutex cell handle `m`). On the
                 // VALID arm (a `lock()` success) the guard is held, so unlock it; on
                 // the timeout arm nothing is held (the same null-guarded shape the
-                // `?Struct` arm above uses to "drop only on the present arm"). This
-                // fires in reverse-declaration order, BEFORE the owning `Mutex`'s
-                // `sentinel_mutex_release`, so the cell is unlocked before it can be
-                // freed — the whole point of the slice (a bound-and-locked mutex is
-                // now sound).
+                // `?Struct` arm above uses to "drop only on the present arm"). The
+                // unlock also gives back the unit the lock took for the guard (ADR 0071
+                // A3), so the cell outlives the guard however the owning `Mutex`'s
+                // `sentinel_mutex_release` is ordered against it.
                 let llvm_ty = self.llvm_basic_type(ty);
                 let val = self
                     .builder
@@ -5602,11 +5601,10 @@ impl<'ctx, 'plan, 'm> CodegenCtx<'ctx, 'plan, 'm> {
             Type::Guard(_) => {
                 // ADR 0071 M1.4b slice 3b: the guard's scope-exit UNLOCK — load the
                 // guard value (the mutex cell handle `m`) and `sentinel_mutex_unlock`
-                // it. The guard is Move + no-escape, so this fires exactly once, and
-                // in reverse-declaration order BEFORE the owning `Mutex`'s
-                // `sentinel_mutex_release` (drops run innermost/last-declared first),
-                // so the cell is unlocked before it can be freed (the runtime's
-                // free-while-locked debug-assert would trip otherwise).
+                // it. The guard is Move + no-escape, so this fires at most once; the
+                // unlock also gives back the guard's own unit (ADR 0071 A3), so the
+                // cell outlives the guard however the owning `Mutex`'s
+                // `sentinel_mutex_release` is ordered against it.
                 let handle = self
                     .builder
                     .build_load(self.context.ptr_type(inkwell::AddressSpace::default()), ptr, "guard_drop_ld")

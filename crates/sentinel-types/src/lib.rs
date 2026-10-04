@@ -4311,7 +4311,7 @@ pub enum TypeError {
     /// DIRECTLY `let`-bound guard binding. A computed guard operand — `*{ g }`,
     /// `*(if c { g } else { g2 })` — is rejected: it would fall to a *consuming*
     /// borrow-check walk that marks the guard moved, SKIPPING its unlock-on-drop
-    /// (freeing a still-locked cell) and diverging from the self-host mirror. This
+    /// (leaving the lock held) and diverging from the self-host mirror. This
     /// is the same conservative pin as [`GuardNotLetBound`] (`lock()` may only be a
     /// direct `let` RHS): dereference the guard binding directly.
     #[error("a lock guard can only be dereferenced (`*g`) directly on its `let` binding")]
@@ -4328,14 +4328,15 @@ pub enum TypeError {
     /// call appeared somewhere other than the direct RHS of an immutable `let`.
     /// A `?Guard` unlocks the mutex on its scope-exit drop, so it must stay
     /// lexically pinned to the `let` where it was acquired — otherwise a guard
-    /// that outlived its mutex would unlock a freed cell (a use-after-free). So a
+    /// could hold the lock past that scope (before ADR 0071 A3, a guard that
+    /// outlived its mutex also unlocked a freed cell). So a
     /// `lock()` in a block tail, a call argument, a `return`, a reassignment, or a
     /// `let mut` is rejected; write `let g = lock(m);` and hold the critical
     /// section in that scope.
     #[error("`lock()` must be bound directly by an immutable `let` (`let g = lock(m);`)")]
     #[diagnostic(
         code(sentinel::types::guard_not_let_bound),
-        help("acquire the lock as `let g = lock(m);` — the guard unlocks at that scope's exit. A `lock()` in any other position (a block tail, a call argument, a `return`, a reassignment, or a `let mut`) is rejected so the guard cannot outlive its mutex (which would unlock a freed cell). The full guard no-escape rule (ADR 0071 D3) is a follow-on.")
+        help("acquire the lock as `let g = lock(m);` — the guard unlocks at that scope's exit. A `lock()` in any other position (a block tail, a call argument, a `return`, a reassignment, or a `let mut`) is rejected, so a fresh `lock()` cannot escape its `let`; a guard binding moved out of that scope still holds the lock until it drops (the full no-escape rule, ADR 0071 D3, is deferred). The full guard no-escape rule (ADR 0071 D3) is a follow-on.")
     )]
     GuardNotLetBound {
         #[label("`lock()` not in an immutable-`let` initializer")]
@@ -7615,8 +7616,9 @@ struct VarTypeEnv {
     /// `Let` arm sets it; `check_call` reads it (for `LOCK_FN_ID`) and clears it
     /// immediately, so a `lock()` nested anywhere else (a block tail, a fn arg, a
     /// reassignment, a `let mut`, a return) sees `false` and is rejected
-    /// (`GuardNotLetBound`). This keeps a guard lexically pinned to its `let`
-    /// scope so its unlock-on-drop cannot outlive the mutex (a UAF).
+    /// (`GuardNotLetBound`). This keeps a fresh `lock()` lexically pinned to its
+    /// `let`, so it cannot escape and hold the lock past that scope (before ADR 0071
+    /// A3 an escaped guard could also unlock a freed cell).
     lock_allowed: bool,
 }
 
@@ -9277,8 +9279,8 @@ fn check_call(
         // ADR 0071 M1.4b slice 3b (guard no-escape, conservative pin): a `lock()`
         // may ONLY be the direct RHS of an immutable `let` (`let g = lock(m);`).
         // Anywhere else it is rejected, so the `?Guard` it yields stays lexically
-        // bound to that `let`'s scope — its unlock-on-drop cannot outlive the
-        // mutex (which would unlock a freed cell: a UAF). The full guard-pinning
+        // bound to that `let`'s scope and the lock is not held past it (before ADR
+        // 0071 A3 an escaped guard also unlocked a freed cell). The full guard-pinning
         // no-escape (ADR D3) also catches guard-VAR reshuffles; this cheap rule
         // closes the `lock()`-position escapes (block tail / arg / return /
         // reassignment / `let mut`).

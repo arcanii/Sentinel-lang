@@ -45,7 +45,7 @@ fn is_move_type(c: &mut TyCtx, h: i64) -> bool {
             // recursion below) is MOVE, not Copy — unlike Shared/Mutex/Channel. Its
             // scope-exit drop is sentinel_mutex_unlock, with no clone accounting;
             // duplicating a guard (`let g2 = g`) would double-unlock a cell locked once.
-            // Move-tracking makes the duplication CONSUME g, so exactly one owner unlocks.
+            // Move-tracking makes the duplication CONSUME g, so at most one owner unlocks.
             true
         } else if k == 3 {
             is_move_type(c, (*c).ta[idx])

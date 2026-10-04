@@ -174,7 +174,8 @@ struct RuntimeSyms {
     /// ptr) -> i64` (0 acquired / 1 timeout, writes the guard slot ptr to `*out`),
     /// `sentinel_mutex_clone(ptr) -> ptr` (rc++), `sentinel_mutex_release(ptr)`
     /// (rc--, free at 0) — the slice-3a refcount accounting. `sentinel_mutex_unlock(ptr)`
-    /// is the slice-3b Guard scope-exit unlock (`force_unlock`, no refcount change).
+    /// is the slice-3b Guard scope-exit unlock (`force_unlock`, then the guard's own
+    /// refcount unit back, ADR 0071 A3).
     mutex_new: bool,
     /// ADR 0071 M1.4c (D6.2): `sentinel_mutex_new_secret(i64) -> ptr` — the
     /// mlocked, zeroed-at-last-drop cell for a `secret T` protected value.
@@ -3411,9 +3412,10 @@ impl Emit<'_> {
             // ADR 0071 M1.4b slice 3b: a bound `?Guard` unlocks on scope exit. On the
             // VALID arm (a `lock()` success) the guard holds the cell handle `m`, so
             // unlock it; on the timeout arm nothing is held (the null-guarded shape the
-            // enum box-free arm above uses to "drop only on the present arm"). Fires in
-            // reverse-declaration order, BEFORE the owning `Mutex`'s
-            // `sentinel_mutex_release`, so the cell is unlocked before it can be freed.
+            // enum box-free arm above uses to "drop only on the present arm"). The
+            // unlock also gives back the unit the lock took for the guard (ADR 0071
+            // A3), so the cell outlives the guard however the owning `Mutex`'s
+            // `sentinel_mutex_release` is ordered against it.
             Type::Nullable(NullableInner::Guard(_)) => {
                 let v = self.fresh();
                 writeln!(self.body, "  %v{v} = load {{ i1, ptr }}, ptr %v{ptr_reg}").unwrap();

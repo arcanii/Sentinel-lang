@@ -1664,8 +1664,8 @@ fn walk_expr_inner(
         // without consuming it — the guard must stay live for its scope-exit unlock,
         // and the motivating RMW shape derefs it repeatedly (`let v = *g; *g = v+6`).
         // A consuming walk would mark `g` Moved: the unlock drop would be skipped
-        // (a leak + a free-while-locked abort) and the second `*g` would be a bogus
-        // UseAfterMove. Non-consuming ALSO mirrors scg's unary walk, whose deref
+        // (the lock, and since ADR 0071 A3 its cell, kept for good) and the second
+        // `*g` would be a bogus UseAfterMove. Non-consuming ALSO mirrors scg's unary walk, whose deref
         // operand is unconditionally non-consuming — for `Ref` operands (Copy) the
         // difference was moot, for the Move guard it is load-bearing (the
         // moved-sources dump must stay byte-identical). The use-after-move CHECK
@@ -2544,12 +2544,14 @@ fn is_copy_type(ty: Type, program: &TypedProgram) -> bool {
         Type::Mutex(_) => true,
         // ADR 0071 M1.4b slice 3b: a `Guard<T>` (and its `?Guard`, below) is MOVE,
         // NOT Copy — unlike the `Shared`/`Mutex`/`Channel` handles. Its scope-exit
-        // drop is `sentinel_mutex_unlock`, which (unlike the refcounted `release`)
-        // has no clone accounting: duplicating a guard (`let g2 = g`) would
-        // double-unlock a cell locked once. Move-tracking makes `let g2 = g`
-        // CONSUME `g`, so exactly one owner drops → exactly one unlock. The D3
-        // no-escape rule (below) additionally forbids a guard leaving its lock
-        // scope (return / store), which would let it outlive the cell (UAF).
+        // drop is `sentinel_mutex_unlock`, which has no clone accounting (the
+        // guard's one refcount unit, ADR 0071 A3, is taken by the lock itself):
+        // duplicating a guard (`let g2 = g`) would double-unlock a cell locked once
+        // and give back that unit twice. Move-tracking makes `let g2 = g` CONSUME
+        // `g`, so at most one owner drops → at most one unlock. Keeping a guard
+        // binding from leaving its lock scope (and so holding the lock past it) is
+        // the full ADR 0071 D3 no-escape rule, which is deferred; the typer's
+        // `GuardNotLetBound` pins only where `lock()` itself may appear.
         Type::Guard(_) => false,
     }
 }

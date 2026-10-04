@@ -1,6 +1,6 @@
 // ADR 0071 M1.4b slice 3b: a BOUND `let g = lock(m)` is now SOUND — the `?Guard`
-// unlocks the mutex on its scope-exit drop, BEFORE the owning `Mutex`'s
-// `sentinel_mutex_release`, so the cell is unlocked before it is freed.
+// unlocks the mutex on its scope-exit drop (and, since ADR 0071 A3, gives back the
+// refcount unit the lock took for it, so the cell outlives the guard).
 //
 // This is the slice-3b replacement for the prior slice-2b-ii fixture, which
 // deliberately leaked (`is_some(lock(mutex_new(42)))`, an unbound rvalue) because
@@ -9,14 +9,15 @@
 // of an immutable `let`) also REJECTS that old unbound form, so the sound bound form
 // is now the only spelling — see `tests/ui/c71_guard_not_let_bound.sentinel`.
 //
-// Trace: `mutex_new(42)` (rc=1, m owns); `lock(m)` acquires (uncontended → success)
-// and yields a `?Guard` whose payload is the cell handle `m`; `is_some(g)` reads the
-// valid bit (true) → 42. At main's scope exit the drops fire in reverse-declaration
-// order: `g` first (`sentinel_mutex_unlock(m)` on the valid arm), then `m`
-// (`sentinel_mutex_release`, rc→0, freed once). A clean exit 42 IS the leak/unlock
-// check — a missed unlock would trip the runtime's free-while-locked debug-assert,
-// and a miscounted refcount a use-after-free crash. (The `*g` deref that reads the
-// protected value is slice 3c.) Exit 42.
+// Trace: `mutex_new(42)` (rc=1, m owns); `lock(m)` acquires (uncontended → success),
+// taking a unit for the guard (rc=2, ADR 0071 A3), and yields a `?Guard` whose payload
+// is the cell handle `m`; `is_some(g)` reads the valid bit (true) → 42. At main's scope
+// exit the drops fire in reverse-declaration order: `g` first (`sentinel_mutex_unlock(m)`
+// on the valid arm, rc→1), then `m` (`sentinel_mutex_release`, rc→0, freed once). The
+// clean exit no longer proves the unlock (a missed one now keeps the cell rather than
+// tripping the runtime's free-while-locked debug-assert): `c71_guard_outlives_its_owner`
+// checks it by locking again. (The `*g` deref that reads the protected value is slice
+// 3c.) Exit 42.
 
 fn main() -> i64 {
     let m = mutex_new(42);

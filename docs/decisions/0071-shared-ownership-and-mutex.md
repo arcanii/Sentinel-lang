@@ -7,7 +7,9 @@ Status: **ACCEPTED for M1.4a (`Shared<T>`) — implemented 2026-07-02 — and fo
 were then completed 2026-09-02 (M1.4c-1c, `6337bea`, register D17); see the M1.4c
 implementation log + the D6/D4 amendment. `Channel<secret T>` (M1.4c-2) remains open. D2 is
 amended by A1 (2026-09-25): a duplication out of a place into a new owner is counted, with the
-exceptions A1 lists.** Design
+exceptions A1 lists; and by A2 (2026-10-03): inkwell's method and init parameter frames are
+dropped but release no handle. D4 is amended by A3 (2026-10-04): a guard owns a refcount unit
+of its mutex.** Design
 PINNED with maintainer sign-off 2026-07-02. This is the M1.4 sub-phase of the ADR 0066 threading roadmap, broken out into
 its own ADR per **ADR 0066 D5** ("blocked on first designing a runtime-refcounted
 `Shared<T>` handle … a language feature in its own right, arguably bigger than the mutex
@@ -183,7 +185,8 @@ mechanism it plugs into.
 
 **Amended by A1 (2026-09-25), below:** the duplication is counted wherever the value is read
 out of a place, not only out of a named binding, and into more kinds of new owner; A1 lists
-what it leaves out.
+what it leaves out. **And by A2 (2026-10-03), below:** inkwell drops a method's and an init's
+parameters but releases no handle among them.
 
 ### D3. Deterministic drop reuses the existing scope-exit machinery; a hard-coded drop-content arm, not a `Drop` trait. **PINNED.**
 
@@ -225,6 +228,9 @@ infallible guard):
 Atomics on a `Shared`-backed cell (`fetch_add`/`load`/`store`) come for free as
 lock-free operations on the same cell shape and are the fast path for the "shared
 counter" case, deadlock-free by construction.
+
+**Amended by A3 (2026-10-04), below:** a successful `lock()` takes a refcount unit on the cell
+for the guard, which the guard's unlock gives back, so a guard keeps its mutex alive.
 
 ### D5. Deadlock detection — two tiers, over public lock identity only. **PINNED (carried from ADR 0066 D5a).**
 
@@ -506,21 +512,26 @@ Makes a **bound** `let g = lock(m)` sound. Decisions taken (all pinned by the ma
    drop needs `m` for `sentinel_mutex_unlock`. (Reading the protected value via `*g` is
    deferred to **slice 3c** — it needs a runtime `sentinel_mutex_data_ptr(m)` accessor.)
 2. **The `?Guard` conditionally unlocks on drop.** A bound `?Guard`'s scope-exit drop, on the
-   VALID arm (a `lock()` success), calls `sentinel_mutex_unlock(m)` (`force_unlock`, no
-   refcount change); on the timeout arm nothing is held → nothing unlocks. It reuses the
+   VALID arm (a `lock()` success), calls `sentinel_mutex_unlock(m)` (`force_unlock`; at this
+   slice it changed no count, and since A3 it also gives back the unit a successful lock takes
+   for the guard); on the timeout arm nothing is held → nothing unlocks. It reuses the
    existing null-guarded conditional-drop shape (the enum box-free arm). Drops fire in
    reverse-declaration order, so `g`'s unlock precedes the owning `Mutex`'s
-   `sentinel_mutex_release` — the cell is unlocked before it can be freed.
-3. **`Guard`/`?Guard` are MOVE, not Copy** (unlike `Shared`/`Mutex`/`Channel`). A guard has no
-   refcount, so a duplicated guard would double-`force_unlock` a cell locked once. Move-tracking
-   makes `let g2 = g` consume `g` → exactly one unlock.
+   `sentinel_mutex_release` — which kept the cell from being freed while locked only as long
+   as the guard stayed inside its owner's scope and the owner was not moved; since A3 the
+   guard's own unit keeps the cell alive in every case.
+3. **`Guard`/`?Guard` are MOVE, not Copy** (unlike `Shared`/`Mutex`/`Channel`). A guard is never
+   cloned, so a duplicated guard would double-`force_unlock` a cell locked once (and, since A3,
+   give back its one unit twice). Move-tracking makes `let g2 = g` consume `g` → at most one
+   unlock.
 4. **Guard no-escape = the CONSERVATIVE PIN: `lock()` may only be the direct RHS of an
    IMMUTABLE `let`** (`TypeError::GuardNotLetBound`, ui fixture `c71_guard_not_let_bound`).
    Blocks the fresh-`lock()` escapes — a block tail, a call argument, a `return`, a
    reassignment, a `let mut`. The FULL D3 no-escape (guard-VAR reshuffles into an outer scope)
-   is a documented **deferred hardening** — those residual escapes are contrived and caught by
-   the runtime free-while-locked assert (⚠ which is `debug_assert!`, compiled out in release —
-   the reason the static pin rule is needed).
+   is a documented **deferred hardening**. Those residual escapes are contrived; at this slice
+   they were caught only by the runtime free-while-locked assert (⚠ a `debug_assert!`, compiled
+   out in release — the reason the static pin rule is needed). Since A3 an escaped guard keeps
+   its cell alive, so what remains deferred is a lock held past its scope.
 
 **Where the change lands (four backends, in lockstep):** the borrow-check crate flips
 `Guard`/`?Guard` to Move + adds the `GuardNotLetBound` pin (shared by inkwell + the oracle);
@@ -533,7 +544,8 @@ rejection fixture is auto-skipped by every self-host differential), exactly as t
 `SharedReturnNotSupported` / `MutexReturnNotSupported` guards are snc-only. The differential
 fixture `tests/pass/c71_mutex_lock` was rewritten from the old unbound rvalue (now rejected by
 the pin) to the sound bound form `let m = mutex_new(42); let g = lock(m); is_some(g)` (exit 42,
-the clean exit being the unlock/leak proof).
+the clean exit being the unlock/leak proof until A3; since A3 the unlock is checked by
+`c71_guard_outlives_its_owner`'s relock case).
 
 ### slice 3c — the `*g` guard deref (read + write the protected value)
 
@@ -905,3 +917,39 @@ released, a struct's included). It changes what `snc build` emits for a method w
 parameter, for a method with a `Shared` / `Mutex` parameter (bound directly or in a struct
 parameter's field) that leaves through `return`, and for an `init` with a heap parameter or
 local, so it is at least a minor version (ADR 0076 D2).
+
+## D4 amendment A3 (2026-10-04) — a guard owns a refcount unit of its mutex (register D155)
+
+Slice 3b gave a guard the mutex cell handle without a refcount unit of its own, on the ground
+that drops run in reverse declaration order, so a guard's unlock always precedes the release
+by the `Mutex` owner it was locked through. That holds only while the guard stays inside its
+owner's scope and the owner is not moved. Moving the owner breaks it: when the struct holding
+the `Mutex` is passed by value, or bound anew in an inner block, while a guard taken from it
+is held, the struct's drop can release the cell's last unit. The locked cell was then freed
+under the guard, which went on to read, write and unlock freed memory. The runtime's
+free-while-locked check is a `debug_assert!`, so a debug build aborted and a release build
+did not.
+
+A successful `lock` now takes a refcount unit on the cell for the guard, and the guard's
+`sentinel_mutex_unlock` gives it back after unlocking — freeing the cell if every other owner
+is already gone, by the same last-drop path every release takes. A failed acquire (a timeout,
+a detected deadlock, a null handle or out-slot) takes none. The guard's unit also covers a
+guard that leaves its owner's scope (slice 3b's deferred no-escape residue), which no longer
+frees the cell either. A guard stays Move (slice 3b's decision 3), so at most one unlock
+gives back the one unit. A guard that is never unlocked — the shapes registered as D22, D64,
+D93, D117, D120 and D122 — now keeps its cell for good, a leak of one cell per acquire, where
+a debug build aborted and a release build freed the cell, still locked, at its owner's last
+release; the lock stayed held either way.
+
+The symbols, their signatures and every back end's emitted IR are unchanged: only the runtime
+moves, so inkwell, the oracle and `scg` are fixed together. It amends `abi-v1` §5's contract
+for `sentinel_mutex_lock`, `_try_lock_for` and `_unlock`, which ADR 0076 D2's minor row
+covers; the next version is at least 0.2.0 already. Pinned by
+`tests/pass/c71_guard_outlives_its_owner` — six cases with the owner passed to a call,
+rebound in an inner block, nested in another struct, a generic instance, a `Mutex<secret
+i64>` and a loop, each aborting on the debug runtime before, and a seventh that locks the
+same mutex again after a block, loop exits through `continue` and `break`, and an early
+`return`, so a missed unlock times out — and by the runtime tests
+`a_guard_keeps_its_mutex_alive`, `a_failed_lock_takes_no_unit` and
+`secret_mutex_guard_outlives_its_owner_and_scrubs_at_its_unlock`, with the deadlock tier's
+self-cycle test now also checking that a refused acquire takes no unit.

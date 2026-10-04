@@ -9,11 +9,12 @@
 // The deref is NON-consuming on the Move-typed `?Guard` (three `*g` uses below —
 // a consuming read would poison the later uses with UseAfterMove and skip the
 // scope-exit unlock). At main's exit the drops fire in reverse order: `g` unlocks
-// (valid arm), then `m` releases (rc→0, freed once) — the clean exit is the
-// unlock/leak proof.
+// (valid arm) and gives back its unit, then `m` releases (rc→0, freed once). The
+// clean exit no longer proves the unlock (ADR 0071 A3); `c71_guard_outlives_its_owner`
+// checks it by locking again.
 //
-// Trace: mutex_new(36) → lock (rc unchanged; lock held) → read 36 → write 36+6=42
-// → read back 42 as the tail. Exit 42.
+// Trace: mutex_new(36) → lock (rc 1→2, the guard's unit; lock held) → read 36 →
+// write 36+6=42 → read back 42 as the tail. Exit 42.
 
 fn main() -> i64 {
     let m = mutex_new(36);
