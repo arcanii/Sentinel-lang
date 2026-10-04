@@ -14,7 +14,39 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
-**Latest (2026-10-04) — a `Mutex` guard keeps its mutex alive (register D155).**
+**Latest (2026-10-04, second slice) — a handle stored into a class field is counted, and a
+class's drop releases it (register D156).**
+[ADR 0071](decisions/0071-shared-ownership-and-mutex.md) D2 amendment A4: a `Shared` / `Mutex`
+stored into a field of a class instance was not cloned, and no back end released a class's
+fields at its drop, so the field shared its cell with the value it was stored from. When that
+value's owner released the cell — a callee's parameter, a method's or an init's local, a
+struct parameter's field — the cell was freed while the field still pointed at it, and the
+field's next use read freed memory. A store into a class field is now counted like any other
+assignment, and a class's drop releases the handles its fields hold, at any depth through
+struct, generic-instance and class fields, `secret`-qualified or not, and frees nothing else
+(register D137). That also closes the leak of a handle nothing else owned stored into a class
+field (`self.m = mutex_new(0)` in an `init`). An overwritten field keeps its old unit
+(register D120), and an owner that is never dropped (a temporary, a container's element or
+payload, a binding moved on one path only, an inkwell method's or init's frame, an effecting
+fn's parameter its continuation frame does not carry, an overwritten value, and in the text
+back ends a `secret`-qualified class or a class inside a `secret`-qualified struct) keeps the
+units counted into a class's fields: leaks that balanced before only because the field held
+no unit, measured and listed in A4. Because a class's drop now releases its fields, the text
+back ends also refuse an effecting fn whose continuation would capture a parameter that is
+not `i64` or `secret i64`, whatever its type, as inkwell does (registers D67, D69 and D159):
+they had rebuilt such a parameter from one word of itself. That refuses some programs they ran
+correctly before, and the oracle now lowers in order a block tail ending in the `perform`
+that its embedded shape declines for such a parameter. All three back ends and the `scg` mirror; both
+bootstrap fixed points hold. Pinned by `tests/pass/c71_class_field_handles` (23 cases; eleven
+misbehaved before), two IR tests and a refusal test in each text back end. Filed D157 (a
+struct and a class holding each other by value are accepted), D158 (the text back ends drop
+nothing for a `secret`-qualified struct or class binding), D159 (`scg`'s embedded and let
+shapes also refuse a parameter the resumer never reads) and D160 (`scg`'s effecting-fn
+classifier lowers some tails the oracle refuses or lowers differently, and some of those
+answer wrong). It moves the IR all three back ends emit and refuses programs the text back
+ends lowered, so it is at least a minor (ADR 0076 D2).
+
+**Previously (2026-10-04) — a `Mutex` guard keeps its mutex alive (register D155).**
 [ADR 0071](decisions/0071-shared-ownership-and-mutex.md) D4 amendment A3: `lock` gave the guard
 the mutex cell without a refcount unit of its own, relying on the guard's unlock coming before
 its owner's release; moving the struct that holds the `Mutex` while a guard taken from it was

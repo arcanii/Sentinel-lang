@@ -124,6 +124,12 @@ reference as you work through the milestones.
 > confirming nothing pre-existing is newly refused; oracle-vs-scg byte-equality on the new
 > fixture at types, mir and llvm; and the secret-taint check in both directions.
 
+### ▶ RESUME HERE (2026-10-04, second slice — `origin/main` was `7d89db7` when this was written, and this slice's two commits sit on top of it, unpushed; read `git reflog show refs/remotes/origin/main` and `git log --oneline origin/main..HEAD` at the START and AGAIN before writing either down. This slice: **register D156 CLOSED** (`2fdc3dd` fix, then this docs commit) — [ADR 0071](decisions/0071-shared-ownership-and-mutex.md) **D2 amendment A4**: a `Shared` / `Mutex` stored into a field of a class instance is counted like any other assignment, and a class's drop releases the handles its fields hold, at any depth through struct, generic-instance and class fields, `secret`-qualified or not, and frees nothing else. The store used to take no unit and nothing released a class field, so the field shared its cell with the value it was stored from; when that value's owner released the cell, the cell was freed while the field still pointed at it. All three back ends and the `scg` mirror; it also closes the leak of a handle nothing else owned stored into a class field. An overwritten field keeps its old unit (D120), and an owner that is never dropped (a temporary, a container's element or payload, a binding moved on one path only, an inkwell method's or init's frame, an effecting fn's parameter its continuation frame does not carry, an overwritten value, and in the text back ends a `secret`-qualified class or a class in a `secret`-qualified struct) now keeps the units counted into a class's fields: leaks, measured in A4 and noted in D120, D122, D139, D154 and D158. Because a class's drop now releases its fields, the text back ends also refuse an effecting fn whose continuation would capture a parameter that is not `i64` or `secret i64`, whatever its type, as inkwell does (notes on D67 and D69): the oracle's embedded shape one its resumer reads, `scg`'s chained shape one its frames carry, `scg`'s embedded and let shapes any (D159). Filed **D157** (a struct and a class that hold each other by value are accepted; `snc build` overflows its stack on one), **D158** (the oracle and `scg` drop nothing for a `secret`-qualified struct or class binding), **D159** (`scg`'s embedded and let shapes also refuse a parameter the resumer never reads) and **D160** (`scg`'s effecting-fn classifier lowers some tails the oracle refuses or lowers differently, and some of those answer wrong); D68(c) gains a class operation parameter, D108 its `match` half and D145 a fourth order. Four bounded review rounds, each lens with a construct-the-input verifier. `wf_2c5d20bf-6e7` (soundness, leaks and prose) found that the text back ends rebuilt a non-word parameter from one word of itself across a continuation (now refused, as inkwell refuses it), that the class walk skipped a `secret`-qualified field (fixed in all three back ends), and prose and unlisted-leak points, all fixed. `wf_fcb7e334-28d` (the remedies) found that `scg`'s refusal over-reached in its chained shape, two more unlisted leak shapes (now in A4, D139 and D158) and prose points, all fixed, and led to D160. `wf_776b76ff-735` (round 2's remedies) found that the narrowed chained refusal still mistook a `match` or handler-arm binding for a parameter of the same name, refusing programs HEAD's `scg` lowered to the oracle's bytes, so the rule is now the simpler one: `scg` refuses exactly the non-word parameters its frames carry (a read its frame walk does not enter still loads from `%v-1`, which `llc` rejects, as at HEAD); it also found an unpinned later-`let` case (now pinned) and prose points, all fixed, and widened D160. `wf_737a3bd4-8cf` (round 3's remedies) found no over- or under-refusal across the corpus and about 360 constructed programs, and found prose points, all fixed, and an order in which `scg` names a different refusal than the oracle (a note on D145). Register: **159 distinct ids, 65 whose heading opens `**D<n> — DONE`** (the 2026-09-22 block's rule; the id D130 is reserved and not in the public register). Four-check: **2,128 passed with exactly the 18 known Windows failures**, doctests and clippy clean, every `selfhost_*` differential green including both bootstrap fixed points. Sweeps, HEAD's `snc` against the final one, beside the same runtime: `snc llvm` over the 516 `.sentinel` files in the tree, 345 byte-identical, 169 refused by both with identical messages, and 2 changed — the new fixture and `c71_shared_place_duplications`, whose `class_field` shape now clones at its store and releases at `k`'s drop (its answer, 5 + 5, is unchanged); `snc build` and a run of those files and 47 library wrappers (563 entries, against the round-2 binary, whose `snc` differs from the final one by a comment), only the new fixture changes, from heap corruption to 42. Mutations: 38 of the change, 37 caught; the survivor removes inkwell's stop at a repeated type, which no program reaches (`snc build` overflows on such a type with or without it). It moves the IR all three back ends emit and refuses programs the text back ends lowered, so at least a minor version (ADR 0076 D2); `Cargo.toml` still says 0.1.0.)
+
+> **NEXT:** ADR 0077's implementation, re-applied from the scratchpad's `a77park2/` on top of this, with its first review's findings fixed; it must give A4's class drop the same flag-guarded field skip it gives a struct's. Then its review, four-check, sweeps and commit.
+>
+> Owed by the maintainer: D102, D103, ADR 0077's Q6, D36's decision, D146's direction, whether D154's kept units can now be released, whether D139 (the frame-pushing fn drops none of its parameters, which since D156 leaks a class parameter's handles) and D158 (the text back ends' `secret`-qualified drops) may be fixed — both are in the drop path — and when to bump the version (at least 0.2.0; `Cargo.toml` still says 0.1.0).
+
 ### ▶ RESUME HERE (2026-10-04 — `origin/main` was `b3e4de9` when this was written, and D150's two commits (`2563d0b`, `aff4a2b`), D153's two (`d25d196`, `91d3af3`) and this slice's two sit on top of it, unpushed; read `git reflog show refs/remotes/origin/main` and `git log --oneline origin/main..HEAD` at the START and AGAIN before writing either down. This slice: **register D155 CLOSED** (`17b71bd` fix, then this docs commit) — [ADR 0071](decisions/0071-shared-ownership-and-mutex.md) **D4 amendment A3**: a successful `lock` takes a refcount unit for the guard and the guard's unlock gives it back after unlocking, so a `Mutex` guard keeps its cell alive when the struct that owns the `Mutex` is moved away while the guard is held (passed by value, or bound anew in an inner block), which used to free the locked cell under the guard. Runtime-only: no symbol, signature or emitted IR moves, so all three back ends are fixed together; `abi-v1` §5's contract for three symbols is amended. A guard that is never unlocked (the D22, D64, D93, D117, D120 and D122 shapes) now keeps its cell, a leak, where a debug build aborted. Two bounded review rounds. `wf_00195873-e88` (soundness and prose, each with a construct-the-input verifier; no crash, double unlock, over-release or deadlock in balanced programs) found that a never-unlocked guard now keeps its cell (documented), that no end-to-end check of a guard's unlock was left (a relock case was added), the amendment's numbering, the `abi-v1` rows and a family of stale guard-ordering comments, all fixed. `wf_0705e1f2-d93` (the remedy text) found seven more points: five fixed, one refuted, and one pre-existing, D46, whose scope line now names `?Guard<T>`. Register: **154 distinct ids, 64 whose heading opens `**D<n> — DONE`** (the 2026-09-22 block's rule; the id D130 is reserved and not in the public register). Four-check: **2,121 passed with exactly the 18 known Windows failures**, doctests and clippy clean, every `selfhost_*` differential green including both bootstrap fixed points. Sweeps, the same compiler beside the old and the new runtime: a matched `snc build` and run of all 515 `.sentinel` files and 47 library wrappers changes only the new fixture (an abort before, 42 after); `snc llvm` moves no byte. Mutations: four in the runtime and one in inkwell (a `?Guard` drop without its unlock) are caught, the baseline surviving. The `abi-v1` amendment makes it a minor (ADR 0076 D2); the next version is at least 0.2.0 either way, and `Cargo.toml` says 0.1.0.)
 
 > **NEXT:** the order agreed with the maintainer; ADR 0077's implementation stays parked in the scratchpad (`a77park2/`).
@@ -1981,6 +1987,9 @@ reference as you work through the milestones.
 >      read only inside a `handle` is never captured into the frame. `scg` emits the chained one as
 >      IR `llvm-as` rejects (`%v-1`) and the embedded one as valid IR. `snc build` refuses both (a
 >      `handle` in a `perform`'s argument or an effecting fn's tail). No corpus program has either.
+>      The walk has no `Match` arm either (found 2026-10-04 by D156's review): `fn eff(n: i64)
+>      -> i64 ! { Io } { perform Io.read() + (match mk(1) { E::A(v) => v + n - 1, _ => 0 }) }`
+>      fails the same way, and so does a chained tail that reads `n` only in a `match` arm.
 >
 >      **D109 — an effecting fn whose frame returns a computed `bool` does not compile in any
 >      back end, and the text back ends cannot lower a `bool`-typed `handle` whose value is
@@ -2180,6 +2189,12 @@ reference as you work through the milestones.
 >      end, and for a `Shared` / `Mutex` the old unit is never released. Dropping it is not a
 >      local fix: the old value may already have been moved away (`a = f(a)`), so whether to
 >      drop depends on the path taken, which is ADR 0077's drop-flag question.
+>      Since D156 (2026-10-04) a store into a class field is counted too, so overwriting a
+>      class field, or a class value as a whole — a binding, a struct's field, or through a
+>      reference — leaves the old units held: 69.9 MB over 2,000,000 overwrites in all three
+>      back ends, against 8.3 to 8.4 MB before, when the field held no unit of its own.
+>      Releasing them is this entry's drop-flag question, and for a field inkwell's lent method
+>      arguments make it unsafe (ADR 0071 A4).
 >
 >      **D121 — DONE (2026-09-25). A `Shared` / `Mutex` duplicated out of a field, a
 >      reference or a tail, or into a struct literal, an assignment, a method argument or a
@@ -2198,7 +2213,8 @@ reference as you work through the milestones.
 >      place (a generic parameter at `Shared` — which also closes an older leak: HEAD's
 >      oracle and inkwell cloned a moved generic parameter passed to a call and never released
 >      the clone). An enum-construct argument and an assignment into a class field keep D2's
->      treatment; a read out of a class field is cloned like any other place read. A
+>      treatment (the assignment until D156, ADR 0071 A4, which counts it); a read out of a
+>      class field is cloned like any other place read. A
 >      `secret`-qualified handle (`secret Shared<T>`, `secret Mutex<T>`) is now a type error,
 >      `SecretHandle`: the secret belongs inside the container. The reviews found two more
 >      defects, both fixed before this landed: `scg`'s hand-emitted delegate forwarder did not
@@ -2243,6 +2259,16 @@ reference as you work through the milestones.
 >      `{ g };` — is never unlocked for the same reason; since ADR 0043 A3 all three back ends
 >      agree on it. Before D155 the debug runtime then panicked when the mutex's last handle was
 >      released; since D155 the guard keeps its cell, a leak of one cell per evaluation.
+>      Since D156 (2026-10-04) a class holding a handle joins these owners, now that a store
+>      into its field is counted: a class temporary — a discarded `K::init(s);`, `K::init(s).n`,
+>      a discarded call result, a struct literal holding one read in place — keeps the unit, and
+>      so does a class in an enum payload (built by an enum constructor, matched or not), in an
+>      array literal or a pushed `Vec` element inside a struct or generic instance, in inkwell's
+>      nullable box, and a class, or a field holding one, moved on one path only (D93): each
+>      69.9 MB over 2,000,000 evaluations in all three back ends (the nullable box in inkwell
+>      only), against 8.3 to 8.4 before. So does a class passed by value to an inkwell method or
+>      init, or bound by an init's top-level statements (D154). Each balanced before only
+>      because the field held no unit of its own.
 >
 >      **D123 — inkwell keeps a unit counted into a block's own `let`-local when nothing
 >      receives the block's value (a leak).** Found 2026-09-25 by the review of D121's fix.
@@ -2465,6 +2491,11 @@ reference as you work through the milestones.
 >      self.v = [n, n, n, n]; 0 } }`, built and dropped 2,000,000 times, peaks at about 101 MB in
 >      inkwell, the oracle's IR and `scg`'s IR, against 8.4 MB for the same field in a struct.
 >      The fix is to walk a class's fields as the struct drop does, in all three back ends.
+>      Since D156 (2026-10-04, ADR 0071 A4) a class's drop releases the `Shared` / `Mutex`
+>      handles its fields hold — inkwell's class arm walks its fields for them, the oracle's and
+>      `scg`'s drops have a class arm, and `needs_drop` / `cg_needs_drop` report a class that
+>      holds a handle as needing a drop — but frees nothing else: the class above still peaks
+>      at 100.6 MB in all three back ends.
 >
 >      **D138 — an enum payload's own heap is never freed (a leak).** Found 2026-09-23 by the
 >      D93 investigation; re-verified 2026-09-26. ADR 0032's drop frees an enum value's box but
@@ -2479,6 +2510,17 @@ reference as you work through the milestones.
 >      parameter (`{ perform Io.read() }`) peaks at 8.4 MB. (`scg`'s IR for it also differs from
 >      the oracle's: it captures the parameter into a frame where the oracle captures nothing,
 >      a D67 instance.)
+>      The fn that pushes the frame drops none of its parameters, in the embedded and chained
+>      shapes too (found 2026-10-04 by D156's review): an array parameter, or a struct holding
+>      a `Shared`, that no resumer reads peaks at 69.9 to 70.0 MB over 2,000,000 calls in all
+>      three back ends before D156. Since D156 `scg` refuses such a fn in its embedded and let
+>      shapes, this entry's own program included (D159), and leaks only in its chained shape.
+>      Since D156 a class holding a handle leaks the same way, where it balanced before because
+>      its field held no unit: 69.9 to 70.0 MB through inkwell and the oracle in the embedded,
+>      let and chained shapes, and through `scg` in the chained shape, against 8.3 to 8.4
+>      before. The oracle also takes a block holding only a `perform` (`{ perform Io.write(41 +
+>      n) }`) as embedded and leaks there (69.9), where inkwell and `scg` lower it straight-line
+>      and drop the class (8.4).
 >
 >      **D140 — `==` between two arrays type-checks and borrow-checks, then fails in every back
 >      end.** Found 2026-09-25 by a review of the checker slice; re-verified 2026-09-26.
@@ -2544,6 +2586,12 @@ reference as you work through the milestones.
 >      leaves a field unassigned, is refused for `zzz` by `scg` and for the field by the oracle.
 >      Matching needs the class's refusals held until its `init` is checked, and a
 >      source-order typing pass for a literal's values.
+>      Since D156 (2026-10-04) a fourth: `scg` records its refusal of a parameter a
+>      continuation would capture that is not `i64` or `secret i64` (D159, and D67's note)
+>      when its code generator reaches the effecting fn, before it reaches a ported type error
+>      later in that fn or in a later item, which the oracle, typing the whole program first,
+>      names instead: a `fn bad() -> i64 { P { n: 1, zz: 2 }.n }` after such a fn is refused
+>      for `zz` by the oracle and for the capture by `scg`.
 >
 >      **D146 — `vec_to_array` over a generic instance whose field is `secret T`: the oracle
 >      refuses, `scg` accepts.** Found 2026-09-26 by D97's review. `struct Box<T> { s: secret
@@ -2699,6 +2747,10 @@ reference as you work through the milestones.
 >      fields are freed now: with an array field added, the first shape falls from 163.0 MB
 >      to 70.9. The oracle and `scg`, which clone a place argument and release the
 >      parameter, release all of these units. A fix is not attempted here.
+>      Since D156 (2026-10-04) a class passed by value to a method or an init that does not
+>      move it on, or bound by an init's top-level statements, keeps its fields' units the same
+>      way, now that a store into a class field is counted: 69.9 MB over 2,000,000 calls,
+>      against 8.3 to 8.4 before.
 >
 >      **D155 — DONE (2026-10-04, `17b71bd`, [ADR
 >      0071](decisions/0071-shared-ownership-and-mutex.md) D4 amendment A3). A `Mutex` guard
@@ -2723,6 +2775,115 @@ reference as you work through the milestones.
 >      after a block, loop exits, a callee's and a method's `return` and fall-through, and a
 >      generic callee, so a missed unlock times out) and three runtime tests. The `abi-v1`
 >      amendment makes it a minor by ADR 0076 D2.
+>
+>      **D156 — DONE (2026-10-04, `2fdc3dd`, [ADR
+>      0071](decisions/0071-shared-ownership-and-mutex.md) D2 amendment A4). A `Shared` /
+>      `Mutex` stored into a field of a class instance was not counted, and nothing released a
+>      class's fields.** ADR 0071 A1 left a store into a class field as D2 had it, with no
+>      clone, and no back end walked a class's fields at its drop (D137), so the field shared
+>      its cell with the value it was stored from, without a unit of its own. When that
+>      value's owner released the cell, the cell was freed while the field still pointed at
+>      it: the field's next use read freed memory, and through a `Mutex` field `lock` took and
+>      gave back a unit of the freed cell. The checker accepted such programs. In all three
+>      back ends the releasing owner could be a free fn's parameter (or a field of a struct
+>      parameter), a method's local, or a local in an init's nested block; in the oracle and
+>      `scg`, which release an init's and a method's parameters, also one of those parameters
+>      or any local of an init. Found 2026-10-01 while landing D153. A store into a class
+>      field is now a new owner like any other assignment (a place read is cloned), and a
+>      class's drop releases each handle its fields hold, at any depth through struct,
+>      generic-instance and class fields, `secret`-qualified or not, skipping a field the
+>      binding was partially moved out of, and frees nothing else (the rest of D137 stays
+>      open). That also closes a leak: a handle nothing else owned stored into a class field
+>      — `self.m = mutex_new(0)` in an `init` — was never released (69.9 MB with a `Shared`,
+>      100.6 with a `Mutex`, over 2,000,000 classes in all three back ends; 8.4 to 8.5 now).
+>      An overwritten field keeps its old unit (D120): inkwell lends a method its handle
+>      argument without a clone, so releasing the old value could free the cell that argument
+>      points at. Because a class's drop now releases its fields, the text back ends refuse an
+>      effecting fn whose continuation would capture a parameter that is not `i64` or `secret
+>      i64`, whatever its type, as inkwell does: the resumer rebuilt such a parameter from one
+>      word of itself (D67, D69). The oracle's embedded shape refuses one its resumer reads,
+>      `scg`'s chained shape one its frames carry, and `scg`'s embedded and let shapes any
+>      (D159); that refuses some programs the text back ends ran correctly before,
+>      and `scg` refuses only where its classifier picks one of those shapes (D160). The
+>      oracle now lowers in order a block tail ending in the `perform` that its embedded shape
+>      declines for such a parameter, as inkwell and `scg` do. An owner never dropped now keeps
+>      the units counted into a class's fields — a class temporary, a class held in an enum
+>      payload or in an array or `Vec` element, a class or a field holding one moved on one
+>      path only (D93), an overwritten class field or class value (D120), in inkwell a class a
+>      method's or an init's frame holds (D154), an effecting fn's class parameter its
+>      continuation frame does not carry (D139), and in the text back ends a
+>      `secret`-qualified class binding or parameter, a `secret` class in a struct's field or
+>      a class in a `secret` struct (D158) — leaks that balanced before only because the
+>      field held no unit; A4 lists them with measurements, and the D120, D122, D139 and D154
+>      notes add them. Pinned by
+>      `tests/pass/c71_class_field_handles` (23 cases; eleven misbehaved before), run through
+>      inkwell, the oracle's IR and the codegen differential, by the IR tests
+>      `a4_a_class_field_store_counts_and_a_class_drop_releases` and
+>      `llvm_a_class_field_store_counts_and_a_class_drop_releases`, and by the refusal tests
+>      in `tests/llvm.rs` and `selfhost_codegen.rs`. It moves the IR all three back ends emit
+>      and refuses programs the text back ends lowered, so it is at least a minor version (ADR
+>      0076 D2).
+>
+>      **D157 — a struct and a class that hold each other by value are accepted, though they
+>      have no finite layout.** Found 2026-10-04 while landing D156. The type checker's
+>      `detect_struct_cycle` refuses a struct that holds itself by value, directly or through
+>      other structs, but follows only struct-to-struct edges, so `struct S { k: K, n: i64 }`
+>      with `class K { let s: S; .. }`, or two classes that hold each other, type-check. `snc
+>      build` then overflows its own stack on the program, even when only the class's `init`
+>      names the other type (verified on the compiler before D156 as well), and `snc llvm`
+>      emits IR `llc` rejects ("Cannot allocate unsized type"). D156's handle walk stops at a
+>      type already on its path, so it ends; `tests/llvm.rs`'s
+>      `llvm_survives_a_by_value_cycle_through_a_class_field` and a `selfhost_codegen` seed hold
+>      that. The fix is to follow class edges in the cycle check. `scg` refuses no recursive
+>      aggregate at all, not even a struct that holds itself (type errors outside D97's set are
+>      out of its scope, ADR 0041 D7), so its half would be a new refusal.
+>
+>      **D158 — the oracle and `scg` drop nothing for a `secret`-qualified struct or class
+>      binding (a leak).** Found 2026-10-04 while landing D156. A `secret`-qualified aggregate
+>      type-checks — `let h: secret H = H { .. }`, a `secret K` binding or parameter — unlike a
+>      `secret`-qualified handle (`SecretHandle`). inkwell strips the qualifier before it picks
+>      a drop, so it drops the struct or class as such; the oracle's `emit_drop_for_binding`
+>      and `scg`'s `cg_emit_drop` match on the binding's type without stripping it and emit
+>      nothing, and their struct drops skip a `secret`-qualified field the same way. D156's
+>      class drop strips it, in all three back ends, for a field of a class. Measured over
+>      2,000,000 iterations, peak working set: a `secret` struct binding with an array field,
+>      100.5 MB in the oracle's and `scg`'s output against 8.4 in inkwell; with a `Shared`
+>      field, 69.9 against 8.4. Since D156, which counts a store into a class field, so also a
+>      `secret` class binding holding a `Shared`, a `secret` class held in a struct's field,
+>      and a class held in a `secret` struct binding or parameter: each 69.9 against 8.4 (8.3
+>      to 8.4 in all three before D156, when the field held no unit). The fix is to strip the
+>      qualifier in the two text back ends' drop dispatch and struct walk, as inkwell does.
+>
+>      **D159 — `scg` refuses an effecting fn in its embedded or let shape when any parameter
+>      is not `i64` or `secret i64`, even one the resumer never reads; the oracle lowers that
+>      fn.** Found 2026-10-04 while landing D156. `scg`'s embedded and let shapes copy every
+>      parameter into the continuation's frame (D67), so D156 has them refuse a fn with any
+>      parameter that does not fit one `i64` slot, where the oracle and inkwell refuse only a
+>      parameter the resumer reads. (Its chained shape copies only what its frames carry, and
+>      refuses only that.) `fn f(flag: bool) -> i64 ! { Io } { let v: i64 = perform
+>      Io.read(); v + 1 }`, handled by `Io.read(k) => k(41)`, answers 42 through inkwell and
+>      the oracle's IR, and `scg` refuses it. No corpus program has the shape: each shape's
+>      word-typed twin is in `tests/pass`, and the codegen differential holds there. The fix is
+>      D67's: copy only the parameters the resumer reads, then refuse only those.
+>
+>      **D160 — `scg`'s effecting-fn classifier lowers some tails the oracle refuses or lowers
+>      differently, and some of those answer wrong.** Found 2026-10-04 by D156's review;
+>      pre-existing (the same at HEAD). `scg` looks for a tail's `perform` only through binary
+>      and unary operators and call arguments, takes the first it finds, and picks its shape
+>      from that, where the oracle walks the whole tail. A tail with two `perform`s —
+>      `perform Io.read() + perform Io.write(1) + n - 1` with `n == 1`, handled by
+>      `Io.read(kk) => kk(41), Io.write(x, kk) => kk(x)` — is refused by the oracle and
+>      inkwell, and `scg` lowers it: the program answers 82 where its source means 42, the
+>      read's resumed value standing in for both. A `perform` inside an `if` arm or among a
+>      block's statements `scg` emits as IR `llc` rejects (`if c == 1 { eat(k) + perform
+>      Io.read() } else { 0 }`; `{ perform Io.read(); k + 41 }` with `k: i64`, which the
+>      oracle and inkwell lower to 42) or lowers straight-line. Lowered straight-line, a block
+>      whose statement is a `perform` calls the operation and drops the continuation it
+>      returns, so the handler's own value never reaches the caller: `{ perform Io.read();
+>      one() + 41 }`, handled by `Io.read(kk) => 7`, answers 7 through inkwell and the
+>      oracle's IR and 42 through `scg`'s. The codegen differential is green, so no corpus
+>      program has such a tail. The fix is for `scg` to refuse what the oracle refuses and
+>      lower what it lowers, from the same walk.
 >
 >      **D78 — stale corpus fixture counts in `llvm.rs` and `README.md`, at six sites, stale
 >      before this change.** Found by D74's reviews. `crates/sentinel-driver/tests/llvm.rs`
@@ -2977,6 +3138,20 @@ reference as you work through the milestones.
 >      and refuses the `match` form, and scg emits invalid IR for them; for the `return`-first
 >      form both emit the same hoisted IR, which, run, answers the handler's value — so no
 >      differential sees any of it.
+>      Since D156 (2026-10-04) the text oracle applies A1's capture rule to the embedded shape,
+>      as its let and chained shapes already did: a parameter the resumer reads must be `i64` or
+>      `secret i64`, or the shape declines it, because the resumer rebuilt any other from one
+>      word of itself, and a struct or class rebuilt that way releases words that were never
+>      handles when it is dropped (ADR 0071 A4). The declined fn is refused, the capture rule
+>      named in inkwell's words, unless its tail is a block ending in the `perform` after
+>      statements that do not suspend, which the direct shape now lowers in order, as inkwell
+>      and `scg` do. `scg` refuses such a parameter when its classifier picks one of its
+>      continuation shapes (D159), in the chained shape one its frames carry: a parameter a
+>      chained tail reads only inside a form its frame walk does not enter (an `if`, a `match`
+>      or a `handle`, among others) it still loads from `%v-1`, which `llc` rejects (D67). A
+>      tail the oracle takes as embedded and `scg` does not, such as an `if` or a block, `scg`
+>      still emits as IR `llc` rejects or lowers straight-line (D160). The rest of A1 is still
+>      not applied by either.
 >
 >      **D68 — `snc build` PANICS on user input in three effect / spawn corners; (a) is CLOSED
 >      (2026-09-12).** Found by
@@ -3015,7 +3190,9 @@ reference as you work through the milestones.
 >      inkwell though the operation is never performed (found 2026-10-01 by D150's third
 >      review). The fix is a refusal at the operation's declaration, like ADR 0073 D1's for
 >      references; it would also refuse the programs of this kind that build today, so it is
->      at least a minor version (ADR 0076 D2).
+>      at least a minor version (ADR 0076 D2). A class parameter panics inkwell the same way
+>      (found 2026-10-04 by D156's review: `effect Io { put(k: K3) -> i64; }` with `perform
+>      Io.put(k)`), and the text back ends' IR for it fails `llc`.
 >
 >      **D67 — scg's effecting chained-let and let-shape emitters capture a different variable
 >      set from the oracle.** Found by D59/D60's review, at the ADR 0072 continuation seam.
@@ -3033,6 +3210,13 @@ reference as you work through the milestones.
 >      Mix.mix(s); r }` the oracle pushes the continuation with no frame, while `scg`
 >      allocates an 8-byte frame and stores `s` in it, though nothing after the `perform`
 >      reads `s`.
+>      Since D156 (2026-10-04) `scg` refuses an effecting fn in the embedded or let shape when
+>      any parameter is not `i64` or `secret i64`, since each copies every parameter into the
+>      frame with an 8-byte load — that refuses a parameter the resumer never reads, which the
+>      oracle lowers (D159) — and in the chained shape when a parameter its frames carry is
+>      not. A parameter the chained tail reads only inside a form its frame walk does not enter
+>      (an `if`, a `match` or a `handle`, among others) is in none of its frames, so its
+>      resumer still loads it from `%v-1`, as above.
 >
 >      **D66 — DONE (2026-09-11, with D59). The text oracle, and scg with it, stored every
 >      `match` arm at the MATCH's type, so an arm whose divergent value is a register of another
