@@ -1,0 +1,24 @@
+// ADR 0077: why a maybe-moved binding is dropped at its scope's end under a flag, and not
+// on the edge that did not move it. A reference into `v` leaves the `else` arm through the
+// `if`'s value and is read after the join; dropping `v` at the end of that arm would free
+// the buffer `r` points into. The flag's drop runs after the tail has been read.
+
+fn consume(v: [i64]) -> i64 { v[0] }
+
+fn once(i: i64) -> i64 {
+    let x: i64 = 5;
+    let v: [i64] = [42, 2, 3, 4];
+    let r: &i64 = if i < 0 { let z: i64 = consume(v); &x } else { &v[0] };
+    *r
+}
+
+fn main() -> i64 {
+    let mut j: i64 = 0;
+    let mut acc: i64 = 0;
+    while j < 1000 {
+        acc = acc + once(1) + once(0 - 1);
+        j = j + 1;
+    }
+    // a round: 42 + 5
+    if acc == 47000 { 42 } else { 1 }
+}

@@ -690,8 +690,9 @@ fn llvm_scope_drops_moved_and_nested() {
     //  - `consume` frees its param `xs` at exit (param-frame drop, after the body).
     //  - `main`'s nested block frees `tmp` at the inner block's exit (before its value
     //    is stored), then drops nothing for the i64 `inner`.
-    //  - `arr` is moved into `consume(arr)` (consuming call) → NOT freed in `main`; the
-    //    callee owns + frees it. No double-free. consume(arr)=1 + tmp[0]=4 = 5.
+    //  - `arr` is moved into `consume(arr)` (consuming call). Its scope-exit drop tests the
+    //    moved flag `%mf0`, which the call's move sets first (ADR 0077 D3), so `main` never
+    //    frees it; the callee owns + frees it. No double-free. consume(arr)=1 + tmp[0]=4 = 5.
     assert_eq!(
         llvm_dump(
             "drops",
@@ -732,6 +733,8 @@ fn llvm_scope_drops_moved_and_nested() {
             "  %v8 = alloca { i64, ptr }\n",
             "  %v16 = alloca { i64, ptr }\n",
             "  %v27 = alloca i64\n",
+            "  %mf0 = alloca i1\n",
+            "  store i1 false, ptr %mf0\n",
             "  %v0 = getelementptr i64, ptr null, i64 3\n",
             "  %v1 = ptrtoint ptr %v0 to i64\n",
             "  %v2 = call ptr @sentinel_alloc(i64 %v1)\n",
@@ -772,11 +775,21 @@ fn llvm_scope_drops_moved_and_nested() {
             "  call void @sentinel_free(ptr %v26)\n",
             "  store i64 %v24, ptr %v27\n",
             "  %v28 = load { i64, ptr }, ptr %v8\n",
+            "  store i1 true, ptr %mf0\n",
             "  %v29 = call i64 @consume({ i64, ptr } %v28)\n",
             "  %v30 = load i64, ptr %v27\n",
             "  %v31 = add i64 %v29, %v30\n",
-            "  %v32 = trunc i64 %v31 to i32\n",
-            "  ret i32 %v32\n",
+            "  %v32 = load i1, ptr %mf0\n",
+            "  br i1 %v32, label %bb3, label %bb2\n",
+            "bb2:\n",
+            "  %v33 = load { i64, ptr }, ptr %v8\n",
+            "  %v34 = extractvalue { i64, ptr } %v33, 1\n",
+            "  call void @sentinel_free(ptr %v34)\n",
+            "  br label %bb3\n",
+            "bb3:\n",
+            "  store i1 false, ptr %mf0\n",
+            "  %v35 = trunc i64 %v31 to i32\n",
+            "  ret i32 %v35\n",
             "}\n",
             "\n",
         )
@@ -1185,8 +1198,9 @@ fn llvm_a_class_field_store_counts_and_a_class_drop_releases() {
     // ADR 0071 D2 amendment A4 (register D156): a `Shared` / `Mutex` stored into a field of
     // a class instance is cloned like any assignment of a place read, and a class binding's
     // drop releases every handle its fields hold, at any depth through struct,
-    // generic-instance and class fields, skipping a field the binding was partially moved
-    // out of, and frees nothing else (register D137). The oracle, unlike inkwell (A2),
+    // generic-instance and class fields, a field the binding was partially moved out of
+    // behind its moved flag (ADR 0077 D5), and frees nothing else (register D137). The
+    // oracle, unlike inkwell (A2),
     // releases a method's and an init's handle parameters, a class parameter's fields
     // included. A missing release is a leak, not an exit code, so this reads the IR; the
     // codegen differential holds `scg` to the same IR on `c71_class_field_handles`.
@@ -1246,15 +1260,17 @@ fn llvm_a_class_field_store_counts_and_a_class_drop_releases() {
         ("K__set", 1, 0, 1, 0, 0),
         // the class parameter's drop releases both of its fields
         ("U__eat", 0, 0, 1, 1, 0),
-        // a struct and a class moved into fields, and a value no place holds
-        ("N__init", 0, 0, 0, 0, 0),
+        // a struct and a class moved into fields, and a value no place holds: the moved
+        // parameters' drop is emitted behind the flags their moves set (ADR 0077), so none
+        // of it runs (checked below)
+        ("N__init", 0, 0, 2, 1, 1),
         ("store", 1, 0, 1, 0, 0),
         // `k`'s drop releases both of its fields
         ("direct", 0, 0, 1, 1, 0),
         // `n`'s drop: `h.s`, `k.s`, `k.m`, `b.v`, and none of the arrays it holds
         ("nested", 0, 0, 3, 1, 0),
-        // `n.h` was moved out, so `n`'s drop skips it
-        ("partial", 0, 0, 2, 1, 0),
+        // `n.h` was moved out: its release sits behind its field's flag (ADR 0077 D5)
+        ("partial", 0, 0, 3, 1, 0),
         ("arrays_only", 0, 0, 0, 0, 0),
         // a struct's drop reaches the class in its field
         ("held", 0, 0, 1, 1, 0),
@@ -1280,6 +1296,21 @@ fn llvm_a_class_field_store_counts_and_a_class_drop_releases() {
         ] {
             assert_eq!(body.matches(sym).count(), want, "@{f}: {sym} count:\n{body}");
         }
+        // ADR 0077: the drops of what a move took sit behind the flag the move set -- all of
+        // `N__init`'s, and `partial`'s release of `n.h.s` -- and no other drop does.
+        let lines: Vec<&str> = body.lines().collect();
+        let guarded = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| l.contains("_release(") || l.contains("@sentinel_free("))
+            .filter(|(i, _)| drop_is_behind_a_moved_flag(&lines, *i))
+            .count();
+        let want = match f {
+            "N__init" => 4,
+            "partial" => 1,
+            _ => 0,
+        };
+        assert_eq!(guarded, want, "@{f}: drops behind a set moved flag:\n{body}");
     }
 }
 
@@ -1611,7 +1642,10 @@ fn llvm_emitted_ir_assembles_over_corpus() {
 /// a returned local (`Counter::fresh`); and a param stored into a field (`Holder::init`).
 /// The pass fixture's exit code sees the first three but not the last two (inkwell was
 /// right about those), and `llvm-as` accepts every wrong free. So assert the oracle's IR
-/// directly: none of those bodies may call `sentinel_free`.
+/// directly. Since ADR 0077 a moved binding keeps a drop at scope exit behind its moved
+/// flag, so a body may call `sentinel_free` for it; what must hold is that the call never
+/// runs: every `sentinel_free` in these bodies is the false branch of a test of a moved
+/// flag that the same basic block set `true` before loading it.
 #[test]
 fn llvm_method_moves_are_not_freed() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -1646,12 +1680,128 @@ fn llvm_method_moves_are_not_freed() {
             .position(|l| l.starts_with("define ") && l.contains(&head))
             .unwrap_or_else(|| panic!("no `define` for {sym} in:\n{ll}"));
         let body: Vec<&str> = lines[def..].iter().take_while(|l| **l != "}").copied().collect();
-        assert!(
-            !body.iter().any(|l| l.contains("@sentinel_free")),
-            "{sym} frees memory it no longer owns:\n{}",
-            body.join("\n")
-        );
+        for (i, l) in body.iter().enumerate() {
+            if l.contains("@sentinel_free") {
+                assert!(
+                    free_is_behind_a_set_flag(&body, i),
+                    "{sym} frees memory it no longer owns:\n{}",
+                    body.join("\n")
+                );
+            }
+        }
     }
+}
+
+/// ADR 0077 D5: a moved field gets a flag only if its binding's drop does something with
+/// it. A class's drop releases the handles its fields hold and nothing else, so in
+/// `secret_field` the moved `c.h` -- a `secret`-qualified struct holding a `Shared` -- is
+/// released only behind its flag, on the path that did not move it, and in `array_field` the
+/// moved `c.a`, which a class's drop never frees, gets no flag. A missing release is a leak,
+/// not an exit code, so this reads the IR; the codegen differential holds `scg` to it.
+#[test]
+fn llvm_a_moved_field_gets_a_flag_only_if_its_binding_drop_touches_it() {
+    let ir = llvm_dump(
+        "a77_class_fields",
+        concat!(
+            "struct H { s: Shared<i64>, n: i64 }\n",
+            "fn eat(h: secret H) -> i64 { 1 }\n",
+            "fn consume(v: [i64]) -> i64 { v[0] }\n",
+            "class C {\n",
+            "    let h: secret H;\n",
+            "    let a: [i64];\n",
+            "    pub init(n: i64) { self.h = H { s: shared_new(n), n: n }; self.a = [n]; 0 }\n",
+            "}\n",
+            "fn secret_field(n: i64) -> i64 {\n",
+            "    let c: C = C::init(40);\n",
+            "    if n > 5 { eat(c.h) } else { 0 }\n",
+            "}\n",
+            "fn array_field(n: i64) -> i64 {\n",
+            "    let c: C = C::init(40);\n",
+            "    if n > 5 { consume(c.a) } else { 0 }\n",
+            "}\n",
+            "fn main() -> i64 { secret_field(1) + array_field(1) + 42 }\n",
+        ),
+    );
+    let body = dump_fn_body(&ir, "secret_field");
+    let lines: Vec<&str> = body.lines().collect();
+    let releases: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| l.contains("@sentinel_shared_release("))
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(releases.len(), 1, "@secret_field: one release, of `c.h.s`:\n{body}");
+    assert!(
+        drop_is_behind_a_moved_flag(&lines, releases[0]),
+        "@secret_field: the moved field's release is behind its flag:\n{body}"
+    );
+    let body = dump_fn_body(&ir, "array_field");
+    assert!(
+        !body.contains("%mf"),
+        "@array_field: a field a class's drop never touches gets no flag:\n{body}"
+    );
+}
+
+/// ADR 0077: does the drop at `body[at]` sit behind a moved flag? Its block must be the false
+/// target of `br i1 %c, ...` where `%c = load i1, ptr %mfN`, and `store i1 true, ptr %mfN`
+/// must come earlier in the function. Weaker than [`free_is_behind_a_set_flag`], which also
+/// asks for the store in the guard's own block: a second guard follows the first's join.
+fn drop_is_behind_a_moved_flag(body: &[&str], at: usize) -> bool {
+    let is_label = |l: &str| !l.starts_with(' ') && l.ends_with(':');
+    let Some(label) = body[..at].iter().rev().find(|l| is_label(l)) else {
+        return false;
+    };
+    let false_target = format!(", label %{}", label.trim_end_matches(':'));
+    body.iter().enumerate().any(|(b, br)| {
+        let Some(rest) = br.strip_prefix("  br i1 ") else {
+            return false;
+        };
+        if !br.ends_with(&false_target) {
+            return false;
+        }
+        let cond = rest.split(',').next().unwrap_or("");
+        let load = format!("  {cond} = load i1, ptr %mf");
+        body[..b].iter().any(|l| {
+            l.starts_with(&load) && {
+                let flag = &l[l.rfind("ptr ").map_or(0, |p| p + 4)..];
+                body[..b].iter().any(|s| *s == format!("  store i1 true, ptr {flag}"))
+            }
+        })
+    })
+}
+
+/// ADR 0077: is the `sentinel_free` at `body[at]` dead because a moved flag guards it? Its
+/// block must be the false target of `br i1 %c, ...` where `%c = load i1, ptr %mfN`, and a
+/// `store i1 true, ptr %mfN` must come before that load in the same basic block.
+fn free_is_behind_a_set_flag(body: &[&str], at: usize) -> bool {
+    let is_label = |l: &str| !l.starts_with(' ') && l.ends_with(':');
+    let Some(label) = body[..at].iter().rev().find(|l| is_label(l)) else {
+        return false;
+    };
+    let false_target = format!(", label %{}", label.trim_end_matches(':'));
+    for (b, br) in body.iter().enumerate() {
+        let Some(rest) = br.strip_prefix("  br i1 ") else {
+            continue;
+        };
+        if !br.ends_with(&false_target) {
+            continue;
+        }
+        let cond = rest.split(',').next().unwrap_or("");
+        let load = format!("  {cond} = load i1, ptr ");
+        // Walk back through the branch's own block to the flag's load.
+        let mut j = b;
+        while j > 0 && !is_label(body[j - 1]) {
+            j -= 1;
+            if let Some(flag) = body[j].strip_prefix(&load) {
+                if !flag.starts_with("%mf") {
+                    return false;
+                }
+                let set = format!("  store i1 true, ptr {flag}");
+                return body[..j].iter().rev().take_while(|l| !is_label(l)).any(|l| *l == set);
+            }
+        }
+    }
+    false
 }
 
 /// ADR 0074 (register D79): a handler arm owns its continuation until it resumes it.
@@ -2178,4 +2328,192 @@ fn llvm_loads_match_their_slot_over_corpus() {
     }
     assert!(checked >= 170, "expected the emitting corpus to be checked, got {checked}");
     assert!(bad.is_empty(), "loads wider or narrower than their slot:\n{}", bad.join("\n"));
+}
+
+/// ADR 0077: a moved binding's drop is decided per exit. In `early`, the `return` comes
+/// before any move of `v` in the emitted code, so its drain frees `v` unconditionally (D2);
+/// the scope's end comes after the move in `bb4`, so it frees `v` only when `%mf0`, set at
+/// the move, is `false`, and stores it back `false` (D3). In `field`, only the moved field
+/// `a` is guarded, by its own flag, and `b` is freed unconditionally (D5). Each flag is
+/// numbered in the order the walk first needs it, and its `alloca` and `false` store follow
+/// the hoisted allocas.
+#[test]
+fn llvm_a_moved_binding_drop_is_decided_per_exit() {
+    assert_eq!(
+        llvm_dump(
+            "dropflags",
+            "struct S { a: [i64], b: [i64] }\n\
+             fn consume(v: [i64]) -> i64 { v[0] }\n\
+             fn early(n: i64) -> i64 {\n\
+             \x20   let v: [i64] = [1, 2];\n\
+             \x20   if n < 0 { return 0 } else { 0 };\n\
+             \x20   if n > 5 { consume(v) } else { 0 }\n\
+             }\n\
+             fn field(n: i64) -> i64 {\n\
+             \x20   let s: S = S { a: [1], b: [2] };\n\
+             \x20   if n > 5 { consume(s.a) } else { 0 }\n\
+             }\n\
+             fn main() -> i64 { early(1) + field(1) }\n"
+        ),
+        concat!(
+            "target triple = \"arm64-apple-darwin\"\n",
+            "\n",
+            "%Struct.0 = type { { i64, ptr }, { i64, ptr } }\n",
+            "\n",
+            "declare ptr @sentinel_alloc(i64)\n",
+            "declare void @sentinel_free(ptr)\n",
+            "declare void @sentinel_panic_oob(i64, i64)\n",
+            "\n",
+            "define i64 @consume({ i64, ptr } %arg0) {\n",
+            "entry:\n",
+            "  %v0 = alloca { i64, ptr }\n",
+            "  store { i64, ptr } %arg0, ptr %v0\n",
+            "  %v1 = load { i64, ptr }, ptr %v0\n",
+            "  %v2 = extractvalue { i64, ptr } %v1, 0\n",
+            "  %v3 = extractvalue { i64, ptr } %v1, 1\n",
+            "  %v4 = icmp sge i64 0, 0\n",
+            "  %v5 = icmp slt i64 0, %v2\n",
+            "  %v6 = and i1 %v4, %v5\n",
+            "  br i1 %v6, label %bb1, label %bb0\n",
+            "bb0:\n",
+            "  call void @sentinel_panic_oob(i64 0, i64 %v2)\n",
+            "  unreachable\n",
+            "bb1:\n",
+            "  %v7 = getelementptr i64, ptr %v3, i64 0\n",
+            "  %v8 = load i64, ptr %v7\n",
+            "  %v9 = load { i64, ptr }, ptr %v0\n",
+            "  %v10 = extractvalue { i64, ptr } %v9, 1\n",
+            "  call void @sentinel_free(ptr %v10)\n",
+            "  ret i64 %v8\n",
+            "}\n",
+            "\n",
+            "define i64 @early(i64 %arg0) {\n",
+            "entry:\n",
+            "  %v0 = alloca i64\n",
+            "  %v8 = alloca { i64, ptr }\n",
+            "  %v13 = alloca i64\n",
+            "  %v19 = alloca i64\n",
+            "  %mf0 = alloca i1\n",
+            "  store i1 false, ptr %mf0\n",
+            "  store i64 %arg0, ptr %v0\n",
+            "  %v1 = getelementptr i64, ptr null, i64 2\n",
+            "  %v2 = ptrtoint ptr %v1 to i64\n",
+            "  %v3 = call ptr @sentinel_alloc(i64 %v2)\n",
+            "  %v4 = getelementptr i64, ptr %v3, i64 0\n",
+            "  store i64 1, ptr %v4\n",
+            "  %v5 = getelementptr i64, ptr %v3, i64 1\n",
+            "  store i64 2, ptr %v5\n",
+            "  %v6 = insertvalue { i64, ptr } undef, i64 2, 0\n",
+            "  %v7 = insertvalue { i64, ptr } %v6, ptr %v3, 1\n",
+            "  store { i64, ptr } %v7, ptr %v8\n",
+            "  %v9 = load i64, ptr %v0\n",
+            "  %v10 = icmp slt i64 %v9, 0\n",
+            "  br i1 %v10, label %bb0, label %bb1\n",
+            "bb0:\n",
+            "  %v11 = load { i64, ptr }, ptr %v8\n",
+            "  %v12 = extractvalue { i64, ptr } %v11, 1\n",
+            "  call void @sentinel_free(ptr %v12)\n",
+            "  ret i64 0\n",
+            "bb3:\n",
+            "  store i64 zeroinitializer, ptr %v13\n",
+            "  br label %bb2\n",
+            "bb1:\n",
+            "  store i64 0, ptr %v13\n",
+            "  br label %bb2\n",
+            "bb2:\n",
+            "  %v14 = load i64, ptr %v13\n",
+            "  %v15 = load i64, ptr %v0\n",
+            "  %v16 = icmp sgt i64 %v15, 5\n",
+            "  br i1 %v16, label %bb4, label %bb5\n",
+            "bb4:\n",
+            "  %v17 = load { i64, ptr }, ptr %v8\n",
+            "  store i1 true, ptr %mf0\n",
+            "  %v18 = call i64 @consume({ i64, ptr } %v17)\n",
+            "  store i64 %v18, ptr %v19\n",
+            "  br label %bb6\n",
+            "bb5:\n",
+            "  store i64 0, ptr %v19\n",
+            "  br label %bb6\n",
+            "bb6:\n",
+            "  %v20 = load i64, ptr %v19\n",
+            "  %v21 = load i1, ptr %mf0\n",
+            "  br i1 %v21, label %bb8, label %bb7\n",
+            "bb7:\n",
+            "  %v22 = load { i64, ptr }, ptr %v8\n",
+            "  %v23 = extractvalue { i64, ptr } %v22, 1\n",
+            "  call void @sentinel_free(ptr %v23)\n",
+            "  br label %bb8\n",
+            "bb8:\n",
+            "  store i1 false, ptr %mf0\n",
+            "  ret i64 %v20\n",
+            "}\n",
+            "\n",
+            "define i64 @field(i64 %arg0) {\n",
+            "entry:\n",
+            "  %v0 = alloca i64\n",
+            "  %v15 = alloca %Struct.0\n",
+            "  %v21 = alloca i64\n",
+            "  %mf0 = alloca i1\n",
+            "  store i1 false, ptr %mf0\n",
+            "  store i64 %arg0, ptr %v0\n",
+            "  %v1 = getelementptr i64, ptr null, i64 1\n",
+            "  %v2 = ptrtoint ptr %v1 to i64\n",
+            "  %v3 = call ptr @sentinel_alloc(i64 %v2)\n",
+            "  %v4 = getelementptr i64, ptr %v3, i64 0\n",
+            "  store i64 1, ptr %v4\n",
+            "  %v5 = insertvalue { i64, ptr } undef, i64 1, 0\n",
+            "  %v6 = insertvalue { i64, ptr } %v5, ptr %v3, 1\n",
+            "  %v7 = getelementptr i64, ptr null, i64 1\n",
+            "  %v8 = ptrtoint ptr %v7 to i64\n",
+            "  %v9 = call ptr @sentinel_alloc(i64 %v8)\n",
+            "  %v10 = getelementptr i64, ptr %v9, i64 0\n",
+            "  store i64 2, ptr %v10\n",
+            "  %v11 = insertvalue { i64, ptr } undef, i64 1, 0\n",
+            "  %v12 = insertvalue { i64, ptr } %v11, ptr %v9, 1\n",
+            "  %v13 = insertvalue %Struct.0 undef, { i64, ptr } %v6, 0\n",
+            "  %v14 = insertvalue %Struct.0 %v13, { i64, ptr } %v12, 1\n",
+            "  store %Struct.0 %v14, ptr %v15\n",
+            "  %v16 = load i64, ptr %v0\n",
+            "  %v17 = icmp sgt i64 %v16, 5\n",
+            "  br i1 %v17, label %bb0, label %bb1\n",
+            "bb0:\n",
+            "  %v18 = load %Struct.0, ptr %v15\n",
+            "  %v19 = extractvalue %Struct.0 %v18, 0\n",
+            "  store i1 true, ptr %mf0\n",
+            "  %v20 = call i64 @consume({ i64, ptr } %v19)\n",
+            "  store i64 %v20, ptr %v21\n",
+            "  br label %bb2\n",
+            "bb1:\n",
+            "  store i64 0, ptr %v21\n",
+            "  br label %bb2\n",
+            "bb2:\n",
+            "  %v22 = load i64, ptr %v21\n",
+            "  %v23 = load i1, ptr %mf0\n",
+            "  br i1 %v23, label %bb4, label %bb3\n",
+            "bb3:\n",
+            "  %v24 = getelementptr %Struct.0, ptr %v15, i32 0, i32 0\n",
+            "  %v25 = load { i64, ptr }, ptr %v24\n",
+            "  %v26 = extractvalue { i64, ptr } %v25, 1\n",
+            "  call void @sentinel_free(ptr %v26)\n",
+            "  br label %bb4\n",
+            "bb4:\n",
+            "  store i1 false, ptr %mf0\n",
+            "  %v27 = getelementptr %Struct.0, ptr %v15, i32 0, i32 1\n",
+            "  %v28 = load { i64, ptr }, ptr %v27\n",
+            "  %v29 = extractvalue { i64, ptr } %v28, 1\n",
+            "  call void @sentinel_free(ptr %v29)\n",
+            "  ret i64 %v22\n",
+            "}\n",
+            "\n",
+            "define i32 @main() {\n",
+            "entry:\n",
+            "  %v0 = call i64 @early(i64 1)\n",
+            "  %v1 = call i64 @field(i64 1)\n",
+            "  %v2 = add i64 %v0, %v1\n",
+            "  %v3 = trunc i64 %v2 to i32\n",
+            "  ret i32 %v3\n",
+            "}\n",
+            "\n",
+        )
+    );
 }

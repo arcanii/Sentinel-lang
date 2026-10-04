@@ -166,10 +166,15 @@ argued instead from "mutually exclusive blocks" and from "the re-entered arm bin
 slots of its own": both are false — the slot is a single `entry:` alloca that every entry
 reuses, and the value in it is not re-created when it was moved in from an outer scope.
 
+(Amended by [ADR 0077](0077-drop-flags-for-maybe-moved-bindings.md), 2026-10-05: with the
+exception the Consequences record, a binding whose only move lies after the bubble, which the
+drain skipped; it is now dropped there, since no move of it precedes the bubble in the emitted
+code.)
+
 Within an entry, nothing else escapes: the remainder that could have read those bindings is
 what the branch abandons, and an op's resume argument is an `i64` (C3.5(a)), so no heap
 value leaves through `k(v)`. A binding moved into the `k(v)` argument is skipped, as on
-every other exit, by the drop plan's moved-source set.
+every other exit, by its moved flag, which the argument's read set (ADR 0077).
 
 ### D2. The floor is the arm body's frame index, recorded when the arm is entered.
 
@@ -223,7 +228,8 @@ binds: `sentinel_free` for an array, string, `Vec` or a struct's heap fields;
 `sentinel_shared_release` for a `Shared<T>`, `sentinel_mutex_release` for a `Mutex<T>` and
 `sentinel_mutex_unlock` for a `Guard<T>` (ADR 0071); and, in inkwell only, `sentinel_arena_exit`
 for a scope that lazily created a broker arena (ADR 0028 — the text back ends have no arena
-path at all). ADR 0046's partially-moved fields are elided, as everywhere else. Every one is
+path at all). ADR 0046's partially-moved fields are elided, as everywhere else (since
+[ADR 0077](0077-drop-flags-for-maybe-moved-bindings.md), on the paths that moved them, under their flags). Every one is
 already emitted on the other exits of the same arms, so no program gains a symbol it did not
 already reference; what changes is the set of programs that reach them, which now includes
 one whose arm holds a container across a bubbling `k(v)`.
@@ -568,7 +574,8 @@ is the memory leak, it reaches the idiom every tracked program uses, and D6 depe
   is skipped there too and is freed only on the path that reaches the move. Measured
   identical before and after this change, and identical at the `break` drain this one is
   modelled on (about 36.5 MB at 600,000 calls either way, against a control at 8.8) — so
-  it is inherited, not introduced. Registered, not fixed here.
+  it is inherited, not introduced. Registered, not fixed here. (Closed by [ADR 0077](0077-drop-flags-for-maybe-moved-bindings.md),
+  2026-10-05, register D93.)
 - `k(v)` means what ADR 0020 D3 says it means wherever it is written, not only in tail
   position (slice 2), and where the seam cannot carry it the program says so instead of
   answering wrongly — with two exceptions found after acceptance, each a wrong answer with no

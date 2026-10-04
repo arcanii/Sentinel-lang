@@ -1,0 +1,51 @@
+// ADR 0077 in a handler arm whose `k(1)` bubbles (ADR 0075 D6): `two()` performs twice,
+// so the first resume performs again, the arm is left, and its remainder is replayed by a
+// resumer of its own.
+//
+//   - `bound_before`: the arm binds `s` to a string literal before `k(1)` and consumes it
+//     after. (A literal may precede the resume, so the remainder is replayed: ADR 0075 D6
+//     re-runs the arm from the top. An array literal may not, and `[3, 4]` there aborts.)
+//     At the bubble no move of `s` has run on that path, so the bubble drops it (D2); the
+//     resumer re-runs the `let` and consumes its own `s`. Before, the oracle and inkwell
+//     skipped `s` at the bubble -- it is moved later in the function -- and leaked it,
+//     while `scg` dropped it.
+//   - `moved_on_one_path`: the remainder moves `w` on one path only, so the resumer drops
+//     it under its own flag (an arm-remainder resumer is a function of its own, D3).
+effect Io { read() -> i64; }
+
+fn two() -> i64 ! { Io } {
+    let a: i64 = perform Io.read();
+    let b: i64 = perform Io.read();
+    a + b
+}
+
+fn consume(v: [i64]) -> i64 { v[0] }
+fn consume_bytes(v: [u8]) -> i64 { len(v) }
+
+fn bound_before() -> i64 {
+    handle two() with {
+        Io.read(k) => { let s: [u8] = "ab"; let r: i64 = k(1); r + consume_bytes(s) }
+    }
+}
+
+fn moved_on_one_path(n: i64) -> i64 {
+    handle two() with {
+        Io.read(k) => {
+            let r: i64 = k(1);
+            let w: [i64] = [r, 2];
+            let x: i64 = if r > n { consume(w) } else { 0 };
+            x + 10
+        }
+    }
+}
+
+fn main() -> i64 {
+    let mut i: i64 = 0;
+    let mut acc: i64 = 0;
+    while i < 1000 {
+        acc = acc + bound_before() + moved_on_one_path(0) + moved_on_one_path(100);
+        i = i + 1;
+    }
+    // A round: `bound_before` answers 6 and the two `moved_on_one_path` 32 between them.
+    if acc == 38000 { 42 } else { 1 }
+}

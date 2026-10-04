@@ -727,10 +727,10 @@ struct FnCtx {
     moved: HashMap<VarId, Span>,
     /// C2.4: union of ALL bindings that were ever moved during
     /// this fn's analysis (even across branches that got
-    /// snapshot/restored from [`moved`]). Codegen uses this set
-    /// via [`DropPlan`] to skip dropping moved-from bindings.
-    /// Never reset by snapshot/restore — always growing within
-    /// a single fn analysis.
+    /// snapshot/restored from [`moved`]) — the [`DropPlan`]'s moved
+    /// set. (ADR 0077: codegen's drop decisions come from the move
+    /// sites recorded beside it.) Never reset by snapshot/restore —
+    /// always growing within a single fn analysis.
     moved_sources_union: HashSet<VarId>,
     /// ADR 0046: per-(VarId, field-index) PARTIAL move state. A
     /// Move-typed field `p.field` consumed by value (passed to a
@@ -740,10 +740,18 @@ struct FnCtx {
     /// snapshot/restored at if/else like [`moved`].
     moved_fields: HashMap<(VarId, u32), Span>,
     /// ADR 0046: the DropPlan union of partial moves — every
-    /// `(VarId, field)` ever moved (across branches). Codegen
-    /// skips these fields in the binding's recursive drop. Never
+    /// `(VarId, field)` ever moved (across branches). Never
     /// reset by snapshot/restore.
     moved_fields_union: HashSet<(VarId, u32)>,
+    /// ADR 0077 D4: every consuming read of a Move-typed binding, as the binding and the
+    /// read's source span `(start, end)` — the move SITES a back end sets the binding's
+    /// moved flag at. A superset of the reads recorded in [`moved_sources_union`]: a read
+    /// the checker refuses as a use after a move is a site too (the program is refused either
+    /// way), and so is a compared place (register D117).
+    move_sites: HashSet<(VarId, usize, usize)>,
+    /// ADR 0077 D5: the same for [`moved_fields_union`]: the binding, the field and the
+    /// span of each field read.
+    field_move_sites: HashSet<(VarId, u32, usize, usize)>,
     /// Register D61: the method's (or init's) `self` binding, which is always a
     /// borrow, so nothing Move-typed may be moved out of it. `None` in a free fn.
     self_var: Option<VarId>,
@@ -809,6 +817,8 @@ impl FnCtx {
             moved_sources_union: HashSet::new(),
             moved_fields: HashMap::new(),
             moved_fields_union: HashSet::new(),
+            move_sites: HashSet::new(),
+            field_move_sites: HashSet::new(),
             next_seq: 0,
             reported_dead: HashSet::new(),
             payload_scrutinee: HashMap::new(),
@@ -1003,17 +1013,21 @@ impl FnCtx {
 // =============================================================================
 
 /// Per-fn metadata produced by [`borrow_check`] for codegen to
-/// consume when emitting drop calls at scope-exit per ADR 0017 D8.
-/// At C2.4 the plan carries just the **moved-source set** — the
-/// VarIds that act as the source of a move somewhere in their
-/// fn's body. Codegen uses this to skip dropping moved-from
-/// bindings (the destination owns the value).
+/// consume when emitting drop calls at scope-exit per ADR 0017 D8:
+/// the **moved-source set** — the VarIds that act as the source of a
+/// move somewhere in their fn's body — the ADR 0046 partial moves, and
+/// (ADR 0077 D4) the move SITES, the reads that move each.
 ///
-/// Future C2.5+ may extend this to track per-scope drop sites
-/// explicitly (e.g., for non-block scope boundaries like `if`
-/// arms that take ownership) — for C2.4 the per-fn set is
-/// sufficient because every let-binding lives in some block and
-/// codegen emits drops at every block-exit.
+/// ADR 0077: a whole-fn set cannot say whether a binding is moved at a
+/// given drop site — moved on one path and not another, or moved after
+/// an early exit — so a back end decides each drop site by its own
+/// walk: a binding with no move emitted yet is dropped unconditionally
+/// (D2), and after its first move only when its run-time flag, set at
+/// each move site, is `false` (D3). The whole-fn sets stay: the
+/// `snc borrow` dump, inkwell's arena routing and ADR 0071's clone
+/// decision (`moved_out`) read them, and so does each drop site, to
+/// tell a binding or field the checker records as moved, whose drop
+/// D2 or D3 then decides, from one it does not.
 #[derive(Debug, Default, Clone, PartialEq, Eq, Hash)]
 pub struct DropPlan {
     /// VarIds that are sources of moves somewhere in their fn's
@@ -1023,11 +1037,9 @@ pub struct DropPlan {
     /// `Hash + Eq` for salsa-tracked caching.
     pub moved_sources: BTreeMap<FnId, BTreeSet<VarId>>,
     /// ADR 0046: per-fn PARTIAL moves — `(VarId, field-index)`
-    /// pairs for Move-typed fields consumed by value. Codegen
-    /// skips these fields in the binding's recursive drop (the
-    /// consumer owns + frees them). A binding in `moved_sources`
-    /// is skipped wholesale; one with entries here is dropped but
-    /// with the named fields elided.
+    /// pairs for Move-typed fields consumed by value (the consumer
+    /// owns + frees them). Codegen decides each such field's drop by
+    /// its move sites below, as it does a whole binding's (ADR 0077 D5).
     pub moved_fields: BTreeMap<FnId, BTreeSet<(VarId, u32)>>,
     /// Register D61: the same two sets for METHOD bodies. Methods are not in
     /// `program.fns` and have no `FnId`, so they are keyed by [`MethodKey`]. Before
@@ -1038,6 +1050,19 @@ pub struct DropPlan {
     /// variable (which inkwell skips by name).
     pub method_moved_sources: BTreeMap<MethodKey, BTreeSet<VarId>>,
     pub method_moved_fields: BTreeMap<MethodKey, BTreeSet<(VarId, u32)>>,
+    /// ADR 0077 D4: the move SITES — each consuming read of a Move-typed binding, a read
+    /// refused as a use after a move included, as the binding and the read's source span
+    /// `(start, end)`, per fn. A back end sets the binding's moved flag when it emits a read
+    /// of that binding at one of these spans; which drop sites come before or after a move
+    /// it decides by its own emission order, never by comparing spans. The moved sets above
+    /// stay as they are (the type's doc says who reads them).
+    pub move_sites: BTreeMap<FnId, BTreeSet<(VarId, usize, usize)>>,
+    /// ADR 0077 D5: each field read that partially moves a binding, as the binding, the
+    /// field index and the read's span, per fn.
+    pub field_move_sites: BTreeMap<FnId, BTreeSet<(VarId, u32, usize, usize)>>,
+    /// ADR 0077 D4/D5: the same two for METHOD bodies, keyed like the moved sets.
+    pub method_move_sites: BTreeMap<MethodKey, BTreeSet<(VarId, usize, usize)>>,
+    pub method_field_move_sites: BTreeMap<MethodKey, BTreeSet<(VarId, u32, usize, usize)>>,
 }
 
 /// Register D61: identifies a method body in the [`DropPlan`] — a class `init`, the
@@ -1062,8 +1087,9 @@ impl DropPlan {
     }
 
     /// ADR 0046: look up the partial-move set for a fn (empty if
-    /// none). Codegen consults it to skip moved fields in a
-    /// partially-moved binding's drop.
+    /// none). Codegen consults it at each drop site to tell a field the
+    /// checker records as moved, whose drop ADR 0077 decides per site,
+    /// from one it does not.
     pub fn moved_fields_for(&self, fn_id: FnId) -> &BTreeSet<(VarId, u32)> {
         static EMPTY: std::sync::OnceLock<BTreeSet<(VarId, u32)>> = std::sync::OnceLock::new();
         self.moved_fields
@@ -1085,6 +1111,37 @@ impl DropPlan {
         self.method_moved_fields
             .get(&key)
             .unwrap_or_else(|| EMPTY.get_or_init(BTreeSet::new))
+    }
+
+    /// ADR 0077 D4: the whole-binding move sites of a fn, or of a method body when `key`
+    /// is set (empty if none).
+    pub fn move_sites_for(
+        &self,
+        fn_id: FnId,
+        key: Option<MethodKey>,
+    ) -> &BTreeSet<(VarId, usize, usize)> {
+        static EMPTY: std::sync::OnceLock<BTreeSet<(VarId, usize, usize)>> =
+            std::sync::OnceLock::new();
+        match key {
+            Some(k) => self.method_move_sites.get(&k),
+            None => self.move_sites.get(&fn_id),
+        }
+        .unwrap_or_else(|| EMPTY.get_or_init(BTreeSet::new))
+    }
+
+    /// ADR 0077 D5: the field move sites of a fn, or of a method body when `key` is set.
+    pub fn field_move_sites_for(
+        &self,
+        fn_id: FnId,
+        key: Option<MethodKey>,
+    ) -> &BTreeSet<(VarId, u32, usize, usize)> {
+        static EMPTY: std::sync::OnceLock<BTreeSet<(VarId, u32, usize, usize)>> =
+            std::sync::OnceLock::new();
+        match key {
+            Some(k) => self.method_field_move_sites.get(&k),
+            None => self.field_move_sites.get(&fn_id),
+        }
+        .unwrap_or_else(|| EMPTY.get_or_init(BTreeSet::new))
     }
 }
 
@@ -1174,7 +1231,7 @@ fn borrow_check_fn(
     errors: &mut Vec<BorrowError>,
     drop_plan: &mut DropPlan,
 ) {
-    let (moved, moved_fields) = check_body(
+    let m = check_body(
         &fn_def.name,
         None,
         &fn_def.params,
@@ -1183,8 +1240,10 @@ fn borrow_check_fn(
         program,
         errors,
     );
-    drop_plan.moved_sources.insert(fn_def.id, moved);
-    drop_plan.moved_fields.insert(fn_def.id, moved_fields);
+    drop_plan.moved_sources.insert(fn_def.id, m.moved);
+    drop_plan.moved_fields.insert(fn_def.id, m.moved_fields);
+    drop_plan.move_sites.insert(fn_def.id, m.move_sites);
+    drop_plan.field_move_sites.insert(fn_def.id, m.field_move_sites);
 }
 
 /// Register D61: borrow-check one method body and record its move sets under `key`.
@@ -1195,7 +1254,7 @@ fn borrow_check_method(
     errors: &mut Vec<BorrowError>,
     drop_plan: &mut DropPlan,
 ) {
-    let (moved, moved_fields) = check_body(
+    let b = check_body(
         m.name,
         Some((m.self_var, m.self_span)),
         m.params,
@@ -1204,13 +1263,15 @@ fn borrow_check_method(
         program,
         errors,
     );
-    drop_plan.method_moved_sources.insert(key, moved);
-    drop_plan.method_moved_fields.insert(key, moved_fields);
+    drop_plan.method_moved_sources.insert(key, b.moved);
+    drop_plan.method_moved_fields.insert(key, b.moved_fields);
+    drop_plan.method_move_sites.insert(key, b.move_sites);
+    drop_plan.method_field_move_sites.insert(key, b.field_move_sites);
 }
 
 /// Walk one body — a free fn's, or (register D61) a method's with its `self` — and
-/// return its moved-source and partial-move sets for the [`DropPlan`].
-#[allow(clippy::type_complexity)]
+/// return its moved-source and partial-move sets, and (ADR 0077 D4) their move sites, for
+/// the [`DropPlan`].
 fn check_body(
     fn_name: &str,
     self_var: Option<(VarId, &Span)>,
@@ -1219,7 +1280,7 @@ fn check_body(
     body: &TypedBlock,
     program: &TypedProgram,
     errors: &mut Vec<BorrowError>,
-) -> (BTreeSet<VarId>, BTreeSet<(VarId, u32)>) {
+) -> BodyMoves {
     let mut ctx = FnCtx::new();
     // The fn body is scope 0 and every nested scope is >= 1.
     // Without this push the body and the FIRST nested scope both sat at depth 0,
@@ -1274,7 +1335,20 @@ fn check_body(
         let tail_source = source_of_expr(&body.tail, &ctx, program);
         check_returned_source(tail_source, &body.tail.span, &ctx, errors);
     }
-    (moved_btree, moved_fields_btree)
+    BodyMoves {
+        moved: moved_btree,
+        moved_fields: moved_fields_btree,
+        move_sites: ctx.move_sites.iter().copied().collect(),
+        field_move_sites: ctx.field_move_sites.iter().copied().collect(),
+    }
+}
+
+/// What [`check_body`] hands the [`DropPlan`] for one body.
+struct BodyMoves {
+    moved: BTreeSet<VarId>,
+    moved_fields: BTreeSet<(VarId, u32)>,
+    move_sites: BTreeSet<(VarId, usize, usize)>,
+    field_move_sites: BTreeSet<(VarId, u32, usize, usize)>,
 }
 
 /// ADR 0017 D7 "second-class refs": a returned ref-carrying value may point only
@@ -2608,6 +2682,13 @@ fn check_and_record_move(
         });
         return;
     }
+    // ADR 0077 D4: a consuming read of a Move-typed binding is a move site even when it is
+    // reported below as a use after a move — the program is refused either way, and `scg`,
+    // which records every such read, sets the binding's flag there too, so the two emit the
+    // same bytes for it.
+    if !is_copy_type(ty, program) {
+        ctx.move_sites.insert((id, use_span.start, use_span.end));
+    }
     if let Some(move_span) = ctx.moved.get(&id).cloned() {
         emit_use_after_move(ctx, errors, id, &move_span, use_span);
         return;
@@ -2704,6 +2785,9 @@ fn check_and_record_field_move(
     ctx: &mut FnCtx,
     errors: &mut Vec<BorrowError>,
 ) {
+    // ADR 0077 D5: a move site even when reported as a use after a move, as a whole
+    // binding's is (see `check_and_record_move`).
+    ctx.field_move_sites.insert((base, field_index, use_span.start, use_span.end));
     if let Some(move_span) = ctx.moved.get(&base).cloned() {
         emit_use_after_move(ctx, errors, base, &move_span, use_span);
         return;

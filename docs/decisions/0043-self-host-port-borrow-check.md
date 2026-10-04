@@ -187,7 +187,10 @@ array / enum-construct payload Var) **iff its type is non-Copy**. NON-consuming 
 NOT move. ⚠ **Branch-merge is conservative** (ADR 0017 D9): a Var moved in EITHER `if`
 branch (or any `match` arm) is in `moved_sources` — so the analysis is a simple
 UNION over the body (no per-path move-state needed for the *moved-sources* output; the
-per-path state is only for the use-after-move ERROR, which is out of scope). This makes
+per-path state is only for the use-after-move ERROR, which is out of scope). (Amended by
+[ADR 0077](0077-drop-flags-for-maybe-moved-bindings.md), 2026-10-05: that holds for the output, which the `snc borrow` dump still
+compares; codegen no longer skips a binding by the union but decides each drop site by the
+moves its own walk has emitted, and a run-time flag after the first one.) This makes
 the port markedly simpler than the full Rust borrow checker: **we accumulate the union of
 moved non-Copy VarIds, ignoring the error-detection state machine entirely** (D5).
 

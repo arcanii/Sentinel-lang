@@ -667,6 +667,16 @@ fn dump_tstmt(out: &mut Vec<u8>, s: Stmt, src: &[u8], c: &mut TyCtx, gb: &mut Ve
                 let asav: i64 = (*c).cglv;
                 if cgtvid >= 0 {
                     let asslot: i64 = cg_slot_get(c, cgtvid);
+                    // (ADR 0077 D6) a binding with a moved flag (whole or field) owns its old
+                    // value unless the flag says it was moved: drop it as a drop site does,
+                    // which also stores the flags back `false` for the new value.
+                    if cg_has_any_flag(c, cgtvid) {
+                        let asbty: i64 = env_get(c, cgtvid);
+                        cg_binding_drop(c, cgtvid, asbty, asslot);
+                        0
+                    } else {
+                        0
+                    };
                     cg_store(c, ttgt, asak, asav, asslot);
                     0
                 } else {

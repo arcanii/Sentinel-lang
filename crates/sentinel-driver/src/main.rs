@@ -660,8 +660,9 @@ fn run_llvm(path: &str) -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    // 8d-drops: codegen consults the borrow-check DropPlan (moved-sources) to skip
-    // freeing bindings whose ownership was moved out. The emitting subset is
+    // 8d-drops: codegen consults the borrow-check DropPlan (the moved sources and, ADR 0077,
+    // the move sites that set a binding's moved flag) so it does not free a binding whose
+    // ownership was moved out. The emitting subset is
     // borrow-clean (all "pass" fixtures), so any borrow errors are ignored here —
     // a real reject would have failed the full pipeline upstream.
     let (drop_plan, _borrow_errors) = sentinel_borrow_check::borrow_check(&typed);

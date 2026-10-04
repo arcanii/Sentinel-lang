@@ -68,7 +68,8 @@ fn build_sentinel_borrow_checker(tmp: &Path) -> PathBuf {
 
 /// Seeds: all-Copy (no moves), a struct moved by-value into a call (field read is
 /// non-consuming), an array moved (index read non-consuming), the conservative
-/// if-branch union (moved in EITHER arm → included), and enum-construct + match
+/// if-branch union (moved in EITHER arm → included; since ADR 0077 the union no longer
+/// decides a drop on its own, each drop site testing a moved flag), and enum-construct + match
 /// (an arg moved into a construct, an arm payload moved out, the scrutinee NOT moved).
 const SEEDS: &[&str] = &[
     "fn add(a: i64, b: i64) -> i64 { a + b }\nfn main() -> i64 { add(1, 2) }\n",
@@ -80,6 +81,10 @@ const SEEDS: &[&str] = &[
     // typer binds with the operation's declared type (an array; a struct holding one).
     "fn consume(v: [i64]) -> i64 { len(v) }\neffect S { put(xs: [i64]) -> i64; }\nfn one(v: [i64]) -> i64 ! { S } { perform S.put(v) }\nfn main() -> i64 { handle one([1, 2, 3]) with { S.put(xs, k) => { let n: i64 = consume(xs); k(n) } } }\n",
     "struct Q { a: [i64] }\nfn take(q: Q) -> i64 { len(q.a) }\neffect Io { w(q: Q) -> i64; }\nfn one(q: Q) -> i64 ! { Io } { perform Io.w(q) }\nfn main() -> i64 { handle one(Q { a: [1, 2] }) with { Io.w(q, k) => { let n: i64 = take(q); k(n) } } }\n",
+    // ADR 0077: a field of a compound target is not a field of a binding. `{ s }.a` moves
+    // `s` whole, and so does each arm of the `if`; neither records a field move.
+    "struct S { a: [i64], b: [i64] }\nfn consume(v: [i64]) -> i64 { v[0] }\nfn f(n: i64) -> i64 { let s: S = S { a: [40], b: [2] }; consume({ s }.a) }\nfn main() -> i64 { f(1) + 2 }\n",
+    "struct S { a: [i64], b: [i64] }\nfn consume(v: [i64]) -> i64 { v[0] }\nfn f(n: i64) -> i64 { let s: S = S { a: [40], b: [2] }; let t: S = S { a: [40], b: [3] }; consume((if n > 0 { s } else { t }).a) }\nfn main() -> i64 { f(1) + 2 }\n",
 ];
 
 #[test]

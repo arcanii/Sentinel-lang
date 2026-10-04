@@ -41,7 +41,7 @@ use inkwell::values::{
     BasicMetadataValueEnum, BasicValue, BasicValueEnum, FunctionValue, IntValue, PointerValue,
 };
 use inkwell::{FloatPredicate, IntPredicate, OptimizationLevel};
-use sentinel_ast::{BinOp, CmpOp, LogicOp, UnaryOp};
+use sentinel_ast::{BinOp, CmpOp, LogicOp, Span, UnaryOp};
 use sentinel_borrow_check::{DropPlan, MethodKey};
 use sentinel_hir::HirProgram;
 use sentinel_resolve::{
@@ -168,6 +168,16 @@ pub enum CodegenError {
         help("declare the operation with at most one parameter; the runtime passes a handler a single `i64` until ADR 0020 D8's per-operation argument struct lands")
     )]
     OperationArityNotSupported { effect: String, op: String, arity: usize },
+
+    /// ADR 0077: a binding the borrow checker records as moved was dropped unconditionally
+    /// at a drop site walked before any of its moves (D2). That is sound only if every move
+    /// of it was lowered, and one was not, so its drop cannot be decided: refused rather
+    /// than risk a double free.
+    #[error(
+        "internal: a move of binding #{var} at {start}..{end} was not lowered, so its drop cannot be decided (ADR 0077)"
+    )]
+    #[diagnostic(code(sentinel::codegen::move_not_lowered))]
+    MoveNotLowered { var: u32, start: usize, end: usize },
 }
 
 /// Lower an [`HirProgram`] to a native object file at `output`.
@@ -185,9 +195,10 @@ pub enum CodegenError {
 /// into the HIR, shrinking these direct reads.
 ///
 /// C2.4: the drop plan carries per-fn moved-source info from the borrow
-/// checker. Codegen consults it at scope exit to skip dropping bindings
-/// that have been moved away (the destination owns + drops them). See
-/// [`DropPlan`] in sentinel-borrow-check.
+/// checker, and (ADR 0077) the move sites. Codegen consults it at each drop
+/// site: a binding no move of which is lowered yet is dropped, and one moved
+/// since only when its moved flag says this path did not move it (the
+/// destination owns + drops it then). See [`DropPlan`] in sentinel-borrow-check.
 pub fn compile_to_object(hir: &HirProgram, output: &Path) -> Result<(), CodegenError> {
     compile_to_object_for_module(
         hir,
@@ -1656,6 +1667,7 @@ pub fn compile_to_object_for_module(
             array_route_active: false,
             loop_depth: 0,
             loop_targets: Vec::new(),
+            drop_flags: HashMap::new(),
         };
         for fn_def in &program.fns {
             // C1.7.4a / ADR 0016 D7: skip generic fn bodies; their
@@ -1684,6 +1696,8 @@ pub fn compile_to_object_for_module(
         for imp in &program.impl_decls {
             cx.compile_impl(imp, program)?;
         }
+        // ADR 0077: fail closed on a move the lowering did not see.
+        cx.check_drop_flags()?;
     }
 
     module
@@ -1840,6 +1854,31 @@ struct LoopTarget<'ctx> {
 /// lifetime covers both the borrowed Context and the LLVM derived
 /// values (Builder, FunctionValue, etc.) — they all live and die
 /// together.
+/// ADR 0077: one function's moved flags — the text oracle's `DropFlags`. A binding the
+/// borrow checker records as moved is dropped unconditionally at a drop site lowered before
+/// its first move (D2), and after it only when its `i1` flag is `false` (D3); an ADR 0046
+/// field move has a flag of its own (D5). Keyed by the LLVM function being built, so an
+/// arm-remainder resumer lowered in the middle of its parent keeps its own.
+struct InkFlags<'ctx> {
+    /// The drop-plan key of the body (`current_fn_id`, `current_method`).
+    key: (FnId, Option<MethodKey>),
+    /// D2: the bindings (and fields) whose move this function has already lowered.
+    moved: HashSet<VarId>,
+    moved_fields: HashSet<(VarId, u32)>,
+    /// D3 / D5: the flags created, by binding (and field).
+    whole: HashMap<VarId, PointerValue<'ctx>>,
+    field: HashMap<(VarId, u32), PointerValue<'ctx>>,
+    /// The move sites lowered, and the bindings (and fields) dropped unconditionally although
+    /// the checker records a move of them — see [`CodegenCtx::check_drop_flags`].
+    hit: HashSet<(VarId, usize, usize)>,
+    hit_fields: HashSet<(VarId, u32, usize, usize)>,
+    d2_dropped: BTreeSet<VarId>,
+    d2_dropped_fields: BTreeSet<(VarId, u32)>,
+    /// A span whose move sites the fail-closed check ([`CodegenCtx::check_drop_flags`])
+    /// leaves out.
+    uncounted: Option<(usize, usize)>,
+}
+
 struct CodegenCtx<'ctx, 'plan, 'm> {
     context: &'ctx Context,
     /// ADR 0075 D6: the module being built. An arm-remainder resumer is a free function
@@ -2105,9 +2144,9 @@ struct CodegenCtx<'ctx, 'plan, 'm> {
     /// on the result per ADR 0020 D3 deep-handler semantics.
     handle_depth: u32,
     current_fn: Option<FunctionValue<'ctx>>,
-    /// C2.4: the FnId of the fn currently being compiled. Used to
-    /// look up the moved-source set from `drop_plan` at scope-exit
-    /// drop emission.
+    /// C2.4: the FnId of the fn currently being compiled: the key of
+    /// its sets in `drop_plan` (its moved sources and, ADR 0077 D4, its
+    /// move sites).
     current_fn_id: FnId,
     /// Register D61: `Some` while compiling a METHOD (or init) body. Methods have no
     /// `FnId`, and `compile_class` / `compile_impl` never assigned `current_fn_id`, so
@@ -2119,18 +2158,19 @@ struct CodegenCtx<'ctx, 'plan, 'm> {
     /// C2.4 / ADR 0017 D8: stack of scopes; each scope holds the
     /// ordered list of VarIds declared in it. At scope exit
     /// (block-pop, fn return), the codegen iterates these in
-    /// reverse to emit drop calls for heap-backed bindings that
-    /// weren't moved.
+    /// reverse to emit drop calls for heap-backed bindings, each
+    /// decided by walk order and its moved flag (ADR 0077).
     scope_stack: Vec<ScopeFrame<'ctx>>,
     /// ADR 0071 D2 amendment A1: set by a sink that makes the value it lowers the
     /// property of a new owner, and passed on only to a block's, an `if`'s, a `match`
     /// arm's or a `scope` body's tail. A `Shared` / `Mutex` read out of a place in that
     /// context is a duplication and is cloned; see [`Self::lower_expr`].
     owning: bool,
-    /// C2.4: per-fn moved-source sets from the borrow checker.
-    /// Codegen looks up `current_fn_id` to determine which
-    /// bindings should be skipped at scope-exit drop emission
-    /// (the destination of the move owns the value now).
+    /// C2.4: per-fn moved-source sets from the borrow checker and
+    /// (ADR 0077 D4) the move sites, where a binding's moved flag is
+    /// set. A drop site drops a binding no move of which is lowered
+    /// yet, and one moved since only when its flag is `false` (the
+    /// destination of the move owns the value then).
     drop_plan: &'plan DropPlan,
     /// C5.4 (2/N) / ADR 0028: the program-wide set of binding VarIds
     /// whose heap allocation is routed into a scope arena instead of
@@ -2166,6 +2206,8 @@ struct CodegenCtx<'ctx, 'plan, 'm> {
     /// already rejected `break` / `continue` there, so `lower_stmt` can
     /// assume a non-empty stack at those arms.
     loop_targets: Vec<LoopTarget<'ctx>>,
+    /// ADR 0077: each function's moved flags, by the LLVM function being built.
+    drop_flags: HashMap<FunctionValue<'ctx>, InkFlags<'ctx>>,
 }
 
 /// Map a Sentinel [`Type`] to its LLVM `BasicTypeEnum`. C1.5
@@ -2195,6 +2237,18 @@ struct CodegenCtx<'ctx, 'plan, 'm> {
 ///   * Everything else (primitives, refs, `?primitive`) → no drop.
 fn field_type_needs_drop(ty: Type, program: &TypedProgram) -> bool {
     field_type_needs_drop_inner(ty, program, &mut Vec::new())
+}
+
+/// ADR 0077 D5: does the drop of a value of type `base` do anything with its field of type
+/// `field`? A class's drop releases the handles its fields hold and nothing else (ADR 0071
+/// A4, [`type_holds_handle_inner`]); a struct's drops each field [`field_type_needs_drop`]
+/// answers for. A moved field gets a flag only if this holds; one it does not hold for is
+/// skipped by both walks, so dropping its binding unconditionally touches nothing of it.
+fn field_drops(base: Type, field: Type, program: &TypedProgram) -> bool {
+    match base {
+        Type::Class(_) => type_holds_handle_inner(field, program, &mut Vec::new()),
+        _ => field_type_needs_drop(field, program),
+    }
 }
 
 /// ADR 0071 D2 amendment A4: does a value of type `ty` hold a `Shared` / `Mutex` handle a
@@ -3842,6 +3896,8 @@ impl<'ctx, 'plan, 'm> CodegenCtx<'ctx, 'plan, 'm> {
             for stmt in &init_def.body.stmts {
                 self.lower_stmt(stmt, program)?;
             }
+            let tail = &init_def.body.tail.span;
+            self.flags_mut().uncounted = Some((tail.start, tail.end));
             // Register D153: drop the parameters and the statements' locals.
             self.emit_scope_drops(None, program)?;
             self.scope_stack.pop();
@@ -4060,8 +4116,8 @@ impl<'ctx, 'plan, 'm> CodegenCtx<'ctx, 'plan, 'm> {
 
         // C2.4: params live at scope depth 0. lower_block on the
         // body pushes scope 1, etc. At fn return, scope 0 (params)
-        // gets drop emission too — moved-source set will skip
-        // params that were passed-through.
+        // gets drop emission too — a param a move passed on is
+        // skipped by its moved flag (ADR 0077).
         self.scope_stack.push(ScopeFrame::default());
 
         for (i, param) in fn_def.params.iter().enumerate() {
@@ -4088,8 +4144,8 @@ impl<'ctx, 'plan, 'm> CodegenCtx<'ctx, 'plan, 'm> {
 
         // C2.4: emit drops for params (scope 0). The tail value
         // has already been loaded into body_val by lower_block;
-        // any binding consumed by the tail is in the moved-source
-        // set and gets skipped.
+        // a binding the tail consumed had its moved flag set by
+        // that move, so its drop is skipped (ADR 0077).
         let tail_returned = tail_returned_var(&fn_def.body.tail);
         self.emit_scope_drops(tail_returned, program)?;
         self.scope_stack.pop();
@@ -4994,6 +5050,21 @@ impl<'ctx, 'plan, 'm> CodegenCtx<'ctx, 'plan, 'm> {
                     // ADR 0071 D2 amendment A1: the place is a new owner of the value — a
                     // field of a class instance too, since amendment A4.
                     let v = self.lower_owned(value, program)?;
+                    // ADR 0077 D6: a binding with a moved flag (whole or field) owns its
+                    // old value unless the flag says it was moved: drop it as a drop site
+                    // does, which also stores the flags back `false` for the new value.
+                    if let TypedExprKind::Var(id) = &target.kind {
+                        let flagged = self.current_fn.is_some_and(|f| {
+                            self.drop_flags.get(&f).is_some_and(|fl| {
+                                fl.whole.contains_key(id) || fl.field.keys().any(|(b, _)| b == id)
+                            })
+                        });
+                        if flagged {
+                            // Register D153: as the frame that declares it drops it.
+                            let keep = self.declaring_frame_keeps_handles(*id);
+                            self.emit_binding_drop(*id, program, keep)?;
+                        }
+                    }
                     let ptr = self.lower_lvalue_ptr(target, program)?;
                     self.builder
                         .build_store(ptr, v)
@@ -5218,8 +5289,8 @@ impl<'ctx, 'plan, 'm> CodegenCtx<'ctx, 'plan, 'm> {
             self.lower_stmt(stmt, program)?;
         }
         // Skip dropping a Var binding that's returned via the
-        // tail — the move tracking will mark it in
-        // `moved_sources`, but we also conservatively guard here.
+        // tail — the tail read is a move, which sets its flag
+        // (ADR 0077 D3), but we also conservatively guard here.
         let tail_returned = tail_returned_var(&block.tail);
         // ADR 0071 D2 amendment A1: a binding this block declares and returns as its tail
         // is handed on — this block does not drop it — so it is not a duplication.
@@ -5255,8 +5326,8 @@ impl<'ctx, 'plan, 'm> CodegenCtx<'ctx, 'plan, 'm> {
     /// the scope's single `sentinel_arena_exit` if it lazily created an
     /// arena. Iterates in reverse declaration order per Rust convention.
     /// Skips:
-    ///   - Bindings in [`DropPlan::moved_sources_for`] for the current fn
-    ///     (the consumer owns + drops them).
+    ///   - ADR 0077: a binding the borrow checker records as moved, on the paths where it
+    ///     was moved — see [`Self::emit_binding_drop`].
     ///   - The binding returned via the tail expression (if the tail is a
     ///     `Var(id)`) — passed via `tail_returned`.
     ///   - Arena-routed bindings (bulk-freed by the arena exit below).
@@ -5273,25 +5344,8 @@ impl<'ctx, 'plan, 'm> CodegenCtx<'ctx, 'plan, 'm> {
         tail_returned: Option<VarId>,
         program: &TypedProgram,
     ) -> Result<(), CodegenError> {
-        // Register D61: a method body's sets are keyed by `MethodKey`, not `FnId`.
-        let (moved, moved_fields) = match self.current_method {
-            Some(k) => (
-                self.drop_plan.method_moved_sources_for(k),
-                self.drop_plan.method_moved_fields_for(k),
-            ),
-            // ADR 0046: the partial-move set (Move-typed fields consumed by value); the
-            // drop of a partially-moved binding elides these fields (the consumer freed
-            // them).
-            None => (
-                self.drop_plan.moved_sources_for(self.current_fn_id),
-                self.drop_plan.moved_fields_for(self.current_fn_id),
-            ),
-        };
         for &id in scope.vars.iter().rev() {
             if Some(id) == tail_returned {
-                continue;
-            }
-            if moved.contains(&id) {
                 continue;
             }
             // C5.4 (2/N) / ADR 0028: arena-routed bindings (a strict
@@ -5304,19 +5358,9 @@ impl<'ctx, 'plan, 'm> CodegenCtx<'ctx, 'plan, 'm> {
             if self.arena_routed.contains(&id) {
                 continue;
             }
-            let (ptr, ty) = match self.vars.get(&id) {
-                Some(&v) => v,
-                None => continue,
-            };
-            // ADR 0046: this binding's partially-moved field indices (empty for the
-            // common case) — `emit_drop_struct_fields` skips them.
-            let id_moved_fields: BTreeSet<u32> = moved_fields
-                .iter()
-                .filter_map(|(b, f)| (*b == id).then_some(*f))
-                .collect();
             // Register D153: a method's or an init's parameter frame releases no handle
             // (see [`ScopeFrame`]).
-            self.emit_drop_for_binding(ptr, ty, program, &id_moved_fields, scope.keeps_handles)?;
+            self.emit_binding_drop(id, program, scope.keeps_handles)?;
         }
         // C5.4 (2/N) / ADR 0028: if this scope lazily created an arena
         // (i.e. routed ≥1 allocation), bulk-free it in one call. The
@@ -5326,6 +5370,261 @@ impl<'ctx, 'plan, 'm> CodegenCtx<'ctx, 'plan, 'm> {
             self.builder
                 .build_call(self.arena_exit_fn, &[handle.into()], "")
                 .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        }
+        Ok(())
+    }
+
+    /// Register D153: whether the frame that declares `id` keeps its handles — a method's or
+    /// an init's parameter frame — so an assignment's drop of the old value (ADR 0077 D6)
+    /// releases what that frame's own drop would, and no more.
+    fn declaring_frame_keeps_handles(&self, id: VarId) -> bool {
+        self.scope_stack
+            .iter()
+            .rev()
+            .find(|f| f.vars.contains(&id))
+            .is_some_and(|f| f.keeps_handles)
+    }
+
+    /// ADR 0077: one drop site of binding `id` — at a frame's exit, at a drain, or (D6)
+    /// before an assignment overwrites it. A binding the borrow checker records as moved is
+    /// dropped unconditionally if no move of it has been lowered yet in this function (D2),
+    /// and otherwise under its flag (D3); a partially moved field likewise (D5).
+    fn emit_binding_drop(
+        &mut self,
+        id: VarId,
+        program: &TypedProgram,
+        // Register D153: the dropping frame releases no handle ([`ScopeFrame`]).
+        keep_handles: bool,
+    ) -> Result<(), CodegenError> {
+        let (ptr, ty) = match self.vars.get(&id) {
+            Some(&v) => v,
+            None => return Ok(()),
+        };
+        // Register D61: a method body's sets are keyed by `MethodKey`, not `FnId`.
+        let (moved, moved_fields) = match self.current_method {
+            Some(k) => (
+                self.drop_plan.method_moved_sources_for(k),
+                self.drop_plan.method_moved_fields_for(k),
+            ),
+            None => (
+                self.drop_plan.moved_sources_for(self.current_fn_id),
+                self.drop_plan.moved_fields_for(self.current_fn_id),
+            ),
+        };
+        let flags = self.flags_mut();
+        // D5: a field taken by a move already lowered is guarded by its own flag; one the
+        // checker records as moved whose move lies ahead is dropped (D2).
+        let mut guarded: Vec<(u32, PointerValue<'ctx>)> = Vec::new();
+        for &(b, f) in moved_fields.iter() {
+            if b != id {
+                continue;
+            }
+            match flags.field.get(&(id, f)) {
+                Some(&fl) => guarded.push((f, fl)),
+                None => {
+                    flags.d2_dropped_fields.insert((id, f));
+                }
+            }
+        }
+        let whole = flags.whole.get(&id).copied();
+        if moved.contains(&id) && whole.is_none() {
+            flags.d2_dropped.insert(id);
+        }
+        let skip = match whole {
+            Some(flag) => Some((flag, self.open_flag_guard(flag, "mvflag")?)),
+            None => None,
+        };
+        self.emit_drop_for_binding(ptr, ty, program, &guarded, keep_handles)?;
+        if let Some((flag, skip_bb)) = skip {
+            self.close_flag_guard(flag, skip_bb)?;
+        }
+        Ok(())
+    }
+
+    /// ADR 0077 D3: test `flag`; continue in a fresh block that runs only when it is
+    /// `false`. Answers the block the guard rejoins at.
+    fn open_flag_guard(
+        &mut self,
+        flag: PointerValue<'ctx>,
+        name: &str,
+    ) -> Result<inkwell::basic_block::BasicBlock<'ctx>, CodegenError> {
+        let current_fn = self.current_fn.expect("current_fn set");
+        let moved = self
+            .builder
+            .build_load(self.context.bool_type(), flag, name)
+            .map_err(|e| CodegenError::Builder(e.to_string()))?
+            .into_int_value();
+        let drop_bb = self.context.append_basic_block(current_fn, "flag_drop");
+        let skip_bb = self.context.append_basic_block(current_fn, "flag_after");
+        self.builder
+            .build_conditional_branch(moved, skip_bb, drop_bb)
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        self.builder.position_at_end(drop_bb);
+        Ok(skip_bb)
+    }
+
+    /// ADR 0077 D3: close [`Self::open_flag_guard`]'s block and store the flag back
+    /// `false`, which re-arms it for the next entry into the binding's scope.
+    fn close_flag_guard(
+        &mut self,
+        flag: PointerValue<'ctx>,
+        skip_bb: inkwell::basic_block::BasicBlock<'ctx>,
+    ) -> Result<(), CodegenError> {
+        self.builder
+            .build_unconditional_branch(skip_bb)
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        self.builder.position_at_end(skip_bb);
+        self.builder
+            .build_store(flag, self.context.bool_type().const_zero())
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        Ok(())
+    }
+
+    /// ADR 0077: the moved flags of the function being built.
+    fn flags_mut(&mut self) -> &mut InkFlags<'ctx> {
+        let f = self.current_fn.expect("current_fn set");
+        let key = (self.current_fn_id, self.current_method);
+        self.drop_flags.entry(f).or_insert_with(|| InkFlags {
+            key,
+            moved: HashSet::new(),
+            moved_fields: HashSet::new(),
+            whole: HashMap::new(),
+            field: HashMap::new(),
+            hit: HashSet::new(),
+            hit_fields: HashSet::new(),
+            d2_dropped: BTreeSet::new(),
+            d2_dropped_fields: BTreeSet::new(),
+            uncounted: None,
+        })
+    }
+
+    /// ADR 0077 D3: a new `i1` flag, allocated in the entry block and stored `false` there.
+    fn new_flag(&self, name: &str) -> Result<PointerValue<'ctx>, CodegenError> {
+        let current_fn = self.current_fn.expect("current_fn set");
+        let entry = current_fn
+            .get_first_basic_block()
+            .expect("fn has an entry block");
+        let tmp = self.context.create_builder();
+        match entry.get_first_instruction() {
+            Some(first) => tmp.position_before(&first),
+            None => tmp.position_at_end(entry),
+        }
+        let flag = tmp
+            .build_alloca(self.context.bool_type(), name)
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        tmp.build_store(flag, self.context.bool_type().const_zero())
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        Ok(flag)
+    }
+
+    /// Whether binding `id` sits in an open scope frame, so a drop site can drop it.
+    fn is_framed(&self, id: VarId) -> bool {
+        self.scope_stack.iter().any(|f| f.vars.contains(&id))
+    }
+
+    /// ADR 0077 D3/D4: a read of binding `id` at `span`. If the borrow checker recorded it
+    /// as a move, the binding is moved from here on in this function, and its flag is set.
+    fn note_move(&mut self, id: VarId, span: &Span) -> Result<(), CodegenError> {
+        let site = (id, span.start, span.end);
+        if !self
+            .drop_plan
+            .move_sites_for(self.current_fn_id, self.current_method)
+            .contains(&site)
+        {
+            return Ok(());
+        }
+        let framed = self.is_framed(id);
+        let existing = {
+            let flags = self.flags_mut();
+            flags.hit.insert(site);
+            flags.moved.insert(id);
+            flags.whole.get(&id).copied()
+        };
+        if !framed {
+            return Ok(());
+        }
+        let flag = match existing {
+            Some(f) => f,
+            None => {
+                let f = self.new_flag("mvflag")?;
+                self.flags_mut().whole.insert(id, f);
+                f
+            }
+        };
+        self.builder
+            .build_store(flag, self.context.bool_type().const_int(1, false))
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        Ok(())
+    }
+
+    /// ADR 0077 D5: a read of field `field` of binding `id` at `span`, likewise. The flag is
+    /// made only if the binding's drop does something with that field (`droppable`, from
+    /// [`field_drops`]); a flag for one it does not would be set and never read.
+    fn note_field_move(
+        &mut self,
+        id: VarId,
+        field: u32,
+        droppable: bool,
+        span: &Span,
+    ) -> Result<(), CodegenError> {
+        let site = (id, field, span.start, span.end);
+        if !self
+            .drop_plan
+            .field_move_sites_for(self.current_fn_id, self.current_method)
+            .contains(&site)
+        {
+            return Ok(());
+        }
+        let framed = self.is_framed(id);
+        let existing = {
+            let flags = self.flags_mut();
+            flags.hit_fields.insert(site);
+            flags.moved_fields.insert((id, field));
+            flags.field.get(&(id, field)).copied()
+        };
+        if !framed || !droppable {
+            return Ok(());
+        }
+        let flag = match existing {
+            Some(f) => f,
+            None => {
+                let f = self.new_flag("mvfieldflag")?;
+                self.flags_mut().field.insert((id, field), f);
+                f
+            }
+        };
+        self.builder
+            .build_store(flag, self.context.bool_type().const_int(1, false))
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        Ok(())
+    }
+
+    /// ADR 0077: fail closed. A binding dropped unconditionally at a drop site although the
+    /// checker records a move of it (D2) is sound only if every move of it was lowered in
+    /// that function, so a move site that was not is an error, never a double free.
+    fn check_drop_flags(&self) -> Result<(), CodegenError> {
+        for flags in self.drop_flags.values() {
+            let (fn_id, key) = flags.key;
+            // A site in [`InkFlags::uncounted`] is left out.
+            let counted = |start: usize, end: usize| {
+                !flags.uncounted.is_some_and(|(s, e)| start >= s && end <= e)
+            };
+            for &(id, start, end) in self.drop_plan.move_sites_for(fn_id, key) {
+                if flags.d2_dropped.contains(&id)
+                    && !flags.hit.contains(&(id, start, end))
+                    && counted(start, end)
+                {
+                    return Err(CodegenError::MoveNotLowered { var: id.0, start, end });
+                }
+            }
+            for &(id, f, start, end) in self.drop_plan.field_move_sites_for(fn_id, key) {
+                if flags.d2_dropped_fields.contains(&(id, f))
+                    && !flags.hit_fields.contains(&(id, f, start, end))
+                    && counted(start, end)
+                {
+                    return Err(CodegenError::MoveNotLowered { var: id.0, start, end });
+                }
+            }
         }
         Ok(())
     }
@@ -5342,9 +5641,10 @@ impl<'ctx, 'plan, 'm> CodegenCtx<'ctx, 'plan, 'm> {
     /// The frames are NOT popped here — static lowering of the (now-dead)
     /// remainder of each block still pops them via their own `lower_block`,
     /// emitting a second, unreachable set of drops into the `after_loopctl`
-    /// block. Each runtime path therefore frees a given binding exactly
-    /// once (the early-exit drop here, or the body-end drop on fall-through
-    /// — mutually exclusive blocks).
+    /// block. Each runtime path therefore reaches one drop site for a given
+    /// binding (the early-exit drop here, or the body-end drop on fall-through
+    /// — mutually exclusive blocks), and ADR 0077's flags free it there
+    /// exactly once if it was not moved.
     fn emit_loop_exit_drops(
         &mut self,
         scope_floor: usize,
@@ -5452,10 +5752,10 @@ impl<'ctx, 'plan, 'm> CodegenCtx<'ctx, 'plan, 'm> {
         ptr: PointerValue<'ctx>,
         ty: Type,
         program: &TypedProgram,
-        // ADR 0046: field indices of THIS binding that were partially moved (and so are
-        // owned + freed by the consumer); `emit_drop_struct_fields` skips them. Empty for
-        // a fully-live binding and for every nested (recursive) field drop.
-        moved_fields: &BTreeSet<u32>,
+        // ADR 0046 / ADR 0077 D5: the fields of THIS binding a move already lowered may have
+        // taken (owned + freed by the consumer), each with its flag; each is dropped only
+        // when its flag is `false`. Empty for every nested (recursive) field drop.
+        guarded: &[(u32, PointerValue<'ctx>)],
         // Register D153: release no `Shared` / `Mutex`, here or in a field at any depth
         // (a method's or an init's parameter frame, [`ScopeFrame`]'s `keeps_handles`).
         keep_handles: bool,
@@ -5598,7 +5898,7 @@ impl<'ctx, 'plan, 'm> CodegenCtx<'ctx, 'plan, 'm> {
                 // dispatch on the field's type — handles Array,
                 // ?Struct/?GenericInstance, nested structs, and
                 // nested generic instances.
-                self.emit_drop_struct_fields(ptr, ty, program, moved_fields, keep_handles)?;
+                self.emit_drop_struct_fields(ptr, ty, program, guarded, keep_handles)?;
             }
             Type::Nullable(_)
             | Type::I64
@@ -5704,8 +6004,9 @@ impl<'ctx, 'plan, 'm> CodegenCtx<'ctx, 'plan, 'm> {
                 // `Shared` / `Mutex` handles its fields hold, at any depth through struct,
                 // generic-instance and class fields, and frees nothing else — an array, a
                 // `Vec`, a nullable's or an enum's box in it stays held, as before (register
-                // D137). A field the binding was partially moved out of is skipped (ADR 0046).
-                self.emit_handle_drops(ptr, ty, program, moved_fields, &mut Vec::new())?;
+                // D137). A field a move already lowered may have taken is released only when
+                // its flag says it was not taken on this path (ADR 0046, ADR 0077 D5).
+                self.emit_handle_drops(ptr, ty, program, guarded, &mut Vec::new())?;
             }
             Type::Enum(_) => {
                 // Phase D.1 / ADR 0032 D6 (4/N): an enum owns its
@@ -5775,10 +6076,11 @@ impl<'ctx, 'plan, 'm> CodegenCtx<'ctx, 'plan, 'm> {
         ptr: PointerValue<'ctx>,
         ty: Type,
         program: &TypedProgram,
-        // ADR 0046: field indices of the BINDING being dropped that were partially moved
-        // (the consumer owns + freed them) — skip their drop. Non-empty only at the top
-        // level of a partially-moved binding; a nested struct field carries no moves yet.
-        moved_fields: &BTreeSet<u32>,
+        // ADR 0046 / ADR 0077 D5: the fields of the BINDING being dropped that a move
+        // already lowered may have taken, each with its flag — dropped only when the flag
+        // is `false`. Non-empty only at the top level of a partially-moved binding; a
+        // nested struct field carries no moves yet.
+        guarded: &[(u32, PointerValue<'ctx>)],
         // Register D153: passed down from [`Self::emit_drop_for_binding`].
         keep_handles: bool,
     ) -> Result<(), CodegenError> {
@@ -5827,11 +6129,6 @@ impl<'ctx, 'plan, 'm> CodegenCtx<'ctx, 'plan, 'm> {
             if !field_type_needs_drop(*field_ty, program) {
                 continue;
             }
-            // ADR 0046: a field consumed by value (partial move) is owned + freed by the
-            // consumer — skip its drop here so we don't double-free.
-            if moved_fields.contains(&(idx as u32)) {
-                continue;
-            }
             // GenericInstance whose ID is past program bounds —
             // arose from local substitution; LLVM type unavailable
             // so we can't GEP into it. Defensive skip; in practice
@@ -5842,13 +6139,24 @@ impl<'ctx, 'plan, 'm> CodegenCtx<'ctx, 'plan, 'm> {
                     continue;
                 }
             }
+            // ADR 0046 / ADR 0077 D5: a field consumed by value (partial move) is owned +
+            // freed by the consumer — dropped here only if its flag says it was not taken
+            // on this path.
+            let flag = guarded.iter().find(|(f, _)| *f == idx as u32).map(|&(_, fl)| fl);
+            let skip = match flag {
+                Some(fl) => Some((fl, self.open_flag_guard(fl, "mvfieldflag")?)),
+                None => None,
+            };
             let field_ptr = self
                 .builder
                 .build_struct_gep(struct_llvm_ty, ptr, idx as u32, "drop_fldptr")
                 .map_err(|e| CodegenError::Builder(e.to_string()))?;
             // ADR 0046: nested struct fields carry no tracked moves at the MVP (deep
-            // paths deferred — D5), so the recursive drop gets an empty move set.
-            self.emit_drop_for_binding(field_ptr, *field_ty, program, &BTreeSet::new(), keep_handles)?;
+            // paths deferred — D5), so the recursive drop gets none.
+            self.emit_drop_for_binding(field_ptr, *field_ty, program, &[], keep_handles)?;
+            if let Some((fl, skip_bb)) = skip {
+                self.close_flag_guard(fl, skip_bb)?;
+            }
         }
         let _ = decl; // captured for clarity; field types are what we used
         Ok(())
@@ -5858,9 +6166,10 @@ impl<'ctx, 'plan, 'm> CodegenCtx<'ctx, 'plan, 'm> {
     /// at `ptr` holds — the handle itself, or one in a field at any depth through struct,
     /// generic-instance and class fields, `secret`-qualified or not — and nothing else. A
     /// class drop is this walk (see [`type_holds_handle_inner`] for why nothing else is
-    /// walked). `moved_fields` are the
-    /// top-level fields the binding was partially moved out of (ADR 0046), which the
-    /// consumer released; nested walks get an empty set. `seen` holds the aggregate types
+    /// walked). `guarded` are the top-level fields a move already lowered may have taken
+    /// (ADR 0046, ADR 0077 D5), each with its flag: each is released only when its flag is
+    /// `false`, since the consumer released it otherwise; nested walks get none. `seen` holds
+    /// the aggregate types
     /// on the current path, so a by-value cycle through a class field, which the type
     /// checker does not refuse (register D157), stops at its first repeat instead of
     /// recursing for ever.
@@ -5869,13 +6178,13 @@ impl<'ctx, 'plan, 'm> CodegenCtx<'ctx, 'plan, 'm> {
         ptr: PointerValue<'ctx>,
         ty: Type,
         program: &TypedProgram,
-        moved_fields: &BTreeSet<u32>,
+        guarded: &[(u32, PointerValue<'ctx>)],
         seen: &mut Vec<Type>,
     ) -> Result<(), CodegenError> {
         let ty = self.strip_secret(ty);
         let (field_tys, struct_llvm_ty): (Vec<Type>, StructType<'ctx>) = match ty {
             Type::Shared(_) | Type::Mutex(_) => {
-                return self.emit_drop_for_binding(ptr, ty, program, &BTreeSet::new(), false);
+                return self.emit_drop_for_binding(ptr, ty, program, &[], false);
             }
             Type::Struct(id) => {
                 let llvm = *self
@@ -5914,17 +6223,22 @@ impl<'ctx, 'plan, 'm> CodegenCtx<'ctx, 'plan, 'm> {
         };
         seen.push(ty);
         for (idx, field_ty) in field_tys.iter().enumerate() {
-            if moved_fields.contains(&(idx as u32)) {
-                continue;
-            }
             if !type_holds_handle_inner(*field_ty, program, seen) {
                 continue;
             }
+            let flag = guarded.iter().find(|(f, _)| *f == idx as u32).map(|&(_, fl)| fl);
+            let skip = match flag {
+                Some(fl) => Some((fl, self.open_flag_guard(fl, "mvfieldflag")?)),
+                None => None,
+            };
             let field_ptr = self
                 .builder
                 .build_struct_gep(struct_llvm_ty, ptr, idx as u32, "drop_hdlptr")
                 .map_err(|e| CodegenError::Builder(e.to_string()))?;
-            self.emit_handle_drops(field_ptr, *field_ty, program, &BTreeSet::new(), seen)?;
+            self.emit_handle_drops(field_ptr, *field_ty, program, &[], seen)?;
+            if let Some((fl, skip_bb)) = skip {
+                self.close_flag_guard(fl, skip_bb)?;
+            }
         }
         seen.pop();
         Ok(())
@@ -8600,6 +8914,8 @@ impl<'ctx, 'plan, 'm> CodegenCtx<'ctx, 'plan, 'm> {
                     .builder
                     .build_load(llvm_ty, ptr, name)
                     .map_err(|e| CodegenError::Builder(e.to_string()))?;
+                // ADR 0077 D3/D4: a read that moves the binding sets its flag.
+                self.note_move(*id, &expr.span)?;
                 Ok(loaded)
             }
             // ADR 0070: a non-capturing function value — the LLVM function's
@@ -9352,6 +9668,11 @@ impl<'ctx, 'plan, 'm> CodegenCtx<'ctx, 'plan, 'm> {
                     .builder
                     .build_extract_value(struct_val, *field_index as u32, "field")
                     .map_err(|e| CodegenError::Builder(e.to_string()))?;
+                // ADR 0077 D5: a read that moves an ADR 0046 field sets the field's flag.
+                if let TypedExprKind::Var(b) = &target.kind {
+                    let droppable = field_drops(target.ty, expr.ty, program);
+                    self.note_field_move(*b, *field_index as u32, droppable, &expr.span)?;
+                }
                 Ok(field_val)
             }
             TypedExprKind::ArrayLit { elem_ty, elements } => {
@@ -13820,8 +14141,9 @@ fn main() -> i64 {
     //
     // A `Shared` / `Mutex` stored into a field of a class instance is cloned like any
     // assignment of a place read, and a class binding's drop releases every handle its fields
-    // hold, at any depth through struct, generic-instance and class fields, skipping a field
-    // the binding was partially moved out of, and frees nothing else (register D137). A
+    // hold, at any depth through struct, generic-instance and class fields, a field the
+    // binding was partially moved out of behind its moved flag (ADR 0077 D5), and frees
+    // nothing else (register D137). A
     // method's or an init's parameter frame keeps its handles, a class's included (A2). A
     // missing release is a leak, not an exit code, so this reads the IR.
 
@@ -13881,16 +14203,18 @@ fn main() -> i64 {
             ("K__init", 1, 1, 0, 0, 0),
             ("K__set", 1, 0, 0, 0, 0),
             ("U__eat", 0, 0, 0, 0, 0),
-            // a struct and a class moved into fields, and a value no place holds
-            ("N__init", 0, 0, 0, 0, 0),
+            // a struct and a class moved into fields, and a value no place holds: the moved
+            // parameters' drop sits behind the flags their moves set (ADR 0077), and the
+            // frame keeps handles, so only `h.a`'s free is emitted, and it never runs
+            ("N__init", 0, 0, 0, 0, 1),
             // a free fn's store clones, and its frame releases the parameter
             ("store", 1, 0, 1, 0, 0),
             // `k`'s drop releases both of its fields
             ("direct", 0, 0, 1, 1, 0),
             // `n`'s drop: `h.s`, `k.s`, `k.m`, `b.v`, and none of the arrays it holds
             ("nested", 0, 0, 3, 1, 0),
-            // `n.h` was moved out, so `n`'s drop skips it
-            ("partial", 0, 0, 2, 1, 0),
+            // `n.h` was moved out: its release sits behind its field's flag (ADR 0077 D5)
+            ("partial", 0, 0, 3, 1, 0),
             ("arrays_only", 0, 0, 0, 0, 0),
             // a struct's drop reaches the class in its field
             ("held", 0, 0, 1, 1, 0),
@@ -13915,7 +14239,149 @@ fn main() -> i64 {
             ] {
                 assert_eq!(body.matches(sym).count(), want, "@{f}: {sym} count:\n{body}");
             }
+            // ADR 0077: the drops of what a move took sit in the blocks its flag guards --
+            // `N__init`'s free of `h.a`, and `partial`'s release of `n.h.s` -- and no other.
+            let (guarded, sym) = match f {
+                "N__init" => (1, "@sentinel_free("),
+                "partial" => (1, "@sentinel_shared_release("),
+                _ => (0, "@sentinel_free("),
+            };
+            let mut inside = false;
+            let mut n = 0;
+            for l in body.lines() {
+                // A block label, before the `; preds = ...` comment LLVM prints after it.
+                if !l.starts_with(' ')
+                    && l.split(';').next().unwrap_or("").trim_end().ends_with(':')
+                {
+                    inside = l.starts_with("flag_drop");
+                }
+                n += usize::from(inside && l.contains(sym));
+            }
+            assert_eq!(n, guarded, "@{f}: {sym} behind a moved flag:\n{body}");
         }
+    }
+
+    // ===== ADR 0077: a moved binding's drop is decided per exit =====
+    //
+    // `early` returns before its move on one path and moves `v` on another. The `return`'s
+    // drain comes before any move of `v` in the lowering, so it frees `v` unconditionally
+    // (D2); the scope's end comes after one, so it frees `v` only when the flag, set at the
+    // move, is `false`, and stores it back `false` (D3). `field` moves one field on one path:
+    // that field's drop is guarded by its own flag and the other field's is not (D5).
+    // `never` does not move `v`, so it gets no flag. The frees are memory, not an exit code,
+    // so this reads the IR.
+
+    const A77_SHAPES: &str = r#"
+struct S { a: [i64], b: [i64] }
+fn consume(v: [i64]) -> i64 { v[0] }
+fn early(n: i64) -> i64 {
+    let v: [i64] = [1, 2];
+    if n < 0 { return 0 } else { 0 };
+    if n > 5 { consume(v) } else { 0 }
+}
+fn field(n: i64) -> i64 {
+    let s: S = S { a: [1], b: [2] };
+    if n > 5 { consume(s.a) } else { 0 }
+}
+fn never(n: i64) -> i64 { let v: [i64] = [1, 2]; v[0] + n }
+fn main() -> i64 { early(1) + field(1) + never(1) }
+"#;
+
+    #[test]
+    fn a77_a_drop_before_the_first_move_is_unconditional_and_one_after_it_is_flagged() {
+        let ir = compile_src_ir_with_moves(A77_SHAPES);
+        let body = ir_fn_body(&ir, "early");
+        // One flag: allocated and stored `false` in the entry block, set at the move, and
+        // stored back `false` after the guarded drop.
+        assert_eq!(body.matches("alloca i1").count(), 1, "@early: one flag:\n{body}");
+        assert_eq!(body.matches("store i1 true").count(), 1, "@early: set at the move:\n{body}");
+        assert_eq!(
+            body.matches("store i1 false").count(),
+            2,
+            "@early: the entry store and the store-back after the guarded drop:\n{body}"
+        );
+        // Two frees: the `return`'s, unconditional, and the scope end's, under the flag.
+        assert_eq!(body.matches("@sentinel_free(").count(), 2, "@early: two frees:\n{body}");
+        assert_eq!(body.matches("load i1").count(), 1, "@early: one flag test:\n{body}");
+        let guarded = body.find("flag_drop:").expect("@early: a guarded drop block");
+        assert!(
+            body[guarded..].contains("@sentinel_free("),
+            "@early: the scope end's free is in the guarded block:\n{body}"
+        );
+        assert!(
+            body[..guarded].contains("@sentinel_free("),
+            "@early: the `return` frees `v` before any flag test:\n{body}"
+        );
+
+        let body = ir_fn_body(&ir, "field");
+        assert_eq!(body.matches("alloca i1").count(), 1, "@field: one field flag:\n{body}");
+        assert_eq!(body.matches("@sentinel_free(").count(), 2, "@field: both fields:\n{body}");
+        let guarded = body.find("flag_drop:").expect("@field: a guarded field drop");
+        let after = body.find("flag_after:").expect("@field: the guard rejoins");
+        assert_eq!(
+            body[guarded..after].matches("@sentinel_free(").count(),
+            1,
+            "@field: only the moved field is guarded:\n{body}"
+        );
+
+        let body = ir_fn_body(&ir, "never");
+        assert_eq!(body.matches("alloca i1").count(), 0, "@never: no move, no flag:\n{body}");
+    }
+
+    // ADR 0077 D5: a moved field gets a flag only if its binding's drop does something with
+    // it. A class's drop releases the handles its fields hold and nothing else, so in
+    // `secret_field` the moved `c.h` (a `secret`-qualified struct holding a `Shared`) is
+    // released only behind its flag, and in `array_field` the moved `c.a`, which a class's
+    // drop never frees, gets no flag. A release is memory, not an exit code, so this reads
+    // the IR.
+
+    const A77_CLASS_FIELDS: &str = r#"
+struct H { s: Shared<i64>, n: i64 }
+fn eat(h: secret H) -> i64 { 1 }
+fn consume(v: [i64]) -> i64 { v[0] }
+class C {
+    let h: secret H;
+    let a: [i64];
+    pub init(n: i64) { self.h = H { s: shared_new(n), n: n }; self.a = [n]; 0 }
+}
+fn secret_field(n: i64) -> i64 {
+    let c: C = C::init(40);
+    if n > 5 { eat(c.h) } else { 0 }
+}
+fn array_field(n: i64) -> i64 {
+    let c: C = C::init(40);
+    if n > 5 { consume(c.a) } else { 0 }
+}
+fn main() -> i64 { secret_field(1) + array_field(1) + 42 }
+"#;
+
+    #[test]
+    fn a77_a_moved_field_gets_a_flag_only_if_its_binding_drop_touches_it() {
+        let ir = compile_src_ir_with_moves(A77_CLASS_FIELDS);
+        let body = ir_fn_body(&ir, "secret_field");
+        assert_eq!(
+            body.matches("alloca i1").count(),
+            1,
+            "@secret_field: one field flag:\n{body}"
+        );
+        assert_eq!(
+            body.matches("@sentinel_shared_release(").count(),
+            1,
+            "@secret_field: one release, of `c.h.s`:\n{body}"
+        );
+        let guarded = body.find("flag_drop:").expect("@secret_field: a guarded drop");
+        let after = body.find("flag_after:").expect("@secret_field: the guard rejoins");
+        assert!(
+            body[guarded..after].contains("@sentinel_shared_release("),
+            "@secret_field: the moved field's release is behind its flag:\n{body}"
+        );
+
+        let body = ir_fn_body(&ir, "array_field");
+        assert_eq!(
+            body.matches("alloca i1").count(),
+            0,
+            "@array_field: a field a class's drop never touches gets no flag:\n{body}"
+        );
     }
 
     // ===== Register D92 / ADR 0032 A5: a `match` on a temporary frees its payload box =====

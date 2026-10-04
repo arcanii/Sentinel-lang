@@ -1,0 +1,26 @@
+// ADR 0077 D2 is decided by each back end's own emission order. `a[i] = consume(v)` is
+// lowered place first by the oracle and `scg` and value first by inkwell, so a `return`
+// inside the index is reached before the move in the first two and after it in inkwell.
+// Each back end is right by its own order: the oracle and `scg` drop `v` there
+// unconditionally (it was not moved on that path), and inkwell drops it under its flag,
+// which the move it has already run has set.
+
+fn consume(v: [i64]) -> i64 { v[0] }
+
+fn once(n: i64) -> i64 {
+    let v: [i64] = [1, 2, 3, 4];
+    let mut a: [i64] = [0, 0];
+    a[{ if n >= 0 { return 7 } else { 0 }; 0 }] = consume(v);
+    a[0]
+}
+
+fn main() -> i64 {
+    let mut i: i64 = 0;
+    let mut acc: i64 = 0;
+    while i < 2000 {
+        acc = acc + once(1) + once(0 - 1);
+        i = i + 1;
+    }
+    // a round: 7 + 1
+    if acc == 16000 { 42 } else { 1 }
+}

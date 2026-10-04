@@ -99,7 +99,10 @@ statically-lowered remainder of the enclosing block after a `return` is **unreac
 ADR 0036 C3 dead-block handling (never append to a terminated block; the result-store/merge edges
 are simply not taken). Each live binding is freed **exactly once** — on the early-return path *or*
 the fall-through tail path, which are mutually exclusive (the same one-free invariant ADR 0036
-verified leak-free under `leaks --atExit`). All three back ends (inkwell LLVM, Cranelift, self-host
+verified leak-free under `leaks --atExit`). **Amended by [ADR 0077](0077-drop-flags-for-maybe-moved-bindings.md) (2026-10-05):** that held
+only for a binding moved nowhere. One moved anywhere in the function was skipped at every drain,
+so a `return` before its move leaked it (register D64); the drain now drops it unconditionally
+when no move of it precedes the `return` in the emitted code, and under its moved flag after one. All three back ends (inkwell LLVM, Cranelift, self-host
 `scg`) get the same shape.
 
 ### D5. Constant-time — no new sink, guarantee unchanged.
@@ -144,7 +147,9 @@ arbitrary sites is itself incremental); stage 3 may surface gaps there that need
 ### D7. Borrow-check.
 
 A `return` path consumes/moves its operands as any path does; the lexical checker treats the block
-remainder after a `return` as unreachable (the D4 dead block). The 1.0 borrow checker is lexical and
+remainder after a `return` as unreachable (the D4 dead block). (Amended by [ADR 0077](0077-drop-flags-for-maybe-moved-bindings.md),
+2026-10-05: the checker walks that remainder, and a move in it is recorded; codegen emits it into
+the dead block, where its flag store never runs.) The 1.0 borrow checker is lexical and
 over-rejects (`docs/borrow-check-limitations.md`); `return` does not relax it — a false rejection is
 fixed by scoping, not by weakening the checker. v1 keeps it simple: a value moved on the
 return-path-only is considered moved (conservative), matching `break`/`continue`.

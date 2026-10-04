@@ -188,6 +188,8 @@ fn cg_emit_method(c: &mut TyCtx, src: &[u8], rty: i64, is_void: bool, is_init: b
         cg_putc(c, '\n');
         ai = ai + 1;
     }
+    // (ADR 0077 D3) the moved flags, after the allocas they sit with.
+    cg_emit_flags(c);
     let nb: i64 = len((*c).cgbody);
     let mut bi: i64 = 0;
     while bi < nb {

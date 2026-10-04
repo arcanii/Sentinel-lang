@@ -824,7 +824,10 @@ stays held — a leak, and never a release too many:
 - A binding moved on one path is dropped on no path (the drop plan's moved set is per
   function, register D93), so a field read out of it on another path — `if c { take(h.s) }
   else { eat(h) }` — is cloned and the unit the field holds stays held. In the oracle and
-  inkwell, D2's missing clone had handed that unit to the reader. Register D122.
+  inkwell, D2's missing clone had handed that unit to the reader. Register D122. (Closed by
+  ADR 0077, 2026-10-05: the binding is dropped at scope exit on the path that does not move
+  it, under its moved flag; run down `c` 2,000,000 times, the shape peaked at 69.9 MB in all
+  three back ends and now at 8.4.)
 - A struct literal that nothing drops — read in place (`H { s: s, n: 1 }.n`), or stored where
   it is never released (an array literal, `push`, an enum constructor) — still counts its
   fields, so the units they took stay held. So does a method, qualified-call or class-init
@@ -862,10 +865,12 @@ a block's own `let`-local returned as its tail without a clone; in an owning pos
 three balance (register D123 for inkwell elsewhere). And a generic body is lowered
 differently (register D36): the oracle and inkwell hand a moved type-parameter binding on,
 while `scg` clones it and releases the parameter. Where the binding is moved on every path
-both balance. Where it is moved on only some, the oracle and inkwell leave its unit held on
-the others (D93, as before A1), and `scg` does too when a field of it is read on another path
-(`if c { Bx { v: b.v, n: 0 } } else { b }`). The IR differs, so the corpus carries no such
-program. An assignment still does not release the value it overwrites (register D120, a
+both balance. Where it is moved on only some, the oracle and inkwell left its unit held on
+the others (D93, as before A1), and `scg` did too when a field of it is read on another path
+(`if c { Bx { v: b.v, n: 0 } } else { b }`). Since ADR 0077 (2026-10-05) each releases it on
+the paths that do not move it, so all three balance there too: 8.3–8.4 MB over 2,000,000
+alternating calls of either shape, against 39.2 before. The IR differs, so the corpus carries
+no such program. An assignment still does not release the value it overwrites (register D120, a
 leak), so `v = s` now leaves one unit held rather than releasing one too many.
 
 Pinned by `tests/pass/c71_shared_place_duplications.sentinel`, which reads a `Shared` out of
@@ -982,7 +987,8 @@ The rule now, in all three back ends:
   struct, generic-instance and class fields, `secret`-qualified or not, and frees nothing
   else: an array, a `Vec`, or a nullable's or an enum's box held in a class stays held, as
   before (register D137). A field the binding was partially moved out of is skipped, as a
-  struct's is (ADR 0046). A class needs a drop exactly when it holds such a handle, which is
+  struct's is (ADR 0046); since ADR 0077 it is released behind its moved flag on the paths
+  that did not move it. A class needs a drop exactly when it holds such a handle, which is
   also how a struct's drop reaches a class in one of its fields — though the text back ends'
   struct drop skips a `secret`-qualified field (register D158). inkwell's method and init
   parameter frames keep a class's handles, as they keep every handle (A2).
@@ -1038,7 +1044,10 @@ all three back ends unless noted:
   array literal whose element is a generic struct literal, register D136), and in inkwell,
   the only back end that builds one, in a nullable's box (register D122).
 - a class, or a field holding one, moved on one path only, which is dropped on no path
-  (register D93).
+  (register D93). Closed by ADR 0077 (2026-10-05): it is dropped at scope exit on the path
+  that does not move it, under its moved flag. Over 2,000,000 calls that take the other path,
+  a class moved on one path, and a struct's or a class's field holding one, peaked at 69.9 MB
+  in all three back ends and now at 8.3–8.4.
 - in inkwell, a class passed by value to a method or an init that does not move it on, or
   bound by an init's top-level statements, which A2 lowers into the parameter frame; that
   frame keeps its handles (A2, register D154).

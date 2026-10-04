@@ -100,6 +100,14 @@ fn synth_forward(buf: &mut Vec<u8>, c: &mut TyCtx, gb: &mut Vec<u8>, cid: i64, s
             let cg_pty: i64 = env_get(c, cg_pv);
             let cg_ps: i64 = cg_slot_get(c, cg_pv);
             cg_load(c, cg_pty, cg_ps);
+            // (ADR 0077 D3/D4) the forwarded parameter is moved (recorded above): set its flag.
+            if is_move_type(c, cg_pty) {
+                let cg_pnd: bool = cg_needs_drop(c, cg_pty);
+                cg_note_move(c, cg_pv, 0 - 1, cg_pnd);
+                0
+            } else {
+                0
+            };
             // (ADR 0071 D2 amendment A1) the forwarded call's parameter is a new owner, as
             // the oracle's `lower_args` makes it for this ordinary method call there: a
             // `Shared` / `Mutex` param is cloned. This body is emitted by hand, not through

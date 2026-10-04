@@ -1501,9 +1501,10 @@ fn cg_drop_record(c: &mut TyCtx, vid: i64, ty: i64, slot: i64) -> i64 {
 }
 
 // (8d-drops) is `vid` a moved source of fn `fnidx`? Scans the borrow analysis's
-// `mvf`/`mvv` side-table (the same set `snc borrow` dumps) — a moved binding is owned
-// + dropped by its consumer (incl. a tail-returned value, recorded as a consuming
-// move), so it is skipped at scope exit. Mirrors `DropPlan::moved_sources_for`.
+// `mvf`/`mvv` side-table (the same set `snc borrow` dumps), which the walk fills as it
+// goes, so at a drop site it holds the moves emitted so far. (ADR 0077) A drop site asks
+// `cg_has_flag` first; this answers only for a binding moved without a flag (its type
+// needs no drop), which is skipped, as the oracle's `emit_binding_drop` skips it.
 fn cg_is_moved(c: &mut TyCtx, fnidx: i64, vid: i64) -> bool {
     let n: i64 = len((*c).mvf);
     let mut i: i64 = 0;
@@ -1526,8 +1527,10 @@ fn cg_is_moved(c: &mut TyCtx, fnidx: i64, vid: i64) -> bool {
 
 // (ADR 0046) is field `fidx` of binding `vid` (in fn `fnidx`) a PARTIAL move — a
 // Move-typed field consumed by value, owned + freed by the consumer? Scans the
-// `mff`/`mfv`/`mfi` side-table. A partially-moved field is ELIDED from `vid`'s recursive
-// struct drop (else a double-free). Mirrors codegen's `moved_fields.contains(&(idx))`.
+// `mff`/`mfv`/`mfi` side-table, which the walk fills as it goes. (ADR 0077 D5) A drop site
+// asks `cg_has_flag` first; this answers only for a field moved without a flag (its
+// binding's drop does nothing with it), which is skipped, as the oracle's
+// `field_moved_unflagged` skips it.
 fn cg_is_field_moved(c: &mut TyCtx, fnidx: i64, vid: i64, fidx: i64) -> bool {
     let n: i64 = len((*c).mff);
     let mut i: i64 = 0;
@@ -1667,6 +1670,19 @@ fn cg_needs_drop(c: &mut TyCtx, ty: i64) -> bool {
     }
 }
 
+// (ADR 0077 D5) does the drop of a value of type `bty` do anything with its field of type
+// `fty`? A class's drop releases the handles its fields hold and nothing else (ADR 0071
+// A4); a struct's drops each field its type needs a drop for. A moved field gets a flag
+// only if this holds. Mirrors the oracle's `field_drops`.
+fn cg_field_drops(c: &mut TyCtx, bty: i64, fty: i64) -> bool {
+    if class_of_handle(c, bty) >= 0 {
+        let mut seen: Vec<i64> = vec_new();
+        cg_holds_handle(c, fty, &mut seen)
+    } else {
+        cg_needs_drop(c, fty)
+    }
+}
+
 // (ADR 0071 D2 amendment A4) does a value of type `ty` hold a `Shared` / `Mutex` handle a
 // class drop releases — the handle itself, or one in a field at any depth through struct,
 // generic-instance and class fields, `secret`-qualified or not? Nothing else is walked: an array, a `Vec`, a nullable's
@@ -1763,9 +1779,10 @@ fn cg_holds_handle(c: &mut TyCtx, ty: i64, seen: &mut Vec<i64>) -> bool {
 // (ADR 0071 D2 amendment A4) release each `Shared` / `Mutex` handle a value of type `ty` at
 // `slot` holds — the handle itself, or one in a field at any depth through struct,
 // generic-instance and class fields, `secret`-qualified or not — and nothing else
-// (`cg_holds_handle` says why). A class drop is this walk. `vid` is the class binding being dropped, whose partially-moved
-// fields are skipped (ADR 0046), and -1 for every nested walk; `seen` holds the aggregate
-// types on the path. Mirrors the oracle's `emit_handle_drops`, byte for byte.
+// (`cg_holds_handle` says why). A class drop is this walk. `vid` is the class binding
+// being dropped, whose partially-moved fields are released only behind their moved flags
+// (ADR 0077 D5), and -1 for every nested walk; `seen` holds the aggregate types on the
+// path. Mirrors the oracle's `emit_handle_drops`, byte for byte.
 fn cg_emit_handle_drops(c: &mut TyCtx, ty: i64, slot: i64, vid: i64, seen: &mut Vec<i64>) -> i64 {
     let inner: i64 = strip_secret(c, ty);
     if inner != ty {
@@ -1827,7 +1844,15 @@ fn cg_emit_handle_drops(c: &mut TyCtx, ty: i64, slot: i64, vid: i64, seen: &mut 
                     } else {
                         eraw
                     };
-                    let eskip: bool = if vid >= 0 {
+                    // (ADR 0046 / ADR 0077 D5) as the struct walk: a top-level field with a
+                    // flag is released only when the flag says it was not taken; a move of it
+                    // already walked with no flag skips it; otherwise it is released (D2).
+                    let eflag: bool = if vid >= 0 {
+                        cg_has_flag(c, vid, efidx)
+                    } else {
+                        false
+                    };
+                    let eskip: bool = if vid >= 0 && !eflag {
                         cg_is_field_moved(c, (*c).curfn, vid, efidx)
                     } else {
                         false
@@ -1835,6 +1860,11 @@ fn cg_emit_handle_drops(c: &mut TyCtx, ty: i64, slot: i64, vid: i64, seen: &mut 
                     if eskip {
                         0
                     } else if cg_holds_handle(c, eft, seen) {
+                        let esb: i64 = if eflag {
+                            cg_open_flag_guard(c, vid, efidx)
+                        } else {
+                            0 - 1
+                        };
                         let efp: i64 = cg_dst(c);
                         if esid >= 0 {
                             cgo_str(c, "getelementptr %Struct.");
@@ -1856,7 +1886,12 @@ fn cg_emit_handle_drops(c: &mut TyCtx, ty: i64, slot: i64, vid: i64, seen: &mut 
                         cgo_str(c, ", i32 0, i32 ");
                         cgo_int(c, efidx);
                         cg_putc(c, '\n');
-                        cg_emit_handle_drops(c, eft, efp, 0 - 1, seen)
+                        cg_emit_handle_drops(c, eft, efp, 0 - 1, seen);
+                        if eflag {
+                            cg_close_flag_guard(c, vid, efidx, esb)
+                        } else {
+                            0
+                        }
                     } else {
                         0
                     };
@@ -2004,10 +2039,17 @@ fn cg_emit_drop(c: &mut TyCtx, ty: i64, slot: i64, vid: i64) -> i64 {
             while si < snf {
                 if (*c).fldo[si] == ssid {
                     let sft: i64 = (*c).fldty[si];
-                    // (ADR 0046) skip a field consumed by value (partial move) — the
-                    // consumer owns + freed it; dropping it here double-frees. Only at the
-                    // top level of a partially-moved binding (`vid >= 0`).
-                    let sskip: bool = if vid >= 0 {
+                    // (ADR 0046 / ADR 0077 D5) a field consumed by value (partial move) is
+                    // owned + freed by the consumer: with a flag it is dropped only when the
+                    // flag says it was not taken on this path; a move of it already walked
+                    // with no flag skips it; otherwise it is dropped (D2). Only at the top
+                    // level of a partially-moved binding (`vid >= 0`).
+                    let sflag: bool = if vid >= 0 {
+                        cg_has_flag(c, vid, fidx)
+                    } else {
+                        false
+                    };
+                    let sskip: bool = if vid >= 0 && !sflag {
                         cg_is_field_moved(c, (*c).curfn, vid, fidx)
                     } else {
                         false
@@ -2016,6 +2058,11 @@ fn cg_emit_drop(c: &mut TyCtx, ty: i64, slot: i64, vid: i64) -> i64 {
                         if sskip {
                             0
                         } else {
+                            let ssb: i64 = if sflag {
+                                cg_open_flag_guard(c, vid, fidx)
+                            } else {
+                                0 - 1
+                            };
                             let sfp: i64 = cg_dst(c);
                             cgo_str(c, "getelementptr %Struct.");
                             cgo_int(c, ssid);
@@ -2025,7 +2072,12 @@ fn cg_emit_drop(c: &mut TyCtx, ty: i64, slot: i64, vid: i64) -> i64 {
                             cgo_int(c, fidx);
                             cg_putc(c, '\n');
                             cg_emit_drop(c, sft, sfp, 0 - 1);
-                            0
+                            if sflag {
+                                cg_close_flag_guard(c, vid, fidx, ssb);
+                                0
+                            } else {
+                                0
+                            }
                         }
                     } else {
                         0
@@ -2104,7 +2156,13 @@ fn cg_emit_drop(c: &mut TyCtx, ty: i64, slot: i64, vid: i64) -> i64 {
                             // (ADR 0046) same partial-move skip as the plain-struct arm —
                             // the oracle drops `Struct | GenericInstance` through the same
                             // `emit_drop_struct_fields(…, moved_fields)`.
-                            let dgskip: bool = if vid >= 0 {
+                            // (ADR 0077 D5) and the same flag guard.
+                            let dgflag: bool = if vid >= 0 {
+                                cg_has_flag(c, vid, dgfidx)
+                            } else {
+                                false
+                            };
+                            let dgskip: bool = if vid >= 0 && !dgflag {
                                 cg_is_field_moved(c, (*c).curfn, vid, dgfidx)
                             } else {
                                 false
@@ -2113,6 +2171,11 @@ fn cg_emit_drop(c: &mut TyCtx, ty: i64, slot: i64, vid: i64) -> i64 {
                                 if dgskip {
                                     0
                                 } else {
+                                    let dgsb: i64 = if dgflag {
+                                        cg_open_flag_guard(c, vid, dgfidx)
+                                    } else {
+                                        0 - 1
+                                    };
                                     let dgfp: i64 = cg_dst(c);
                                     cgo_str(c, "getelementptr %");
                                     let mut dgmb: Vec<u8> = vec_new();
@@ -2124,7 +2187,12 @@ fn cg_emit_drop(c: &mut TyCtx, ty: i64, slot: i64, vid: i64) -> i64 {
                                     cgo_int(c, dgfidx);
                                     cg_putc(c, '\n');
                                     cg_emit_drop(c, dgch, dgfp, 0 - 1);
-                                    0
+                                    if dgflag {
+                                        cg_close_flag_guard(c, vid, dgfidx, dgsb);
+                                        0
+                                    } else {
+                                        0
+                                    }
                                 }
                             } else {
                                 0
@@ -2141,7 +2209,8 @@ fn cg_emit_drop(c: &mut TyCtx, ty: i64, slot: i64, vid: i64) -> i64 {
                     // (ADR 0071 D2 amendment A4) a class releases the handles its fields hold,
                     // at any depth through struct, generic-instance and class fields, and
                     // frees nothing else (register D137); a field the binding was partially
-                    // moved out of is skipped. Mirrors the oracle's Class arm.
+                    // moved out of is released only behind its moved flag (ADR 0077 D5).
+                    // Mirrors the oracle's Class arm.
                     let mut kseen: Vec<i64> = vec_new();
                     cg_emit_handle_drops(c, ty, slot, vid, &mut kseen)
                 } else {
@@ -2152,21 +2221,185 @@ fn cg_emit_drop(c: &mut TyCtx, ty: i64, slot: i64, vid: i64) -> i64 {
     }
 }
 
+// (ADR 0077 D3/D5) does the current define have a flag for binding `vid` (`f` = -1) or
+// for its field `f`?
+fn cg_has_flag(c: &mut TyCtx, vid: i64, f: i64) -> bool {
+    let n: i64 = len((*c).cgfl_v);
+    let mut i: i64 = 0;
+    let mut hit: bool = false;
+    while i < n {
+        if (*c).cgfl_v[i] == vid && (*c).cgfl_f[i] == f {
+            hit = true;
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    hit
+}
+
+// (ADR 0077 D6) does it have any flag of binding `vid`, whole or field?
+fn cg_has_any_flag(c: &mut TyCtx, vid: i64) -> bool {
+    let n: i64 = len((*c).cgfl_v);
+    let mut i: i64 = 0;
+    let mut hit: bool = false;
+    while i < n {
+        if (*c).cgfl_v[i] == vid {
+            hit = true;
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    hit
+}
+
+// (ADR 0077 D3) is `vid` in an open scope frame (the drop pool), so a drop site can drop
+// it? Mirrors the oracle's `flaggable` frame test.
+fn cg_is_framed(c: &mut TyCtx, vid: i64) -> bool {
+    let n: i64 = len((*c).cgdv);
+    let mut i: i64 = 0;
+    let mut hit: bool = false;
+    while i < n {
+        if (*c).cgdv[i] == vid {
+            hit = true;
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    hit
+}
+
+// (ADR 0077) the flag of binding `vid` (`f` = -1) or of its field `f`: `%mf<n>`, `n`
+// its place in the define's flag list, which is the order this walk first needed each
+// flag -- the oracle's numbering. (A VarId would not do: a replayed arm remainder is
+// re-parsed here, and its bindings get fresh ones.)
+fn cg_put_flag(c: &mut TyCtx, vid: i64, f: i64) -> i64 {
+    let n: i64 = len((*c).cgfl_v);
+    let mut i: i64 = 0;
+    let mut at: i64 = 0 - 1;
+    while i < n {
+        if at < 0 && (*c).cgfl_v[i] == vid && (*c).cgfl_f[i] == f {
+            at = i;
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    cgo_str(c, "%mf");
+    cgo_int(c, at)
+}
+
+// (ADR 0077 D3/D4/D5) a read that moves binding `vid` (`f` = -1) or its field `f`, just
+// emitted: if a drop site can drop what it moved (the binding is framed, and `drops`: the
+// binding's type needs a drop, or for a field `cg_field_drops`), give it a flag in this
+// define and set it. Called where `record_move` / `record_field_move` already ran, right
+// after the read's load. Mirrors the oracle's `note_move` / `note_field_move`.
+fn cg_note_move(c: &mut TyCtx, vid: i64, f: i64, drops: bool) -> i64 {
+    if cg_is_framed(c, vid) && drops {
+        if cg_has_flag(c, vid, f) {
+            0
+        } else {
+            push(&mut (*c).cgfl_v, vid);
+            push(&mut (*c).cgfl_f, f);
+            0
+        };
+        cgo_str(c, "  store i1 true, ptr ");
+        cg_put_flag(c, vid, f);
+        cg_putc(c, '\n');
+        0
+    } else {
+        0
+    }
+}
+
+// (ADR 0077 D3) the define's flags, after its hoisted allocas: each `alloca i1` and its
+// `false` store, in the order the walk made them -- the oracle's `flag_prologue`.
+fn cg_emit_flags(c: &mut TyCtx) -> i64 {
+    let n: i64 = len((*c).cgfl_v);
+    let mut i: i64 = 0;
+    while i < n {
+        cgo_str(c, "  %mf");
+        cgo_int(c, i);
+        cgo_str(c, " = alloca i1\n  store i1 false, ptr %mf");
+        cgo_int(c, i);
+        cg_putc(c, '\n');
+        i = i + 1;
+    }
+    0
+}
+
+// (ADR 0077 D3) test flag `vid`/`f`; continue in a block that runs only when it is
+// `false`. Answers the block the guard rejoins at. Mirrors the oracle's guard.
+fn cg_open_flag_guard(c: &mut TyCtx, vid: i64, f: i64) -> i64 {
+    let l: i64 = cg_dst(c);
+    cgo_str(c, "load i1, ptr ");
+    cg_put_flag(c, vid, f);
+    cg_putc(c, '\n');
+    let db: i64 = cg_fresh_block(c);
+    let sb: i64 = cg_fresh_block(c);
+    cgo_str(c, "  br i1 %v");
+    cgo_int(c, l);
+    cgo_str(c, ", label %bb");
+    cgo_int(c, sb);
+    cgo_str(c, ", label %bb");
+    cgo_int(c, db);
+    cg_putc(c, '\n');
+    cgo_str(c, "bb");
+    cgo_int(c, db);
+    cgo_str(c, ":\n");
+    sb
+}
+
+// (ADR 0077 D3) close `cg_open_flag_guard`'s block and store the flag back `false`,
+// which re-arms it for the next entry into the binding's scope.
+fn cg_close_flag_guard(c: &mut TyCtx, vid: i64, f: i64, sb: i64) -> i64 {
+    cgo_str(c, "  br label %bb");
+    cgo_int(c, sb);
+    cg_putc(c, '\n');
+    cgo_str(c, "bb");
+    cgo_int(c, sb);
+    cgo_str(c, ":\n  store i1 false, ptr ");
+    cg_put_flag(c, vid, f);
+    cg_putc(c, '\n');
+    0
+}
+
+// (ADR 0077) one drop site of binding `vid` (type `ty`, slot `slot`): at a frame's exit,
+// at a drain, or (D6) before an assignment overwrites it. With a flag, the drop runs only
+// when the flag is `false` (D3); a move already walked of a binding with no flag (its type
+// needs no drop) is skipped, as every moved binding was before ADR 0077; otherwise the
+// binding is dropped (D2: no move of it walked yet). Mirrors the oracle's
+// `emit_binding_drop`.
+fn cg_binding_drop(c: &mut TyCtx, vid: i64, ty: i64, slot: i64) -> i64 {
+    if cg_has_flag(c, vid, 0 - 1) {
+        let sb: i64 = cg_open_flag_guard(c, vid, 0 - 1);
+        cg_emit_drop(c, ty, slot, vid);
+        cg_close_flag_guard(c, vid, 0 - 1, sb)
+    } else if cg_is_moved(c, (*c).curfn, vid) {
+        0
+    } else {
+        cg_emit_drop(c, ty, slot, vid)
+    }
+}
+
 // (8d-drops) free the top scope frame [mark..]: the un-moved heap-backed bindings in
 // REVERSE declaration order, then truncate the pools back to `mark`. Called at each
 // block's exit (body-block + nested blocks via the Block arm; the param frame in
 // `type_fn`). Frames nest LIFO via the recursive walk, so `mark` is a local — no stack.
+// (ADR 0077) each binding through `cg_binding_drop`.
 fn cg_drop_frame(c: &mut TyCtx, mark: i64) -> i64 {
     let mut i: i64 = len((*c).cgdv) - 1;
     while i >= mark {
         let vid: i64 = (*c).cgdv[i];
         let ty: i64 = (*c).cgdt[i];
         let slot: i64 = (*c).cgds[i];
-        if cg_is_moved(c, (*c).curfn, vid) {
-            0
-        } else {
-            cg_emit_drop(c, ty, slot, vid)
-        };
+        cg_binding_drop(c, vid, ty, slot);
         i = i - 1;
     }
     while len((*c).cgdv) > mark {
@@ -2189,11 +2422,7 @@ fn cg_drop_range(c: &mut TyCtx, floor: i64) -> i64 {
         let vid: i64 = (*c).cgdv[i];
         let ty: i64 = (*c).cgdt[i];
         let slot: i64 = (*c).cgds[i];
-        if cg_is_moved(c, (*c).curfn, vid) {
-            0
-        } else {
-            cg_emit_drop(c, ty, slot, vid)
-        };
+        cg_binding_drop(c, vid, ty, slot);
         i = i - 1;
     }
     0

@@ -122,7 +122,11 @@ The Polonius migration **does not change**:
     `TypedProgram` and returns `(DropPlan, Vec<BorrowError>)`.
     Polonius is an *internal* reformulation of the analysis.
   - Codegen — entirely unaffected. The `DropPlan` consumer doesn't
-    care how the moved-source set was computed.
+    care how the moved-source set was computed. (Amended by
+    [ADR 0077](0077-drop-flags-for-maybe-moved-bindings.md), 2026-10-05: codegen no longer decides drops
+    from that set; it decides them from the move sites the plan now
+    carries beside it, so a path-sensitive analysis would still leave
+    codegen unaffected, but through the sites.)
 
 ### D3. Adopt polonius-engine; don't reinvent.
 

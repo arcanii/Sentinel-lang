@@ -73,7 +73,9 @@ fn borrow_dump_array_move() {
 #[test]
 fn borrow_dump_conservative_if_branch_merge() {
     // `pick` moves `p` (#1) in the then-branch and `q` (#2) in the else-branch — the
-    // analysis is conservative (moved in EITHER branch → included), so both appear.
+    // analysis is conservative (moved in EITHER branch → included), so both appear. The
+    // set no longer decides a drop on its own: since ADR 0077 each drop site decides by
+    // walk order and the binding's moved flag, and the dump shows the whole-fn set.
     // `main`'s struct-lit args are temporaries (not bindings), and `r.x` is a field
     // read → `main` has no moved sources.
     assert_eq!(

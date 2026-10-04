@@ -161,7 +161,9 @@ tooling. **P4** = outreach + deferred ergonomics.
   `UseAfterMove` keyed on the field path for reads of moved fields;
   `DropPlan` statically skips moved fields (static rewrite preferred
   over dynamic drop flags — matches the doc; dynamic flags only if
-  conditional moves force them). Sequence inside the slice:
+  conditional moves force them). (2026-10-05: they did — ADR 0077
+  adds run-time moved flags; its D11 would drop the tests where a
+  binding is moved on every path.) Sequence inside the slice:
   1. ADR PROPOSED (decision detail: projection depth, `match`
      bindings interaction, Vec/String fields, arrays of Move values).
   2. Implement in Rust `snc` (the oracle) + UB-shape fixtures: the

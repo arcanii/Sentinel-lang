@@ -483,7 +483,10 @@ Settled with the owner (as 5/N–7/N were), recommendations grounded in the scou
       `Var` is already recorded as a move → `{tail-returned} ⊆ {moved}`. Skipping `moved` alone gives
       the identical drop set with no `&enum`-peek (which Sentinel can't do). The Sentinel's move set
       (`mvf`/`mvv`) was already proven == the oracle's `DropPlan` in the (6/N) borrow slice, so
-      `cg_is_moved` ⟺ `moved_sources_for`. Validated: `c24_moved_array_no_double_free` /
+      `cg_is_moved` ⟺ `moved_sources_for`. (Amended by [ADR 0077](0077-drop-flags-for-maybe-moved-bindings.md), 2026-10-05: the
+      drop decision is now a moved flag, set where `record_move` runs and tested at each drop
+      site after the first move; `cg_is_moved` survives only for a binding with no flag.)
+      Validated: `c24_moved_array_no_double_free` /
       `c23_array_move` (recursive move) → exit-correct, 0 leaks, no double-free.
   - **Two-frame fn structure.** A fn has scope-0 (params) + scope-1 (the body block); body-frame
     drops fire first, then param-frame drops, before `ret` — so a `[u8]` param of a non-consuming

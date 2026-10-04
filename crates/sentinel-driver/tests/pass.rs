@@ -704,9 +704,9 @@ fn pass_c24_array_dropped() {
 
 #[test]
 fn pass_c24_moved_array_no_double_free() {
-    // arr moved into consume(arr); the borrow checker records
-    // arr in moved_sources, so codegen skips arr's drop at
-    // main's scope exit. consume drops xs (its param) instead.
+    // arr moved into consume(arr); the move sets arr's moved
+    // flag, so main's scope-exit drop, which tests it (ADR 0077),
+    // does not run. consume drops xs (its param) instead.
     // No double-free. 11+22+33 = 66.
     assert_eq!(run_exit("c24_moved_array_no_double_free.sentinel"), 66);
 }
@@ -1934,6 +1934,68 @@ fn pass_c75_remainder_capture_types() {
     // taken at run time and only its emitted form is under test, through the differential).
     // Both captures follow an arm that binds a `bool`. Exit = 42.
     assert_eq!(run_exit("c75_remainder_capture_types.sentinel"), 42);
+}
+
+#[test]
+fn pass_c77_maybe_moved_joins() {
+    // ADR 0077 D3/D5: a binding moved in one arm of an `if` or a `match`, or in the
+    // right-hand side of `&&` / `||`, and an ADR 0046 field moved on one path (and the whole
+    // binding on another), is dropped at its scope's end on the paths that did not move it,
+    // under its moved flag. Each fn runs every path; a missing drop leaks (measured by peak
+    // memory, not by this exit code) and a second drop on a moving path double-frees.
+    // 5 a round at n < 0, 2000 rounds: 10000 → exit 42.
+    assert_eq!(run_exit("c77_maybe_moved_joins.sentinel"), 42);
+}
+
+#[test]
+fn pass_c77_exits_before_and_after_a_move() {
+    // ADR 0077 D2/D3 at the drains: a `return`, `break` or `continue` before a binding's
+    // first move drops it unconditionally, and one after a join drops it under its flag
+    // (registers D64 and D93). 11 a round, 2000 rounds → exit 42.
+    assert_eq!(run_exit("c77_exits_before_and_after_a_move.sentinel"), 42);
+}
+
+#[test]
+fn pass_c77_arm_remainders() {
+    // ADR 0077 in a handler arm whose `k(1)` bubbles (ADR 0075 D6): the bubble drops a binding
+    // whose only move lies in the replayed remainder (D2), and a replayed remainder that moves
+    // a binding on one path only drops it under a flag of its own resumer's. 38 a round, 1000
+    // rounds → exit 42.
+    assert_eq!(run_exit("c77_arm_remainders.sentinel"), 42);
+}
+
+#[test]
+fn pass_c77_assign_after_a_move() {
+    // ADR 0077 D6: `x = e` into a binding with a moved flag drops the old value unless it was
+    // moved and stores the flag back `false`, so the new value is dropped at the scope's end
+    // on every path. 2 a round, 2000 rounds → exit 42.
+    assert_eq!(run_exit("c77_assign_after_a_move.sentinel"), 42);
+}
+
+#[test]
+fn pass_c77_guard_moved_on_one_branch() {
+    // ADR 0077 D7, register D22: a `?Guard` moved on one branch is unlocked at its scope's end
+    // on the other, so a later `lock` of the same mutex succeeds; a loop moving its guard on
+    // alternate iterations relocks on every one, which a flag not stored back `false` would
+    // break. 1 + 0 + 40 + 4 - 3 → exit 42.
+    assert_eq!(run_exit("c77_guard_moved_on_one_branch.sentinel"), 42);
+}
+
+#[test]
+fn pass_c77_return_in_an_index_place() {
+    // ADR 0077 D2 by each back end's own emission order: `a[i] = consume(v)` with a `return`
+    // in the index is place-first in the oracle and `scg` (the drain precedes the move) and
+    // value-first in inkwell (it follows it), and each drops `v` correctly by its own order.
+    // 8 a round, 2000 rounds → exit 42.
+    assert_eq!(run_exit("c77_return_in_an_index_place.sentinel"), 42);
+}
+
+#[test]
+fn pass_c77_reference_out_of_a_join() {
+    // ADR 0077: a maybe-moved binding is dropped at its scope's end, not on the edge that did
+    // not move it — a reference into it leaves that arm through the `if`'s value and is read
+    // after the join. 47 a round, 1000 rounds → exit 42.
+    assert_eq!(run_exit("c77_reference_out_of_a_join.sentinel"), 42);
 }
 
 #[test]

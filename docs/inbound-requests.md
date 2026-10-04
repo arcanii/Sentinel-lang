@@ -113,11 +113,13 @@ not merely with each other), rejects a single flipped ciphertext bit with an emp
 and opens twice from one key binding.
 ⚠ **The review found a blocker in the first cut and it is worth telling them about**: the
 by-value `key`/`nonce` signature leaked ~80 bytes per REFUSED open — unbounded and paced by
-the attacker — because Sentinel attaches a Move's drop to the move SITE, and the params were
-consumed only on the accept arm. Measured 100k refusals 16.30 MB → 800k 70.20 MB, against a
+the attacker — because Sentinel attached a Move's drop to the move SITE, and the params were
+consumed only on the accept arm. (Since ADR 0077, 2026-10-05, the refused arm drops them at
+scope exit under a moved flag, and the by-value shape measures flat.) Measured 100k refusals 16.30 MB → 800k 70.20 MB, against a
 flat accept path. Borrowing the key removed it (now 9.16 → 9.09 MB, flat) and also fixed a
 second defect the same signature caused: a caller could not open two records from one key.
-**If they wrote their own open against the by-value shape, they have the same leak.**
+**If they wrote their own open against the by-value shape, it leaked the same way until ADR
+0077; borrowing remains the better signature.**
 
 ### Standing notes
 

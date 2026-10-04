@@ -1,0 +1,80 @@
+// ADR 0077 D2 and D3 at the drains. A `return`, `break` or `continue` reached before a
+// binding's move drops it unconditionally (D2): no move of it has run on that path. One
+// reached after a join where the binding may or may not have been moved drops it under its
+// flag (D3). Before, both skipped every binding moved anywhere in the function, so each
+// leaked (register D64 for the first shape, D93 at the drains).
+
+fn consume(v: [i64]) -> i64 { v[0] }
+
+// `return` before the move
+fn ret_first(n: i64) -> i64 {
+    let v: [i64] = [1, 2, 3, 4];
+    if n >= 0 { return 0 } else { 0 };
+    consume(v)
+}
+
+// a `return` after a join: moved or not, independently of whether it returns
+fn ret_after_join(n: i64, m: i64) -> i64 {
+    let v: [i64] = [1, 2, 3, 4];
+    let r: i64 = if n < 0 { consume(v) } else { 0 };
+    if m >= 0 { return r } else { 0 };
+    r + 1
+}
+
+// `continue` before the move, and a binding moved on some iterations only
+fn loops() -> i64 {
+    let mut j: i64 = 0;
+    let mut acc: i64 = 0;
+    while j < 4 {
+        let v: [i64] = [1, 2, 3, 4];
+        let w: [i64] = [1, 2];
+        j = j + 1;
+        if j == 2 { continue; 0 } else { 0 };
+        if j == 4 { acc = acc + consume(w); 0 } else { 0 };
+        acc = acc + consume(v);
+    }
+    acc
+}
+
+// `break` before the move: on the iteration it leaves, `v` is not moved yet
+fn break_first(n: i64) -> i64 {
+    let mut j: i64 = 0;
+    let mut acc: i64 = 0;
+    while j < 3 {
+        let v: [i64] = [1, 2, 3, 4];
+        j = j + 1;
+        if j == n { break; 0 } else { 0 };
+        acc = acc + consume(v);
+    }
+    acc
+}
+
+// `break` after a move on one path
+fn breaks() -> i64 {
+    let mut j: i64 = 0;
+    let mut acc: i64 = 0;
+    while j < 4 {
+        let v: [i64] = [1, 2, 3, 4];
+        j = j + 1;
+        let r: i64 = if j == 1 { consume(v) } else { 0 };
+        acc = acc + r;
+        if j == 3 { break; 0 } else { 0 };
+    }
+    acc
+}
+
+fn main() -> i64 {
+    let mut i: i64 = 0;
+    let mut acc: i64 = 0;
+    while i < 2000 {
+        // 0 + 1 + 1 (moved, returned) + 0 + 2 (moved, falls through: 1 + 1) + 1 (not
+        // moved, falls through: 0 + 1) + 4 + 1 + 0 (breaks before any move) + 1
+        acc = acc + ret_first(1) + ret_first(0 - 1)
+            + ret_after_join(0 - 1, 0) + ret_after_join(1, 0)
+            + ret_after_join(0 - 1, 0 - 1) + ret_after_join(1, 0 - 1)
+            + loops() + breaks() + break_first(1) + break_first(2);
+        i = i + 1;
+    }
+    // a round: 0 + 1 + 1 + 0 + 2 + 1 + 4 + 1 + 0 + 1 = 11
+    if acc == 22000 { 42 } else { 1 }
+}

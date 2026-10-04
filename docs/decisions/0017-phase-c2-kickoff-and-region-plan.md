@@ -337,6 +337,11 @@ RAII drop tied to lexical region exit:
   - Move semantics (D9 below) interact with drop: a moved-from
     value is not dropped at its original scope's exit because it
     was moved (state-tracked in the borrow checker).
+    **Amended by [ADR 0077](0077-drop-flags-for-maybe-moved-bindings.md) (2026-10-05):** "moved" is
+    decided per path. A binding moved on some paths only was never
+    dropped on any; it is now dropped at each exit on the paths that
+    did not move it — unconditionally before its first move in the
+    emitted code, and after it under a run-time flag set at the move.
 
 The `sentinel_free(ptr: ptr) -> void` runtime symbol:
 

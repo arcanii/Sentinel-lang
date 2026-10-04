@@ -1258,20 +1258,21 @@ fn dump_te_field(out: &mut Vec<u8>, ft: Expr, fdn: [u8], exp: i64, src: &[u8], c
             // compound target can leak its inner Var up. (ADR 0046 A4) For a NESTED path the
             // leak recorded the wrong struct's field: in `s.i.a` the target `s.i` left `mvbv`
             // at `s`, and `a`'s index was recorded as a field of `s`. The oracle records
-            // nothing there (`if let Var(base) = &target`), and `snc` now refuses the move, so
-            // a target that is itself a field access records nothing: `lastfld` is the node
-            // number of the last COMPLETED field access, and the target's node is `fd_n0 + 1`.
-            // Other compound targets keep `mvbv`, as before.
-            let fd_self: i64 = (*c).ndump;
+            // nothing there (`if let Var(base) = &target`), and `snc` now refuses the move.
+            // (ADR 0077) Nor for any other compound target: `{ s }.a` and
+            // `(if c { s } else { t }).a` move `s` (or `t`) whole, and recording a field of it
+            // as well made a flag that elided a drop the oracle emits. So only a LEAF target
+            // is a field's base: dumping it entered exactly one node, `fd_n0 + 1` (register
+            // D31's test).
             let fd_n0: i64 = (*c).ndump;
             let tty: i64 = dump_texpr(out, ft, 0 - 1, src, c, gb);
             // (ADR 0071 D2 amendment A1) whether the target read out of a place; this node's
             // own answer follows from it (set at the end).
             let fd_tpl: bool = (*c).cg_place;
-            let base_vid: i64 = if (*c).lastfld == fd_n0 + 1 {
-                0 - 1
-            } else {
+            let base_vid: i64 = if (*c).ndump == fd_n0 + 1 {
                 (*c).mvbv
+            } else {
+                0 - 1
             };
             let frecv: i64 = if mir_on(c) {
                 (*c).lastval
@@ -1376,17 +1377,10 @@ fn dump_te_field(out: &mut Vec<u8>, ft: Expr, fdn: [u8], exp: i64, src: &[u8], c
             // non-consuming receiver read (no record). `fty` is the SUBSTITUTED field type
             // (= the oracle's `expr.ty`), so `p.first` where `p: Pair<A,B>` sees the
             // type-param `A` (Move). Mirrors the consuming-walk FieldAccess arm.
-            if svc {
-                if base_vid >= 0 {
-                    if is_move_type(c, fty) {
-                        record_field_move(c, base_vid, fidx);
-                        0
-                    } else {
-                        0
-                    }
-                } else {
-                    0
-                }
+            let fmoved: bool = svc && base_vid >= 0 && is_move_type(c, fty);
+            if fmoved {
+                record_field_move(c, base_vid, fidx);
+                0
             } else {
                 0
             };
@@ -1511,7 +1505,16 @@ fn dump_te_field(out: &mut Vec<u8>, ft: Expr, fdn: [u8], exp: i64, src: &[u8], c
             } else {
                 0
             };
-            (*c).lastfld = fd_self;
+            // (ADR 0077 D5) a read that moves an ADR 0046 field sets the field's flag, right
+            // after its `extractvalue`, as the oracle's `note_field_move`.
+            if cg_on(c) && fmoved && !(*c).cg_suppress && (*c).curfn >= 0 {
+                let fbty: i64 = env_get(c, base_vid);
+                let fdrops: bool = cg_field_drops(c, fbty, fty);
+                cg_note_move(c, base_vid, fidx, fdrops);
+                0
+            } else {
+                0
+            };
             // (ADR 0071 D2 amendment A1) a field path reads out of a place iff its target
             // does (the oracle's `is_place_read`).
             (*c).cg_placen = fd_tpl;

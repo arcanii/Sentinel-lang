@@ -128,15 +128,13 @@ fn main() -> i64 ! { Subprocess } {
     // Neither is `Guard<T>`; it arrives wrapped, as `lock`'s `?Guard<i64>`, so the
     // tag that gets exercised is the composed `opt_guard_i64`.
     //
-    // ⚠ THE CONDITION HERE MUST STAY `is_some(g)` — do not copy this shape with any
-    // other condition. Moving a `?Guard` into a call is the one way it leaves its
-    // `let`, and the scope-exit unlock is then emitted ONLY on the branch that moved
-    // it. That is sound here and only here, because the `else` arm is by construction
-    // the null-guard arm, where no lock was ever acquired. Swap in an unrelated
-    // condition and the borrow checker still accepts the program while the `else`
-    // path holds a lock that is never released — a real leak from safe source,
-    // PRE-EXISTING (a pre-A1 `scg` emits the identical unlock structure) and part of
-    // ADR 0071's deferred no-escape tail. Registered as D22.
+    // Moving a `?Guard` into a call is one way it leaves its `let` (a block temporary,
+    // `{ g }`, is another, and still strands the lock: register D122). Its scope-exit
+    // unlock runs on the branch that did not move it, under its moved flag (ADR 0077
+    // D7). Before that, a guard moved on any branch was unlocked on none (register
+    // D22), and this condition had to stay `is_some(g)`, whose `else` arm holds no
+    // lock; for a guard moved into a call any condition is sound now, and
+    // `c77_guard_moved_on_one_branch` pins one that is not `is_some`.
     let mx: Mutex<i64> = mutex_new(2);
     let g = lock(mx);
     let from_guard: i64 = if is_some(g) {
@@ -150,8 +148,7 @@ fn main() -> i64 ! { Subprocess } {
     // `guard_<elem>`'s element rather than merely its shape: `@idg__opt_guard_u8`.
     // Unreachable before D17 — a `u8` container value diverged for want of the width
     // conversion, so this binding would have pinned that bug instead of the tag.
-    // Contributes 0 so the trace arithmetic above is untouched. The `is_some` condition
-    // is load-bearing here for exactly the reason spelled out above; do not vary it.
+    // Contributes 0 so the trace arithmetic above is untouched.
     let mxu: Mutex<u8> = mutex_new(2 as u8);
     let gu = lock(mxu);
     let from_guard_u8: i64 = if is_some(gu) {

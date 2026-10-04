@@ -1,0 +1,43 @@
+// ADR 0077 D7 (register D22): a `?Guard` moved on one branch is unlocked at its scope's
+// end on the other. `take` owns the guard it is handed and unlocks it when it returns (it
+// is generic because `Guard` cannot be written; its instance at `?Guard<i64>` drops it);
+// on the branch that does not call it, `once`'s own scope exit unlocks it, under its
+// moved flag. Before, a binding moved on any path was never dropped, so `once(mx, false)`
+// returned still holding the lock, and the relock below failed.
+//
+// `in_a_loop` moves its guard on the first and third iterations only. The flag's drop
+// stores it back `false`, so the second iteration, which does not move, unlocks; without
+// the store-back, that guard would stay locked and the third iteration's `lock` fail.
+
+fn take<T>(g: T) -> i64 {
+    1
+}
+
+fn once(mx: Mutex<i64>, c: bool) -> i64 {
+    let g = lock(mx);
+    let r: i64 = if c { take(g) } else { 0 };
+    r
+}
+
+fn in_a_loop(mx: Mutex<i64>) -> i64 {
+    let mut j: i64 = 0;
+    let mut got: i64 = 0;
+    while j < 4 {
+        let g = lock(mx);
+        if is_some(g) { got = got + 1; 0 } else { 0 };
+        if j == 0 || j == 2 { take(g); 0 } else { 0 };
+        j = j + 1;
+    }
+    got
+}
+
+fn main() -> i64 {
+    let mx: Mutex<i64> = mutex_new(5);
+    let a: i64 = once(mx, true);
+    let b: i64 = once(mx, false);
+    let n: i64 = in_a_loop(mx);
+    let g2 = lock(mx);
+    let c: i64 = if is_some(g2) { 40 } else { 0 };
+    // 1 + 0 + 40, and each of the loop's four locks succeeds
+    a + b + c + n - 3
+}

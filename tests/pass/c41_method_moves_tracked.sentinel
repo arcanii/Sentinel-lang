@@ -25,10 +25,11 @@
 // `go`, `run` and the `Seeded` init can fail this exit code. `fresh` and the `Holder` init
 // were wrong only in the text oracle and scg, whose output this fixture never runs, and
 // `llvm-as` accepts the wrong frees; `llvm_method_moves_are_not_freed` in `tests/llvm.rs`
-// pins all five by asserting that none of these method bodies calls `sentinel_free`. The
-// codegen differential pins only that scg agrees with the oracle. (Since D153 inkwell drops
-// an init's parameter frame too, so a lost move record for the `Holder` init would make
-// inkwell free the param it stored.)
+// pins all five by asserting that no `sentinel_free` in these method bodies can run (since
+// ADR 0077 each sits behind a moved flag the body has just set). The codegen differential
+// pins only that scg agrees with the oracle. (Since D153 inkwell drops an init's parameter
+// frame too, so a lost move record for the `Holder` init would make inkwell free the param
+// it stored.)
 //
 // Exit 42 = every check held.
 

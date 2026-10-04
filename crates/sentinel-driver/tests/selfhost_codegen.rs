@@ -270,6 +270,38 @@ const SEEDS: &[&str] = &[
     // "Cannot allocate unsized type"); it holds `scg`'s walk, and where it stops, to the
     // oracle's. Remove it once D157's refusal exists.
     "struct S { k: K, n: i64 }\nclass K { let s: S; let h: Shared<i64>; pub init(s: S) { self.s = s; self.h = shared_new(1); 0 } }\nfn f(s: S) -> i64 { s.n }\nfn g(k: K) -> i64 { 1 }\nfn main() -> i64 { 7 }\n",
+    // ADR 0077: a `handle`'s `return` arm is emitted once per pure-drain site; the oracle walks
+    // one typed tree at each and `scg` re-parses the arm, so a binding the arm declares and
+    // moves must get its own flag in each copy in both (`%mf0`, `%mf1`).
+    "effect Io { read() -> i64; }\nfn consume(v: [i64]) -> i64 { v[0] }\nfn main() -> i64 { handle 40 with { Io.read(k) => k(1), return x => { let v: [i64] = [x, 2]; consume(v) + 2 } } }\n",
+    // ADR 0077 D5: a moved field its binding's drop does nothing with gets no flag. A
+    // compared `?Node` field in an `if` condition is a move site whose drop is empty, and so
+    // is a type parameter's field at a Copy instance; neither gets a flag in either back end.
+    "struct Node { val: i64 }\nstruct Holder { name: [u8], head: ?Node }\nfn main() -> i64 { let h: Holder = Holder { name: \"abc\", head: null }; if h.head == null { 42 } else { 0 } }\n",
+    "struct Pair<A, B> { first: A, second: B }\nfn take<T>(x: T) -> i64 { 1 }\nfn g<T>(p: Pair<T, [i64]>, n: i64) -> i64 { if n > 5 { take(p.first) } else { 42 } }\nfn main() -> i64 { let p: Pair<i64, [i64]> = Pair { first: 5, second: [1] }; g(p, 1) }\n",
+    // ADR 0077 D5: a moved field gets a flag only if its binding's drop does something with
+    // it -- a struct's drop drops a field its type needs a drop for, and a class's releases
+    // the handles its fields hold and nothing else. So none for a struct of scalars, a
+    // compared `?Node` in a `let`, an array moved out of a class, or a type parameter's field
+    // at a struct of scalars (whose numbering must not shift the whole binding's flag), and an
+    // assignment after such a move drops nothing; one for a `secret` struct holding a
+    // `Shared` moved out of a class.
+    "struct Pt { x: i64, y: i64 }\nstruct Bag { buf: [i64], pt: Pt }\nfn use_pt(p: Pt) -> i64 { p.x + p.y }\nfn main() -> i64 { let b: Bag = Bag { buf: [7, 8, 9], pt: Pt { x: 20, y: 22 } }; let r: i64 = use_pt(b.pt); r }\n",
+    "struct Node { val: i64 }\nstruct Holder { name: [u8], head: ?Node }\nfn main() -> i64 { let h: Holder = Holder { name: \"abc\", head: null }; let b: bool = h.head == null; if b { 42 } else { 0 } }\n",
+    "class C { let a: [i64]; let n: i64; pub init(a: [i64]) { self.a = a; self.n = 1; 0 } }\nfn consume(v: [i64]) -> i64 { v[0] }\nfn f(i: i64) -> i64 { let c: C = C::init([1, 2]); if i > 5 { consume(c.a) } else { 1 } }\nfn main() -> i64 { f(9) + f(1) + 40 }\n",
+    "struct P { x: i64 }\nstruct Pair<A, B> { first: A, second: B }\nfn take<T>(g: T) -> i64 { 1 }\nfn gp<A, B>(p: Pair<A, B>, n: i64) -> i64 { if n == 0 { take(p.first) } else { if n == 1 { take(p) } else { 1 } } }\nfn main() -> i64 { let p: Pair<P, [i64]> = Pair { first: P { x: 1 }, second: [1] }; gp(p, 0) + 41 }\n",
+    "struct P { x: i64 }\nstruct HQ { q: P, a: [i64] }\nfn eat_p(p: P) -> i64 { p.x }\nfn f(i: i64) -> i64 { let mut h: HQ = HQ { q: P { x: 1 }, a: [1, 2, 3, 4] }; let r: i64 = if i > 5 { eat_p(h.q) } else { 1 }; h = HQ { q: P { x: 2 }, a: [5, 6, 7, 8] }; r }\nfn main() -> i64 { f(9) + f(1) + 40 }\n",
+    "struct H { s: Shared<i64>, n: i64 }\nfn eat(h: secret H) -> i64 { 1 }\nclass C { let h: secret H; let z: i64; pub init(n: i64) { self.h = H { s: shared_new(n), n: n }; self.z = n; 0 } }\nfn f(i: i64) -> i64 { let c: C = C::init(40); if i > 5 { eat(c.h) } else { 0 } }\nfn main() -> i64 { f(9) + f(1) + 41 }\n",
+    // Parity where D6 does not fire: after a class moved an array out (no flag), after a
+    // compared `?Node` field (register D117's position) and after a type parameter's field at
+    // a Copy instance, an assignment drops no old value in either back end (register D120).
+    "fn consume(v: [i64]) -> i64 { v[0] }\nclass C { let a: [i64]; let h: Shared<i64>; pub init(n: i64) { self.a = [n, 2]; self.h = shared_new(n); 0 } }\nfn f(n: i64) -> i64 { let mut c: C = C::init(1); let r: i64 = if n > 0 { consume(c.a) } else { 1 }; c = C::init(2); r }\nfn main() -> i64 { f(1) + f(0) + 40 }\n",
+    "struct Node { val: i64 }\nstruct Holder { buf: [i64], head: ?Node }\nfn f(i: i64) -> i64 { let mut h: Holder = Holder { buf: [1, 2], head: null }; let r: i64 = if h.head == null { 1 } else { 0 }; h = Holder { buf: [5, 6], head: null }; r }\nfn main() -> i64 { f(1) + 41 }\n",
+    "struct Pair<A, B> { first: A, second: B }\nfn take_g<T>(x: T) -> i64 { 1 }\nfn mkp<A, B>(a: A, b: B) -> Pair<A, B> { Pair { first: a, second: b } }\nfn g<T>(x: T, y: T, n: i64) -> i64 { let mut s = mkp(x, [n, 2]); let r: i64 = if n > 0 { take_g(s.first) } else { 0 }; s = mkp(y, [n, 5]); r }\nfn main() -> i64 { g(1, 2, 1) + 41 }\n",
+    // A field of a compound target is not a field of a binding: `{ s }.a` moves `s` whole,
+    // and so does each arm of the `if`. No field flag, and neither binding's drop is elided.
+    "struct S { a: [i64], b: [i64] }\nfn consume(v: [i64]) -> i64 { v[0] }\nfn f(n: i64) -> i64 { let s: S = S { a: [40], b: [2] }; consume({ s }.a) }\nfn main() -> i64 { f(1) + 2 }\n",
+    "struct S { a: [i64], b: [i64] }\nfn consume(v: [i64]) -> i64 { v[0] }\nfn f(n: i64) -> i64 { let s: S = S { a: [40], b: [2] }; let t: S = S { a: [40], b: [3] }; consume((if n > 0 { s } else { t }).a) }\nfn main() -> i64 { f(1) + 2 }\n",
 ];
 
 #[test]

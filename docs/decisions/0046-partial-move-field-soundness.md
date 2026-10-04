@@ -64,13 +64,18 @@ A whole-binding move implicitly subsumes all field state (every field goes with 
 field index). Codegen's recursive struct-field drop (`emit_drop_struct_fields`) skips a
 field whose `(binding-VarId, field-index)` is in the set — so the consumer's drop is the
 only free. The whole-binding `moved_sources` path is unchanged (a fully-moved binding is
-skipped entirely; partial moves skip only the named fields).
+skipped entirely; partial moves skip only the named fields). **Amended by [ADR 0077](0077-drop-flags-for-maybe-moved-bindings.md)
+(2026-10-05, its D5):** a field's drop is decided per path, as a whole binding's is: dropped
+unconditionally before the field's first move in the emitted code, and after it only when the
+field's own flag is `false`; a binding moved whole on one path and by a field on another is
+exact on both.
 
 ### D4. Branch merging.
 
 A field moved in *either* arm of an `if/else` is conservatively Moved after the merge (the
 same rule the whole-binding move state already uses), so codegen never double-frees on
-either path. The partial-move *union* (for the DropPlan) grows monotonically within a fn
+either path. (Since [ADR 0077](0077-drop-flags-for-maybe-moved-bindings.md) codegen no longer skips it on both: the other path drops
+it under the field's flag.) The partial-move *union* (for the DropPlan) grows monotonically within a fn
 analysis and is never reset by the branch snapshot/restore.
 
 ### D5. Scope (MVP) + refinements.
@@ -148,7 +153,9 @@ patterns; no `&Expr` matching), and the existing "last resolved Var" channels
 `Var` arm — the mode-independent analogue of `cg_lastvid`. The FieldAccess arm reads it
 right after the (forced-non-consuming) target dump: `>= 0` iff the target was a directly-
 named binding. Verified exact (not merely conservative) by byte-identical borrow + codegen
-differentials over the whole corpus + the self-host fixed point.
+differentials over the whole corpus + the self-host fixed point. (Not for a compound target
+whose tail is a `Var`: `{ s }.a` left `mvbv` at `s` and recorded a field move of it, which
+no corpus program has. Since ADR 0077 a field's base is taken only from a leaf target.)
 
 **A3 — an existing fixture already exercised the path.** D6 (and the `snc` feat) stated the
 existing corpus was unaffected because "no current fixture consumes a Move-typed field."

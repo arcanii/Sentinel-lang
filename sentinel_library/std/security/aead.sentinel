@@ -250,9 +250,10 @@ pub struct AeadOpenResult { ok: i64, pt: [secret u8] }
 //      perform repeatedly with a long-lived key; a first draft of the example
 //      quietly built three identical key/nonce pairs to work around it, which is
 //      the smell that should have been read as a signature defect.
-//   2. THE FAILURE PATH LEAKED THE KEY. Sentinel attaches a Move's drop to the
-//      MOVE SITE, not to scope exit, so params consumed only inside the `good == 1`
-//      arm were freed on the accept path and stranded on the REFUSE path —
+//   2. THE FAILURE PATH LEAKED THE KEY. Sentinel then attached a Move's drop to
+//      the MOVE SITE, not to scope exit (ADR 0077 has since changed that), so params
+//      consumed only inside the `good == 1` arm were freed on the accept path and
+//      stranded on the REFUSE path —
 //      ~80 bytes of key and nonce per rejected open, unbounded and paced entirely
 //      by the attacker. Measured before the fix: 100k refusals 16.30 MB, 800k
 //      70.20 MB, perfectly linear, while the accept path stayed flat at 9.09 MB.

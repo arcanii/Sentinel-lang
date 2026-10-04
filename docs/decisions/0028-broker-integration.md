@@ -208,7 +208,10 @@ one arena reset.
 The borrow checker's `DropPlan` already separates, per function, the
 bindings that are **moved out** (escape their scope — `moved_sources_for`)
 from those **dropped at scope exit** (non-escaping; the ones codegen
-currently `sentinel_free`s). The non-escaping, scope-exit-freed bindings
+currently `sentinel_free`s). (Since [ADR 0077](0077-drop-flags-for-maybe-moved-bindings.md), 2026-10-05, a binding
+moved on some paths is also dropped at scope exit on the others, under a
+flag; arena routing still takes only bindings moved nowhere, so the arena
+never holds one of those.) The non-escaping, scope-exit-freed bindings
 are exactly the allocations safe to place in a per-scope **bump arena**
 that is reset on scope exit. So:
 

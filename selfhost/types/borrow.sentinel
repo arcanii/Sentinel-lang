@@ -312,7 +312,8 @@ fn dump_texpr_arm(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyC
             // non-`Var` target leaves -1).
             (*c).mvbv = vid;
             // (6/N) a Var in a consuming position moves it (if non-Copy).
-            if (*c).consuming {
+            let vmoved: bool = (*c).consuming;
+            if vmoved {
                 record_move(c, vid);
                 0
             } else {
@@ -368,6 +369,15 @@ fn dump_texpr_arm(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyC
                     } else {
                         let cgslot: i64 = cg_slot_get(c, vid);
                         cg_load(c, ty, cgslot);
+                        // (ADR 0077 D3/D4) a read that moves the binding sets its flag,
+                        // right after the load, as the oracle's `note_move`.
+                        if vmoved && (*c).curfn >= 0 && is_move_type(c, ty) {
+                            let nd: bool = cg_needs_drop(c, ty);
+                            cg_note_move(c, vid, 0 - 1, nd);
+                            0
+                        } else {
+                            0
+                        };
                         0
                     };
                     0
@@ -1374,8 +1384,9 @@ fn dump_texpr_arm(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyC
         //   still sees a secret divisor inside `return a / b`.
         //   CG (the byte-identical twin of `snc llvm`'s `llvm_dump` Return arm):
         //   evaluate the inner, drop EVERY live binding down to the fn floor
-        //   (`cg_drop_range` floor 0 = "break all the way out"; the moved set skips a
-        //   returned binding), release the kont of every handler arm it leaves (ADR 0074
+        //   (`cg_drop_range` floor 0 = "break all the way out"; a returned binding's read
+        //   is a move, so its moved flag, ADR 0077, skips it), release the kont of every
+        //   handler arm it leaves (ADR 0074
         //   D2), then `ret` with the epilogue ABI (`main` i64→i32;
         //   effecting → `sentinel_kont_pure`; ordinary → the value), then park a dead
         //   block for the now-unreachable remainder. The produced operand is a

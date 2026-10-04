@@ -577,6 +577,8 @@ fn cg_ar_drain(c: &mut TyCtx, src: &[u8], pcurfn: i64, gb: &mut Vec<u8>) -> i64 
             cg_putc(c, '\n');
             ai = ai + 1;
         }
+        // (ADR 0077 D3) the moved flags, after the allocas they sit with.
+        cg_emit_flags(c);
         let nb: i64 = len((*c).cgbody);
         let mut bi: i64 = 0;
         while bi < nb {
@@ -3232,6 +3234,8 @@ fn cg_emit_fn(c: &mut TyCtx, src: &[u8], name_s: i64, name_e: i64, rty: i64) -> 
         cg_putc(c, '\n');
         ai = ai + 1;
     }
+    // (ADR 0077 D3) the moved flags, after the allocas they sit with.
+    cg_emit_flags(c);
     // the buffered body (cgbody) — folded into cgout via the builtin push.
     let nb: i64 = len((*c).cgbody);
     let mut bi: i64 = 0;
@@ -3298,6 +3302,8 @@ fn cg_flush_allocas_body(c: &mut TyCtx) -> i64 {
         cg_putc(c, '\n');
         ai = ai + 1;
     }
+    // (ADR 0077 D3) the moved flags, after the allocas they sit with.
+    cg_emit_flags(c);
     let nb: i64 = len((*c).cgbody);
     let mut bi: i64 = 0;
     while bi < nb {

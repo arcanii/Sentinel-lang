@@ -1,0 +1,64 @@
+// ADR 0077 D3: a binding moved on some paths only is dropped at its scope's end on the
+// paths that did not move it, and not on the paths that did. Before, every drop site
+// skipped a binding moved anywhere in its function, so each shape below leaked on the
+// non-moving path (measured at 600,000 calls: 36.1 MiB for `by_if`, which holds one
+// buffer, 54.5 for `by_whole_or_field`, which holds two, and 8.4 after). Each fn runs
+// both paths; a missing drop leaks and a second drop on the moving path double-frees.
+
+enum E { A, B }
+struct S { a: [i64], b: [i64] }
+
+fn consume(v: [i64]) -> i64 { v[0] }
+fn test(v: [i64]) -> bool { v[0] == 1 }
+fn eat(s: S) -> i64 { s.b[0] }
+
+// an `if`: moved in one arm
+fn by_if(n: i64) -> i64 {
+    let v: [i64] = [1, 2, 3, 4];
+    if n < 0 { consume(v) } else { 0 }
+}
+
+// a `match`: moved in one arm
+fn by_match(n: i64) -> i64 {
+    let v: [i64] = [1, 2, 3, 4];
+    let e: E = if n < 0 { E::A } else { E::B };
+    match e { E::A => consume(v), E::B => 0 }
+}
+
+// the right-hand side of `&&` / `||`, evaluated or not
+fn by_and(n: i64) -> i64 {
+    let v: [i64] = [1, 2, 3, 4];
+    if n < 0 && test(v) { 1 } else { 0 }
+}
+fn by_or(n: i64) -> i64 {
+    let v: [i64] = [1, 2, 3, 4];
+    if n >= 0 || test(v) { 0 } else { 1 }
+}
+
+// an ADR 0046 field moved in one arm, and (D5) the whole binding in another
+fn by_field(n: i64) -> i64 {
+    let s: S = S { a: [1, 2, 3, 4], b: [5, 6] };
+    if n < 0 { consume(s.a) } else { 0 }
+}
+fn by_whole_or_field(n: i64) -> i64 {
+    let s: S = S { a: [1, 2, 3, 4], b: [5, 6] };
+    if n < 0 { consume(s.a) } else { if n < 1 { eat(s) - 5 } else { 0 } }
+}
+
+fn round(n: i64) -> i64 {
+    by_if(n) + by_match(n) + by_and(n) + by_or(n) + by_field(n) + by_whole_or_field(n)
+}
+
+fn main() -> i64 {
+    let mut i: i64 = 0;
+    let mut acc: i64 = 0;
+    while i < 2000 {
+        // n < 0: every fn moves (each answers 1 but `by_or`, whose moving path answers
+        // 0; `by_whole_or_field` moves its field); n == 0: only `by_whole_or_field`
+        // moves (the whole binding, answering 0); n > 0: nothing moves.
+        acc = acc + round(0 - 1) + round(0) + round(1);
+        i = i + 1;
+    }
+    // 5 a round at n < 0, 0 at n == 0 and n > 0
+    if acc == 10000 { 42 } else { 1 }
+}

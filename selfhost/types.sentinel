@@ -284,12 +284,9 @@ struct TyCtx {
     // `mvbv >= 0` to recognise a bare-`Var` argument for the refcount clone — `mvbv` alone
     // cannot, since any compound expression whose tail is a Var leaks it upward — until
     // ADR 0071 D2 amendment A1 moved that decision into `dump_texpr_node`. The field-access
-    // arm still uses it, through `lastfld`.
+    // arm uses it directly: a field's base is taken only from a target whose dump entered
+    // exactly one node (ADR 0077).
     ndump: i64,
-    // (ADR 0046 A4) the `ndump` number of the last COMPLETED field-access node, so the
-    // field-access arm can tell that its own target was a field access (a nested path)
-    // without peeking at the AST node.
-    lastfld: i64,
     // (ADR 0071 D2 amendment A1) the OWNING CONTEXT, the oracle's `owning`: set by a sink
     // that makes the value it walks the property of a new owner (a `let`, an assignment, a
     // user-fn / generic / method / qualified-call / class-init / spawn argument, a
@@ -399,6 +396,12 @@ struct TyCtx {
     cgdv: Vec<i64>,   // scope-drop pool (append-only): VarId
     cgdt: Vec<i64>,   // scope-drop pool: the binding's type handle
     cgds: Vec<i64>,   // scope-drop pool: the binding's alloca `%vN` (paired with cgdv)
+    // (ADR 0077 D3/D5) the current define's moved flags, in the order this walk made them:
+    // a binding (`cgfl_f` = -1) or one of its fields (`cgfl_f` = the field index) given an
+    // `i1` flag `%mf<n>` (`n` its place here) at its first move. Rendered after the
+    // hoisted allocas by `cg_emit_flags`.
+    cgfl_v: Vec<i64>,
+    cgfl_f: Vec<i64>,
     cg_suppress: bool,   // true while walking an assign target (the Var arm records, no load)
     // (c36a) the program's tokens, COPIED for re-parsing handle `return` arm bodies at
     // each pure-drain site (the return arm lowers inline, but move semantics bar reusing
@@ -2158,6 +2161,8 @@ fn cg_reset(c: &mut TyCtx) -> i64 {
     clear_i64(&mut (*c).cgdv);
     clear_i64(&mut (*c).cgdt);
     clear_i64(&mut (*c).cgds);
+    clear_i64(&mut (*c).cgfl_v);
+    clear_i64(&mut (*c).cgfl_f);
     (*c).cgnext = 0;
     (*c).cglk = 0;
     (*c).cglv = 0;

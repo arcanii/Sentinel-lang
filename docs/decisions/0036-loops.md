@@ -133,7 +133,8 @@ iteration**, with no accumulation: leak-free under `leaks --atExit`. This is the
 load-bearing correctness property and the primary thing the phase-go verifies (a
 loop body that allocates N times leaks nothing). Loop-carried bindings (declared
 *outside* the loop) are **not** dropped per iteration — they drop at their own
-(outer) scope exit, as today.
+(outer) scope exit, as today. (A body binding moved on some iterations only is dropped on
+the others, under its [ADR 0077](0077-drop-flags-for-maybe-moved-bindings.md) flag, which the drop re-arms each time.)
 
 ### D6. Termination via mutation.
 
@@ -292,7 +293,11 @@ implementation:
   Implemented by splitting `emit_scope_drops` into a per-frame `emit_frame_drops`
   and adding `emit_loop_exit_drops(scope_floor)`; each runtime path frees a given
   binding exactly once (the early-exit drop, or the body-end drop on fall-through —
-  mutually exclusive blocks). Verified leak-free with a heap binding live across
+  mutually exclusive blocks). **Amended by [ADR 0077](0077-drop-flags-for-maybe-moved-bindings.md) (2026-10-05):** once a binding
+  was moved anywhere in the function it was freed on no path, so a `break` / `continue`
+  before its move leaked it (register D93); both drops now decide by the moves emitted so far
+  and the binding's run-time flag, which each drop stores back `false` for the next
+  iteration. Verified leak-free with a heap binding live across
   both a `break` and a `continue`, including in a nested inner loop.
 - **C2 — the loop-target stack + `scope_floor`.** A `LoopTarget { cond_bb,
   after_bb, scope_floor }` is pushed onto `CodegenCtx::loop_targets` entering a

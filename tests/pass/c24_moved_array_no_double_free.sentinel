@@ -1,6 +1,6 @@
-// C2.4 / ADR 0017 D8: when `arr` is moved into `consume(arr)`,
-// the borrow checker records arr in moved_sources; codegen skips
-// arr's drop at main's scope exit (the consumer is responsible).
+// C2.4 / ADR 0017 D8: when `arr` is moved into `consume(arr)`, the
+// move sets arr's moved flag, so main's scope-exit drop, which tests
+// the flag (ADR 0077), does not run (the consumer is responsible).
 // `consume` then drops `xs` (its param) at its own scope exit.
 // Tests that we don't double-free.
 // arr = [11, 22, 33]; sum = 11 + 22 + 33 = 66 -> exit 66.
