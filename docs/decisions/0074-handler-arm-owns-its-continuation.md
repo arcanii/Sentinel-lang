@@ -183,7 +183,9 @@ same resume path, so it now clears that local's slot too; the entry's reason sti
 - Heap values inside a captured block. `sentinel_kont_free` releases the block, not what it
   points to; ADR 0072 D4's `FITS` admits only `i64` and `secret i64` captures, so there is
   nothing inside to release in the shipped compiler. (Register D69's remainder — the oracle
-  and `scg` not applying ADR 0072 A1 — is where a wider capture would come from.)
+  and `scg` not applying ADR 0072 A1 — was where a wider capture would come from; since ADR
+  0071 A4 (2026-10-04) both refuse a captured parameter that is not `i64` or `secret i64` in
+  each shape that builds a frame.)
 
 ## Consequences
 

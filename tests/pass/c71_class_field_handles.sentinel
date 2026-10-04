@@ -1,0 +1,484 @@
+// ADR 0071 D2 amendment A4 (register D156): a `Shared` / `Mutex` stored into a field of a
+// class instance is counted like any assignment (a place read is cloned), and a class's drop
+// releases the handles its fields hold, at any depth through struct, generic-instance and
+// class fields. Before, the store took no unit and nothing released a class field, so the
+// field shared its cell with the value it was stored from; when that other owner released
+// the cell — a callee's parameter, a method's or an init's local, a struct parameter's
+// field — the cell was freed while the field still pointed at it, and the field's next use
+// read freed memory, or, for a `Mutex`, locked and unlocked it.
+//
+// Each case loops up to 200 times (`exits` leaves at 150); after the store, `churn` /
+// `churn_m` allocates cells of the same size, so a freed cell is reused and the read sees
+// another value. Before the change:
+// `free_fn_store`, `free_fn_struct_store`, `method_local` and `init_block_local` read a
+// reused cell in all three back ends; `init_local`, `init_param`, `init_struct_param`,
+// `method_struct_param` and `method_return` in the oracle's and `scg`'s output (inkwell's
+// method and init frames keep their handles, A2); `mutex_method_local` and
+// `mutex_free_fn_store` corrupted the heap in all three. `overwrite_keeps_old` pins that an
+// overwritten field's old unit stays held: inkwell lends a method its handle argument
+// without a clone, so releasing the old value there would free the cell the argument
+// points at. The last eleven check the new drop: each builds a class holding a handle the
+// caller keeps (nested in a struct, a class or a generic instance, partially moved out,
+// held by a struct, passed by value, through a method, left by `return`, `continue` and
+// `break`, through a `delegate`, held in a `secret`-qualified class field, and a
+// `Mutex<secret i64>`), drops it, churns, and reads the handle again, so a release too
+// many shows: the read sees a reused cell, or the debug runtime's refcount check aborts.
+//
+// Exit 42 = all 23 cases held.
+
+struct H { s: Shared<i64>, n: i64 }
+struct B<T> { v: T, n: i64 }
+
+class K {
+    let s: Shared<i64>;
+    pub init(s: Shared<i64>) { self.s = s; 0 }
+    pub fn get(self: &Self) -> i64 { shared_get(self.s) }
+    pub fn reset(self: &mut Self, v: i64) -> i64 { let h: Shared<i64> = shared_new(v); self.s = h; 0 }
+    pub fn put_h(self: &mut Self, h: H) -> i64 { self.s = h.s; 0 }
+    pub fn put_ret(self: &mut Self, h: H, c: bool) -> i64 {
+        self.s = h.s;
+        if c { return h.n } else { 0 };
+        h.n + 1
+    }
+}
+
+class L {
+    let s: Shared<i64>;
+    pub init(v: i64) { let h: Shared<i64> = shared_new(v); self.s = h; 0 }
+    pub fn get(self: &Self) -> i64 { shared_get(self.s) }
+}
+
+class LB {
+    let s: Shared<i64>;
+    let n: i64;
+    pub init(v: i64) {
+        let r: i64 = { let h: Shared<i64> = shared_new(v); self.s = h; 0 };
+        self.n = r;
+        0
+    }
+    pub fn get(self: &Self) -> i64 { shared_get(self.s) }
+}
+
+class LH {
+    let s: Shared<i64>;
+    pub init(h: H) { self.s = h.s; 0 }
+    pub fn get(self: &Self) -> i64 { shared_get(self.s) }
+}
+
+class M {
+    let m: Mutex<i64>;
+    pub init(v: i64) { self.m = mutex_new(v); 0 }
+    pub fn reset(self: &mut Self, v: i64) -> i64 { let h: Mutex<i64> = mutex_new(v); self.m = h; 0 }
+    pub fn get(self: &Self) -> i64 { let g = lock(self.m); if is_some(g) { *g } else { 0 } }
+}
+
+class SW {
+    let s: Shared<i64>;
+    pub init() { self.s = shared_new(42); 0 }
+    pub fn swap_then_read(self: &mut Self, t: Shared<i64>) -> i64 {
+        self.s = shared_new(7);
+        churn();
+        shared_get(t)
+    }
+}
+
+class NS {
+    let h: H;
+    pub init(s: Shared<i64>) { self.h = H { s: s, n: 1 }; 0 }
+    pub fn get(self: &Self) -> i64 { shared_get(self.h.s) }
+}
+
+class O {
+    let k: K;
+    let m: Mutex<i64>;
+    pub init(k: K, m: Mutex<i64>) { self.k = k; self.m = m; 0 }
+    pub fn get(self: &Self) -> i64 { self.k.get() }
+}
+
+class G {
+    let b: B<Shared<i64>>;
+    pub init(s: Shared<i64>) { self.b = B { v: s, n: 1 }; 0 }
+    pub fn get(self: &Self) -> i64 { shared_get(self.b.v) }
+}
+
+class P {
+    let k: K;
+    let h: H;
+    pub init(k: K, h: H) { self.k = k; self.h = h; 0 }
+}
+
+struct W { k: K, n: i64 }
+
+class U {
+    let n: i64;
+    pub init() { self.n = 0; 0 }
+    pub fn eat(self: &Self, k: K) -> i64 { k.get() }
+}
+
+trait T { fn val(self: &Self) -> i64; }
+class In {
+    let s: Shared<i64>;
+    pub init(s: Shared<i64>) { self.s = s; 0 }
+    pub fn val(self: &Self) -> i64 { shared_get(self.s) }
+}
+class Out {
+    delegate inner: In to T;
+    pub init(i: In) { self.inner = i; 0 }
+}
+
+class SK {
+    let k: secret K;
+    pub init(k: secret K) { self.k = k; 0 }
+}
+
+class V {
+    let m: Mutex<secret i64>;
+    pub init(m: Mutex<secret i64>) { self.m = m; 0 }
+    pub fn peek(self: &Self) -> i64 {
+        let g = lock(self.m);
+        if is_some(g) { let v: secret i64 = *g; declassify(v) } else { 0 }
+    }
+}
+
+fn churn() -> i64 {
+    let mut i: i64 = 0;
+    while i < 50 { let o: Shared<i64> = shared_new(999); i = i + 1; }
+    0
+}
+
+fn churn_m() -> i64 {
+    let mut i: i64 = 0;
+    while i < 50 { let o: Mutex<i64> = mutex_new(999); i = i + 1; }
+    0
+}
+
+fn store_s(k: &mut K, s: Shared<i64>) -> i64 { (*k).s = s; 0 }
+fn store_h(k: &mut K, h: H) -> i64 { (*k).s = h.s; 0 }
+fn store_m(k: &mut M, m: Mutex<i64>) -> i64 { (*k).m = m; 0 }
+fn eat_k(k: K) -> i64 { k.get() }
+fn eat_h(h: H) -> i64 { shared_get(h.s) }
+fn mk(s: Shared<i64>) -> K { let k: K = K::init(s); k }
+fn leave(s: Shared<i64>, c: bool) -> i64 {
+    let k: K = K::init(s);
+    if c { return k.get() } else { 0 };
+    k.get() + 1
+}
+
+fn free_fn_store() -> i64 {
+    let mut i: i64 = 0;
+    let mut ok: bool = true;
+    while i < 200 {
+        let mut k: K = K::init(shared_new(1));
+        { let t: Shared<i64> = shared_new(42); store_s(&mut k, t) };
+        churn();
+        ok = ok && k.get() == 42;
+        i = i + 1;
+    }
+    if ok { 1 } else { 0 }
+}
+
+fn free_fn_struct_store() -> i64 {
+    let mut i: i64 = 0;
+    let mut ok: bool = true;
+    while i < 200 {
+        let mut k: K = K::init(shared_new(1));
+        { let t: Shared<i64> = shared_new(42); store_h(&mut k, H { s: t, n: 1 }) };
+        churn();
+        ok = ok && k.get() == 42;
+        i = i + 1;
+    }
+    if ok { 1 } else { 0 }
+}
+
+fn method_local() -> i64 {
+    let mut i: i64 = 0;
+    let mut ok: bool = true;
+    while i < 200 {
+        let mut k: K = K::init(shared_new(1));
+        k.reset(42);
+        churn();
+        ok = ok && k.get() == 42;
+        i = i + 1;
+    }
+    if ok { 1 } else { 0 }
+}
+
+fn init_block_local() -> i64 {
+    let mut i: i64 = 0;
+    let mut ok: bool = true;
+    while i < 200 {
+        let k: LB = LB::init(42);
+        churn();
+        ok = ok && k.get() == 42;
+        i = i + 1;
+    }
+    if ok { 1 } else { 0 }
+}
+
+fn init_local() -> i64 {
+    let mut i: i64 = 0;
+    let mut ok: bool = true;
+    while i < 200 {
+        let k: L = L::init(42);
+        churn();
+        ok = ok && k.get() == 42;
+        i = i + 1;
+    }
+    if ok { 1 } else { 0 }
+}
+
+fn init_param() -> i64 {
+    let mut i: i64 = 0;
+    let mut ok: bool = true;
+    while i < 200 {
+        let k: K = K::init(shared_new(42));
+        churn();
+        ok = ok && k.get() == 42;
+        i = i + 1;
+    }
+    if ok { 1 } else { 0 }
+}
+
+fn init_struct_param() -> i64 {
+    let mut i: i64 = 0;
+    let mut ok: bool = true;
+    while i < 200 {
+        let k: LH = LH::init(H { s: shared_new(42), n: 1 });
+        churn();
+        ok = ok && k.get() == 42;
+        i = i + 1;
+    }
+    if ok { 1 } else { 0 }
+}
+
+fn method_struct_param() -> i64 {
+    let mut i: i64 = 0;
+    let mut ok: bool = true;
+    while i < 200 {
+        let mut k: K = K::init(shared_new(1));
+        k.put_h(H { s: shared_new(42), n: 1 });
+        churn();
+        ok = ok && k.get() == 42;
+        i = i + 1;
+    }
+    if ok { 1 } else { 0 }
+}
+
+fn method_return() -> i64 {
+    let mut i: i64 = 0;
+    let mut ok: bool = true;
+    while i < 200 {
+        let mut k: K = K::init(shared_new(1));
+        let r: i64 = k.put_ret(H { s: shared_new(42), n: 1 }, true);
+        churn();
+        ok = ok && r == 1 && k.get() == 42;
+        i = i + 1;
+    }
+    if ok { 1 } else { 0 }
+}
+
+fn mutex_method_local() -> i64 {
+    let mut i: i64 = 0;
+    let mut ok: bool = true;
+    while i < 200 {
+        let mut k: M = M::init(1);
+        k.reset(42);
+        churn_m();
+        ok = ok && k.get() == 42;
+        i = i + 1;
+    }
+    if ok { 1 } else { 0 }
+}
+
+fn mutex_free_fn_store() -> i64 {
+    let mut i: i64 = 0;
+    let mut ok: bool = true;
+    while i < 200 {
+        let mut k: M = M::init(1);
+        { let t: Mutex<i64> = mutex_new(42); store_m(&mut k, t) };
+        churn_m();
+        ok = ok && k.get() == 42;
+        i = i + 1;
+    }
+    if ok { 1 } else { 0 }
+}
+
+fn overwrite_keeps_old() -> i64 {
+    let mut i: i64 = 0;
+    let mut ok: bool = true;
+    while i < 200 {
+        let mut k: SW = SW::init();
+        ok = ok && k.swap_then_read(k.s) == 42;
+        i = i + 1;
+    }
+    if ok { 1 } else { 0 }
+}
+
+fn nested_struct_field() -> i64 {
+    let s: Shared<i64> = shared_new(42);
+    let mut i: i64 = 0;
+    let mut ok: bool = true;
+    while i < 200 {
+        let r: i64 = { let k: NS = NS::init(s); k.get() };
+        churn();
+        ok = ok && r == 42 && shared_get(s) == 42;
+        i = i + 1;
+    }
+    if ok { 1 } else { 0 }
+}
+
+fn class_in_class() -> i64 {
+    let s: Shared<i64> = shared_new(42);
+    let m: Mutex<i64> = mutex_new(1);
+    let mut i: i64 = 0;
+    let mut ok: bool = true;
+    while i < 200 {
+        let r: i64 = { let o: O = O::init(K::init(s), m); o.get() };
+        churn();
+        let g = lock(m);
+        let mv: i64 = if is_some(g) { *g } else { 0 };
+        ok = ok && r == 42 && shared_get(s) == 42 && mv == 1;
+        i = i + 1;
+    }
+    if ok { 1 } else { 0 }
+}
+
+fn generic_field() -> i64 {
+    let s: Shared<i64> = shared_new(42);
+    let mut i: i64 = 0;
+    let mut ok: bool = true;
+    while i < 200 {
+        let r: i64 = { let k: G = G::init(s); k.get() };
+        churn();
+        ok = ok && r == 42 && shared_get(s) == 42;
+        i = i + 1;
+    }
+    if ok { 1 } else { 0 }
+}
+
+fn partial_move() -> i64 {
+    let s: Shared<i64> = shared_new(42);
+    let mut i: i64 = 0;
+    let mut ok: bool = true;
+    while i < 200 {
+        let r: i64 = {
+            let p: P = P::init(K::init(s), H { s: s, n: 1 });
+            let k1: K = p.k;
+            k1.get() + eat_h(p.h)
+        };
+        churn();
+        ok = ok && r == 84 && shared_get(s) == 42;
+        i = i + 1;
+    }
+    if ok { 1 } else { 0 }
+}
+
+fn held_by_struct() -> i64 {
+    let s: Shared<i64> = shared_new(42);
+    let mut i: i64 = 0;
+    let mut ok: bool = true;
+    while i < 200 {
+        let r: i64 = { let w: W = W { k: K::init(s), n: 1 }; w.k.get() };
+        churn();
+        ok = ok && r == 42 && shared_get(s) == 42;
+        i = i + 1;
+    }
+    if ok { 1 } else { 0 }
+}
+
+fn by_value() -> i64 {
+    let s: Shared<i64> = shared_new(42);
+    let mut i: i64 = 0;
+    let mut ok: bool = true;
+    while i < 200 {
+        let k2: K = mk(s);
+        let r: i64 = eat_k(mk(s)) + eat_k(k2);
+        churn();
+        ok = ok && r == 84 && shared_get(s) == 42;
+        i = i + 1;
+    }
+    if ok { 1 } else { 0 }
+}
+
+fn into_method() -> i64 {
+    let s: Shared<i64> = shared_new(42);
+    let u: U = U::init();
+    let mut i: i64 = 0;
+    let mut ok: bool = true;
+    while i < 200 {
+        let r: i64 = u.eat(K::init(s));
+        churn();
+        ok = ok && r == 42 && shared_get(s) == 42;
+        i = i + 1;
+    }
+    if ok { 1 } else { 0 }
+}
+
+fn exits() -> i64 {
+    let s: Shared<i64> = shared_new(42);
+    let mut i: i64 = 0;
+    let mut ok: bool = true;
+    while i < 200 {
+        let k: K = K::init(s);
+        ok = ok && leave(s, true) == 42 && leave(s, false) == 43;
+        churn();
+        ok = ok && shared_get(s) == 42 && k.get() == 42;
+        i = i + 1;
+        if i == 100 { continue; 0 } else { 0 };
+        if i == 150 { break; 0 } else { 0 };
+    }
+    churn();
+    if ok && i == 150 && shared_get(s) == 42 { 1 } else { 0 }
+}
+
+fn delegated() -> i64 {
+    let s: Shared<i64> = shared_new(42);
+    let mut i: i64 = 0;
+    let mut ok: bool = true;
+    while i < 200 {
+        let r: i64 = { let o: Out = Out::init(In::init(s)); o.val() };
+        churn();
+        ok = ok && r == 42 && shared_get(s) == 42;
+        i = i + 1;
+    }
+    if ok { 1 } else { 0 }
+}
+
+fn secret_class_field() -> i64 {
+    let s: Shared<i64> = shared_new(42);
+    let mut i: i64 = 0;
+    let mut ok: bool = true;
+    while i < 200 {
+        { let o: SK = SK::init(K::init(s)); 0 };
+        churn();
+        ok = ok && shared_get(s) == 42;
+        i = i + 1;
+    }
+    if ok { 1 } else { 0 }
+}
+
+fn secret_mutex_field() -> i64 {
+    let mut i: i64 = 0;
+    let mut ok: bool = true;
+    while i < 200 {
+        let sv: secret i64 = 42;
+        let m: Mutex<secret i64> = mutex_new(sv);
+        let r: i64 = { let v: V = V::init(m); v.peek() };
+        churn_m();
+        let g = lock(m);
+        let back: i64 = if is_some(g) { let w: secret i64 = *g; declassify(w) } else { 0 };
+        ok = ok && r == 42 && back == 42;
+        i = i + 1;
+    }
+    if ok { 1 } else { 0 }
+}
+
+fn main() -> i64 {
+    let n: i64 = free_fn_store() + free_fn_struct_store() + method_local() + init_block_local()
+        + init_local() + init_param() + init_struct_param() + method_struct_param()
+        + method_return() + mutex_method_local() + mutex_free_fn_store() + overwrite_keeps_old()
+        + nested_struct_field() + class_in_class() + generic_field() + partial_move()
+        + held_by_struct() + by_value() + into_method() + exits() + delegated()
+        + secret_class_field() + secret_mutex_field();
+    if n == 23 { 42 } else { n }
+}

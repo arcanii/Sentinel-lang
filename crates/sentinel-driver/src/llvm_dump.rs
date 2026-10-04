@@ -2036,13 +2036,9 @@ impl Emit<'_> {
                 | TypedExprKind::FieldAccess { .. }
                 | TypedExprKind::Index { .. } => {
                     let ptr = self.lower_lvalue_ptr(target)?;
-                    // ADR 0071 D2 amendment A1: the place is a new owner of the value,
-                    // unless it lies in a class (left as D2 had it).
-                    let v = if self.in_class_field(target) {
-                        self.lower_expr(value)?
-                    } else {
-                        self.lower_owned(value)?
-                    };
+                    // ADR 0071 D2 amendment A1: the place is a new owner of the value — a
+                    // field of a class instance too, since amendment A4.
+                    let v = self.lower_owned(value)?;
                     let llty = self.lty(target.ty)?;
                     writeln!(self.body, "  store {llty} {v}, ptr {ptr}").unwrap();
                     Ok(())
@@ -3270,8 +3266,9 @@ impl Emit<'_> {
     /// array `[T]` (`{ i64, ptr }`) frees its data pointer (field 1); a `Vec<T>`
     /// (`{ i64, i64, ptr }`) frees field 2 (`sentinel_free(null)` is a safe no-op, so
     /// an empty `vec_new()` drops cleanly with no guard); a struct recurses into its
-    /// heap-backed fields (8d-drops-2). Primitives / refs have no heap → nothing. The
-    /// Bar-B shapes (nullable/enum/class) are later slices; their fixtures don't emit.
+    /// heap-backed fields (8d-drops-2). Primitives / refs have no heap → nothing. An enum
+    /// frees its box (8e-1), a `?Guard` unlocks, and a class releases only the handles its
+    /// fields hold (ADR 0071 A4); the other nullables free nothing.
     /// ADR 0046: `moved_fields` = field indices of THIS binding that were partially moved
     /// (a Move-typed field consumed by value → owned + freed by the consumer), so they are
     /// elided from the struct field walk below. Empty for a fully-live binding and for
@@ -3436,8 +3433,84 @@ impl Emit<'_> {
                 writeln!(self.body, "  br label %bb{after_b}").unwrap();
                 writeln!(self.body, "bb{after_b}:").unwrap();
             }
+            // ADR 0071 D2 amendment A4: a class releases the `Shared` / `Mutex` handles its
+            // fields hold, at any depth through struct, generic-instance and class fields,
+            // and frees nothing else (register D137). A field the binding was partially moved
+            // out of is skipped (ADR 0046). Mirrors inkwell's class arm and `scg`'s
+            // `cg_emit_handle_drops`.
+            Type::Class(_) => {
+                self.emit_handle_drops(ptr_reg, ty, moved_fields, &mut Vec::new())?;
+            }
             _ => {}
         }
+        Ok(())
+    }
+
+    /// ADR 0071 D2 amendment A4: release each `Shared` / `Mutex` handle a value of type `ty`
+    /// at `ptr_reg` holds — the handle itself, or one in a field at any depth through struct,
+    /// generic-instance and class fields, `secret`-qualified or not — and nothing else
+    /// ([`holds_handle`] says why).
+    /// `moved_fields` are the top-level fields the binding was partially moved out of (ADR
+    /// 0046), which the consumer released; nested walks get an empty set. `seen` holds the
+    /// aggregate types on the current path, so a by-value cycle through a class field, which
+    /// the type checker does not refuse (register D157), ends at its first repeat.
+    fn emit_handle_drops(
+        &mut self,
+        ptr_reg: u32,
+        ty: Type,
+        moved_fields: &BTreeSet<u32>,
+        seen: &mut Vec<Type>,
+    ) -> Result<(), String> {
+        let ty = self.unsecret(ty);
+        let prog = self.program;
+        let (agg, field_tys): (String, Vec<Type>) = match ty {
+            Type::Shared(_) | Type::Mutex(_) => {
+                return self.emit_drop_for_binding(ptr_reg, ty, &BTreeSet::new());
+            }
+            Type::Struct(id) => (
+                format!("%Struct.{}", id.0),
+                prog.struct_decl(id).fields.iter().map(|f| f.ty).collect(),
+            ),
+            Type::GenericInstance(id) => {
+                if (id.0 as usize) >= prog.generic_instances.len() {
+                    return Ok(());
+                }
+                let inst = prog.generic_instance(id);
+                let struct_id = inst.struct_id;
+                let inst_args = inst.args.clone();
+                let name = mangle_instance(prog, struct_id, &inst_args);
+                let tys = prog
+                    .struct_decl(struct_id)
+                    .fields
+                    .iter()
+                    .map(|f| {
+                        let mut insts = prog.generic_instances.clone();
+                        let mut refs = prog.refs.clone();
+                        f.ty.substitute(&inst_args, &mut insts, &mut refs)
+                    })
+                    .collect();
+                (format!("%{name}"), tys)
+            }
+            Type::Class(id) => (
+                format!("%Class.{}", id.0),
+                prog.class_decl(id).fields.iter().map(|f| f.ty).collect(),
+            ),
+            _ => return Ok(()),
+        };
+        seen.push(ty);
+        for (idx, &fty) in field_tys.iter().enumerate() {
+            if moved_fields.contains(&(idx as u32)) {
+                continue;
+            }
+            if !holds_handle_inner(fty, prog, seen) {
+                continue;
+            }
+            let fp = self.fresh();
+            writeln!(self.body, "  %v{fp} = getelementptr {agg}, ptr %v{ptr_reg}, i32 0, i32 {idx}")
+                .unwrap();
+            self.emit_handle_drops(fp, fty, &BTreeSet::new(), seen)?;
+        }
+        seen.pop();
         Ok(())
     }
 
@@ -3460,22 +3533,6 @@ impl Emit<'_> {
             self.used.mutex_clone = true;
         }
         Ok(format!("%v{c}"))
-    }
-
-    /// Whether the place `e` is, or lies inside, a field of a class instance, which ADR 0071
-    /// D2 amendment A1 leaves as D2 had it (not a new owner).
-    fn in_class_field(&self, e: &TypedExpr) -> bool {
-        match &e.kind {
-            TypedExprKind::FieldAccess { target, .. } => {
-                let base = match target.ty {
-                    Type::Ref(rid) => self.program.refs[rid.0 as usize].inner,
-                    t => t,
-                };
-                matches!(base, Type::Class(_)) || self.in_class_field(target)
-            }
-            TypedExprKind::Index { target, .. } => self.in_class_field(target),
-            _ => false,
-        }
     }
 
     /// Lower `e` as a value that becomes the property of a new owner (ADR 0071 D2
@@ -5232,6 +5289,22 @@ fn unlowerable_reason(f: &TypedFnDef, program: &TypedProgram) -> String {
             }
         }
     }
+    // Register D69: the embedded shape declined a param its resumer would read; name it
+    // as inkwell's `embedded_perform_verdict` does.
+    if f.body.stmts.is_empty() {
+        let mut performs: Vec<&TypedExpr> = Vec::new();
+        collect_performs(&f.body.tail, &mut performs);
+        if performs.len() == 1 {
+            if let Some(p) = unfit_embedded_capture(f, program) {
+                return format!(
+                    "`{}` is captured across the continuation, so it must be `i64` or `secret \
+                     i64`, and it is `{}`",
+                    p.name,
+                    type_display(p.ty, Some(program))
+                );
+            }
+        }
+    }
     "a `perform` or a call to an effecting fn appears outside tail position, which \
      needs a reified frame"
         .to_string()
@@ -5444,7 +5517,31 @@ fn detect_embedded_shape<'a>(
     if perform.ty != Type::I64 {
         return None;
     }
+    // ADR 0072 D4, which the let and chained shapes already apply, and register D69: the
+    // parent copies each param the resumer reads into the frame with an 8-byte load, so a
+    // param that is not `i64` or `secret i64` is read out of bounds or rebuilt from one word
+    // of itself, and a struct or class rebuilt that way releases words that were never
+    // handles when the replay drops it (ADR 0071 A4). Declining hands the body to
+    // `validate_effecting_fn_body`, which refuses it, as inkwell's verdict does — unless the
+    // tail is a block ending in the `perform` after statements that do not suspend, which the
+    // direct shape then lowers in order, as inkwell's A1 does.
+    if unfit_embedded_capture(f, program).is_some() {
+        return None;
+    }
     Some(perform)
+}
+
+/// ADR 0072 D4 / register D69: the first param the embedded shape's resumer would read
+/// whose type is not `i64` or `secret i64` — `walk_collect_var_refs` over the tail is the
+/// set `dump_embedded_shape_fn` captures (it skips the `perform`, which the parent lowers).
+/// Shared by the detector and by [`unlowerable_reason`], so the refusal names the rule
+/// that declined.
+fn unfit_embedded_capture<'a>(f: &'a TypedFnDef, program: &TypedProgram) -> Option<&'a TypedParam> {
+    let mut captured: Vec<VarId> = Vec::new();
+    walk_collect_var_refs(&f.body.tail, &mut captured);
+    captured
+        .iter()
+        .find_map(|cid| f.params.iter().find(|p| p.id == *cid && !fits_kont_slot(p.ty, program)))
 }
 
 /// Bar B / effects (c35d) — collect every `Perform` node in pre-order, recursing into
@@ -5769,6 +5866,92 @@ fn walk_collect_var_refs_stmt(kind: &TypedStmtKind, acc: &mut Vec<VarId>) {
     }
 }
 
+/// ADR 0071 D2 amendment A4: does a value of type `ty` hold a `Shared` / `Mutex` handle a
+/// class drop releases — the handle itself, or one in a field at any depth through struct,
+/// generic-instance and class fields, `secret`-qualified or not? Nothing else is walked: an
+/// array, a `Vec`, a nullable's box and an enum's payload never release the handles in them
+/// (register D122), and a class drop frees none of them. Mirrors inkwell's
+/// `type_holds_handle_inner` and `scg`'s `cg_holds_handle`.
+fn holds_handle(ty: Type, program: &TypedProgram) -> bool {
+    holds_handle_inner(ty, program, &mut Vec::new())
+}
+
+/// [`holds_handle`] with the aggregate types already on the path in `seen`: a type met
+/// again is a by-value cycle through a class field, which the type checker does not refuse
+/// (register D157), and answers `false` so the walk ends. Exhaustive on purpose, like
+/// [`needs_drop`].
+fn holds_handle_inner(ty: Type, program: &TypedProgram, seen: &mut Vec<Type>) -> bool {
+    if seen.contains(&ty) {
+        return false;
+    }
+    match ty {
+        Type::Shared(_) | Type::Mutex(_) => true,
+        // A `secret`-qualified struct or class holds what its inner type holds, and lowers
+        // as it does (inkwell's struct drop strips the qualifier the same way).
+        Type::Secret(id) => match program.secrets.get(id.0 as usize) {
+            Some(s) => holds_handle_inner(s.inner, program, seen),
+            None => false,
+        },
+        Type::Struct(id) => {
+            seen.push(ty);
+            let any = program
+                .struct_decl(id)
+                .fields
+                .iter()
+                .any(|f| holds_handle_inner(f.ty, program, seen));
+            seen.pop();
+            any
+        }
+        Type::GenericInstance(id) => {
+            if (id.0 as usize) >= program.generic_instances.len() {
+                return false;
+            }
+            seen.push(ty);
+            let inst = program.generic_instance(id);
+            let struct_id = inst.struct_id;
+            let inst_args = inst.args.clone();
+            let any = program.struct_decl(struct_id).fields.iter().any(|f| {
+                let mut insts = program.generic_instances.clone();
+                let mut refs = program.refs.clone();
+                holds_handle_inner(f.ty.substitute(&inst_args, &mut insts, &mut refs), program, seen)
+            });
+            seen.pop();
+            any
+        }
+        Type::Class(id) => {
+            seen.push(ty);
+            let any = program
+                .class_decl(id)
+                .fields
+                .iter()
+                .any(|f| holds_handle_inner(f.ty, program, seen));
+            seen.pop();
+            any
+        }
+        Type::Array(_)
+        | Type::Vec(_)
+        | Type::Nullable(_)
+        | Type::Enum(_)
+        | Type::Guard(_)
+        | Type::I64
+        | Type::I32
+        | Type::U8
+        | Type::U128
+        | Type::F64
+        | Type::Ptr
+        | Type::Bool
+        | Type::Ref(_)
+        | Type::TypeParam(_)
+        | Type::Kont(_)
+        | Type::Task(_)
+        | Type::Channel(_)
+        | Type::Process
+        | Type::SealedChannel
+        | Type::TraitSelf(_)
+        | Type::Fn(_) => false,
+    }
+}
+
 fn needs_drop(ty: Type, program: &TypedProgram) -> bool {
     match ty {
         Type::Array(_) | Type::Vec(_) => true,
@@ -5809,6 +5992,9 @@ fn needs_drop(ty: Type, program: &TypedProgram) -> bool {
                 needs_drop(f.ty.substitute(&inst_args, &mut insts, &mut refs), program)
             })
         }
+        // ADR 0071 D2 amendment A4: a class instance's drop releases the handles its fields
+        // hold and nothing else, so it needs one iff it holds a handle.
+        Type::Class(_) => holds_handle(ty, program),
         // Everything else owns no scope-exit drop. This is EXHAUSTIVE on purpose —
         // it was `_ => false`, the one safety classifier in the compiler that failed
         // OPEN: a future refcounted/resource-owning handle added to `Type` would have
@@ -5841,10 +6027,6 @@ fn needs_drop(ty: Type, program: &TypedProgram) -> bool {
         | Type::Process
         | Type::SealedChannel
         | Type::Kont(_)
-        //   - a class instance boxes nothing droppable as of the bootstrap close
-        //     (explicit-drop rewriting is deferred post-bootstrap; unchanged from the
-        //     prior `_ => false`).
-        | Type::Class(_)
         //   - abstract types are monomorphized/substituted away before codegen.
         | Type::TypeParam(_)
         | Type::TraitSelf(_)

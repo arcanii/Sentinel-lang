@@ -266,8 +266,12 @@ multi-parameter operation whose second argument is pure — so the Consequences 
 correct program gains a diagnostic does not hold after A1. No corpus program is among them — but the corpus says little either way:
 outside this change's own fixtures, only three repo programs and one review-generated program
 reach the embedded shape's rules at all, and all four are accepted unchanged.
-Still open: the text oracle and `scg` do not apply this amendment (the rest of D69), and only the
-embedded shape checks the fn's value against the `i64` seam — the direct, pure-tail, let and
-chained shapes do not (register D68(c)). Pinned by
+Still open: the text oracle and `scg` do not apply this amendment (the rest of D69) — but for
+rule 5's type requirement (a parameter the replay reads must be `i64` or `secret i64`), which
+since ADR 0071 A4 (2026-10-04) the oracle applies to its embedded shape, as its let and
+chained shapes already did, and `scg` to its continuation
+shapes (registers D67, D159 and D160 record where it differs) — and only the embedded shape checks
+the fn's value against the `i64` seam — the direct, pure-tail, let and chained shapes do not
+(register D68(c)). Pinned by
 `crates/sentinel-driver/tests/embedded_perform.rs` — a refusal for each rule, with its reason, and
 accepted bodies built and run against their meaning — and ui `c65_return_before_perform`.

@@ -1265,10 +1265,9 @@ fn dump_te_field(out: &mut Vec<u8>, ft: Expr, fdn: [u8], exp: i64, src: &[u8], c
             let fd_self: i64 = (*c).ndump;
             let fd_n0: i64 = (*c).ndump;
             let tty: i64 = dump_texpr(out, ft, 0 - 1, src, c, gb);
-            // (ADR 0071 D2 amendment A1) whether the target read out of a place, and lies
-            // in a class field; this node's own answers follow from them (set at the end).
+            // (ADR 0071 D2 amendment A1) whether the target read out of a place; this node's
+            // own answer follows from it (set at the end).
             let fd_tpl: bool = (*c).cg_place;
-            let fd_tcls: bool = (*c).cg_clsfld;
             let base_vid: i64 = if (*c).lastfld == fd_n0 + 1 {
                 0 - 1
             } else {
@@ -1514,10 +1513,8 @@ fn dump_te_field(out: &mut Vec<u8>, ft: Expr, fdn: [u8], exp: i64, src: &[u8], c
             };
             (*c).lastfld = fd_self;
             // (ADR 0071 D2 amendment A1) a field path reads out of a place iff its target
-            // does (the oracle's `is_place_read`), and lies in a class field iff its base is
-            // a class or its target lies in one (`in_class_field`).
+            // does (the oracle's `is_place_read`).
             (*c).cg_placen = fd_tpl;
-            (*c).cg_clsfldn = ccid >= 0 || fd_tcls;
             fty
 }
 

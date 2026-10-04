@@ -35,6 +35,14 @@ module types;
 // nested in another, `P { u: U { }, n: 2 }`, is misparsed, and the misparse is refused with
 // "no field `{`" (D144); and `vec_to_array` over a generic instance whose field is `secret T`
 // is accepted where the oracle refuses (D146).
+//
+// Since ADR 0071 A4 the code generator makes one refusal of its own,
+// `sentinel::codegen::effecting_fn_body_not_direct`, for a parameter a continuation would
+// capture that is not `i64` or `secret i64` (D159, and D67's note). Its message is not the
+// oracle's: the oracle adds the parameter's type in its embedded shape and a note that it
+// would be read out of bounds in its let shape, and gives another reason in its chained
+// shape. It is recorded when the code generator reaches the effecting fn, before a ported
+// type error later in the program (D145).
 
 // Record the refusal `code` with the message `msg`, unless one is recorded already.
 fn refuse(c: &mut TyCtx, code: [u8], msg: [u8]) -> i64 {

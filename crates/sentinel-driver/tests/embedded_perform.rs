@@ -10,9 +10,9 @@
 //! order (a few, like `loop_cond`, happened to print the right answer and are refused
 //! because the rule is conservative). Each accepted body is built and run, and must print
 //! what its source means. The programs live here rather than in `tests/pass` or `tests/ui`
-//! because the text back ends do not apply the rules — the oracle hoists or refuses several
-//! of these and scg emits invalid IR for others (the rest of register D69, and D71) — so the
-//! stage differentials cannot hold them.
+//! because the text back ends do not apply the rules (since ADR 0071 A4, in part the capture
+//! rule) — the oracle hoists or refuses several of these and scg emits invalid IR for others
+//! (the rest of register D69, and D71) — so the stage differentials cannot hold them.
 
 use std::path::PathBuf;
 use std::process::Command;

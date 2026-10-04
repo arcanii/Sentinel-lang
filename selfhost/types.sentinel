@@ -306,11 +306,6 @@ struct TyCtx {
     // `dump_texpr_node` moves it here; an arm that never sets it leaves `false`.
     cg_place: bool,
     cg_placen: bool,
-    // (ADR 0071 D2 amendment A1) whether the place just walked is, or lies inside, a field
-    // of a class instance (the oracle's `in_class_field`): an assignment into one is left as
-    // ADR 0071 D2 had it, not a new owner. Same set/move pattern as above.
-    cg_clsfld: bool,
-    cg_clsfldn: bool,
     // (ADR 0071 D2 amendment A1) `dump_cargs` walks the arguments of a class init, a
     // method and a qualified call (whose callees drop their parameters, so each argument
     // goes to a new owner) and of an enum construct and a `perform` (which are not): set

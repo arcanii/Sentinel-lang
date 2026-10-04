@@ -1554,7 +1554,8 @@ fn cg_is_field_moved(c: &mut TyCtx, fnidx: i64, vid: i64, fidx: i64) -> bool {
 
 // (8d-drops-2) does a value of type `ty` own heap that scope-exit must `sentinel_free`?
 // An array / `Vec` always does; a struct does iff some field does (recursive — a struct
-// of only scalars drops nothing). Bar-B shapes don't emit → false. Mirrors `needs_drop`.
+// of only scalars drops nothing); a class does iff it holds a `Shared` / `Mutex` (ADR 0071
+// A4). Mirrors `needs_drop`.
 fn cg_needs_drop(c: &mut TyCtx, ty: i64) -> bool {
     if cg_is_array(c, ty) {
         true
@@ -1652,10 +1653,222 @@ fn cg_needs_drop(c: &mut TyCtx, ty: i64) -> bool {
                         gi2 = gi2 + 1;
                     }
                     gany
+                } else if class_of_handle(c, ty) >= 0 {
+                    // (ADR 0071 D2 amendment A4) a class instance's drop releases the handles
+                    // its fields hold and nothing else, so it needs one iff it holds a
+                    // handle. Mirrors the oracle's `needs_drop`.
+                    let mut nseen: Vec<i64> = vec_new();
+                    cg_holds_handle(c, ty, &mut nseen)
                 } else {
                     false
                 }
             }
+        }
+    }
+}
+
+// (ADR 0071 D2 amendment A4) does a value of type `ty` hold a `Shared` / `Mutex` handle a
+// class drop releases — the handle itself, or one in a field at any depth through struct,
+// generic-instance and class fields, `secret`-qualified or not? Nothing else is walked: an array, a `Vec`, a nullable's
+// box and an enum's payload never release the handles in them (register D122), and a class
+// drop frees none of them. `seen` holds the aggregate types already on the path; a type met
+// again is a by-value cycle through a class field, which the type checker does not refuse
+// (register D157), and answers false so the walk ends. Mirrors the oracle's
+// `holds_handle_inner`.
+fn cg_holds_handle(c: &mut TyCtx, ty: i64, seen: &mut Vec<i64>) -> bool {
+    let inner: i64 = strip_secret(c, ty);
+    if rf_has(seen, ty) {
+        false
+    } else if inner != ty {
+        // A `secret`-qualified struct or class holds what its inner type holds.
+        cg_holds_handle(c, inner, seen)
+    } else if cg_is_shared(c, ty) {
+        true
+    } else if cg_is_mutex(c, ty) {
+        true
+    } else {
+        let hsid: i64 = struct_of_handle(c, ty);
+        let hgd: i64 = gi_decl_of(c, ty);
+        let hcid: i64 = class_of_handle(c, ty);
+        if hsid < 0 && hgd < 0 && hcid < 0 {
+            false
+        } else {
+            push(seen, ty);
+            // A generic instance's fields are its declaration's, substituted by its args.
+            let mut hargs: Vec<i64> = vec_new();
+            if hgd >= 0 {
+                let has: i64 = gi_argstart(c, ty);
+                let hae: i64 = gi_argend(c, ty);
+                let mut hj: i64 = has;
+                while hj < hae {
+                    push(&mut hargs, (*c).gia[hj]);
+                    hj = hj + 1;
+                }
+                0
+            } else {
+                0
+            };
+            // A class's fields are in the class table, a struct's and an instance's in the
+            // struct table.
+            let hn: i64 = if hcid >= 0 {
+                len((*c).clfo)
+            } else {
+                len((*c).fldo)
+            };
+            let howner: i64 = if hcid >= 0 {
+                hcid
+            } else if hsid >= 0 {
+                hsid
+            } else {
+                hgd
+            };
+            let mut hi: i64 = 0;
+            let mut any: bool = false;
+            while hi < hn {
+                let hown: i64 = if hcid >= 0 {
+                    (*c).clfo[hi]
+                } else {
+                    (*c).fldo[hi]
+                };
+                if any {
+                    0
+                } else if hown == howner {
+                    let hraw: i64 = if hcid >= 0 {
+                        (*c).clft[hi]
+                    } else {
+                        (*c).fldty[hi]
+                    };
+                    let hft: i64 = if hgd >= 0 {
+                        subst_type(c, hraw, &hargs)
+                    } else {
+                        hraw
+                    };
+                    if cg_holds_handle(c, hft, seen) {
+                        any = true;
+                        0
+                    } else {
+                        0
+                    }
+                } else {
+                    0
+                };
+                hi = hi + 1;
+            }
+            pop(seen);
+            any
+        }
+    }
+}
+
+// (ADR 0071 D2 amendment A4) release each `Shared` / `Mutex` handle a value of type `ty` at
+// `slot` holds — the handle itself, or one in a field at any depth through struct,
+// generic-instance and class fields, `secret`-qualified or not — and nothing else
+// (`cg_holds_handle` says why). A class drop is this walk. `vid` is the class binding being dropped, whose partially-moved
+// fields are skipped (ADR 0046), and -1 for every nested walk; `seen` holds the aggregate
+// types on the path. Mirrors the oracle's `emit_handle_drops`, byte for byte.
+fn cg_emit_handle_drops(c: &mut TyCtx, ty: i64, slot: i64, vid: i64, seen: &mut Vec<i64>) -> i64 {
+    let inner: i64 = strip_secret(c, ty);
+    if inner != ty {
+        // A `secret`-qualified struct or class lowers as its inner type does.
+        cg_emit_handle_drops(c, inner, slot, vid, seen)
+    } else if cg_is_shared(c, ty) {
+        cg_emit_drop(c, ty, slot, 0 - 1)
+    } else if cg_is_mutex(c, ty) {
+        cg_emit_drop(c, ty, slot, 0 - 1)
+    } else {
+        let esid: i64 = struct_of_handle(c, ty);
+        let egd: i64 = gi_decl_of(c, ty);
+        let ecid: i64 = class_of_handle(c, ty);
+        if esid < 0 && egd < 0 && ecid < 0 {
+            0
+        } else {
+            push(seen, ty);
+            let mut eargs: Vec<i64> = vec_new();
+            if egd >= 0 {
+                let eas: i64 = gi_argstart(c, ty);
+                let eae: i64 = gi_argend(c, ty);
+                let mut ej: i64 = eas;
+                while ej < eae {
+                    push(&mut eargs, (*c).gia[ej]);
+                    ej = ej + 1;
+                }
+                0
+            } else {
+                0
+            };
+            let en: i64 = if ecid >= 0 {
+                len((*c).clfo)
+            } else {
+                len((*c).fldo)
+            };
+            let eowner: i64 = if ecid >= 0 {
+                ecid
+            } else if esid >= 0 {
+                esid
+            } else {
+                egd
+            };
+            let mut ei: i64 = 0;
+            let mut efidx: i64 = 0;
+            while ei < en {
+                let eown: i64 = if ecid >= 0 {
+                    (*c).clfo[ei]
+                } else {
+                    (*c).fldo[ei]
+                };
+                if eown == eowner {
+                    let eraw: i64 = if ecid >= 0 {
+                        (*c).clft[ei]
+                    } else {
+                        (*c).fldty[ei]
+                    };
+                    let eft: i64 = if egd >= 0 {
+                        subst_type(c, eraw, &eargs)
+                    } else {
+                        eraw
+                    };
+                    let eskip: bool = if vid >= 0 {
+                        cg_is_field_moved(c, (*c).curfn, vid, efidx)
+                    } else {
+                        false
+                    };
+                    if eskip {
+                        0
+                    } else if cg_holds_handle(c, eft, seen) {
+                        let efp: i64 = cg_dst(c);
+                        if esid >= 0 {
+                            cgo_str(c, "getelementptr %Struct.");
+                            cgo_int(c, esid);
+                            0
+                        } else if ecid >= 0 {
+                            cgo_str(c, "getelementptr %Class.");
+                            cgo_int(c, ecid);
+                            0
+                        } else {
+                            cgo_str(c, "getelementptr %");
+                            let mut emb: Vec<u8> = vec_new();
+                            cg_mangle_to(&mut emb, c, ty);
+                            cgo_str(c, vec_to_array(emb));
+                            0
+                        };
+                        cgo_str(c, ", ptr %v");
+                        cgo_int(c, slot);
+                        cgo_str(c, ", i32 0, i32 ");
+                        cgo_int(c, efidx);
+                        cg_putc(c, '\n');
+                        cg_emit_handle_drops(c, eft, efp, 0 - 1, seen)
+                    } else {
+                        0
+                    };
+                    efidx = efidx + 1;
+                    0
+                } else {
+                    0
+                };
+                ei = ei + 1;
+            }
+            pop(seen);
+            0
         }
     }
 }
@@ -1924,6 +2137,13 @@ fn cg_emit_drop(c: &mut TyCtx, ty: i64, slot: i64, vid: i64) -> i64 {
                         dgi = dgi + 1;
                     }
                     0
+                } else if class_of_handle(c, ty) >= 0 {
+                    // (ADR 0071 D2 amendment A4) a class releases the handles its fields hold,
+                    // at any depth through struct, generic-instance and class fields, and
+                    // frees nothing else (register D137); a field the binding was partially
+                    // moved out of is skipped. Mirrors the oracle's Class arm.
+                    let mut kseen: Vec<i64> = vec_new();
+                    cg_emit_handle_drops(c, ty, slot, vid, &mut kseen)
                 } else {
                     0
                 }

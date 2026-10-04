@@ -264,6 +264,12 @@ const SEEDS: &[&str] = &[
     include_str!("fixtures/handler_arm_exits/c74_arm_break_continue.sentinel"),
     include_str!("fixtures/handler_arm_exits/c74_resume_arg_leaves_the_arm.sentinel"),
     include_str!("fixtures/handler_arm_exits/c74_two_open_arms.sentinel"),
+    // ADR 0071 A4 (register D157): a struct and a class that hold each other by value are
+    // accepted, and a class's drop walks its fields for handles, stopping at a type already
+    // on its path. A seed rather than a fixture because the IR does not assemble (`llc`:
+    // "Cannot allocate unsized type"); it holds `scg`'s walk, and where it stops, to the
+    // oracle's. Remove it once D157's refusal exists.
+    "struct S { k: K, n: i64 }\nclass K { let s: S; let h: Shared<i64>; pub init(s: S) { self.s = s; self.h = shared_new(1); 0 } }\nfn f(s: S) -> i64 { s.n }\nfn g(k: K) -> i64 { 1 }\nfn main() -> i64 { 7 }\n",
 ];
 
 #[test]
@@ -341,6 +347,101 @@ fn sentinel_codegen_reads_an_arm_parameter_within_its_slot() {
         !ir.contains("load { i1, i64 }"),
         "the arm's parameter was read wider than its `i64` slot:\n{ir}"
     );
+}
+
+/// ADR 0072 D4, registers D67 and D69: a continuation frame carries each captured value in
+/// one `i64`, so a param that is not `i64` or `secret i64` would be rebuilt in the resumer
+/// from one word of itself, and a class or struct rebuilt that way releases words that were
+/// never handles when the replay drops it (ADR 0071 A4). `scg` refuses such a fn, with the
+/// code inkwell refuses it with: in the embedded and let shapes any non-word param, since they
+/// copy every one (register D159), and in the chained shape one its frames carry: one a later
+/// `let`'s value or the tail reads outside the forms its frame walk does not enter, such as
+/// an `if`, a `match` or a `handle` (D67). The oracle refuses all four programs
+/// (`tests/llvm.rs`). A chained fn whose non-word params only the first
+/// `let` reads, or none, still lowers, to the oracle's bytes, and so does one where a `match`
+/// arm binds a name a non-word param has.
+#[test]
+fn sentinel_codegen_refuses_a_non_word_param_a_continuation_would_capture() {
+    let tmp =
+        std::env::temp_dir().join(format!("snc_selfhost_cg_capture_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).expect("create temp dir");
+    let cg = build_sentinel_codegen(&tmp);
+    let work = tmp.join("work");
+    std::fs::create_dir_all(&work).expect("create work dir");
+    let header = "class K { let n: i64; let s: Shared<i64>; pub init(s: Shared<i64>) { self.n = 5; self.s = s; 0 } }\n\
+                  effect Io { read() -> i64; echo(x: i64) -> i64; }\n\
+                  fn eat(k: K) -> i64 { 1 }\n";
+    let main = "fn main() -> i64 { let s: Shared<i64> = shared_new(42); handle eff(K::init(s)) with { Io.read(kk) => kk(41), Io.echo(x, kk) => kk(x) } }\n";
+    for (name, eff) in [
+        ("embedded", "fn eff(k: K) -> i64 ! { Io } { eat(k) + perform Io.read() }\n"),
+        ("let", "fn eff(k: K) -> i64 ! { Io } { let v: i64 = perform Io.read(); v + eat(k) }\n"),
+        (
+            "chained",
+            "fn eff(k: K) -> i64 ! { Io } { let a: i64 = perform Io.read(); let b: i64 = perform Io.read(); a + b + eat(k) }\n",
+        ),
+        // Read only by a later `let`'s `perform` argument, in the resumer that evaluates it.
+        (
+            "chained_later_let",
+            "fn eff(k: K) -> i64 ! { Io } { let a: i64 = perform Io.read(); let b: i64 = perform Io.echo(eat(k)); a + b }\n",
+        ),
+    ] {
+        std::fs::write(work.join("input.sentinel"), format!("{header}{eff}{main}"))
+            .expect("stage the program");
+        let out = Command::new(&cg).current_dir(&work).output().expect("run the Sentinel codegen");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let mut lines = stdout.lines();
+        assert!(
+            !out.status.success()
+                && lines.next() == Some("sentinel::codegen::effecting_fn_body_not_direct")
+                && lines.next().is_some_and(|l| l.contains("`k` is captured across the continuation")),
+            "{name}: `scg` must refuse a class param its continuation would capture; got {:?}:\n{stdout}",
+            out.status
+        );
+    }
+    // The chained shape copies only what its frames carry, so a fn whose non-word params
+    // nothing reads, or only the first `let`'s `perform` argument reads (in the parent), lowers,
+    // to the oracle's bytes; so does one whose `match` arm binds the name a non-word param has.
+    for (name, prog) in [
+        (
+            "unread",
+            format!(
+                "{header}fn eff(k: K, flag: bool) -> i64 ! {{ Io }} {{ let a: i64 = perform Io.read(); let b: i64 = perform Io.read(); a + b - 40 }}\n{}",
+                main.replace("eff(K::init(s))", "eff(K::init(s), true)")
+            ),
+        ),
+        (
+            "first_let_arg",
+            "class K { let n: i64; let s: Shared<i64>; pub init(s: Shared<i64>) { self.n = 5; self.s = s; 0 } }\n\
+             effect Io { read() -> i64; echo(x: i64) -> i64; }\n\
+             fn eat(k: K) -> i64 { 1 }\n\
+             fn eff(k: K, flag: bool) -> i64 ! { Io } { let a: i64 = perform Io.echo(eat(k) + 40); let b: i64 = perform Io.read(); a + b - 40 }\n\
+             fn main() -> i64 { let s: Shared<i64> = shared_new(42); handle eff(K::init(s), true) with { Io.read(kk) => kk(41), Io.echo(x, kk) => kk(x) } }\n"
+                .to_string(),
+        ),
+        (
+            "match_binding_shadows",
+            format!(
+                "{header}enum E {{ A(i64), B }}\nfn mk(v: i64) -> E {{ E::A(v) }}\n\
+                 fn eff(x: K) -> i64 ! {{ Io }} {{ let a: i64 = perform Io.read(); let b: i64 = perform Io.read(); match mk(b) {{ E::A(x) => x + 1, _ => 0 }} }}\n{main}"
+            ),
+        ),
+    ] {
+        std::fs::write(work.join("input.sentinel"), prog).expect("stage the program");
+        let oracle = Command::new(env!("CARGO_BIN_EXE_snc"))
+            .arg("llvm")
+            .arg(work.join("input.sentinel"))
+            .output()
+            .expect("run snc llvm");
+        assert!(oracle.status.success(), "{name}: the oracle lowers the chained program");
+        let out = Command::new(&cg).current_dir(&work).output().expect("run the Sentinel codegen");
+        assert!(
+            out.status.success() && out.stdout == oracle.stdout,
+            "{name}: `scg` must lower a chained fn whose resumers read no non-word param, to the oracle's bytes; got {:?}:\n{}",
+            out.status,
+            String::from_utf8_lossy(&out.stdout)
+        );
+    }
 }
 
 /// ADR 0074 (register D79): the five `handler_arm_exits` programs, built from the
@@ -475,6 +576,43 @@ fn oracle_ir_of_the_shared_duplication_program_runs() {
     assert_eq!(
         run.status.code(),
         Some(94),
+        "{stem}: built from the oracle's IR it exits {:?}; stderr:\n{}",
+        run.status,
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// ADR 0071 D2 amendment A4 (register D156): the oracle's IR of `c71_class_field_handles`
+/// runs and answers 42. Before the amendment the text back ends failed eleven of its cases —
+/// five of them only there, since inkwell's method and init frames keep their handles (A2) —
+/// and `pass_c71_class_field_handles` builds the file through inkwell alone; the corpus-wide
+/// behaviour check cannot run on Windows, and the codegen differential holds `scg` to the
+/// oracle byte for byte, so this is what runs the oracle's output.
+#[test]
+fn oracle_ir_of_the_class_field_program_runs() {
+    let tmp = std::env::temp_dir().join(format!("snc_clsfld_oracle_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).expect("create temp dir");
+    let stem = "c71_class_field_handles";
+    let src = workspace_root().join("tests/pass").join(format!("{stem}.sentinel"));
+    let oracle = Command::new(env!("CARGO_BIN_EXE_snc"))
+        .arg("llvm")
+        .arg(&src)
+        .output()
+        .expect("run snc llvm");
+    assert!(
+        oracle.status.success(),
+        "snc llvm failed on {stem}:\n{}",
+        String::from_utf8_lossy(&oracle.stderr)
+    );
+    let ll = tmp.join(format!("{stem}.ll"));
+    std::fs::write(&ll, &oracle.stdout).expect("write the oracle's IR");
+    let exe = compile_ll_to_exe(&ll, &tmp.join(stem));
+    let run = Command::new(&exe).output().expect("run the program built from the oracle's IR");
+    assert_eq!(
+        run.status.code(),
+        Some(42),
         "{stem}: built from the oracle's IR it exits {:?}; stderr:\n{}",
         run.status,
         String::from_utf8_lossy(&run.stderr)

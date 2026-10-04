@@ -116,8 +116,6 @@ fn new_tyctx(mode: i64) -> TyCtx {
         cg_tailown: false,
         cg_place: false,
         cg_placen: false,
-        cg_clsfld: false,
-        cg_clsfldn: false,
         cg_ownargs: false,
         mode: mode,
         lastval: 0 - 1,

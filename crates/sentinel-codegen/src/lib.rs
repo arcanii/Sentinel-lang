@@ -2190,9 +2190,96 @@ struct CodegenCtx<'ctx, 'plan, 'm> {
 ///   * `Struct(_)` / `GenericInstance(_)` → recurse only if some
 ///     transitive field needs drop. Otherwise the struct is pure
 ///     data and can be skipped.
+///   * `Class(_)` → only if it holds a `Shared` / `Mutex`, the one thing a
+///     class drop releases (ADR 0071 A4, [`type_holds_handle_inner`]).
 ///   * Everything else (primitives, refs, `?primitive`) → no drop.
 fn field_type_needs_drop(ty: Type, program: &TypedProgram) -> bool {
     field_type_needs_drop_inner(ty, program, &mut Vec::new())
+}
+
+/// ADR 0071 D2 amendment A4: does a value of type `ty` hold a `Shared` / `Mutex` handle a
+/// class drop releases — the handle itself, or one in a field at any depth through struct,
+/// generic-instance and class fields, `secret`-qualified or not? Nothing else is walked: an
+/// array, a `Vec`, a nullable's box and an enum's payload never release the handles in them
+/// (register D122), and a class drop frees none of them. `seen` holds the aggregate types
+/// already on the path; a type met again is a by-value cycle through a class field, which
+/// the type checker does not refuse (register D157), and answers `false` so the walk ends.
+/// The match is exhaustive on purpose, like [`field_type_needs_drop_inner`]'s.
+fn type_holds_handle_inner(ty: Type, program: &TypedProgram, seen: &mut Vec<Type>) -> bool {
+    if seen.contains(&ty) {
+        return false;
+    }
+    match ty {
+        Type::Shared(_) | Type::Mutex(_) => true,
+        // A `secret`-qualified struct or class holds what its inner type holds, and lowers
+        // as it does; inkwell's struct drop strips the qualifier the same way.
+        Type::Secret(id) => {
+            if (id.0 as usize) >= program.secrets.len() {
+                return false;
+            }
+            type_holds_handle_inner(program.secret_data(id).inner, program, seen)
+        }
+        Type::Struct(id) => {
+            seen.push(ty);
+            let any = program
+                .struct_decl(id)
+                .fields
+                .iter()
+                .any(|f| type_holds_handle_inner(f.ty, program, seen));
+            seen.pop();
+            any
+        }
+        Type::GenericInstance(id) => {
+            if (id.0 as usize) >= program.generic_instances.len() {
+                return false;
+            }
+            seen.push(ty);
+            let inst = program.generic_instance(id);
+            let mut local_instances = program.generic_instances.clone();
+            let mut local_refs = program.refs.clone();
+            let any = program.struct_decl(inst.struct_id).fields.iter().any(|f| {
+                let concrete =
+                    f.ty.substitute(&inst.args, &mut local_instances, &mut local_refs);
+                type_holds_handle_inner(concrete, program, seen)
+            });
+            seen.pop();
+            any
+        }
+        Type::Class(id) => {
+            if (id.0 as usize) >= program.class_decls.len() {
+                return false;
+            }
+            seen.push(ty);
+            let any = program
+                .class_decl(id)
+                .fields
+                .iter()
+                .any(|f| type_holds_handle_inner(f.ty, program, seen));
+            seen.pop();
+            any
+        }
+        Type::Array(_)
+        | Type::Vec(_)
+        | Type::Nullable(_)
+        | Type::Enum(_)
+        | Type::Guard(_)
+        | Type::I64
+        | Type::I32
+        | Type::U8
+        | Type::U128
+        | Type::F64
+        | Type::Ptr
+        | Type::Bool
+        | Type::Ref(_)
+        | Type::TypeParam(_)
+        | Type::Kont(_)
+        | Type::Task(_)
+        | Type::Channel(_)
+        | Type::Process
+        | Type::SealedChannel
+        | Type::TraitSelf(_)
+        | Type::Fn(_) => false,
+    }
 }
 
 /// C4.4 / ADR 0024 D8: collect the FnId of every `spawn fn(args)`
@@ -2442,21 +2529,10 @@ fn field_type_needs_drop_inner(
                     .iter()
                     .any(|v| !v.payloads.is_empty())
         }
-        // C4.1 / ADR 0022 D9: class instances follow the same
-        // drop-needs rule as structs (recurse into fields).
-        Type::Class(id) => {
-            if (id.0 as usize) >= program.class_decls.len() {
-                return false;
-            }
-            seen.push(ty);
-            let decl = program.class_decl(id);
-            let any = decl
-                .fields
-                .iter()
-                .any(|f| field_type_needs_drop_inner(f.ty, program, seen));
-            seen.pop();
-            any
-        }
+        // C4.1 / ADR 0022 D9, ADR 0071 D2 amendment A4: a class instance's drop releases
+        // the handles its fields hold and nothing else, so it needs one iff it holds a
+        // handle.
+        Type::Class(_) => type_holds_handle_inner(ty, program, seen),
         // C4.2 / ADR 0023 D7: `Self` never reaches codegen — impl-
         // sig substitution resolves it before bodies type-check.
         Type::TraitSelf(_) => false,
@@ -4915,13 +4991,9 @@ impl<'ctx, 'plan, 'm> CodegenCtx<'ctx, 'plan, 'm> {
                     // C2 / ADR 0017 D2: lower the RHS, compute the LHS
                     // address as a pointer, then store. Lvalue / mut
                     // gates already passed at type-check time.
-                    // ADR 0071 D2 amendment A1: the place is a new owner of the value,
-                    // unless it lies in a class (left as D2 had it).
-                    let v = if in_class_field(target, program) {
-                        self.lower_expr(value, program)?
-                    } else {
-                        self.lower_owned(value, program)?
-                    };
+                    // ADR 0071 D2 amendment A1: the place is a new owner of the value — a
+                    // field of a class instance too, since amendment A4.
+                    let v = self.lower_owned(value, program)?;
                     let ptr = self.lower_lvalue_ptr(target, program)?;
                     self.builder
                         .build_store(ptr, v)
@@ -5623,11 +5695,17 @@ impl<'ctx, 'plan, 'm> CodegenCtx<'ctx, 'plan, 'm> {
                 // ADR 0066 M2.4a: a SealedChannel wraps the child's pipe (a Copy
                 // pointer); runtime-owned like Process — no codegen-emitted drop.
             }
+            Type::Class(_) if keep_handles => {
+                // Register D153: a class releases nothing but handles (below), and this
+                // frame keeps them.
+            }
             Type::Class(_) => {
-                // C4.1 / ADR 0022 D9: class drop reuses struct
-                // recursive field drop machinery. Classes own
-                // their fields and follow the standard pattern.
-                self.emit_drop_struct_fields(ptr, ty, program, moved_fields, keep_handles)?;
+                // C4.1 / ADR 0022 D9, ADR 0071 D2 amendment A4: a class releases the
+                // `Shared` / `Mutex` handles its fields hold, at any depth through struct,
+                // generic-instance and class fields, and frees nothing else — an array, a
+                // `Vec`, a nullable's or an enum's box in it stays held, as before (register
+                // D137). A field the binding was partially moved out of is skipped (ADR 0046).
+                self.emit_handle_drops(ptr, ty, program, moved_fields, &mut Vec::new())?;
             }
             Type::Enum(_) => {
                 // Phase D.1 / ADR 0032 D6 (4/N): an enum owns its
@@ -5773,6 +5851,82 @@ impl<'ctx, 'plan, 'm> CodegenCtx<'ctx, 'plan, 'm> {
             self.emit_drop_for_binding(field_ptr, *field_ty, program, &BTreeSet::new(), keep_handles)?;
         }
         let _ = decl; // captured for clarity; field types are what we used
+        Ok(())
+    }
+
+    /// ADR 0071 D2 amendment A4: release each `Shared` / `Mutex` handle a value of type `ty`
+    /// at `ptr` holds — the handle itself, or one in a field at any depth through struct,
+    /// generic-instance and class fields, `secret`-qualified or not — and nothing else. A
+    /// class drop is this walk (see [`type_holds_handle_inner`] for why nothing else is
+    /// walked). `moved_fields` are the
+    /// top-level fields the binding was partially moved out of (ADR 0046), which the
+    /// consumer released; nested walks get an empty set. `seen` holds the aggregate types
+    /// on the current path, so a by-value cycle through a class field, which the type
+    /// checker does not refuse (register D157), stops at its first repeat instead of
+    /// recursing for ever.
+    fn emit_handle_drops(
+        &mut self,
+        ptr: PointerValue<'ctx>,
+        ty: Type,
+        program: &TypedProgram,
+        moved_fields: &BTreeSet<u32>,
+        seen: &mut Vec<Type>,
+    ) -> Result<(), CodegenError> {
+        let ty = self.strip_secret(ty);
+        let (field_tys, struct_llvm_ty): (Vec<Type>, StructType<'ctx>) = match ty {
+            Type::Shared(_) | Type::Mutex(_) => {
+                return self.emit_drop_for_binding(ptr, ty, program, &BTreeSet::new(), false);
+            }
+            Type::Struct(id) => {
+                let llvm = *self
+                    .struct_types
+                    .get(&id)
+                    .expect("struct LLVM type declared in pass 0");
+                (program.struct_decl(id).fields.iter().map(|f| f.ty).collect(), llvm)
+            }
+            Type::GenericInstance(id) => {
+                if (id.0 as usize) >= program.generic_instances.len() {
+                    return Ok(());
+                }
+                let inst = program.generic_instance(id);
+                let llvm = *self
+                    .generic_struct_types
+                    .get(&id)
+                    .expect("generic instance LLVM type declared in pass 0");
+                let mut local_instances = program.generic_instances.clone();
+                let mut local_refs = program.refs.clone();
+                let tys = program
+                    .struct_decl(inst.struct_id)
+                    .fields
+                    .iter()
+                    .map(|f| f.ty.substitute(&inst.args, &mut local_instances, &mut local_refs))
+                    .collect();
+                (tys, llvm)
+            }
+            Type::Class(id) => {
+                let llvm = *self
+                    .class_types
+                    .get(&id)
+                    .expect("class LLVM type declared in pass 0");
+                (program.class_decl(id).fields.iter().map(|f| f.ty).collect(), llvm)
+            }
+            _ => return Ok(()),
+        };
+        seen.push(ty);
+        for (idx, field_ty) in field_tys.iter().enumerate() {
+            if moved_fields.contains(&(idx as u32)) {
+                continue;
+            }
+            if !type_holds_handle_inner(*field_ty, program, seen) {
+                continue;
+            }
+            let field_ptr = self
+                .builder
+                .build_struct_gep(struct_llvm_ty, ptr, idx as u32, "drop_hdlptr")
+                .map_err(|e| CodegenError::Builder(e.to_string()))?;
+            self.emit_handle_drops(field_ptr, *field_ty, program, &BTreeSet::new(), seen)?;
+        }
+        seen.pop();
         Ok(())
     }
 
@@ -12827,22 +12981,6 @@ fn is_place_read(e: &TypedExpr) -> bool {
     }
 }
 
-/// Whether the place `e` is, or lies inside, a field of a class instance, which ADR 0071
-/// D2 amendment A1 leaves as D2 had it (not a new owner).
-fn in_class_field(e: &TypedExpr, program: &TypedProgram) -> bool {
-    match &e.kind {
-        TypedExprKind::FieldAccess { target, .. } => {
-            let base = match target.ty {
-                Type::Ref(id) => program.refs[id.0 as usize].inner,
-                t => t,
-            };
-            matches!(base, Type::Class(_)) || in_class_field(target, program)
-        }
-        TypedExprKind::Index { target, .. } => in_class_field(target, program),
-        _ => false,
-    }
-}
-
 /// C2.4 / ADR 0017 D8 helper: if a block / fn tail expression
 /// is `Var(id)`, returns `Some(id)` — codegen should skip
 /// dropping that binding at scope exit (it's being returned by
@@ -13675,6 +13813,108 @@ fn main() -> i64 {
                 0,
                 "@{f} releases a `Mutex` in its parameter frame:\n{body}"
             );
+        }
+    }
+
+    // ===== Register D156 / ADR 0071 A4: a class field's handle is counted and released =====
+    //
+    // A `Shared` / `Mutex` stored into a field of a class instance is cloned like any
+    // assignment of a place read, and a class binding's drop releases every handle its fields
+    // hold, at any depth through struct, generic-instance and class fields, skipping a field
+    // the binding was partially moved out of, and frees nothing else (register D137). A
+    // method's or an init's parameter frame keeps its handles, a class's included (A2). A
+    // missing release is a leak, not an exit code, so this reads the IR.
+
+    const A4_CLASS_FIELDS: &str = r#"
+struct H { s: Shared<i64>, a: [i64] }
+struct B<T> { v: T, n: i64 }
+class K {
+    let s: Shared<i64>;
+    let m: Mutex<i64>;
+    pub init(s: Shared<i64>, m: Mutex<i64>) { self.s = s; self.m = m; 0 }
+    pub fn get(self: &Self) -> i64 { shared_get(self.s) }
+    pub fn set(self: &mut Self, t: Shared<i64>) -> i64 { self.s = t; 0 }
+}
+class N {
+    let h: H;
+    let k: K;
+    let b: B<Shared<i64>>;
+    let a: [i64];
+    pub init(h: H, k: K) { self.h = h; self.k = k; self.b = B { v: shared_new(4), n: 1 }; self.a = [1, 2]; 0 }
+}
+class A { let a: [i64]; pub init() { self.a = [1]; 0 } }
+class U {
+    let n: i64;
+    pub init() { self.n = 0; 0 }
+    pub fn eat(self: &Self, k: K) -> i64 { k.get() }
+}
+class SK { let k: secret K; pub init(k: secret K) { self.k = k; 0 } }
+struct W { k: K, n: i64 }
+fn eat_h(h: H) -> i64 { h.a[0] }
+fn store(k: &mut K, s: Shared<i64>) -> i64 { (*k).s = s; 0 }
+fn direct() -> i64 { let k: K = K::init(shared_new(1), mutex_new(2)); k.get() }
+fn nested() -> i64 {
+    let n: N = N::init(H { s: shared_new(1), a: [3] }, K::init(shared_new(2), mutex_new(3)));
+    1
+}
+fn partial() -> i64 {
+    let n: N = N::init(H { s: shared_new(1), a: [3] }, K::init(shared_new(2), mutex_new(3)));
+    eat_h(n.h)
+}
+fn arrays_only() -> i64 { let a: A = A::init(); 1 }
+fn held() -> i64 { let w: W = W { k: K::init(shared_new(1), mutex_new(2)), n: 1 }; w.n }
+fn secret_field() -> i64 { let o: SK = SK::init(K::init(shared_new(1), mutex_new(2))); 1 }
+fn main() -> i64 {
+    let mut k: K = K::init(shared_new(5), mutex_new(6));
+    let u: U = U::init();
+    store(&mut k, shared_new(7)) + k.set(shared_new(8)) + u.eat(K::init(shared_new(9), mutex_new(1)))
+        + direct() + nested() + partial() + arrays_only() + held() + secret_field()
+}
+"#;
+
+    #[test]
+    fn a4_a_class_field_store_counts_and_a_class_drop_releases() {
+        let ir = compile_src_ir_with_moves(A4_CLASS_FIELDS);
+        // (fn, shared clones, mutex clones, shared releases, mutex releases, frees)
+        for (f, sc, mc, sr, mr, fr) in [
+            // each store into a class field clones; the parameter frame keeps (A2)
+            ("K__init", 1, 1, 0, 0, 0),
+            ("K__set", 1, 0, 0, 0, 0),
+            ("U__eat", 0, 0, 0, 0, 0),
+            // a struct and a class moved into fields, and a value no place holds
+            ("N__init", 0, 0, 0, 0, 0),
+            // a free fn's store clones, and its frame releases the parameter
+            ("store", 1, 0, 1, 0, 0),
+            // `k`'s drop releases both of its fields
+            ("direct", 0, 0, 1, 1, 0),
+            // `n`'s drop: `h.s`, `k.s`, `k.m`, `b.v`, and none of the arrays it holds
+            ("nested", 0, 0, 3, 1, 0),
+            // `n.h` was moved out, so `n`'s drop skips it
+            ("partial", 0, 0, 2, 1, 0),
+            ("arrays_only", 0, 0, 0, 0, 0),
+            // a struct's drop reaches the class in its field
+            ("held", 0, 0, 1, 1, 0),
+            // a `secret`-qualified class field holds what the class holds
+            ("secret_field", 0, 0, 1, 1, 0),
+        ] {
+            // The `define`, not a call site, which can come first in the module.
+            let head = format!("@{f}(");
+            let body: String = ir
+                .lines()
+                .skip_while(|l| !(l.starts_with("define ") && l.contains(&head)))
+                .take_while(|l| *l != "}")
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(!body.is_empty(), "no define for @{f} in:\n{ir}");
+            for (sym, want) in [
+                ("@sentinel_shared_clone(", sc),
+                ("@sentinel_mutex_clone(", mc),
+                ("@sentinel_shared_release(", sr),
+                ("@sentinel_mutex_release(", mr),
+                ("@sentinel_free(", fr),
+            ] {
+                assert_eq!(body.matches(sym).count(), want, "@{f}: {sym} count:\n{body}");
+            }
         }
     }
 

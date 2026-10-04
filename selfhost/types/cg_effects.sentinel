@@ -3333,6 +3333,42 @@ fn cg_flush_allocas_body(c: &mut TyCtx) -> i64 {
 // `%v0 = call ptr @do_work()`), so it silently treats the callee's `Kont*` as an `i64`.
 // Fixing it means deciding what that shape should lower to, on BOTH sides — tracked as
 // its own item. Nothing in the corpus reaches it today.
+// (ADR 0072 D4, registers D67 and D69) the embedded and let shapes below copy EVERY param
+// into the continuation's frame with an 8-byte load (the oracle copies only those the
+// resumer reads), so a param that is not `i64` or `secret i64` is read out of its slot's
+// bounds or rebuilt from one word of itself, and a struct or class rebuilt that way releases
+// words that were never handles when the replay drops it (ADR 0071 A4). Refuse the fn, as
+// inkwell does, and as the oracle does for a param the resumer reads; this also refuses a
+// param the resumer never reads, which the oracle lowers (register D159). The chained shape
+// copies only what its frames carry, and `cg_chained_refuse_unfit` refuses exactly that.
+fn cg_eff_refuse_unfit(c: &mut TyCtx, src: &[u8], name_s: i64, name_e: i64, pv0: i64, pvn: i64) -> i64 {
+    let mut pi: i64 = pv0;
+    let mut done: bool = false;
+    while pi < pvn {
+        if done {
+            0
+        } else {
+            let pty: i64 = cg_vid_ty(c, pi);
+            if cg_ar_fits(c, pty) {
+                0
+            } else {
+                let mut m: Vec<u8> = vec_new();
+                append_str(&mut m, "effecting fn `");
+                append_slice(&mut m, src, name_s, name_e);
+                append_str(&mut m, "` cannot be lowered: `");
+                let pn: [u8] = cg_vid_name(c, pi);
+                rf_put(&mut m, &pn);
+                append_str(&mut m, "` is captured across the continuation, so it must be `i64` or `secret i64`");
+                refuse(c, "sentinel::codegen::effecting_fn_body_not_direct", vec_to_array(m));
+                done = true;
+                0
+            }
+        };
+        pi = pi + 1;
+    }
+    0
+}
+
 fn cg_emit_fn_eff(out: &mut Vec<u8>, c: &mut TyCtx, body: Expr, rty: i64, src: &[u8], name_s: i64, name_e: i64, cgpmark: i64, pv0: i64, pvn: i64, gb: &mut Vec<u8>, embed: Args, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, body_tok0: i64) -> i64 {
     // (The Sentinel match grammar has no bind-the-whole-value pattern — only
     // `Enum::Variant(..)` + `_`. So the non-let-shape branches re-wrap the moved-out
@@ -3347,6 +3383,7 @@ fn cg_emit_fn_eff(out: &mut Vec<u8>, c: &mut TyCtx, body: Expr, rty: i64, src: &
                     match embed {
                         Args::Cell(pf, erest) => {
                             let _er: Args = erest;
+                            cg_eff_refuse_unfit(c, src, name_s, name_e, pv0, pvn);
                             cg_embed_emit(out, c, pf, tail, rty, src, name_s, name_e, pv0, pvn, gb)
                         },
                         Args::End => {
@@ -3366,6 +3403,7 @@ fn cg_emit_fn_eff(out: &mut Vec<u8>, c: &mut TyCtx, body: Expr, rty: i64, src: &
                             // let-shape. `lty` is the type to guard on if this is ever fixed.
                             match st {
                                 Stmt::SLet(lmf, lnm, lty, lval) => {
+                                    cg_eff_refuse_unfit(c, src, name_s, name_e, pv0, pvn);
                                     cg_letshape_emit(out, c, lnm, lty, lval, tail, rty, src, name_s, name_e, pv0, pvn, gb)
                                 },
                                 Stmt::SAssign(at, av) => {

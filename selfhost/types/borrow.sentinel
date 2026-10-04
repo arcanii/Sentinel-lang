@@ -193,8 +193,6 @@ fn dump_texpr_node(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut Ty
     (*c).sdivn = false;
     (*c).cg_place = (*c).cg_placen;
     (*c).cg_placen = false;
-    (*c).cg_clsfld = (*c).cg_clsfldn;
-    (*c).cg_clsfldn = false;
     // A `Shared` / `Mutex` read out of a place into a new owner is cloned right after it
     // is read (the oracle's `lower_expr` wrapper). The oracle's `moved_out` exception has no
     // counterpart here on purpose: it fires only in a generic body, where `scg` clones the
@@ -794,10 +792,8 @@ fn dump_texpr_arm(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyC
             };
             let tty: i64 = dump_texpr(out, it, 0 - 1, src, c, gb);
             // (ADR 0071 D2 amendment A1) an element path reads out of a place iff its target
-            // does, and lies in a class field iff its target does; captured before the
-            // index walk overwrites them.
+            // does; captured before the index walk overwrites it.
             let ix_tpl: bool = (*c).cg_place;
-            let ix_tcls: bool = (*c).cg_clsfld;
             let ibase: i64 = if mir_on(c) {
                 (*c).lastval
             } else {
@@ -890,7 +886,6 @@ fn dump_texpr_arm(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyC
                 0
             };
             (*c).cg_placen = ix_tpl;
-            (*c).cg_clsfldn = ix_tcls;
             ety
         },
         // (4e) `Name::Variant(args)` / paren-less `Name::Variant`. If `Name` is an

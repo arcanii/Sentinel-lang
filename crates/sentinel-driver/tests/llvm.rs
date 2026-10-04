@@ -1180,6 +1180,211 @@ fn llvm_a_moved_generic_read_hands_its_unit_on() {
     );
 }
 
+#[test]
+fn llvm_a_class_field_store_counts_and_a_class_drop_releases() {
+    // ADR 0071 D2 amendment A4 (register D156): a `Shared` / `Mutex` stored into a field of
+    // a class instance is cloned like any assignment of a place read, and a class binding's
+    // drop releases every handle its fields hold, at any depth through struct,
+    // generic-instance and class fields, skipping a field the binding was partially moved
+    // out of, and frees nothing else (register D137). The oracle, unlike inkwell (A2),
+    // releases a method's and an init's handle parameters, a class parameter's fields
+    // included. A missing release is a leak, not an exit code, so this reads the IR; the
+    // codegen differential holds `scg` to the same IR on `c71_class_field_handles`.
+    let ir = llvm_dump(
+        "a4_class_fields",
+        concat!(
+            "struct H { s: Shared<i64>, a: [i64] }\n",
+            "struct B<T> { v: T, n: i64 }\n",
+            "class K {\n",
+            "    let s: Shared<i64>;\n",
+            "    let m: Mutex<i64>;\n",
+            "    pub init(s: Shared<i64>, m: Mutex<i64>) { self.s = s; self.m = m; 0 }\n",
+            "    pub fn get(self: &Self) -> i64 { shared_get(self.s) }\n",
+            "    pub fn set(self: &mut Self, t: Shared<i64>) -> i64 { self.s = t; 0 }\n",
+            "}\n",
+            "class N {\n",
+            "    let h: H;\n",
+            "    let k: K;\n",
+            "    let b: B<Shared<i64>>;\n",
+            "    let a: [i64];\n",
+            "    pub init(h: H, k: K) { self.h = h; self.k = k; self.b = B { v: shared_new(4), n: 1 }; self.a = [1, 2]; 0 }\n",
+            "}\n",
+            "class A { let a: [i64]; pub init() { self.a = [1]; 0 } }\n",
+            "class U {\n",
+            "    let n: i64;\n",
+            "    pub init() { self.n = 0; 0 }\n",
+            "    pub fn eat(self: &Self, k: K) -> i64 { k.get() }\n",
+            "}\n",
+            "class SK { let k: secret K; pub init(k: secret K) { self.k = k; 0 } }\n",
+            "struct W { k: K, n: i64 }\n",
+            "fn eat_h(h: H) -> i64 { h.a[0] }\n",
+            "fn store(k: &mut K, s: Shared<i64>) -> i64 { (*k).s = s; 0 }\n",
+            "fn direct() -> i64 { let k: K = K::init(shared_new(1), mutex_new(2)); k.get() }\n",
+            "fn nested() -> i64 {\n",
+            "    let n: N = N::init(H { s: shared_new(1), a: [3] }, K::init(shared_new(2), mutex_new(3)));\n",
+            "    1\n",
+            "}\n",
+            "fn partial() -> i64 {\n",
+            "    let n: N = N::init(H { s: shared_new(1), a: [3] }, K::init(shared_new(2), mutex_new(3)));\n",
+            "    eat_h(n.h)\n",
+            "}\n",
+            "fn arrays_only() -> i64 { let a: A = A::init(); 1 }\n",
+            "fn held() -> i64 { let w: W = W { k: K::init(shared_new(1), mutex_new(2)), n: 1 }; w.n }\n",
+            "fn secret_field() -> i64 { let o: SK = SK::init(K::init(shared_new(1), mutex_new(2))); 1 }\n",
+            "fn main() -> i64 {\n",
+            "    let mut k: K = K::init(shared_new(5), mutex_new(6));\n",
+            "    let u: U = U::init();\n",
+            "    store(&mut k, shared_new(7)) + k.set(shared_new(8)) + u.eat(K::init(shared_new(9), mutex_new(1)))\n",
+            "        + direct() + nested() + partial() + arrays_only() + held() + secret_field()\n",
+            "}\n",
+        ),
+    );
+    // (fn, shared clones, mutex clones, shared releases, mutex releases, frees)
+    for (f, sc, mc, sr, mr, fr) in [
+        // each store into a class field clones; the frame releases the handle parameters
+        ("K__init", 1, 1, 1, 1, 0),
+        ("K__set", 1, 0, 1, 0, 0),
+        // the class parameter's drop releases both of its fields
+        ("U__eat", 0, 0, 1, 1, 0),
+        // a struct and a class moved into fields, and a value no place holds
+        ("N__init", 0, 0, 0, 0, 0),
+        ("store", 1, 0, 1, 0, 0),
+        // `k`'s drop releases both of its fields
+        ("direct", 0, 0, 1, 1, 0),
+        // `n`'s drop: `h.s`, `k.s`, `k.m`, `b.v`, and none of the arrays it holds
+        ("nested", 0, 0, 3, 1, 0),
+        // `n.h` was moved out, so `n`'s drop skips it
+        ("partial", 0, 0, 2, 1, 0),
+        ("arrays_only", 0, 0, 0, 0, 0),
+        // a struct's drop reaches the class in its field
+        ("held", 0, 0, 1, 1, 0),
+        // a `secret`-qualified class field holds what the class holds
+        ("secret_field", 0, 0, 1, 1, 0),
+    ] {
+        // The `define`, not a call site: the oracle emits class methods after the free fns
+        // that call them.
+        let head = format!("@{f}(");
+        let body: String = ir
+            .lines()
+            .skip_while(|l| !(l.starts_with("define ") && l.contains(&head)))
+            .take_while(|l| *l != "}")
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!body.is_empty(), "no define for @{f} in:\n{ir}");
+        for (sym, want) in [
+            ("@sentinel_shared_clone(", sc),
+            ("@sentinel_mutex_clone(", mc),
+            ("@sentinel_shared_release(", sr),
+            ("@sentinel_mutex_release(", mr),
+            ("@sentinel_free(", fr),
+        ] {
+            assert_eq!(body.matches(sym).count(), want, "@{f}: {sym} count:\n{body}");
+        }
+    }
+}
+
+#[test]
+fn llvm_refuses_a_non_word_param_the_embedded_shape_would_capture() {
+    // ADR 0072 D4 and register D69: the embedded shape's parent copies each param its resumer
+    // reads into the frame with an 8-byte load, and the resumer rebuilds the param from that
+    // one word. A struct or class rebuilt that way releases words that were never handles when
+    // the replay hands it to a by-value callee, whose drop releases its handle fields (ADR 0071
+    // A4). The oracle now refuses such a param, as its let and chained shapes already did and
+    // inkwell does (the let and chained cases pin those older refusals for a class, the last
+    // one read only by a later `let`'s `perform` argument); a word-typed param in the same
+    // shape still lowers.
+    let header = concat!(
+        "class K { let n: i64; let s: Shared<i64>; pub init(s: Shared<i64>) { self.n = 5; self.s = s; 0 } }\n",
+        "struct H { n: i64, s: Shared<i64> }\n",
+        "effect Io { read() -> i64; echo(x: i64) -> i64; }\n",
+        "fn eat(k: K) -> i64 { 1 }\n",
+        "fn eat_h(h: H) -> i64 { 1 }\n",
+    );
+    for (name, body, refused) in [
+        (
+            "class_param",
+            "fn eff(k: K) -> i64 ! { Io } { eat(k) + perform Io.read() }\nfn main() -> i64 { let s: Shared<i64> = shared_new(42); handle eff(K::init(s)) with { Io.read(kk) => kk(41) } }\n",
+            Some("`k` is captured across the continuation, so it must be `i64` or `secret i64`, and it is `K`"),
+        ),
+        (
+            "struct_param",
+            "fn eff(h: H) -> i64 ! { Io } { eat_h(h) + perform Io.read() }\nfn main() -> i64 { let s: Shared<i64> = shared_new(42); handle eff(H { n: 1, s: s }) with { Io.read(kk) => kk(41) } }\n",
+            Some("`h` is captured across the continuation, so it must be `i64` or `secret i64`, and it is `H`"),
+        ),
+        (
+            "let_class_param",
+            "fn eff(k: K) -> i64 ! { Io } { let v: i64 = perform Io.read(); v + eat(k) }\nfn main() -> i64 { let s: Shared<i64> = shared_new(42); handle eff(K::init(s)) with { Io.read(kk) => kk(41) } }\n",
+            Some("`k` is captured across the continuation, so it must be `i64` or `secret i64`; `K` would be read out of bounds"),
+        ),
+        (
+            "chained_class_param",
+            "fn eff(k: K) -> i64 ! { Io } { let a: i64 = perform Io.read(); let b: i64 = perform Io.read(); a + b + eat(k) }\nfn main() -> i64 { let s: Shared<i64> = shared_new(42); handle eff(K::init(s)) with { Io.read(kk) => kk(41) } }\n",
+            Some("effecting fn `eff` cannot be lowered"),
+        ),
+        (
+            "chained_later_let_class_param",
+            "fn eff(k: K) -> i64 ! { Io } { let a: i64 = perform Io.read(); let b: i64 = perform Io.echo(eat(k)); a + b }\nfn main() -> i64 { let s: Shared<i64> = shared_new(42); handle eff(K::init(s)) with { Io.read(kk) => kk(41), Io.echo(x, kk) => kk(x) } }\n",
+            Some("effecting fn `eff` cannot be lowered"),
+        ),
+        (
+            "word_param",
+            "fn eff(n: i64) -> i64 ! { Io } { n + perform Io.read() }\nfn main() -> i64 { handle eff(1) with { Io.read(kk) => kk(41) } }\n",
+            None,
+        ),
+    ] {
+        let path = temp_dir(&format!("a4_embedded_capture_{name}")).join("input.sentinel");
+        std::fs::write(&path, format!("{header}{body}")).expect("write source");
+        let out = Command::new(env!("CARGO_BIN_EXE_snc"))
+            .arg("llvm")
+            .arg(&path)
+            .output()
+            .expect("run snc llvm");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        match refused {
+            Some(reason) => assert!(
+                !out.status.success() && stderr.contains(reason),
+                "{name}: snc llvm must refuse, because {reason}; got {:?}:\n{stderr}",
+                out.status
+            ),
+            None => assert!(out.status.success(), "{name}: snc llvm must lower it:\n{stderr}"),
+        }
+    }
+}
+
+#[test]
+fn llvm_survives_a_by_value_cycle_through_a_class_field() {
+    // Register D157: the type checker refuses a struct that holds itself by value, but
+    // follows only struct-to-struct edges, so a struct and a class that hold each other are
+    // accepted though they have no finite layout. A class's drop now walks its fields for the
+    // handles they hold (ADR 0071 A4), and this walk stops at a type already on its path;
+    // without that stop it recursed until `snc` overflowed its stack. The IR emitted for such
+    // a type does not assemble (`llc`: "Cannot allocate unsized type"), so this checks only
+    // that `snc llvm` ends with a status of its own: 0 now, 1 once D157's refusal exists.
+    let path = temp_dir("a4_class_cycle").join("input.sentinel");
+    std::fs::write(
+        &path,
+        concat!(
+            "struct S { k: K, n: i64 }\n",
+            "class K { let s: S; let h: Shared<i64>; pub init(s: S) { self.s = s; self.h = shared_new(1); 0 } }\n",
+            "fn f(s: S) -> i64 { s.n }\n",
+            "fn g(k: K) -> i64 { 1 }\n",
+            "fn main() -> i64 { 7 }\n",
+        ),
+    )
+    .expect("write source");
+    let out = Command::new(env!("CARGO_BIN_EXE_snc"))
+        .arg("llvm")
+        .arg(&path)
+        .output()
+        .expect("run snc llvm");
+    assert!(
+        matches!(out.status.code(), Some(0) | Some(1)),
+        "snc llvm did not end with a status of its own on a class/struct cycle: {:?}\n{}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 // ---- Layer 2: the 0-panics corpus sweep ---------------------------------
 
 fn corpus_fixtures() -> Vec<PathBuf> {

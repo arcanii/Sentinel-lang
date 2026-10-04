@@ -2443,6 +2443,20 @@ fn pass_c71_method_handle_param() {
 }
 
 #[test]
+fn pass_c71_class_field_handles() {
+    // Register D156: a `Shared` / `Mutex` stored into a field of a class instance is counted
+    // (a place read is cloned), and a class's drop releases the handles its fields hold.
+    // Before, the field shared its cell with the value it was stored from, without a unit of
+    // its own, so a cell that other owner released was freed while the field still held it:
+    // through inkwell four cases read a reused cell and two corrupted the heap. The oracle
+    // and `scg` failed five more, which
+    // `selfhost_codegen::oracle_ir_of_the_class_field_program_runs` and the codegen
+    // differential pin. The last eleven cases check that the new drop releases no more
+    // than the store counted. 23 cases, 1 each; 42 = all held.
+    assert_eq!(run_exit("c71_class_field_handles.sentinel"), 42);
+}
+
+#[test]
 fn pass_c71_guard_outlives_its_owner() {
     // Register D155: a successful `lock` takes a refcount unit for the guard, which its
     // unlock gives back, so moving away the struct that owns the `Mutex` while the guard

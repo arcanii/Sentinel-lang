@@ -629,9 +629,6 @@ fn dump_tstmt(out: &mut Vec<u8>, s: Stmt, src: &[u8], c: &mut TyCtx, gb: &mut Ve
             } else {
                 0
             };
-            // (ADR 0071 D2 amendment A1) the place is a new owner of the value, unless it
-            // lies in a class, left as D2 had it (the oracle's `in_class_field`).
-            let as_own: bool = !(*c).cg_clsfld;
             (*c).consuming = true;
             push(out, ' ');
             // (ADR 0014 D3 / ADR 0051 A5) the RHS is checked against the assigned PLACE's
@@ -640,7 +637,9 @@ fn dump_tstmt(out: &mut Vec<u8>, s: Stmt, src: &[u8], c: &mut TyCtx, gb: &mut Ve
             // than a text divergence: `let mut o: ?i64 = null; o = 42;` emitted
             // `store { i1, i64 } 42, ptr %v0` — an aggregate store of a bare integer,
             // which `llvm-as` rejects with "integer constant must have integer type".
-            (*c).cg_own = as_own;
+            // (ADR 0071 D2 amendment A1) the place is a new owner of the value — a field of a
+            // class instance too, since amendment A4.
+            (*c).cg_own = true;
             dump_texpr(out, aval, ttgt, src, c, gb);
             stmt_div(c);
             // (7c) MIR: a plain-Var target rebinds var_defs to the RHS; a field/`*`-deref
