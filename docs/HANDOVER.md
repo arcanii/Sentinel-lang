@@ -124,6 +124,12 @@ reference as you work through the milestones.
 > confirming nothing pre-existing is newly refused; oracle-vs-scg byte-equality on the new
 > fixture at types, mir and llvm; and the secret-taint check in both directions.
 
+### ▶ RESUME HERE (2026-10-04 — `origin/main` was `b3e4de9` when this was written, and D150's two commits (`2563d0b`, `aff4a2b`), D153's two (`d25d196`, `91d3af3`) and this slice's two sit on top of it, unpushed; read `git reflog show refs/remotes/origin/main` and `git log --oneline origin/main..HEAD` at the START and AGAIN before writing either down. This slice: **register D155 CLOSED** (`17b71bd` fix, then this docs commit) — [ADR 0071](decisions/0071-shared-ownership-and-mutex.md) **D4 amendment A3**: a successful `lock` takes a refcount unit for the guard and the guard's unlock gives it back after unlocking, so a `Mutex` guard keeps its cell alive when the struct that owns the `Mutex` is moved away while the guard is held (passed by value, or bound anew in an inner block), which used to free the locked cell under the guard. Runtime-only: no symbol, signature or emitted IR moves, so all three back ends are fixed together; `abi-v1` §5's contract for three symbols is amended. A guard that is never unlocked (the D22, D64, D93, D117, D120 and D122 shapes) now keeps its cell, a leak, where a debug build aborted. Two bounded review rounds. `wf_00195873-e88` (soundness and prose, each with a construct-the-input verifier; no crash, double unlock, over-release or deadlock in balanced programs) found that a never-unlocked guard now keeps its cell (documented), that no end-to-end check of a guard's unlock was left (a relock case was added), the amendment's numbering, the `abi-v1` rows and a family of stale guard-ordering comments, all fixed. `wf_0705e1f2-d93` (the remedy text) found seven more points: five fixed, one refuted, and one pre-existing, D46, whose scope line now names `?Guard<T>`. Register: **154 distinct ids, 64 whose heading opens `**D<n> — DONE`** (the 2026-09-22 block's rule; the id D130 is reserved and not in the public register). Four-check: **2,121 passed with exactly the 18 known Windows failures**, doctests and clippy clean, every `selfhost_*` differential green including both bootstrap fixed points. Sweeps, the same compiler beside the old and the new runtime: a matched `snc build` and run of all 515 `.sentinel` files and 47 library wrappers changes only the new fixture (an abort before, 42 after); `snc llvm` moves no byte. Mutations: four in the runtime and one in inkwell (a `?Guard` drop without its unlock) are caught, the baseline surviving. The `abi-v1` amendment makes it a minor (ADR 0076 D2); the next version is at least 0.2.0 either way, and `Cargo.toml` says 0.1.0.)
+
+> **NEXT:** the order agreed with the maintainer; ADR 0077's implementation stays parked in the scratchpad (`a77park2/`).
+>
+> Owed by the maintainer: D102, D103, ADR 0077's Q6, D36's decision, D146's direction, and when to bump the version (at least 0.2.0; `Cargo.toml` still says 0.1.0).
+
 ### ▶ RESUME HERE (2026-10-03 — `origin/main` was `b3e4de9` when this was written, and D150's two commits (`2563d0b`, `aff4a2b`) and this slice's two sit on top of it, unpushed; read `git reflog show refs/remotes/origin/main` and `git log --oneline origin/main..HEAD` at the START and AGAIN before writing either down. This slice: **register D153 CLOSED, and D63 and D119 with it** (`d25d196` fix, then this docs commit) — [ADR 0071](decisions/0071-shared-ownership-and-mutex.md) **D2 amendment A2**: inkwell drops a class method's, an impl method's and a class `init`'s parameter frame on every exit, as a free fn's, but releases no handle in it, neither a `Shared` / `Mutex` binding nor one held in a field of a struct bound there, at any depth. A `return` in a method used to release a handle parameter the call had not cloned, which freed the cell while the caller still held it. The units the rule keeps are a leak, filed as **D154**. Found by ADR 0077's review (`wf_f44939ca-b9f`); ADR 0077's implementation stays parked in the scratchpad (`a77park2/`) until this lands. Two bounded review rounds. `wf_9abc7097-513` (three lenses, each with a construct-the-input verifier; about 650 constructed programs, no use-after-free, double free or over-release) found that the rule's kept units include a new leak on a method's `return` exit, where the drained frame used to release a unit a temporary or a struct argument brought in: kept as the price of the fail-closed rule, registered with the rest in D154 and reported to the maintainer; it also found prose and fixture gaps, all fixed. `wf_9d0686c1-fc0` (the remedy text only; its first run died on a usage limit and was re-run) found six more prose points, all fixed. Register: **153 distinct ids, 63 whose heading opens `**D<n> — DONE`** (the 2026-09-22 block's rule; the id D130 is reserved and not in the public register). Four-check: **2,117 passed with exactly the 18 known Windows failures**, doctests and clippy clean, every `selfhost_*` differential green including both bootstrap fixed points. Sweeps, the `snc` before this change against the final code: `snc llvm` over all 514 `.sentinel` files changes no byte on the 345 it emits and no verdict on the other 169; a matched `snc build` and run over those files and 47 library wrappers (561 entries) changes only the new fixture (an abort before, 42 after). Eleven mutations: the baseline survives and the ten others are caught. It moves inkwell's emitted IR, so at least a minor version (ADR 0076 D2); `Cargo.toml` still says 0.1.0.)
 
 > **NEXT:** ADR 0077's implementation, re-applied from the scratchpad's `a77park2/` on top of this, with its first review's findings fixed; then its review, four-check, sweeps and commit. D152 after D132's `perform` half.
@@ -2234,8 +2240,9 @@ reference as you work through the milestones.
 >      owners' drops: element drops for arrays and `Vec`, payload drops for enums, a drop for
 >      a temporary once its reader is done (D92's seam), drop flags for a maybe-moved binding
 >      (ADR 0077), and D154. A `?Guard` moved into such a temporary — `is_some({ g })`, or
->      `{ g };` — is never unlocked for the same reason, and the debug runtime then panics when
->      the mutex's last handle is released; since ADR 0043 A3 all three back ends agree on it.
+>      `{ g };` — is never unlocked for the same reason; since ADR 0043 A3 all three back ends
+>      agree on it. Before D155 the debug runtime then panicked when the mutex's last handle was
+>      released; since D155 the guard keeps its cell, a leak of one cell per evaluation.
 >
 >      **D123 — inkwell keeps a unit counted into a block's own `let`-local when nothing
 >      receives the block's value (a leak).** Found 2026-09-25 by the review of D121's fix.
@@ -2692,6 +2699,30 @@ reference as you work through the milestones.
 >      fields are freed now: with an array field added, the first shape falls from 163.0 MB
 >      to 70.9. The oracle and `scg`, which clone a place argument and release the
 >      parameter, release all of these units. A fix is not attempted here.
+>
+>      **D155 — DONE (2026-10-04, `17b71bd`, [ADR
+>      0071](decisions/0071-shared-ownership-and-mutex.md) D4 amendment A3). A `Mutex` guard
+>      did not keep its mutex alive.** `lock` gave the guard the mutex cell without a
+>      refcount unit of its own, on the ground that a guard's unlock always comes before the
+>      release by the owner it was locked through (drops run in reverse declaration order).
+>      Moving the owner broke that: when the struct holding the `Mutex` was passed by value,
+>      or bound anew in an inner block, while a guard taken from it was held, the struct's
+>      drop released the cell's last unit, so the locked cell was freed under the guard,
+>      which then read, wrote and unlocked freed memory. The checker accepted such a
+>      program, and all three back ends share the runtime. Its free-while-locked check is a
+>      `debug_assert!`: a debug build aborted, and a release build did not (a constructed
+>      program read the value of a cell allocated after the free). Found 2026-10-03 while
+>      checking how guards interact with drops. A successful `lock` now takes a unit for the
+>      guard and its unlock gives it back after unlocking; a failed acquire takes none. A
+>      guard that is never unlocked — the shapes registered as D22, D64, D93, D117, D120 and
+>      D122 — now keeps its cell for good, a leak of one cell per acquire, where a debug
+>      build aborted and a release build freed the locked cell at its owner's last release.
+>      Runtime-only: no symbol, signature or emitted IR changes, and `abi-v1` §5's contract
+>      for three symbols is amended. Pinned by `tests/pass/c71_guard_outlives_its_owner`
+>      (six cases, each aborting on the debug runtime before, and a seventh that locks again
+>      after a block, loop exits, a callee's and a method's `return` and fall-through, and a
+>      generic callee, so a missed unlock times out) and three runtime tests. The `abi-v1`
+>      amendment makes it a minor by ADR 0076 D2.
 >
 >      **D78 — stale corpus fixture counts in `llvm.rs` and `README.md`, at six sites, stale
 >      before this change.** Found by D74's reviews. `crates/sentinel-driver/tests/llvm.rs`
@@ -3179,7 +3210,7 @@ reference as you work through the milestones.
 >      `let cond: bool = false; let m: Mutex<i64> = mutex_new(2); let g = lock(m);`
 >      `let r: i64 = if cond { let h = idg(g); 2 } else { 0 }; r + 42`
 >      borrow-checks CLEAN, and the `else` path holds an acquired lock with no
->      `sentinel_mutex_unlock` anywhere on it. PRE-EXISTING — a pre-A1 `scg` emits the
+>      `sentinel_mutex_unlock` anywhere on it (and, since D155, the guard's cell: a leak). PRE-EXISTING — a pre-A1 `scg` emits the
 >      identical unlock structure (verified; the two binaries differ only in the
 >      mangled name) — and it sits inside ADR 0071's deliberately deferred no-escape
 >      tail, which pinned `lock()` to a direct `let` RHS (`GuardNotLetBound`) but never
@@ -3489,15 +3520,15 @@ reference as you work through the milestones.
 >      first held back as its own slice because it RENAMES emitted symbols for null-free
 >      programs (`let s: secret i64 = idg(7)` → `@idg__sec_i64`), landed with D4 and D43.
 >
->      **D46 — a `?&T` or `?Channel<T>` `null` constant is JOINT invalid IR: the oracle
->      emits `ptr 0` and `scg` reproduces it byte-for-byte.**
->      `store { i1, ptr } { i1 0, ptr 0 }` — "integer constant must have integer type".
->      The oracle's `NullLit` `_` arm is `format!("{} 0", lty(inner))`, which spells a
->      pointer payload's zero as `ptr 0` instead of `ptr null`; `scg`'s
->      `cgo_ty(c, val); cgo_str(c, " 0")` mirrors it exactly. 432 bytes on both sides.
->      The `llvm_rejects` gate is silent BY DESIGN here — it fires only when `scg` is
->      rejected and the oracle is clean — so this is the both-wrong exemption, working as
->      specified. **Oracle-first**, and it is the reason D39's predicate must stay narrow.
+>      **D46 — a `?&T`, `?Channel<T>` or `?Guard<T>` `null` constant is JOINT invalid IR:
+>      the oracle emits `ptr 0` and `scg` reproduces it byte-for-byte.** `store { i1, ptr }
+>      { i1 0, ptr 0 }` — "integer constant must have integer type". The oracle's `NullLit`
+>      `_` arm is `format!("{} 0", lty(inner))`, which spells a pointer payload's zero as
+>      `ptr 0` instead of `ptr null`; `scg`'s `cgo_ty(c, val); cgo_str(c, " 0")` mirrors it
+>      exactly. 432 bytes on both sides. The `llvm_rejects` gate is silent BY DESIGN here —
+>      it fires only when `scg` is rejected and the oracle is clean — so this is the
+>      both-wrong exemption, working as specified. **Oracle-first**, and it is the reason
+>      D39's predicate must stay narrow.
 >
 >      **D47 — OPTION A DONE (`unwrap_or` on a heap-indirect payload is now REFUSED at
 >      the type layer); the READ-BACK itself is still missing.** Originally filed as

@@ -5,7 +5,7 @@ HANDOVER.md, STATE.md is the source of truth. New contributors (or
 new chat sessions) should be able to read this file and understand
 the current state of the workspace without re-reading every commit.
 
-## Current State (2026-10-03)
+## Current State (2026-10-04)
 
 > **Phase C closed at the bootstrap milestone (2026-05-30); Phase D self-hosts; the
 > per-unit separate-compilation back end is functionally complete.**
@@ -14,7 +14,22 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
-**Latest (2026-10-03) — inkwell drops a method's and an init's parameters,
+**Latest (2026-10-04) — a `Mutex` guard keeps its mutex alive (register D155).**
+[ADR 0071](decisions/0071-shared-ownership-and-mutex.md) D4 amendment A3: `lock` gave the guard
+the mutex cell without a refcount unit of its own, relying on the guard's unlock coming before
+its owner's release; moving the struct that holds the `Mutex` while a guard taken from it was
+held — passing it by value, or binding it anew in an inner block — released the last unit and
+freed the locked cell under the guard. The runtime's free-while-locked check is a
+`debug_assert!`, so only a debug build caught it. A successful `lock` now takes a unit for the
+guard, and the unlock gives it back after unlocking; a failed acquire takes none. A guard that
+is never unlocked (the D22, D64, D93, D117, D120 and D122 shapes) now keeps its cell, a leak,
+where a debug build aborted. Runtime-only: no symbol, signature or emitted IR moves, in any back end;
+`abi-v1` §5's contract for three symbols is amended, which makes it a minor (ADR 0076 D2).
+Pinned by `tests/pass/c71_guard_outlives_its_owner` (six cases aborting before, and a seventh
+that locks the mutex again after a block, loop exits, a callee's and a method's `return` and
+fall-through, and a generic callee) and three runtime tests.
+
+**Previously (2026-10-03) — inkwell drops a method's and an init's parameters,
 but releases no handle among them (register D153; D63 and D119 closed).**
 [ADR 0071](decisions/0071-shared-ownership-and-mutex.md) D2 amendment A2: inkwell released a
 class method's, an impl method's or a qualified call's `Shared` / `Mutex` parameter at a
@@ -2448,14 +2463,20 @@ cell + C-ABI symbols (slice 1); the FnId-base shift 40→42 (slice 2a); `Type::M
 `Mutex` handle refcount clone/drop accounting mirroring `Shared` (slice 3a). **Slice 3b closes
 the guard drop:** a bound `let g = lock(m)` now UNLOCKS on scope exit. The `?Guard`'s payload
 is the mutex cell handle `m`; its scope-exit drop, on the valid arm, calls
-`sentinel_mutex_unlock(m)` (`force_unlock`, no refcount change), firing in reverse-declaration
-order BEFORE the owning `Mutex`'s `sentinel_mutex_release` — so the cell is unlocked before it
-is freed (a still-locked free would trip the runtime's free-while-locked `debug_assert!`).
-`Guard`/`?Guard` are **MOVE, not Copy** (no refcount → a duplicated guard would double-unlock),
-and a **conservative no-escape pin** (`lock()` only as the direct RHS of an immutable `let`;
-`GuardNotLetBound`, ui `c71_guard_not_let_bound`) keeps the guard from outliving its mutex (the
-full ADR-D3 no-escape is a deferred hardening — the residual escapes are contrived and caught
-by the runtime assert, which is `debug_assert!`, hence the static pin). Landed in lockstep
+`sentinel_mutex_unlock(m)` (`force_unlock`), firing in reverse-declaration order BEFORE the
+owning `Mutex`'s `sentinel_mutex_release` — so, while the guard stays in its owner's scope and
+the owner is not moved, the cell is unlocked before it is freed (a still-locked free would trip
+the runtime's free-while-locked `debug_assert!`). (Since D155, ADR 0071 A3, a successful lock
+also takes a refcount unit for the guard, which its unlock gives back, so the cell outlives the
+guard in every case.) `Guard`/`?Guard` are **MOVE, not Copy** (a guard is never cloned, so a
+duplicated guard would double-unlock — and, since D155, give back its unit twice), and a
+**conservative no-escape pin** (`lock()` only as the direct RHS of an immutable `let`;
+`GuardNotLetBound`, ui `c71_guard_not_let_bound`) keeps the guard from outliving its scope (the
+full ADR-D3 no-escape is a deferred hardening — the residual escapes are contrived; at this
+slice they were caught only by the runtime assert, a `debug_assert!`, hence the static pin;
+since D155 an escaped guard keeps its cell alive until its unlock, so what remains is a lock held
+past its scope).
+Landed in lockstep
 across the four backends — the borrow-check crate (Move + pin, shared by inkwell + oracle), the
 inkwell backend + the `snc llvm` oracle (`llvm_dump.rs`), and self-hosted `scg`
 (`selfhost/types/*.sentinel`, byte-identical); the pin rule is **snc-only** (scg is a dump-only
@@ -2468,7 +2489,8 @@ differential + both bootstrap fixed points green. **Next: slice 4 (the D5a opt-i
 wait-for-graph tier; `LockTimeout` is already always-on) → M1.4c (secret `Shared<secret T>` /
 `Mutex<secret T>`, D6, which also unblocks `Channel<secret T>`).** The full ADR-D3 guard
 no-escape (outer-scope guard-VAR reshuffles) + a `& *g` guard-borrow lifetime model stay deferred
-hardening. See ADR 0071 (M1.4b implementation log) + HANDOVER §RESUME.
+hardening (since D155 an escaped guard keeps its cell alive until its unlock; it still holds the
+lock past its scope). See ADR 0071 (M1.4b implementation log) + HANDOVER §RESUME.
 
 **(2026-07-02) — ADR 0071 M1.4a: `Shared<T>` refcounted-handle DONE — the first
 `Copy`-for-the-checker YET drop-emitting type, self-hosted byte-identically.** The ADR 0066
