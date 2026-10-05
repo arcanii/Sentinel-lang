@@ -197,10 +197,10 @@ Sentinel is being built by [Anie Ltd.](https://aniesolutions.ai) as the language
 `snc --version` answers **"what version of Sentinel do I have?"** in two parts:
 
 ```
-snc 0.1.0 (0x8a33152df5471198)
+snc 0.2.0 (0x8a33152df5471198)
 ```
 
-- **`0.1.0`** is the semantic version of the compiler and the language it accepts. Pre-1.0,
+- **`0.2.0`** is the semantic version of the compiler and the language it accepts. Pre-1.0,
   so the MINOR is the breaking slot: a new feature, a changed flag, a new runtime symbol or a
   rule that now rejects a program that used to compile all bump the minor; a fix with no
   user-visible surface change bumps the patch.

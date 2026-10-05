@@ -1,8 +1,8 @@
 # ADR 0077: A moved binding's drop is decided per exit, by walk order and a run-time flag
 
-Status: **ACCEPTED** (2026-10-01) with the proposed answers to Q1–Q5; Q6, the version, is
-the maintainer's. Drafted 2026-09-25. Closes register items **D93**, **D64** and **D22**; see
-*Implementation* for what landing it settled. Amends
+Status: **ACCEPTED** (2026-10-01) with the proposed answers to Q1–Q5; Q6, the version, was
+answered on 2026-10-05 (0.2.0, after the landing). Drafted 2026-09-25. Closes register items
+**D93**, **D64** and **D22**; see *Implementation* for what landing it settled. Amends
 [ADR 0017](0017-phase-c2-kickoff-and-region-plan.md) D8, [ADR 0046](0046-partial-move-field-soundness.md)
 D3/D4, [ADR 0065](0065-early-return.md) D4/D7, [ADR 0036](0036-loops.md) C1 and
 [ADR 0075](0075-a-bubbling-resume-leaves-its-arm.md) D1/D5 (the full list is under *Docs to
@@ -289,8 +289,8 @@ is an optimization with its own oracle-moving landing, not part of this ADR's fi
 
 Landed with the proposed answers to Q1–Q5 (D2 + D3; the flag set at the read; D6 for a flagged
 binding only, the general assignment leak staying register D120; D22 closed by the flag; move
-sites exported in the `DropPlan`). Q6 is the maintainer's. What the implementation settled that
-the decisions above left open:
+sites exported in the `DropPlan`). Q6: the version went to 0.2.0 in its own commit right after
+this landed. What the implementation settled that the decisions above left open:
 
 - **A move site is keyed by its binding as well as its span** — `(VarId, start, end)`, and
   `(VarId, field, start, end)` for an ADR 0046 field — so two reads that happen to share a span
@@ -452,7 +452,8 @@ list of owners never dropped; and the register: D93 cites D64 and D22 and is wid
 
 ## Open questions for the maintainer
 
-Q1–Q5 were answered as proposed (2026-09-26); Q6 remains open.
+Q1–Q5 were answered as proposed (2026-09-26). Q6 was answered on 2026-10-05: the version went to
+0.2.0 in its own commit right after the landing, covering every oracle-moving change since 0.1.0.
 
 - **Q1.** Accept D2 + D3 (walk order, then a flag after the first move) in place of the order's
   framing, a path-sensitive static set with flags only where a binding is maybe moved?

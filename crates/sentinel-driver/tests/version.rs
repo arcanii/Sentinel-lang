@@ -1,7 +1,7 @@
 //! ADR 0076 — the compiler's two-part version, and the build id that closes register D73.
 //!
 //! The version is a hand-maintained semver plus a computed build id:
-//! `snc 0.1.0 (0x3f2a1c9d4e5b6a70)`. The semver encodes a judgement, so a human keeps it;
+//! `snc 0.2.0 (0x3f2a1c9d4e5b6a70)`. The semver encodes a judgement, so a human keeps it;
 //! the build id encodes a fact, so it is computed (D4/D5).
 //!
 //! Two things are worth testing that look like they do not need it. A version QUERY is not
