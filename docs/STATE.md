@@ -5,7 +5,7 @@ HANDOVER.md, STATE.md is the source of truth. New contributors (or
 new chat sessions) should be able to read this file and understand
 the current state of the workspace without re-reading every commit.
 
-## Current State (2026-10-04)
+## Current State (2026-10-05)
 
 > **Phase C closed at the bootstrap milestone (2026-05-30); Phase D self-hosts; the
 > per-unit separate-compilation back end is functionally complete.**
@@ -14,7 +14,35 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
-**Latest (2026-10-05) — a moved binding's drop is decided per exit, by walk order and a run-time
+**Latest (2026-10-05, second slice) — `scg` routes an effecting body with statements as the oracle
+does (registers D133 and D161).**
+The self-hosted code generator routed an effecting fn's body by its statement count: a body of one
+`let` took the let shape and a body of two or more statements the chained shape, whatever the
+statements were. So D133's body (a `let` bound to a plain value before a `perform` tail), which the
+oracle lowers straight-line, got IR `llc` rejects, and `scg` emitted IR for bodies the oracle
+refuses. It now routes a body with statements from a classification copy by the oracle's conditions,
+all but the capture condition, which stays with the shapes' emitters (D159, D162, D108, D165):
+`eff_route` answers the route over `eff_kind`, a walk total over `Expr`. It refuses with the
+oracle's code a body those conditions refuse, and with the oracle's message, or its part before the
+type it names, but in five cases D161 lists. A body with statements that calls, anywhere in it,
+through a name the fn binds anywhere other than only as a handler arm's continuation, or reads such
+a name (not a parameter) that also names a fn, is refused, wherever the binding's scope ends, and so
+is one that holds a `handle` with a `return` arm: the simpler fail-closed rules, after the review
+rounds kept finding holes in narrower ones. It refuses bodies the oracle lowers, some of which `scg`
+lowered to the oracle's bytes before (D161 lists them); a body without statements is still
+classified as before (D160). The reviews filed D162 (a capture the shapes' emitters do not check),
+D163 (generic instance names in the shapes), D164 (`scg`'s typer scopes a `while` body's and a
+`return` arm's names unlike the resolver, and binds a `return` arm's names at each resume site in a
+handler arm) and D165 (the oracle's capture walk skips a `match`, a `handle`, a `scope`, a `spawn`,
+an `await` and a block-wrapped `perform`, widening D108), and the probe sweep D166 (`scg` defines
+the instances of nested generic calls in another order than the oracle), all pre-existing. Both
+bootstrap fixed points hold. Pinned by `tests/pass/c35_effecting_body_straight_line`, twenty-one
+codegen seeds and a refusal test. `scg`-only, so a patch by ADR 0076 D2. The version went to 0.2.0
+just before this slice, in its own commit (ADR 0077's Q6). A seventh review round was still running
+when this was committed, at the maintainer's request; HANDOVER's RESUME block says to read its
+findings first.
+
+**Previously (2026-10-05) — a moved binding's drop is decided per exit, by walk order and a run-time
 flag (registers D93, D64 and D22).**
 [ADR 0077](decisions/0077-drop-flags-for-maybe-moved-bindings.md): every drop site in the oracle
 and inkwell skipped a binding the borrow checker recorded as moved anywhere in its function. So
