@@ -7,7 +7,7 @@ module types;
 // `perform` as a 1-element `Args` list (`Args::End` = not embedded: a direct-perform
 // tail [c35a], a call tail [c35b — an effecting callee's args never perform in the
 // emitted corpus, so no ufeff check is needed], a fully pure tail [c35b], or any body
-// with statements [the c35c let-shape, routed structurally in `cg_emit_fn_eff`]).
+// with statements [routed by `eff_route`, below]).
 // Mirrors the oracle's `detect_embedded_shape` over the emitted-corpus shapes.
 fn eff_classify(body2: Expr) -> Args {
     match body2 {
@@ -102,6 +102,756 @@ fn efp_args(aa: Args) -> Args {
             }
         },
     }
+}
+
+// ===== (registers D133 and D161) the oracle's routing of an effecting body with statements ====
+//
+// The oracle (`dump_fn_named`) takes its LET shape when an effecting fn's body is one `let`
+// whose value produces a continuation, of type `i64` or `secret i64`, before a tail that does
+// not suspend; its CHAINED shape when the body is two or more such `let`s before such a tail;
+// either only when each name its capture walk collects from the tail (and, chained, from a
+// later `let`'s value) is a parameter of type `i64` or `secret i64` or one of the shape's
+// `let`s. Otherwise it lowers the body straight-line when no statement suspends and the tail
+// either produces a continuation or does not suspend (`validate_effecting_fn_body`), and
+// refuses it when not. It takes neither shape for `main`. `eff_route` answers which, from a
+// classification copy of the body (consumed), by the same conditions but the captures:
+//   0 — no statements, which `eff_classify` routes;
+//   1 — the let shape;   2 — the chained shape;   3 — straight-line;
+//   4 — refused naming the type rule: the one `let`, whose value is not a block, is bound to
+//       a suspension, its type does not fit, and the tail does not suspend;
+//   5 — refused with the oracle's general reason.
+// The captures are left to the shapes' emitters, which refuse a parameter a frame would carry
+// that is not `i64` or `secret i64` (`cg_eff_refuse_unfit`, `cg_chained_refuse_unfit`; in the
+// let and embedded shapes any such parameter, D159). They do not refuse a name the body binds
+// outside the shape's `let`s, in the tail or in a `let`'s value, that the tail or a later
+// `let`'s value reads, which the oracle's capture walk collects (register D162); that walk does
+// not enter a `match`, a `handle`, a `scope`, a `spawn` or an `await`, nor a `perform` that
+// ends a block which is a later `let`'s value (registers D108 and D165). A call, anywhere in
+// the body, through a name the fn binds anywhere other than only as a handler arm's
+// continuation (a parameter, a `let`, a pattern, a handler arm's other parameters, a `return`
+// arm's value) refuses it (5) ahead of the shapes, the straight-line route and the type-rule
+// refusal (4) (`eff_check_called` sets `cg_eff_refused`), wherever the binding's scope ends:
+// `scg` lowers such a call apart from the oracle where its typer binds the name where the
+// resolver does not, or the name holds a `Fn` value (ADR 0070's direct call is not mirrored).
+// So does a read, anywhere in the body, of a name bound that way, other than a parameter, that
+// also names one of the program's fns: outside the binding's scope the resolver takes the fn.
+// So does a `handle` with a `return` arm, which `scg` lowers inside the handler arm at each
+// resume site of the `handle` (`eff_ret`; register D164). A call inside a handler arm through
+// that arm's continuation resumes it, and counts as a suspension, as the oracle counts it.
+// A value "produces a continuation" as the oracle's `produces_kont` says: a
+// `perform`, a call to an effecting fn, or a block whose statements do not suspend, ending in
+// one. A widen the oracle's typer puts around it stops it producing one and leaves it
+// suspending: under a `secret i64` annotation a block of type `i64` (the widen lands on the
+// block's tail, and `strip_secret_widen` peels only a widen on the value itself), and a tail of
+// a type other than the fn's return type. A call of a generic effecting fn whose return type
+// is its type parameter takes the return type, and is not widened; one whose return type wraps
+// the parameter (`?T`, `[T]`) is taken for widened here, where the oracle binds the parameter
+// from the return type and lowers the body (register D161).
+fn eff_route(c: &mut TyCtx, src: &[u8], body3: Expr, rty: i64) -> i64 {
+    match body3 {
+        Expr::Block(st3, tail3) => {
+            (*c).cg_eff_refused = false;
+            (*c).cg_eff_seen = vec_new();
+            (*c).cg_eff_called = vec_new();
+            (*c).cg_eff_read = vec_new();
+            let mut ln: Vec<u8> = vec_new();
+            let mut lo: Vec<i64> = vec_new();
+            let mut ll: Vec<i64> = vec_new();
+            let mut nst: i64 = 0;
+            let mut nshape: i64 = 0;
+            let mut nsusp: i64 = 0;
+            let mut unfit: bool = false;
+            eff_route_stmts(c, src, st3, &mut ln, &mut lo, &mut ll, &mut nst, &mut nshape, &mut nsusp, &mut unfit);
+            let mut tn: i64 = 0;
+            let mut tb: bool = false;
+            let tk0: i64 = eff_kind(c, src, tail3, &mut ln, &mut lo, &mut ll, &mut tn, &mut tb);
+            eff_check_called(c, src);
+            // A tail that produces a continuation of a type other than the fn's return type is
+            // widened to it by the oracle's typer (a `secret` or nullable widen), so it produces
+            // none, and still suspends. A type parameter is bound to the return type.
+            let tk: i64 = if tk0 == 2 && tn != rty && !eff_is_tparam(c, strip_secret(c, tn)) {
+                1
+            } else {
+                tk0
+            };
+            let shaped: bool = if (*c).cgmain {
+                false
+            } else if tk != 0 {
+                false
+            } else if nst == 1 {
+                nshape == 1
+            } else {
+                nshape == nst
+            };
+            if nst == 0 {
+                0
+            } else if (*c).cg_eff_refused {
+                5
+            } else if shaped {
+                if nst == 1 { 1 } else { 2 }
+            } else if nsusp == 0 && tk != 1 {
+                3
+            } else if nst == 1 && unfit && tk == 0 {
+                4
+            } else {
+                5
+            }
+        },
+        _ => {
+            // A fn body is always a `Block` (parse_block); unreachable.
+            let _o: Expr = body3;
+            0
+        },
+    }
+}
+
+// The body's top-level statements, in order: counts them, the `let`s a shape takes and the
+// statements that may suspend, and notes a `let` bound to a suspension whose type does not
+// fit (the oracle's `unlowerable_reason` names that rule for a body of one `let`). A `let`
+// binds its name after its value.
+fn eff_route_stmts(c: &mut TyCtx, src: &[u8], st: Stmts, ln: &mut Vec<u8>, lo: &mut Vec<i64>, ll: &mut Vec<i64>, nst: &mut i64, nshape: &mut i64, nsusp: &mut i64, unfit: &mut bool) -> i64 {
+    match st {
+        Stmts::SEnd => 0,
+        Stmts::SCell(s1, sr) => {
+            *nst = *nst + 1;
+            let susp: i64 = match s1 {
+                Stmt::SLet(lm, lnm, lty, lval) => {
+                    let _m: bool = lm;
+                    let mut vn: i64 = 0;
+                    let mut vb: bool = false;
+                    let vk: i64 = eff_kind(c, src, lval, ln, lo, ll, &mut vn, &mut vb);
+                    let fit: i64 = eff_fit(c, lty, vn);
+                    // A `secret i64` annotation over a block of type `i64`: the widen sits on
+                    // the block's tail, so the value no longer produces a continuation. A block
+                    // whose type is a type parameter (a call of a generic effecting fn) is not
+                    // widened: the oracle's typer binds the parameter to the expected `secret
+                    // i64` first (an argument that binds it to another type is a type error).
+                    let widened: bool = if fit == 2 {
+                        if vb {
+                            !eff_secret_word(c, vn) && !eff_is_tparam(c, strip_secret(c, vn))
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    };
+                    if vk == 2 && fit != 0 && !widened {
+                        *nshape = *nshape + 1;
+                        0
+                    } else {
+                        0
+                    };
+                    // The oracle peels a widen of either kind off the value before naming the
+                    // type rule, which a block's value does not carry on itself.
+                    if vk == 2 && fit == 0 && !vb {
+                        *unfit = true;
+                        0
+                    } else {
+                        0
+                    };
+                    eff_bind(c, ln, lo, ll, &lnm, 'o');
+                    let _n: [u8] = lnm;
+                    vk
+                },
+                Stmt::SAssign(at, av) => {
+                    let t: i64 = eff_sub(c, src, at, ln, lo, ll);
+                    let v: i64 = eff_sub(c, src, av, ln, lo, ll);
+                    t + v
+                },
+                Stmt::SWhile(wc, wb) => {
+                    let w1: i64 = eff_sub(c, src, wc, ln, lo, ll);
+                    let w2: i64 = eff_sub(c, src, wb, ln, lo, ll);
+                    w1 + w2
+                },
+                Stmt::SBreak => 0,
+                Stmt::SContinue => 0,
+                Stmt::SExpr(se) => eff_sub(c, src, se, ln, lo, ll),
+            };
+            if susp > 0 {
+                *nsusp = *nsusp + 1;
+                0
+            } else {
+                0
+            };
+            eff_route_stmts(c, src, sr, ln, lo, ll, nst, nshape, nsusp, unfit)
+        },
+    }
+}
+
+// Does a `let` of annotation `lty`, whose value's type is `vn`, fit the continuation's one
+// `i64` slot (the oracle's `fits_kont_slot` over the let's type)? 0 — no; 1 — yes, and the
+// value takes no widen (an `i64` annotation, or none); 2 — the annotation is `secret i64`.
+// With no annotation the let's type is its value's, and a call to a generic effecting fn
+// types its value as the instance's return type, which classifying does not infer: a bare
+// type parameter (under `secret` or not) counts as fitting here, and a shape's emitter, which
+// types the value, refuses the body when it does not fit (`cg_letshape_emit`; `cg_chained_emit`
+// from `cg_chained_unfit`'s counts), as the oracle refuses it. `main` takes no shape, so there
+// such a body is refused with the general reason, where the oracle names the type rule when the
+// instance does not fit (register D161).
+fn eff_fit(c: &mut TyCtx, lty: TyOpt, vn: i64) -> i64 {
+    match lty {
+        TyOpt::NoTy => {
+            if vn == 0 {
+                1
+            } else if eff_secret_word(c, vn) {
+                1
+            } else if eff_is_tparam(c, strip_secret(c, vn)) {
+                1
+            } else {
+                0
+            }
+        },
+        TyOpt::SomeTy(te) => eff_te_fit(c, te),
+    }
+}
+
+// Is `h` a type parameter (interner kind 9, `mk_tparam`)?
+fn eff_is_tparam(c: &mut TyCtx, h: i64) -> bool {
+    if h < tbase() {
+        false
+    } else {
+        (*c).tk[h - tbase()] == 9
+    }
+}
+
+// An annotation's fit, read from its syntax rather than interned, so that classifying a body
+// interns no type (the order of first interning is the order generic instances are declared
+// in, register D134). 1 — `i64`; 2 — `secret i64`; 0 — anything else. A type parameter is
+// resolved through the instance being lowered, as `type_of_typeexpr` resolves it.
+fn eff_te_fit(c: &mut TyCtx, te: TypeE) -> i64 {
+    match te {
+        TypeE::TIdent(nm) => {
+            let r: i64 = eff_ident_fit(c, &nm);
+            let _n: [u8] = nm;
+            r
+        },
+        TypeE::TSecret(inner) => {
+            let r: i64 = eff_te_fit(c, inner);
+            if r == 0 { 0 } else { 2 }
+        },
+        TypeE::TNullable(x) => {
+            let _x: TypeE = x;
+            0
+        },
+        TypeE::TArray(x) => {
+            let _x: TypeE = x;
+            0
+        },
+        TypeE::TRef(x) => {
+            let _x: TypeE = x;
+            0
+        },
+        TypeE::TRefMut(x) => {
+            let _x: TypeE = x;
+            0
+        },
+        TypeE::TGeneric(gn, ga) => {
+            let _g: [u8] = gn;
+            let _a: TyArgs = ga;
+            0
+        },
+    }
+}
+
+fn eff_ident_fit(c: &mut TyCtx, nm: &[u8]) -> i64 {
+    let tpidx: i64 = tp_lookup(c, nm);
+    if tpidx >= 0 {
+        if (*c).cg_mono_on {
+            let h: i64 = (*c).cg_mono_args[tpidx];
+            if h == 0 {
+                1
+            } else if eff_secret_word(c, h) {
+                2
+            } else {
+                0
+            }
+        } else {
+            0
+        }
+    } else if scalar_code(nm) == 0 {
+        1
+    } else {
+        0
+    }
+}
+
+// Is `h` `secret i64`? (`i64` is the handle 0, and `strip_secret` peels one `secret`.)
+fn eff_secret_word(c: &mut TyCtx, h: i64) -> bool {
+    if h == 0 {
+        false
+    } else {
+        strip_secret(c, h) == 0
+    }
+}
+
+// What evaluating `ex` does, by the oracle's `expr_suspends` and `produces_kont`: 0 — it
+// never suspends; 1 — it may; 2 — it produces a continuation. On 2, `*nt` is the type the
+// continuation resumes with and `*blk` whether the value is a block. Consumes `ex`. Total
+// over `Expr`, as the oracle's walk is over its nodes: a construct the walk did not enter
+// could hide a suspension. Only a block passes a continuation up from its tail; every other
+// construct that holds one may suspend, and produces none.
+fn eff_kind(c: &mut TyCtx, src: &[u8], ex: Expr, ln: &mut Vec<u8>, lo: &mut Vec<i64>, ll: &mut Vec<i64>, nt: &mut i64, blk: &mut bool) -> i64 {
+    match ex {
+        Expr::Perform(pe, po, pa) => {
+            let _a: i64 = eff_args(c, src, pa, ln, lo, ll);
+            let eid: i64 = effect_lookup(c, src, &pe);
+            let oidx: i64 = op_index_lookup(c, src, eid, &po);
+            *nt = op_ret(c, eid, oidx);
+            *blk = false;
+            let _e: [u8] = pe;
+            let _o: [u8] = po;
+            2
+        },
+        Expr::Call(cn, ca) => {
+            // A name bound in the fn shadows a fn of that name, the resolver's rule and
+            // `dump_te_call`'s. The callee is looked up before the arguments are walked, as both
+            // look it up. A call through a bound name may suspend: inside a handler arm through
+            // that arm's continuation it resumes; through a name bound any other way, anywhere in
+            // the fn, the body is refused (`eff_check_called`, over the names noted here).
+            let at: i64 = eff_bound_at(ln, lo, ll, &cn);
+            let bound: bool = at >= 0 || sc_lookup(c, &cn) >= 0;
+            eff_note(&mut (*c).cg_eff_called, &cn);
+            let ak: i64 = eff_args(c, src, ca, ln, lo, ll);
+            let fid: i64 = if bound { 0 - 1 } else { fn_lookup(c, src, &cn) };
+            let effc: bool = if fid >= 42 { (*c).ufeff[fid - 42] != 0 } else { false };
+            let _n: [u8] = cn;
+            if bound {
+                1
+            } else if effc {
+                *nt = (*c).ufret[fid - 42];
+                *blk = false;
+                2
+            } else {
+                ak
+            }
+        },
+        Expr::Block(bs, bt) => {
+            // A block: its statements, then its tail; each name a `let` binds is noted
+            // (`eff_bind`).
+            let sk: i64 = eff_stmts(c, src, bs, ln, lo, ll);
+            let tk: i64 = eff_kind(c, src, bt, ln, lo, ll, nt, blk);
+            *blk = true;
+            if sk > 0 {
+                1
+            } else {
+                tk
+            }
+        },
+        Expr::Unary(uo, ui) => {
+            let _u: i64 = uo;
+            eff_sub(c, src, ui, ln, lo, ll)
+        },
+        Expr::Binary(bo, bl, br) => {
+            let _b: i64 = bo;
+            let l: i64 = eff_sub(c, src, bl, ln, lo, ll);
+            let r: i64 = eff_sub(c, src, br, ln, lo, ll);
+            eff_any(l + r)
+        },
+        Expr::Method(mt, mn, ma) => {
+            let _m: [u8] = mn;
+            let t: i64 = eff_sub(c, src, mt, ln, lo, ll);
+            let a: i64 = eff_args(c, src, ma, ln, lo, ll);
+            eff_any(t + a)
+        },
+        Expr::Field(ft, fnm) => {
+            let _f: [u8] = fnm;
+            eff_sub(c, src, ft, ln, lo, ll)
+        },
+        Expr::Index(it, ix) => {
+            let t: i64 = eff_sub(c, src, it, ln, lo, ll);
+            let i: i64 = eff_sub(c, src, ix, ln, lo, ll);
+            eff_any(t + i)
+        },
+        Expr::Qcall(qm, qn, qa) => {
+            let _q1: [u8] = qm;
+            let _q2: [u8] = qn;
+            eff_args(c, src, qa, ln, lo, ll)
+        },
+        Expr::ClassInit(cin, cia) => {
+            let _c: [u8] = cin;
+            eff_args(c, src, cia, ln, lo, ll)
+        },
+        Expr::Array(aa) => eff_args(c, src, aa, ln, lo, ll),
+        Expr::If(ic, it2, ie) => {
+            let a: i64 = eff_sub(c, src, ic, ln, lo, ll);
+            let b: i64 = eff_sub(c, src, it2, ln, lo, ll);
+            let d: i64 = eff_sub(c, src, ie, ln, lo, ll);
+            eff_any(a + b + d)
+        },
+        Expr::Match(ms, mr) => {
+            let s: i64 = eff_sub(c, src, ms, ln, lo, ll);
+            let a: i64 = eff_arms(c, src, mr, ln, lo, ll);
+            eff_any(s + a)
+        },
+        Expr::StructLit(sn, sf) => {
+            let _s: [u8] = sn;
+            eff_fields(c, src, sf, ln, lo, ll)
+        },
+        Expr::Declassify(di) => eff_sub(c, src, di, ln, lo, ll),
+        Expr::Return(ri) => eff_sub(c, src, ri, ln, lo, ll),
+        Expr::Cast(ce, ct) => {
+            let _t: [u8] = ct;
+            eff_sub(c, src, ce, ln, lo, ll)
+        },
+        Expr::Scope(si) => eff_sub(c, src, si, ln, lo, ll),
+        Expr::Spawn(spi) => eff_sub(c, src, spi, ln, lo, ll),
+        Expr::Await(awi) => eff_sub(c, src, awi, ln, lo, ll),
+        Expr::Handle(hb, ha, hr) => {
+            let b: i64 = eff_sub(c, src, hb, ln, lo, ll);
+            let a: i64 = eff_harms(c, src, ha, ln, lo, ll);
+            let r: i64 = eff_ret(c, src, hr, ln, lo, ll);
+            eff_any(b + a + r)
+        },
+        Expr::Int(iv) => {
+            let _i: i64 = iv;
+            0
+        },
+        Expr::Float(fv) => {
+            let _f: [u8] = fv;
+            0
+        },
+        Expr::Bool(bv) => {
+            let _b: bool = bv;
+            0
+        },
+        Expr::Null => 0,
+        Expr::Char(cv) => {
+            let _c: i64 = cv;
+            0
+        },
+        Expr::Str(sv) => {
+            let _s: [u8] = sv;
+            0
+        },
+        Expr::Var(vv) => {
+            // A name read as a value: noted for `eff_check_called`.
+            eff_note(&mut (*c).cg_eff_read, &vv);
+            let _v: [u8] = vv;
+            0
+        },
+        Expr::SynthZero => 0,
+    }
+}
+
+fn eff_any(k: i64) -> i64 {
+    if k > 0 { 1 } else { 0 }
+}
+
+// `eff_kind` of a part whose continuation, if it has one, is not the whole value's: 0 or 1.
+fn eff_sub(c: &mut TyCtx, src: &[u8], ex: Expr, ln: &mut Vec<u8>, lo: &mut Vec<i64>, ll: &mut Vec<i64>) -> i64 {
+    let mut n: i64 = 0;
+    let mut b: bool = false;
+    eff_any(eff_kind(c, src, ex, ln, lo, ll, &mut n, &mut b))
+}
+
+fn eff_args(c: &mut TyCtx, src: &[u8], aa: Args, ln: &mut Vec<u8>, lo: &mut Vec<i64>, ll: &mut Vec<i64>) -> i64 {
+    match aa {
+        Args::End => 0,
+        Args::Cell(ae, ar) => {
+            let a: i64 = eff_sub(c, src, ae, ln, lo, ll);
+            let r: i64 = eff_args(c, src, ar, ln, lo, ll);
+            eff_any(a + r)
+        },
+    }
+}
+
+fn eff_fields(c: &mut TyCtx, src: &[u8], f: Fields, ln: &mut Vec<u8>, lo: &mut Vec<i64>, ll: &mut Vec<i64>) -> i64 {
+    match f {
+        Fields::FieldEnd => 0,
+        Fields::FieldCell(fnm, fe, fr) => {
+            let _f: [u8] = fnm;
+            let a: i64 = eff_sub(c, src, fe, ln, lo, ll);
+            let r: i64 = eff_fields(c, src, fr, ln, lo, ll);
+            eff_any(a + r)
+        },
+    }
+}
+
+// A block's statements: 1 if any may suspend. A `let` binds its name after its value.
+fn eff_stmts(c: &mut TyCtx, src: &[u8], st: Stmts, ln: &mut Vec<u8>, lo: &mut Vec<i64>, ll: &mut Vec<i64>) -> i64 {
+    match st {
+        Stmts::SEnd => 0,
+        Stmts::SCell(s1, sr) => {
+            let one: i64 = match s1 {
+                Stmt::SLet(lm, lnm, lty, lval) => {
+                    let _m: bool = lm;
+                    let _t: TyOpt = lty;
+                    let v: i64 = eff_sub(c, src, lval, ln, lo, ll);
+                    eff_bind(c, ln, lo, ll, &lnm, 'o');
+                    let _n: [u8] = lnm;
+                    v
+                },
+                Stmt::SAssign(at, av) => {
+                    let t: i64 = eff_sub(c, src, at, ln, lo, ll);
+                    let v: i64 = eff_sub(c, src, av, ln, lo, ll);
+                    eff_any(t + v)
+                },
+                Stmt::SWhile(wc, wb) => {
+                    let w1: i64 = eff_sub(c, src, wc, ln, lo, ll);
+                    let w2: i64 = eff_sub(c, src, wb, ln, lo, ll);
+                    eff_any(w1 + w2)
+                },
+                Stmt::SBreak => 0,
+                Stmt::SContinue => 0,
+                Stmt::SExpr(se) => eff_sub(c, src, se, ln, lo, ll),
+            };
+            let rest: i64 = eff_stmts(c, src, sr, ln, lo, ll);
+            eff_any(one + rest)
+        },
+    }
+}
+
+// A `match`'s arms: each pattern's names are noted (`eff_bind`), then each body is walked.
+fn eff_arms(c: &mut TyCtx, src: &[u8], m: Arms, ln: &mut Vec<u8>, lo: &mut Vec<i64>, ll: &mut Vec<i64>) -> i64 {
+    match m {
+        Arms::ArmEnd => 0,
+        Arms::ArmCell(mp, me, mr) => {
+            let _p: i64 = match mp {
+                Pattern::PatWild => 0,
+                Pattern::PatVariant(pe, pv, pb) => {
+                    let _e: [u8] = pe;
+                    let _v: [u8] = pv;
+                    eff_bind_all(c, ln, lo, ll, pb)
+                },
+            };
+            let a: i64 = eff_sub(c, src, me, ln, lo, ll);
+            let r: i64 = eff_arms(c, src, mr, ln, lo, ll);
+            eff_any(a + r)
+        },
+    }
+}
+
+// A `handle`'s arms, each body with its parameters bound, its continuation (the last) noted as
+// one (`eff_bind_arm`). An arm's names, and the names its body binds, are unbound after it, so a
+// call after the arm through a name bound there only as a continuation calls the fn of that name.
+fn eff_harms(c: &mut TyCtx, src: &[u8], h: HArms, ln: &mut Vec<u8>, lo: &mut Vec<i64>, ll: &mut Vec<i64>) -> i64 {
+    match h {
+        HArms::HEnd => 0,
+        HArms::HCell(hef, hop, hp, hb, hbt, hr) => {
+            let _e: [u8] = hef;
+            let _o: [u8] = hop;
+            let _t: i64 = hbt;
+            let mark: i64 = len(*lo);
+            eff_bind_arm(c, ln, lo, ll, hp);
+            let a: i64 = eff_sub(c, src, hb, ln, lo, ll);
+            eff_unbind(ln, lo, ll, mark);
+            let r: i64 = eff_harms(c, src, hr, ln, lo, ll);
+            eff_any(a + r)
+        },
+    }
+}
+
+// A `handle`'s `return v => body` arm: `v` and the names the body binds are noted (`eff_bind`),
+// then the body is walked. A body with statements that holds one is refused (`cg_eff_refused`):
+// `scg` lowers a `return` arm inside the handler arm at each resume site of its `handle`, apart
+// from the oracle (register D164).
+fn eff_ret(c: &mut TyCtx, src: &[u8], r: Ret, ln: &mut Vec<u8>, lo: &mut Vec<i64>, ll: &mut Vec<i64>) -> i64 {
+    match r {
+        Ret::NoRet => 0,
+        Ret::YesRet(rn, rb, rt1, rt2) => {
+            let _t1: i64 = rt1;
+            let _t2: i64 = rt2;
+            (*c).cg_eff_refused = true;
+            eff_bind(c, ln, lo, ll, &rn, 'o');
+            let _n: [u8] = rn;
+            eff_sub(c, src, rb, ln, lo, ll)
+        },
+    }
+}
+
+// The names bound in the body so far: the bytes of each in `ln`, from `lo[i]`, `ll[i]` long. A
+// call through one is a call through a variable (`eff_kind`'s `Call` arm). A name stays bound
+// once bound, but for a handler arm's, which are unbound after the arm (`eff_harms`). Each
+// binding is also noted in `cg_eff_seen` with its kind: `k` for a handler arm's continuation
+// (`eff_bind_arm`), `o` for any other. A call anywhere in the body through a name with an `o`
+// binding anywhere in it, or through a parameter, refuses the body (`eff_check_called`), and so
+// does a read of a name with an `o` binding that also names a fn, wherever the binding's scope
+// ends, so no scope `scg`'s typer draws apart from the resolver's (register D164) decides the
+// route.
+fn eff_bind(c: &mut TyCtx, ln: &mut Vec<u8>, lo: &mut Vec<i64>, ll: &mut Vec<i64>, nm: &[u8], kind: u8) -> i64 {
+    push(&mut (*c).cg_eff_seen, kind);
+    eff_note(&mut (*c).cg_eff_seen, nm);
+    let n: i64 = len(*nm);
+    push(lo, len(*ln));
+    push(ll, n);
+    let mut i: i64 = 0;
+    while i < n {
+        push(ln, (*nm)[i]);
+        i = i + 1;
+    }
+    0
+}
+
+fn eff_bind_all(c: &mut TyCtx, ln: &mut Vec<u8>, lo: &mut Vec<i64>, ll: &mut Vec<i64>, b: Binds) -> i64 {
+    match b {
+        Binds::BindEnd => 0,
+        Binds::BindCell(bn, br) => {
+            eff_bind(c, ln, lo, ll, &bn, 'o');
+            let _n: [u8] = bn;
+            eff_bind_all(c, ln, lo, ll, br)
+        },
+    }
+}
+
+// A handler arm's parameters: the last is its continuation, noted `k`; the others `o`.
+fn eff_bind_arm(c: &mut TyCtx, ln: &mut Vec<u8>, lo: &mut Vec<i64>, ll: &mut Vec<i64>, b: Binds) -> i64 {
+    match b {
+        Binds::BindEnd => 0,
+        Binds::BindCell(bn, br) => {
+            match br {
+                Binds::BindEnd => {
+                    eff_bind(c, ln, lo, ll, &bn, 'k');
+                    let _n: [u8] = bn;
+                    0
+                },
+                Binds::BindCell(bn2, br2) => {
+                    eff_bind(c, ln, lo, ll, &bn, 'o');
+                    let _n: [u8] = bn;
+                    eff_bind_arm(c, ln, lo, ll, Binds::BindCell(bn2, br2))
+                },
+            }
+        },
+    }
+}
+
+// Append `nm`'s bytes and a space (a name holds none) to `v`.
+fn eff_note(v: &mut Vec<u8>, nm: &[u8]) -> i64 {
+    let n: i64 = len(*nm);
+    let mut i: i64 = 0;
+    while i < n {
+        push(v, (*nm)[i]);
+        i = i + 1;
+    }
+    push(v, ' ');
+    0
+}
+
+// (register D161) After the walk: does the body call, anywhere, through a parameter or a name it
+// binds anywhere with an `o` binding, or read as a value, anywhere, a name it binds that way that
+// also names one of the program's fns (where the resolver takes that fn for a name out of its
+// binding's scope)? Then it is refused (`cg_eff_refused`).
+fn eff_check_called(c: &mut TyCtx, src: &[u8]) -> i64 {
+    let n: i64 = len((*c).cg_eff_called);
+    let mut s: i64 = 0;
+    while s < n {
+        let mut nm: Vec<u8> = vec_new();
+        let mut e: i64 = s;
+        while (*c).cg_eff_called[e] != ' ' {
+            push(&mut nm, (*c).cg_eff_called[e]);
+            e = e + 1;
+        }
+        let q: [u8] = vec_to_array(nm);
+        if sc_lookup(c, &q) >= 0 || eff_seen_other(c, &q) {
+            (*c).cg_eff_refused = true;
+            0
+        } else {
+            0
+        };
+        s = e + 1;
+    }
+    let m: i64 = len((*c).cg_eff_read);
+    let mut t: i64 = 0;
+    while t < m {
+        let mut nr: Vec<u8> = vec_new();
+        let mut f: i64 = t;
+        while (*c).cg_eff_read[f] != ' ' {
+            push(&mut nr, (*c).cg_eff_read[f]);
+            f = f + 1;
+        }
+        let r: [u8] = vec_to_array(nr);
+        if fn_lookup(c, src, &r) >= 42 && eff_seen_other(c, &r) {
+            (*c).cg_eff_refused = true;
+            0
+        } else {
+            0
+        };
+        t = f + 1;
+    }
+    0
+}
+
+// Is `q` among the body's bindings with kind `o` (`cg_eff_seen`)?
+fn eff_seen_other(c: &mut TyCtx, q: &[u8]) -> bool {
+    let n: i64 = len((*c).cg_eff_seen);
+    let qn: i64 = len(*q);
+    let mut hit: bool = false;
+    let mut p: i64 = 0;
+    while p < n {
+        let kind: u8 = (*c).cg_eff_seen[p];
+        let mut e: i64 = p + 1;
+        while (*c).cg_eff_seen[e] != ' ' {
+            e = e + 1;
+        }
+        if kind == 'o' && e - p - 1 == qn {
+            let mut same: bool = true;
+            let mut j: i64 = 0;
+            while j < qn {
+                if (*c).cg_eff_seen[p + 1 + j] != (*q)[j] {
+                    same = false;
+                    0
+                } else {
+                    0
+                };
+                j = j + 1;
+            }
+            if same {
+                hit = true;
+                0
+            } else {
+                0
+            }
+        } else {
+            0
+        };
+        p = e + 1;
+    }
+    hit
+}
+
+// The position of the latest binding of `q` in the name list, or -1.
+fn eff_bound_at(ln: &mut Vec<u8>, lo: &mut Vec<i64>, ll: &mut Vec<i64>, q: &[u8]) -> i64 {
+    let n: i64 = len(*lo);
+    let qn: i64 = len(*q);
+    let mut hit: i64 = 0 - 1;
+    let mut i: i64 = 0;
+    while i < n {
+        if (*ll)[i] == qn {
+            let off: i64 = (*lo)[i];
+            let mut same: bool = true;
+            let mut j: i64 = 0;
+            while j < qn {
+                if (*ln)[off + j] != (*q)[j] {
+                    same = false;
+                    0
+                } else {
+                    0
+                };
+                j = j + 1;
+            }
+            if same {
+                hit = i;
+                0
+            } else {
+                0
+            }
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    hit
+}
+
+// Unbind every name bound since there were `mark`.
+fn eff_unbind(ln: &mut Vec<u8>, lo: &mut Vec<i64>, ll: &mut Vec<i64>, mark: i64) -> i64 {
+    while len(*lo) > mark {
+        let off: i64 = pop(lo);
+        let _l: i64 = pop(ll);
+        while len(*ln) > off {
+            let _b: u8 = pop(ln);
+        }
+    }
+    0
 }
 
 // (Bar B / effects c35d / ADR 0020 D7) emit an embedded-perform effecting fn as TWO
@@ -286,8 +1036,17 @@ fn cg_chained_emit(out: &mut Vec<u8>, c: &mut TyCtx, body: Expr, rty: i64, src: 
     cg_chained_refuse_unfit(c, k, s, e, src, body_tok0, name_s, name_e, pv0, pvn, &letvids, nlets, gb);
     // Phase 3: consume the ORIGINAL body chain, emitting parent + N resumers (captures
     // computed on-demand per define from fresh re-parses).
-    cg_chained_walk(out, c, body, nlets, &letvids, letty, src, name_s, name_e, gb, k, s, e, body_tok0);
-    0
+    let nunfit: i64 = cg_chained_walk(out, c, body, nlets, &letvids, letty, src, name_s, name_e, gb, k, s, e, body_tok0);
+    // (register D161) a `let` whose type `eff_route` could not read (`eff_fit`) and that, typed
+    // as its value was lowered, does not fit the continuation's one `i64` slot: the oracle
+    // refuses the body, with its general reason since the body has more than one statement.
+    // Refused once the whole body is lowered, so that a ported type error in it, which the
+    // oracle reports first, is the one recorded.
+    if nunfit > 0 {
+        cg_eff_refuse_body(c, src, name_s, name_e, "a `perform` or a call to an effecting fn appears outside tail position, which needs a reified frame")
+    } else {
+        0
+    }
 }
 
 // (ADR 0072 D4, registers D67 and D69) refuse the fn when a parameter its frames carry is not
@@ -636,7 +1395,8 @@ fn cg_caps_op(c: &mut TyCtx, alloc_reg: i64, ncaps: i64) -> i64 {
 }
 
 // (c35e) walk the original body chain, emitting parent (chain index 0) + chaining
-// resumers (index 1..N-1), then the LAST resumer (lowering the tail) at chain end.
+// resumers (index 1..N-1), then the LAST resumer (lowering the tail) at chain end. Answers
+// how many `let`s, typed, do not fit (`cg_chained_unfit`).
 fn cg_chained_walk(out: &mut Vec<u8>, c: &mut TyCtx, body: Expr, nlets: i64, letvids: &Vec<i64>, letty: i64, src: &[u8], name_s: i64, name_e: i64, gb: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, body_tok0: i64) -> i64 {
     match body {
         Expr::Block(stmts, tail) => {
@@ -648,7 +1408,8 @@ fn cg_chained_walk(out: &mut Vec<u8>, c: &mut TyCtx, body: Expr, nlets: i64, let
 
 // (c35e) the chain emitter: chain element `kidx`'s RHS is lowered by the PARENT (kidx=0)
 // or resumer-(kidx-1) (kidx>=1, a chaining resumer); at SEnd, resumer-(N-1) lowers the
-// pure tail. Consumes the original body's stmt chain + tail.
+// pure tail. Consumes the original body's stmt chain + tail. Answers how many `let`s, typed,
+// do not fit.
 fn cg_chained_chain(out: &mut Vec<u8>, c: &mut TyCtx, stmts: Stmts, tail: Expr, kidx: i64, nlets: i64, letvids: &Vec<i64>, letty: i64, src: &[u8], name_s: i64, name_e: i64, gb: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, body_tok0: i64) -> i64 {
     match stmts {
         Stmts::SCell(st, rest) => {
@@ -657,14 +1418,12 @@ fn cg_chained_chain(out: &mut Vec<u8>, c: &mut TyCtx, stmts: Stmts, tail: Expr, 
                     let _lmf: bool = lmf;
                     sink_name(gb, lnm);
                     let _t: i64 = tyopt_exp(c, lty, gb);
-                    if kidx == 0 {
-                        cg_chained_parent(out, c, lval, src, name_s, name_e, gb, k, s, e, body_tok0, nlets, letvids);
-                        0
+                    let u: i64 = if kidx == 0 {
+                        cg_chained_parent(out, c, lval, src, name_s, name_e, gb, k, s, e, body_tok0, nlets, letvids)
                     } else {
-                        cg_chained_resumer(out, c, lval, kidx - 1, false, letty, src, name_s, name_e, gb, k, s, e, body_tok0, nlets, letvids);
-                        0
+                        cg_chained_resumer(out, c, lval, kidx - 1, false, letty, src, name_s, name_e, gb, k, s, e, body_tok0, nlets, letvids)
                     };
-                    cg_chained_chain(out, c, rest, tail, kidx + 1, nlets, letvids, letty, src, name_s, name_e, gb, k, s, e, body_tok0)
+                    u + cg_chained_chain(out, c, rest, tail, kidx + 1, nlets, letvids, letty, src, name_s, name_e, gb, k, s, e, body_tok0)
                 },
                 _ => {
                     // non-let — never in an emitted chained body; drop `st`, recurse.
@@ -681,15 +1440,17 @@ fn cg_chained_chain(out: &mut Vec<u8>, c: &mut TyCtx, stmts: Stmts, tail: Expr, 
 
 // (c35e) emit the PARENT define (reuses emit_tparams's param setup — cgnext at #params,
 // param slots set, param stores in cgbody): build captures[0], lower lets[0].RHS → kont,
-// push resumer-0, ret ptr.
+// push resumer-0, ret ptr. Answers 1 when lets[0], typed, does not fit, else 0.
 fn cg_chained_parent(out: &mut Vec<u8>, c: &mut TyCtx, rhs0: Expr, src: &[u8], name_s: i64, name_e: i64, gb: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, body_tok0: i64, nlets: i64, letvids: &Vec<i64>) -> i64 {
     let mut caps0: Vec<i64> = vec_new();
     cg_chained_caps(c, k, s, e, src, body_tok0, 0, letvids, nlets, &mut caps0, gb);
     let alloc_reg: i64 = cg_build_caps_struct(c, &caps0);
     let ncaps: i64 = len(caps0);
     let mut pbuf: Vec<u8> = vec_new();
-    let _prt: i64 = dump_texpr(&mut pbuf, rhs0, 0 - 1, src, c, gb);
+    let prt: i64 = dump_texpr(&mut pbuf, rhs0, 0 - 1, src, c, gb);
     let _pbx: [u8] = vec_to_array(pbuf);
+    // (register D161) a `let` whose type `eff_route` could not read — see `eff_fit`.
+    let unfit: i64 = cg_chained_unfit(c, prt);
     let kk: i64 = (*c).cglk;
     let kv: i64 = (*c).cglv;
     cgo_str(c, "  call void @sentinel_kont_push(ptr ");
@@ -724,14 +1485,15 @@ fn cg_chained_parent(out: &mut Vec<u8>, c: &mut TyCtx, rhs0: Expr, src: &[u8], n
     cgo_str(c, "  ret ptr ");
     cgo_operand(c, kk, kv);
     cgo_str(c, "\n}\n\n");
-    0
+    unfit
 }
 
 // (c35e) emit a resumer define (`@__resume_<name>_<level>(i64 %arg0, ptr %arg1)`): bind
 // let-`level` to the resumed value `%arg0` + each captures[level] var from `%arg1`; then
 // either (last) lower the pure `payload` tail + kont_pure-wrap, or (chaining) build
 // captures[level+1] + lower `payload` (= lets[level+1].RHS) → kont + push resumer-
-// (level+1). Each resumer is its own register space (`cg_reset`).
+// (level+1). Each resumer is its own register space (`cg_reset`). A chaining resumer
+// answers 1 when lets[level+1], typed, does not fit, else 0; the last answers 0.
 fn cg_chained_resumer(out: &mut Vec<u8>, c: &mut TyCtx, payload: Expr, level: i64, is_last: bool, letty: i64, src: &[u8], name_s: i64, name_e: i64, gb: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, body_tok0: i64, nlets: i64, letvids: &Vec<i64>) -> i64 {
     cg_reset(c);
     // Bind let-level to the resumed value (%arg0).
@@ -791,8 +1553,9 @@ fn cg_chained_resumer(out: &mut Vec<u8>, c: &mut TyCtx, payload: Expr, level: i6
         let alloc_reg: i64 = cg_build_caps_struct(c, &capout);
         let nout: i64 = len(capout);
         let mut pbuf: Vec<u8> = vec_new();
-        let _prt: i64 = dump_texpr(&mut pbuf, payload, 0 - 1, src, c, gb);
+        let prt: i64 = dump_texpr(&mut pbuf, payload, 0 - 1, src, c, gb);
         let _pbx: [u8] = vec_to_array(pbuf);
+        let unfit: i64 = cg_chained_unfit(c, prt);
         let kk: i64 = (*c).cglk;
         let kv: i64 = (*c).cglv;
         let next: i64 = level + 1;
@@ -811,7 +1574,25 @@ fn cg_chained_resumer(out: &mut Vec<u8>, c: &mut TyCtx, payload: Expr, level: i6
         cgo_str(c, "  ret ptr ");
         cgo_operand(c, kk, kv);
         cgo_str(c, "\n}\n\n");
+        unfit
+    }
+}
+
+// (register D161) 1 when a chained `let`'s value, now typed, does not fit the continuation's
+// one `i64` slot, else 0; `cg_chained_emit` refuses the body when any does. In a program the
+// oracle accepts, only a `let` with no annotation bound to a call of a generic effecting fn, or
+// to a block ending in one, reaches here unfit (`eff_fit`); `scg` types a value without its
+// annotation (register D163), so in a program the oracle refuses for a type error an annotated
+// `let` can too. A value typed -1 read an earlier `let` with no annotation, which phase 1 binds
+// untyped (D163); that `let` is one of the shape's, so its type fits, and so does the type of
+// the instance it binds.
+fn cg_chained_unfit(c: &mut TyCtx, ty: i64) -> i64 {
+    if ty < 0 {
         0
+    } else if cg_ar_fits(c, ty) {
+        0
+    } else {
+        1
     }
 }
 

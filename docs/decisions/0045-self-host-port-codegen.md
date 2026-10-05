@@ -1153,6 +1153,11 @@ Settled with the owner (as 5/N–7/N were), recommendations grounded in the scou
     `validate_effecting_fn_body` defers all other performing bodies → they never reach `scg`; so the Sentinel
     needs no i64 / pure-tail re-check) — and emits the parent + resumer via **`cg_letshape_emit`**, else falls
     through to **`cg_eff_normal`** (the c35b straight-line path: `dump_texpr` + `cg_drop_frame` + `cg_emit_fn`).
+    *(Superseded 2026-10-05, registers D133 and D161: that ground was false. The oracle lowers
+    straight-line a body of one `let` bound to a plain value before a tail that produces a continuation or
+    does not suspend, and refuses a `let` bound to a suspension whose type does not fit, or one before a
+    tail that suspends. `scg` now routes a body with statements by the oracle's conditions, from a
+    classification copy: `eff_route` in `selfhost/types/cg_chained.sentinel`.)*
     The PARENT reuses the already-set-up param state (`emit_tparams` ran — cg slots + the register counter at
     `#params`); the RESUMER `cg_reset`s to a fresh counter, manually binds the let var (`nextvid++` +
     `bind_name` + a slot) + rebinds each captured param's slot (loaded from `%arg1`; its TYPE binding persists
@@ -1261,7 +1266,10 @@ Settled with the owner (as 5/N–7/N were), recommendations grounded in the scou
   - **Un-parsers: NO change** (no new syntax — `snc merge` round-trips all three byte-identically).
   - **Sentinel mode-4 (`types.sentinel`):** the 2+-stmt branch of `cg_emit_fn_eff` routes to the new
     **`cg_chained_emit`** (every EMITTED 2+-stmt effecting fn is chained-lets — the oracle defers the rest;
-    no 2+-pure-stmt effecting fn is in the corpus). Move semantics + the no-bind-pattern grammar drove a
+    no 2+-pure-stmt effecting fn is in the corpus; *superseded 2026-10-05, registers D133 and D161: the
+    oracle lowers straight-line a body whose statements do not suspend before a tail that produces a
+    continuation or does not suspend, and `scg` now routes by its conditions, `eff_route`*). Move
+    semantics + the no-bind-pattern grammar drove a
     THREE-PHASE structure: **phase 1** re-parses a disposable copy to bind the let vids (`nextvid++` +
     `bind_name`, source order); **phase 3** consumes the ORIGINAL body chain for the N+1 lowerings (each
     RHS/tail walked once by `dump_texpr`); the **capture sets** are computed on-demand per define from FRESH

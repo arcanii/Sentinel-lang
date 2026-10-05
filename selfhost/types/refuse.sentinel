@@ -36,13 +36,37 @@ module types;
 // "no field `{`" (D144); and `vec_to_array` over a generic instance whose field is `secret T`
 // is accepted where the oracle refuses (D146).
 //
-// Since ADR 0071 A4 the code generator makes one refusal of its own,
-// `sentinel::codegen::effecting_fn_body_not_direct`, for a parameter a continuation would
-// capture that is not `i64` or `secret i64` (D159, and D67's note). Its message is not the
-// oracle's: the oracle adds the parameter's type in its embedded shape and a note that it
-// would be read out of bounds in its let shape, and gives another reason in its chained
-// shape. It is recorded when the code generator reaches the effecting fn, before a ported
-// type error later in the program (D145).
+// The code generator makes one refusal of its own,
+// `sentinel::codegen::effecting_fn_body_not_direct`, for two causes. Since ADR 0071 A4, a
+// parameter a continuation would capture that is not `i64` or `secret i64` (D159, and D67's
+// note). Its message is not the oracle's: the oracle adds the parameter's type in its embedded
+// shape and a note that it would be read out of bounds in its let shape, and gives another
+// reason in its chained shape. It is recorded when the code generator reaches the effecting fn,
+// so before a ported type error inside its body, which the oracle reports instead. Since
+// registers D133 and D161, an effecting body with statements that the oracle refuses
+// (`eff_route`), but two kinds of body the oracle does not lower, which `scg` lowers unless a
+// rule below refuses them: one in which the tail or a later `let`'s value reads a name the body
+// binds outside the shape's `let`s, which the oracle refuses for its captures (D162), and one
+// whose lowering the oracle fails with an internal message (D165, D108). Its message is the
+// oracle's, or the part of it before the type the oracle names, but in the cases D161 lists,
+// where it gives the general reason and the oracle names the type rule or a captured parameter,
+// or fails. It is recorded after the body is walked, when `eff_route` refuses the body, or
+// lowered, when a shape's emitter refuses a `let` it could type only by lowering it
+// (`eff_fit`), so a ported type error inside the body, which the oracle reports first, is
+// recorded first. Both causes are recorded before a ported type error in an item `scg` types
+// later (D145): a later fn, and wherever they are declared a generic fn's instances and a
+// class's or an impl's methods and `init`. The second also refuses bodies with statements that
+// the oracle lowers: one that calls, anywhere in it, through a name the fn binds anywhere other
+// than only as a handler arm's continuation, wherever the binding's scope ends, which covers a
+// `Fn` value called directly, which `scg` does not lower as the oracle does, or that reads as a
+// value, anywhere in it, a name it binds that way, other than as a parameter, that also names
+// one of the program's fns; one that holds a `handle` with a `return` arm, which `scg` lowers
+// inside the handler arm at each resume site; in a body with statements the two rules together
+// refuse each use of a name that `scg`'s typer and the resolver take for different bindings
+// (D164); and one whose tail calls a generic effecting fn whose return type wraps its type
+// parameter (`?T`, `[T]`), which `eff_route` takes for widened. Some of these walks fail before
+// the refusal, as they fail in any fn: a call with no argument through a name the typer still
+// binds aborts, and in a `return` arm's body some calls overflow the walk's stack.
 
 // Record the refusal `code` with the message `msg`, unless one is recorded already.
 fn refuse(c: &mut TyCtx, code: [u8], msg: [u8]) -> i64 {

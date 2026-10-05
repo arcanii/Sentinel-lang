@@ -166,10 +166,11 @@ fn type_fn(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u
     (*c).curfn = fnidx;
     (*c).consuming = true;
     // (Bar B / effects c35c) an EFFECTING fn (Kont* ABI) routes through `cg_emit_fn_eff`,
-    // which consumes `body` + assembles the define(s): a let-bound-perform body becomes a
-    // RESUMER fn + a parent that pushes a captured frame (two defines); any other
-    // effecting body (c32/c33/c35b) walks + assembles straight-line. A NON-effecting fn
-    // (or modes 0-3) walks here; `cg_emit_fn` below assembles its single define.
+    // which consumes `body` + assembles the define(s): a body with statements takes the route
+    // `eff_route` answers (the let or chained shape, each a parent that pushes a captured frame
+    // and its resumers; straight-line; or a refusal), and one without the embedded shape or
+    // straight-line. A NON-effecting fn (or modes 0-3) walks here; `cg_emit_fn` below
+    // assembles its single define.
     // The fn return type is the body's expectation — a `?T`-returning fn widens its
     // tail (`dump_texpr` on the body `Block` threads `rty` to the tail).
     let cg_eff_fn: bool = cg_on(c) && (*c).cg_eff;
@@ -181,7 +182,12 @@ fn type_fn(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u
         let mut cur2: i64 = body_tok0;
         let body2: Expr = parse_block(k, s, e, src, &mut cur2);
         let embed: Args = eff_classify(body2);
-        cg_emit_fn_eff(out, c, body, rty, src, name_s, name_e, cgpmark, cg_pv0, cg_pvn, gb, embed, k, s, e, body_tok0);
+        // (registers D133 and D161) a body with statements is routed as the oracle routes it,
+        // from a third copy (`eff_route` consumes the one it classifies).
+        let mut cur3: i64 = body_tok0;
+        let body3: Expr = parse_block(k, s, e, src, &mut cur3);
+        let route: i64 = eff_route(c, src, body3, rty);
+        cg_emit_fn_eff(out, c, body, rty, src, name_s, name_e, cgpmark, cg_pv0, cg_pvn, gb, embed, route, k, s, e, body_tok0);
         0
     } else {
         // (ADR 0014 D3 / ADR 0051 A5) publish the return type for any `return e` inside.

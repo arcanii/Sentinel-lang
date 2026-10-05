@@ -2203,6 +2203,16 @@ fn pass_c35_effecting_let_secret() {
 }
 
 #[test]
+fn pass_c35_effecting_body_straight_line() {
+    // Registers D133 and D161: effecting fns whose statements do not suspend, before a
+    // `perform` tail, a pure tail and a call to an effecting fn, take neither the let shape
+    // nor the chained shape and are lowered straight-line. 12 + 11 + 19 = 42.
+    let r = build_and_run("c35_effecting_body_straight_line.sentinel");
+    assert_eq!(r.exit, 42);
+    assert_eq!(r.stdout, "");
+}
+
+#[test]
 fn pass_c19_widen_call_unary() {
     // c19_widen_call_unary: the public->`secret` (ADR 0019 D5) and public->`?T` (ADR
     // 0014 D3) widenings over the two right-hand-side shapes scg used to skip — a CALL

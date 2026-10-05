@@ -3314,31 +3314,6 @@ fn cg_flush_allocas_body(c: &mut TyCtx) -> i64 {
     0
 }
 
-// (Bar B / effects c35c) emit an EFFECTING fn (Kont* ABI). A let-bound-perform body
-// (`{ let v: i64 = perform …; <pure tail> }`) reifies a captured frame → a RESUMER fn +
-// a parent (`cg_letshape_emit`, two defines); any OTHER effecting body (a pure / direct-
-// perform / call-to-effecting tail, no statements — c32/c33/c35b) walks + assembles
-// straight-line (`cg_eff_normal`). Mirrors the oracle's `dump_fn_named` routing through
-// `detect_let_shape`. Consumes `body`. `[pv0,pvn)` = the fn's param VarId range (the
-// let-shape capture set). The let-shape is matched structurally (single `let` with a
-// `perform` RHS).
-//
-// ⚠ THAT STRUCTURAL MATCH IS NOT ENOUGH, and the comment that used to sit here said it
-// was — "every effecting fn the oracle EMITS with a performing statement is a let-shape,
-// so scg need not re-check the i64 / pure-tail conditions". Both halves of that are
-// wrong. `validate_effecting_fn_body` only defers a statement that PERFORMS, and
-// `stmt_performs` does not count a CALL to an effecting fn — so
-// `fn caller() -> i64 ! { Io } { let s: <ann> = do_work(); … }` reaches the oracle's
-// emitter. And `detect_let_shape` keys on the LET'S TYPE
-// (`if ty != Type::I64 { return None; }`), so annotating that binding `secret i64` or
-// `?i64` makes the ORACLE drop the let-shape and lower straight-line while scg still
-// emits the `kont_push` + `__resume_caller` split — a byte divergence on a program the
-// oracle accepts (exit 0), i.e. NOT excused by the differential.
-// Both sides are wrong there, which is why this is a comment and not a one-line guard:
-// the oracle's straight-line output does not assemble either (`store i64 %v0` where
-// `%v0 = call ptr @do_work()`), so it silently treats the callee's `Kont*` as an `i64`.
-// Fixing it means deciding what that shape should lower to, on BOTH sides — tracked as
-// its own item. Nothing in the corpus reaches it today.
 // (ADR 0072 D4, registers D67 and D69) the embedded and let shapes below copy EVERY param
 // into the continuation's frame with an 8-byte load (the oracle copies only those the
 // resumer reads), so a param that is not `i64` or `secret i64` is read out of its slot's
@@ -3375,10 +3350,27 @@ fn cg_eff_refuse_unfit(c: &mut TyCtx, src: &[u8], name_s: i64, name_e: i64, pv0:
     0
 }
 
-fn cg_emit_fn_eff(out: &mut Vec<u8>, c: &mut TyCtx, body: Expr, rty: i64, src: &[u8], name_s: i64, name_e: i64, cgpmark: i64, pv0: i64, pvn: i64, gb: &mut Vec<u8>, embed: Args, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, body_tok0: i64) -> i64 {
+// (Bar B / effects c35c) emit an EFFECTING fn (Kont* ABI), routed as the oracle's
+// `dump_fn_named` routes it. A body with statements takes the route `eff_route`
+// (`cg_chained.sentinel`) answers from a classification copy: the let shape (`{ let v: i64 =
+// perform …; <pure tail> }` reifies a captured frame → a RESUMER fn + a parent,
+// `cg_letshape_emit`, two defines), the chained shape (`cg_chained_emit`), straight-line
+// (`cg_eff_normal`), or a refusal (`cg_eff_other`). A body without statements is the
+// embedded shape when `eff_classify` extracted its `perform` (`cg_embed_emit`), and
+// straight-line otherwise; that classifier is not yet the oracle's (register D160). Consumes
+// `body`. `[pv0,pvn)` = the fn's param VarId range (the let shape's capture set).
+//
+// (registers D133 and D161) This routing used to count the statements: one `let` took the let
+// shape and two or more statements the chained shape, whatever they were. So D133's `let`
+// bound to a plain value before a `perform` tail, which the oracle lowers straight-line, got
+// IR `llc` rejects; and bodies the oracle refuses got IR: a statement that suspends outside
+// the shapes, a `let` bound to a suspension whose type does not fit one `i64` slot, a tail
+// that suspends after a shape's statements, a tail widened to the fn's return type, and a body
+// with statements in `main` that suspends.
+fn cg_emit_fn_eff(out: &mut Vec<u8>, c: &mut TyCtx, body: Expr, rty: i64, src: &[u8], name_s: i64, name_e: i64, cgpmark: i64, pv0: i64, pvn: i64, gb: &mut Vec<u8>, embed: Args, route: i64, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, body_tok0: i64) -> i64 {
     // (The Sentinel match grammar has no bind-the-whole-value pattern — only
-    // `Enum::Variant(..)` + `_`. So the non-let-shape branches re-wrap the moved-out
-    // parts and fall through to `cg_eff_normal`; `Stmts`/`Stmt` are fully enumerated.)
+    // `Enum::Variant(..)` + `_`. So the branches that take no shape re-wrap the moved-out
+    // parts and go to `cg_eff_other`; `Stmts`/`Stmt` are fully enumerated.)
     match body {
         Expr::Block(stmts, tail) => {
             match stmts {
@@ -3401,49 +3393,52 @@ fn cg_emit_fn_eff(out: &mut Vec<u8>, c: &mut TyCtx, body: Expr, rty: i64, src: &
                 Stmts::SCell(st, rest) => {
                     match rest {
                         Stmts::SEnd => {
-                            // Exactly one statement. A single `let` in an EMITTED effecting fn
-                            // is TREATED AS the c35c let-bound-perform shape → walk its RHS as
-                            // the perform. See the ⚠ on `cg_emit_fn_eff` above for where that
-                            // assumption breaks: a call-to-effecting RHS under a non-`i64`
-                            // annotation reaches the oracle, which then does NOT take the
-                            // let-shape. `lty` is the type to guard on if this is ever fixed.
+                            // Exactly one statement: the c35c let-bound-perform shape when
+                            // `eff_route` answers 1 (the `let`'s value is walked as the
+                            // continuation's producer); otherwise straight-line or refused.
                             match st {
                                 Stmt::SLet(lmf, lnm, lty, lval) => {
-                                    cg_eff_refuse_unfit(c, src, name_s, name_e, pv0, pvn);
-                                    cg_letshape_emit(out, c, lnm, lty, lval, tail, rty, src, name_s, name_e, pv0, pvn, gb)
+                                    if route == 1 {
+                                        cg_eff_refuse_unfit(c, src, name_s, name_e, pv0, pvn);
+                                        cg_letshape_emit(out, c, lnm, lty, lval, tail, rty, src, name_s, name_e, pv0, pvn, gb)
+                                    } else {
+                                        let b1: Expr = Expr::Block(Stmts::SCell(Stmt::SLet(lmf, lnm, lty, lval), Stmts::SEnd), tail);
+                                        cg_eff_other(out, c, b1, route, rty, src, name_s, name_e, cgpmark, gb)
+                                    }
                                 },
                                 Stmt::SAssign(at, av) => {
                                     let b1: Expr = Expr::Block(Stmts::SCell(Stmt::SAssign(at, av), Stmts::SEnd), tail);
-                                    cg_eff_normal(out, c, b1, rty, src, name_s, name_e, cgpmark, gb)
+                                    cg_eff_other(out, c, b1, route, rty, src, name_s, name_e, cgpmark, gb)
                                 },
                                 Stmt::SWhile(wc, wb) => {
                                     let b1: Expr = Expr::Block(Stmts::SCell(Stmt::SWhile(wc, wb), Stmts::SEnd), tail);
-                                    cg_eff_normal(out, c, b1, rty, src, name_s, name_e, cgpmark, gb)
+                                    cg_eff_other(out, c, b1, route, rty, src, name_s, name_e, cgpmark, gb)
                                 },
                                 Stmt::SBreak => {
                                     let b1: Expr = Expr::Block(Stmts::SCell(Stmt::SBreak, Stmts::SEnd), tail);
-                                    cg_eff_normal(out, c, b1, rty, src, name_s, name_e, cgpmark, gb)
+                                    cg_eff_other(out, c, b1, route, rty, src, name_s, name_e, cgpmark, gb)
                                 },
                                 Stmt::SContinue => {
                                     let b1: Expr = Expr::Block(Stmts::SCell(Stmt::SContinue, Stmts::SEnd), tail);
-                                    cg_eff_normal(out, c, b1, rty, src, name_s, name_e, cgpmark, gb)
+                                    cg_eff_other(out, c, b1, route, rty, src, name_s, name_e, cgpmark, gb)
                                 },
                                 Stmt::SExpr(ex) => {
                                     let b1: Expr = Expr::Block(Stmts::SCell(Stmt::SExpr(ex), Stmts::SEnd), tail);
-                                    cg_eff_normal(out, c, b1, rty, src, name_s, name_e, cgpmark, gb)
+                                    cg_eff_other(out, c, b1, route, rty, src, name_s, name_e, cgpmark, gb)
                                 },
                             }
                         },
                         Stmts::SCell(s2, r2) => {
-                            // 2+ statements — the c35e CHAINED-effecting-lets shape (every
-                            // EMITTED 2+-stmt effecting fn is chained lets: the oracle's
-                            // `validate_effecting_fn_body` defers all other 2+-stmt
-                            // performing bodies, and no 2+-pure-stmt effecting fn is in the
-                            // emitted corpus). Re-wrap the moved-out chain + thread it to
-                            // `cg_chained_emit`, which lowers each let's RHS into its own
-                            // resumer (N+1 defines) + re-parses copies for the capture sets.
+                            // 2+ statements: the c35e CHAINED-effecting-lets shape when
+                            // `eff_route` answers 2 — `cg_chained_emit` lowers each let's RHS
+                            // into its own resumer (N+1 defines) + re-parses copies for the
+                            // capture sets; otherwise straight-line or refused.
                             let b2: Expr = Expr::Block(Stmts::SCell(st, Stmts::SCell(s2, r2)), tail);
-                            cg_chained_emit(out, c, b2, rty, src, name_s, name_e, pv0, pvn, gb, k, s, e, body_tok0)
+                            if route == 2 {
+                                cg_chained_emit(out, c, b2, rty, src, name_s, name_e, pv0, pvn, gb, k, s, e, body_tok0)
+                            } else {
+                                cg_eff_other(out, c, b2, route, rty, src, name_s, name_e, cgpmark, gb)
+                            }
                         },
                     }
                 },
@@ -3464,6 +3459,34 @@ fn cg_eff_normal(out: &mut Vec<u8>, c: &mut TyCtx, body: Expr, rty: i64, src: &[
     cg_drop_frame(c, cgpmark);
     cg_emit_fn(c, src, name_s, name_e, rty);
     0
+}
+
+// (registers D133 and D161) a body with statements that takes neither shape: lowered
+// straight-line (`eff_route`'s 3), or refused with the oracle's code (4 and 5) after the same
+// walk, which keeps the code generator's state whole (`run` answers the refusal in place of the
+// output). Recorded after the walk, so a ported type error inside the body, which the oracle
+// reports first, is the one recorded. For 4 the message is the oracle's up to the type it
+// names; for 5 it is the oracle's general reason, which the oracle gives too, except where it
+// names the type rule or a captured parameter, fails with an internal message, or lowers the
+// body (the cases register D161 lists).
+fn cg_eff_other(out: &mut Vec<u8>, c: &mut TyCtx, body: Expr, route: i64, rty: i64, src: &[u8], name_s: i64, name_e: i64, cgpmark: i64, gb: &mut Vec<u8>) -> i64 {
+    cg_eff_normal(out, c, body, rty, src, name_s, name_e, cgpmark, gb);
+    if route == 4 {
+        cg_eff_refuse_body(c, src, name_s, name_e, "a `let` bound to a suspension must be `i64` or `secret i64`")
+    } else if route == 5 {
+        cg_eff_refuse_body(c, src, name_s, name_e, "a `perform` or a call to an effecting fn appears outside tail position, which needs a reified frame")
+    } else {
+        0
+    }
+}
+
+fn cg_eff_refuse_body(c: &mut TyCtx, src: &[u8], name_s: i64, name_e: i64, why: [u8]) -> i64 {
+    let mut m: Vec<u8> = vec_new();
+    append_str(&mut m, "effecting fn `");
+    append_slice(&mut m, src, name_s, name_e);
+    append_str(&mut m, "` cannot be lowered: ");
+    append_str(&mut m, why);
+    refuse(c, "sentinel::codegen::effecting_fn_body_not_direct", vec_to_array(m))
 }
 
 // (Bar B / effects c35c / ADR 0020 D7) emit a let-bound-perform effecting fn as TWO
@@ -3518,8 +3541,14 @@ fn cg_letshape_emit(out: &mut Vec<u8>, c: &mut TyCtx, lnm: [u8], lty: TyOpt, lva
     // Lower the RHS (a `perform`) → a Kont* (operand in cglk/cglv, cg_tailk set); walk it
     // (the type-dump goes to a throwaway buffer; the cg lands in cgbody).
     let mut pbuf: Vec<u8> = vec_new();
-    let _prt: i64 = dump_texpr(&mut pbuf, lval, 0 - 1, src, c, gb);
+    let prt: i64 = dump_texpr(&mut pbuf, lval, 0 - 1, src, c, gb);
     let _pbx: [u8] = vec_to_array(pbuf);
+    // (register D161) a `let` with no annotation bound to a call of a generic effecting fn,
+    // or to a block ending in one, whose type `eff_route` could not read (`eff_fit`), now
+    // typed: the oracle refuses one that does not fit, naming the rule. Refused once the tail
+    // is lowered, below, so that a ported type error in the body, which the oracle reports
+    // first, is the one recorded.
+    let lfit: bool = cg_ar_fits(c, prt);
     let kk: i64 = (*c).cglk;
     let kv: i64 = (*c).cglv;
     // Push the captured frame referencing the resumer + the captured ptr.
@@ -3599,6 +3628,11 @@ fn cg_letshape_emit(out: &mut Vec<u8>, c: &mut TyCtx, lnm: [u8], lty: TyOpt, lva
     let mut tbuf: Vec<u8> = vec_new();
     let _trt: i64 = dump_texpr(&mut tbuf, tail, 0 - 1, src, c, gb);
     let _tbx: [u8] = vec_to_array(tbuf);
+    if lfit {
+        0
+    } else {
+        cg_eff_refuse_body(c, src, name_s, name_e, "a `let` bound to a suspension must be `i64` or `secret i64`")
+    };
     let tk: i64 = (*c).cglk;
     let tv: i64 = (*c).cglv;
     let kp: i64 = cg_dst(c);

@@ -1,0 +1,50 @@
+// Registers D133 and D161: an effecting fn whose body has statements, none of which
+// suspends, before a tail that is a `perform`, a call to an effecting fn or pure, takes
+// neither the let shape nor the chained shape (no `let` is bound to a suspension), and is
+// lowered straight-line, as the oracle's `validate_effecting_fn_body` admits it, by all three
+// back ends alike. The first is D133's, for which the self-hosted code generator emitted IR
+// `llc` rejects.
+//
+// Expected: exit code 42 (12 + 11 + 19), no stdout.
+
+effect Io {
+    read() -> i64;
+    write(x: i64) -> i64;
+}
+
+struct P {
+    x: i64,
+    y: i64,
+}
+
+// D133's shape: a `let` bound to a plain value, then a `perform` tail. write(10) -> 12.
+fn one_let() -> i64 ! { Io } {
+    let s: i64 = 10;
+    perform Io.write(s)
+}
+
+// `let`s bound to plain values before a pure tail: 11.
+fn pure_lets() -> i64 ! { Io } {
+    let a: i64 = 5;
+    let b: i64 = 6;
+    a + b
+}
+
+fn write_less(n: i64) -> i64 ! { Io } {
+    perform Io.write(n - 2)
+}
+
+// Statements that do not suspend, then a call to an effecting fn: write(17) -> 19.
+fn calls_on() -> i64 ! { Io } {
+    let p: P = P { x: 9, y: 10 };
+    let mut n: i64 = p.x;
+    n = n + p.y;
+    write_less(n)
+}
+
+fn main() -> i64 {
+    let a: i64 = handle one_let() with { Io.read(k) => k(0), Io.write(x, k) => k(x + 2) };
+    let b: i64 = handle pure_lets() with { Io.read(k) => k(0), Io.write(x, k) => k(x + 2) };
+    let c: i64 = handle calls_on() with { Io.read(k) => k(0), Io.write(x, k) => k(x + 2) };
+    a + b + c
+}

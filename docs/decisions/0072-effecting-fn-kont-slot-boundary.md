@@ -202,7 +202,9 @@ this one neither makes nor weakens that claim.
 shapes (a wider seam, or per-eval-site reification); `scg`'s own `cg_tailk` sticky flag;
 `scg`'s `?i64` let-shape, which stores 8 bytes into a 16-byte slot and — worse than the
 oracle's version — assembles cleanly; and the accept/reject drift between inkwell's ADR
-0065 stage-3a normalization tier and the text oracle, which has no such tier.
+0065 stage-3a normalization tier and the text oracle, which has no such tier. *(2026-10-05,
+registers D133 and D161: `scg` now refuses the `?i64` let-shape, as the oracle does; the
+`cg_tailk` flag stays reachable through a body without statements, register D160.)*
 
 ## Amendments
 

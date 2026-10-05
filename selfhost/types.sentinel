@@ -367,6 +367,10 @@ struct TyCtx {
     cgsr: Vec<i64>,   // slot pool: the binding's alloca `%vN` (paired with cgsv)
     cgpty: Vec<i64>,  // this fn's param type handles (for the `define` header, in order)
     cgmain: bool,     // is the current fn `main`? (the C-ABI i32-trunc return)
+    cg_eff_refused: bool, // (register D161) `eff_route`: the body calls through a name the fn binds other than only as a continuation, or reads one that also names a fn, or holds a `handle` with a `return` arm
+    cg_eff_seen: Vec<u8>, // `eff_route`: each binding in the body: its kind byte, the name, a space
+    cg_eff_called: Vec<u8>, // `eff_route`: each name the body calls through, then a space
+    cg_eff_read: Vec<u8>, // `eff_route`: each name the body reads as a value, then a space
     cgak: Vec<i64>,   // call-arg stack: operand kind
     cgav: Vec<i64>,   // call-arg stack: operand value
     cgat: Vec<i64>,   // call-arg stack: operand type handle
