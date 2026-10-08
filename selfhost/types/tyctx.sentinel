@@ -159,6 +159,7 @@ fn new_tyctx(mode: i64) -> TyCtx {
         cg_eff_seen: vec_new(),
         cg_eff_called: vec_new(),
         cg_eff_read: vec_new(),
+        cg_eff_inwhile: 0,
         cgak: vec_new(),
         cgav: vec_new(),
         cgat: vec_new(),

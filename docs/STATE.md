@@ -25,10 +25,11 @@ all but the capture condition, which stays with the shapes' emitters (D159, D162
 `eff_route` answers the route over `eff_kind`, a walk total over `Expr`. It refuses with the
 oracle's code a body those conditions refuse, and with the oracle's message, or its part before the
 type it names, but in five cases D161 lists. A body with statements that calls, anywhere in it,
-through a name the fn binds anywhere other than only as a handler arm's continuation, or reads such
-a name (not a parameter) that also names a fn, is refused, wherever the binding's scope ends, and so
-is one that holds a `handle` with a `return` arm: the simpler fail-closed rules, after the review
-rounds kept finding holes in narrower ones. It refuses bodies the oracle lowers, some of which `scg`
+through a name the fn binds anywhere other than only as a handler arm's continuation, or otherwise
+uses such a name (not a parameter) that also names a fn, is refused, wherever the binding's scope
+ends, and so is one that holds a `handle` with a `return` arm, or in which a `let` inside a `while`
+binds a name the body binds anywhere else: the simpler fail-closed rules, after the review rounds
+kept finding holes in narrower ones. It refuses bodies the oracle lowers, some of which `scg`
 lowered to the oracle's bytes before (D161 lists them); a body without statements is still
 classified as before (D160). The reviews filed D162 (a capture the shapes' emitters do not check),
 D163 (generic instance names in the shapes), D164 (`scg`'s typer scopes a `while` body's and a
@@ -36,11 +37,12 @@ D163 (generic instance names in the shapes), D164 (`scg`'s typer scopes a `while
 handler arm) and D165 (the oracle's capture walk skips a `match`, a `handle`, a `scope`, a `spawn`,
 an `await` and a block-wrapped `perform`, widening D108), and the probe sweep D166 (`scg` defines
 the instances of nested generic calls in another order than the oracle), all pre-existing. Both
-bootstrap fixed points hold. Pinned by `tests/pass/c35_effecting_body_straight_line`, twenty-one
+bootstrap fixed points hold. Pinned by `tests/pass/c35_effecting_body_straight_line`, twenty-seven
 codegen seeds and a refusal test. `scg`-only, so a patch by ADR 0076 D2. The version went to 0.2.0
-just before this slice, in its own commit (ADR 0077's Q6). A seventh review round was still running
-when this was committed, at the maintainer's request; HANDOVER's RESUME block says to read its
-findings first.
+just before this slice, in its own commit (ADR 0077's Q6). A seventh review round, still running
+when this was committed at the maintainer's request, confirmed eight findings, seven of them in the
+text and the pins; a follow-up commit fixes those seven, and, after its own review found a body the
+rules missed, adds the `while` rule.
 
 **Previously (2026-10-05) — a moved binding's drop is decided per exit, by walk order and a run-time
 flag (registers D93, D64 and D22).**

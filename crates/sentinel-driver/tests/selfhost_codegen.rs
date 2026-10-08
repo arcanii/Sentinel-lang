@@ -335,13 +335,26 @@ const SEEDS: &[&str] = &[
     // call of the fn of that name a call through a bound name, and a fn that calls a fn, or reads
     // one as a value, does not make a later fn's binding of that name refused. So is the refusal
     // it sets: a body without statements that holds a `handle` with a `return` arm does not refuse
-    // a later fn's. And a read is refused only of a name the body binds that also names one of the
-    // program's fns: not of a fn the body does not bind, nor of a `let` named like a builtin.
+    // a later fn's. And a use is refused only of a name the body binds, other than as a parameter,
+    // that also names one of the program's fns: not of a fn the body does not bind, nor of a
+    // parameter named like one that the body binds no other way, nor of a `let` named like a
+    // builtin. A name a `let` inside a `while` binds that the body binds nowhere else stays
+    // lowered, in the chained shape too; after a loop, at the top level or in a block, a `let` in
+    // a block named like an earlier pattern is not taken for a loop's; nor is a name a pattern
+    // binds twice in a loop, `_` among them, which the typer unbinds after each arm, nor a handler
+    // arm's parameter bound in a loop and again. A pattern's `_` slot binds no name, so a `let _`
+    // in a loop and a `_` slot after it stay lowered.
     "effect Io { read() -> i64; write(x: i64) -> i64; }\nfn work(x: i64) -> i64 ! { Io } { perform Io.write(x) }\nfn a() -> i64 ! { Io } { let work: i64 = perform Io.read(); 41 }\nfn w() -> i64 ! { Io } { let b: i64 = work(40); b + 0 }\nfn main() -> i64 { handle w() with { Io.read(k) => k(41), Io.write(x, k) => k(x + 2) } }\n",
     "effect Io { read() -> i64; write(x: i64) -> i64; }\nfn inc(x: i64) -> i64 { x + 1 }\nfn dbl(x: i64) -> i64 { x * 2 }\nfn a() -> i64 ! { Io } { perform Io.write(inc(apply(dbl, 20))) }\nfn w() -> i64 ! { Io } { let inc: i64 = perform Io.read(); let dbl: i64 = perform Io.read(); 42 }\nfn main() -> i64 { handle w() with { Io.read(k) => k(41), Io.write(x, k) => k(x + 2) } }\n",
     "effect Io { read() -> i64; write(x: i64) -> i64; }\neffect Ask { q(x: i64) -> i64; }\nfn ask1() -> i64 ! { Ask } { perform Ask.q(1) }\nfn work(x: i64) -> i64 ! { Io } { perform Io.write(x) }\nfn a() -> i64 ! { Io } { work(handle ask1() with { Ask.q(x, k) => k(x), return v => v + 1 }) }\nfn w() -> i64 ! { Io } { let b: i64 = perform Io.read(); b + 1 }\nfn main() -> i64 { handle w() with { Io.read(k) => k(41), Io.write(x, k) => k(x + 2) } }\n",
     "effect Io { read() -> i64; write(x: i64) -> i64; }\nfn inc(x: i64) -> i64 { x + 1 }\nfn w() -> i64 ! { Io } { let g: Fn<i64, i64> = inc; perform Io.write(apply(g, 39)) }\nfn main() -> i64 { handle w() with { Io.read(k) => k(41), Io.write(x, k) => k(x + 2) } }\n",
     "effect Io { read() -> i64; write(x: i64) -> i64; }\nfn w() -> i64 ! { Io } { let len: i64 = perform Io.read(); len + 1 }\nfn main() -> i64 { handle w() with { Io.read(k) => k(41), Io.write(x, k) => k(x + 2) } }\n",
+    "effect Io { read() -> i64; write(x: i64) -> i64; }\nfn work(x: i64) -> i64 { x + 2 }\nfn w2(work: i64) -> i64 ! { Io } { let a: i64 = work + 1; perform Io.write(a + 37) }\nfn w() -> i64 ! { Io } { w2(1) }\nfn main() -> i64 { handle w() with { Io.read(k) => k(41), Io.write(x, k) => k(x + 2) } }\n",
+    "effect Io { read() -> i64; write(x: i64) -> i64; }\nfn w() -> i64 ! { Io } { let a: i64 = { while false { let u: i64 = 7; } perform Io.read() }; let t: i64 = perform Io.read(); a + t - 40 }\nfn main() -> i64 { handle w() with { Io.read(k) => k(41), Io.write(x, k) => k(x + 2) } }\n",
+    "effect Io { read() -> i64; write(x: i64) -> i64; }\nenum E { A(i64), B }\nfn w() -> i64 ! { Io } { let mut i: i64 = 0; while i < 1 { i = i + 1; } let n: i64 = { let mut j: i64 = 0; while j < 1 { j = j + 1; } j }; let a: i64 = match E::A(1) { E::A(t) => t, _ => 0 }; let b: i64 = { let t: i64 = 38; t }; perform Io.write(a + b + i + n - 1) }\nfn main() -> i64 { handle w() with { Io.read(k) => k(41), Io.write(x, k) => k(x + 2) } }\n",
+    "effect Io { read() -> i64; write(x: i64) -> i64; }\nenum R { Ok(i64), Err(i64) }\nfn w() -> i64 ! { Io } { let mut i: i64 = 0; let mut s: i64 = 0; while i < 2 { let r: R = if i == 0 { R::Ok(20) } else { R::Err(1) }; s = s + (match r { R::Ok(v) => v, R::Err(v) => 0 - v }) + (match R::Ok(i) { R::Ok(_) => 1, R::Err(_) => 0 }); i = i + 1; } perform Io.write(s + 19) }\nfn main() -> i64 { handle w() with { Io.read(k) => k(41), Io.write(x, k) => k(x + 2) } }\n",
+    "effect Io { read() -> i64; write(x: i64) -> i64; }\neffect Ask { q(x: i64) -> i64; }\nfn pure0() -> i64 { 5 }\nfn w() -> i64 ! { Io } { let mut i: i64 = 0; let mut s: i64 = 0; while i < 1 { s = s + handle pure0() with { Ask.q(x, k) => x }; i = i + 1; } let b: i64 = handle pure0() with { Ask.q(x, k) => x }; perform Io.write(s + b + 30) }\nfn main() -> i64 { handle w() with { Io.read(k) => k(41), Io.write(x, k) => k(x + 2) } }\n",
+    "effect Io { read() -> i64; write(x: i64) -> i64; }\nenum E { A(i64), B }\nfn w() -> i64 ! { Io } { let mut i: i64 = 0; while i < 1 { let _: i64 = i; i = i + 1; } let a: i64 = match E::A(39) { E::A(_) => 39, _ => 0 }; perform Io.write(a + i) }\nfn main() -> i64 { handle w() with { Io.read(k) => k(41), Io.write(x, k) => k(x + 2) } }\n",
     // A handler arm's own continuation, named like the callee, resumed inside the callee's
     // argument, in the let shape and in the chained one: a name bound only as a continuation,
     // which the bound-name rule leaves to the shape, so the call through it resumes, as the
@@ -535,21 +548,24 @@ fn sentinel_codegen_refuses_a_non_word_param_a_continuation_would_capture() {
 /// internal message, are pinned too. A body without statements is still classified by
 /// `eff_classify` (register D160), so the one such fixture `scg` lowers is listed, and must stay
 /// lowered until D160 is fixed. A body with statements that calls, anywhere in it, through a name
-/// the fn binds anywhere other than only as a handler arm's continuation, or reads such a name
-/// that also names a fn, is refused where the oracle lowers it, wherever the binding's scope ends:
-/// pinned with a `Fn` value called directly (a parameter, bound in a block, or a handler arm's
-/// operation parameter), which `scg` does not lower as the oracle does (ADR 0070's direct-call
-/// syntax is not mirrored); with a name `scg`'s typer binds apart from the resolver (register
-/// D164), bound in a `while` body and called, or read as a `Fn` value, after it; with a chained
-/// `let`'s own or a later `let`'s name called in its value; with such calls inside an argument of
-/// an effecting call or of a `perform`; and with calls `scg` lowered to the oracle's bytes before
-/// the rule, which it refuses all the same (a fn named like a `let` its argument binds or like a
-/// `match` arm's pattern, and a continuation named like an earlier `Fn` value). A body with
-/// statements that holds a `handle` with a `return` arm is refused the same way: pinned alone, and
-/// with four that also call through a name the `return` arm binds, in a handler arm after a resume
-/// or after the `handle`. Two bodies whose IR differs from the oracle's (register D163) must stay
-/// lowered. And a ported type error inside a body the oracle refuses is the answer, as it is the
-/// oracle's, whose typer runs before its code generation.
+/// the fn binds anywhere other than only as a handler arm's continuation, or uses such a name
+/// otherwise, other than a parameter, that also names a fn, is refused where the oracle lowers it,
+/// wherever the binding's scope ends: pinned with a `Fn` value called directly (a parameter, bound
+/// in a block, or a handler arm's operation parameter), which `scg` does not lower as the oracle
+/// does (ADR 0070's direct-call syntax is not mirrored); with a name `scg`'s typer binds apart from
+/// the resolver (register D164), bound in a `while` body and called, or read as a `Fn` value, after
+/// it; with a chained `let`'s own or a later `let`'s name called in its value; with such calls
+/// inside an argument of an effecting call or of a `perform`; and with calls `scg` lowered to the
+/// oracle's bytes before the rule, which it refuses all the same (a fn named like a `let` its
+/// argument binds or like a `match` arm's pattern, and a continuation named like an earlier `Fn`
+/// value). A body with statements that holds a `handle` with a `return` arm is refused the same
+/// way: pinned alone, and with four that also call through a name the `return` arm binds, in a
+/// handler arm after a resume or after the `handle`. And so is one in which a `let` inside a
+/// `while` binds a name that the body binds again, pinned with a chained `let` of that name after
+/// the loop and around it, and with a `let` of that name after the loop in a body lowered
+/// straight-line, which `scg` would lower to the oracle's bytes. Two bodies whose IR differs from
+/// the oracle's (register D163) must stay lowered. And a ported type error inside a body the oracle
+/// refuses is the answer, as it is the oracle's, whose typer runs before its code generation.
 #[test]
 fn sentinel_codegen_refuses_an_effecting_body_the_oracle_refuses() {
     const CODE: &str = "sentinel::codegen::effecting_fn_body_not_direct";
@@ -842,7 +858,10 @@ fn sentinel_codegen_refuses_an_effecting_body_the_oracle_refuses() {
     // alone, and with a call through a name the `return` arm binds, which `scg`'s typer also binds
     // at each resume site, in a handler arm after a resume (the arm's own continuation when the
     // `return` arm's value shares its name, or a fn named like its value or like a `let` its body
-    // binds) or after the `handle`.
+    // binds) or after the `handle`. And a name a `let` inside a `while` binds that the body binds
+    // again as a chained `let`, after the loop or around it, which the chained shape binds before
+    // it lowers any value (`eff_check_while`), and, the rule being the simple one, as a `let` after
+    // the loop in a body lowered straight-line, which `scg` would lower to the oracle's bytes.
     let work1 = "fn work(x: i64) -> i64 ! { Io } { perform Io.write(x) }\n";
     let askq = "effect Ask { q(x: i64) -> i64; }\nfn ask0() -> i64 ! { Ask } { perform Ask.q(0) }\nfn ask1() -> i64 ! { Ask } { perform Ask.q(1) }\n";
     for (name, body) in [
@@ -898,6 +917,18 @@ fn sentinel_codegen_refuses_an_effecting_body_the_oracle_refuses() {
         (
             "fn_value_bound_in_a_return_arm",
             format!("{ask}{work1}fn w() -> i64 ! {{ Io }} {{ let n: i64 = handle pure1() with {{ Ask.q(k) => 7, return v => {{ let work: Fn<i64, i64> = inc; v }} }}; work(n) }}\n"),
+        ),
+        (
+            "while_name_bound_again_by_a_later_chained_let",
+            "fn w() -> i64 ! { Io } { let a: i64 = { while false { let t: i64 = 7; } perform Io.read() }; let t: i64 = perform Io.read(); a + t - 40 }\n".to_string(),
+        ),
+        (
+            "while_name_bound_again_by_the_chained_let_around_it",
+            "fn w() -> i64 ! { Io } { let a: i64 = perform Io.read(); let t: i64 = { while false { let t: i64 = 7; } perform Io.read() }; a + t - 40 }\n".to_string(),
+        ),
+        (
+            "while_name_bound_again_by_a_later_let",
+            "fn w() -> i64 ! { Io } { let mut i: i64 = 0; while i < 1 { let t: i64 = 7; i = i + t; } let t: i64 = 34; perform Io.write(t + i - 1) }\n".to_string(),
         ),
         (
             "handle_with_a_return_arm",
