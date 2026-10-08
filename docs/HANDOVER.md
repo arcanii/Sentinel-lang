@@ -124,6 +124,10 @@ reference as you work through the milestones.
 > confirming nothing pre-existing is newly refused; oracle-vs-scg byte-equality on the new
 > fixture at types, mir and llvm; and the secret-taint check in both directions.
 
+### ▶ RESUME HERE (2026-10-09 — `origin/main` was `b84adf4` when this was written (the maintainer has pushed the D161 slice), and this session's three commits sit on top of it, unpushed; read `git reflog show refs/remotes/origin/main` and `git log --oneline origin/main..HEAD` at the START and AGAIN before writing either down. Two slices. **D161's follow-up** (`dacca62`): the seventh review round's seven text and pin findings fixed, its false claim that the rules together refuse each use of a name `scg`'s typer and the resolver take apart withdrawn, and a third fail-closed rule in `scg`'s routing, after the follow-up's own review found a body the rules missed: a body with statements in which a `let` inside a `while` body or its condition binds a name the body binds anywhere else is refused, since `scg`'s typer can keep such a `let` after the loop and its chained shape binds its `let`s before it lowers any value (D164). Three bounded review rounds of the follow-up (`wf_5dd370b3-2b7`, `wf_567fe539-946`, `wf_d0410c7d-1ee`), each lens with a construct-the-input verifier: the first found the body the rules missed; the second, that the rule's first form also refused patterns and handler-arm parameters in a loop, which the typer unbinds after their arm, and counted a pattern's `_` slot as a name, so the rule was narrowed to `let`s; the third, that a `let _` in a loop and a `_` slot were still refused, and text points, all fixed. Mutations of the rule all caught but one equivalent (a defensive per-fn reset); four-check 2,141 passed with the 18 known failures; no corpus program changes, and of 9,696 probes three do, all of which the oracle rejects. Then **register D139 CLOSED** (`c2533aa` fix, then this docs commit) — [ADR 0077](decisions/0077-drop-flags-for-maybe-moved-bindings.md)'s D10 amendment A1: the `define` that pushes an effecting fn's continuation frame, the parent of ADR 0072's let, embedded and chained shapes, dropped none of its parameters, so a parameter whose drop does something and that no resumer reads leaked on every call. Each parent now drops its parameter frame after the push and before it returns the continuation, in the oracle, inkwell and the `scg` mirror, and drops a parameter the parent moves on one path behind its flag. That is where the fn suspends, before the handler arm and the resumers run, so a `?Guard` parameter (only the oracle lowers one in a shape, through a generic fn) is now unlocked there, where it was never unlocked; each back end already unlocked there a guard that a fn binds in its own code and holds across a `perform` or an effecting call, wherever it lowers that fn (D167, filed). Over 2,000,000 calls the probes fall from 70.8–70.9 MB to 9.3–9.4 (40.1–40.2 to 9.3 for a parameter moved on one path; the oracle's embedded block holding only a `perform`, 70.8 to 9.5); inkwell's probes of a class built from a fresh `init` argument stay at 70.8 in every shape, straight-line included, which is D154, and the oracle and `scg` still drop nothing for a `secret`-qualified struct or class parameter (D158). The one corpus program whose output moves is the fixture it adds, `c77_frame_pushing_parent_drops_params`: its IR moves in the oracle and `scg` alike, and it runs to 42 before and after in all three back ends. Over the other 524 `.sentinel` files, `snc llvm` gives 355 identical and 169 refused by both with identical messages; `snc build` and a run of those files and 47 library wrappers (571 entries), all identical; `scg`, all identical. A note on D115 (an array `perform` argument), and ADR 0071 A4's list of owners never dropped closes its D139 item. One bounded review round (`wf_26872d33-cb7`, two lenses, each with a construct-the-input verifier) confirmed eight findings. Four blocked, all fixed: the texts did not say the drop runs where the fn suspends, which unlocks a guard parameter there; A1 said a shape whose resumer reads another parameter is refused, where the oracle stops with an internal message and `scg` emits IR `llc` rejects when their capture walks miss the read (D108, D165, D67); the sweeps left out the fixture the change adds, the one corpus program whose IR moves; and ADR 0071 A4 still listed D139's leak. Four did not: a placeholder in the docs commit's message, fixed; D158, now named beside D154; and two pre-existing defects, filed as D168 (a `return` taken inside the first `let`'s value leaks the continuation frame, oracle and `scg`) and D169 (`scg`'s parser reads a token that cannot start an operand as `0`). Mutations: removing each oracle parent's drop (three), each inkwell parent's drop (three) or `scg`'s chained parent's drop is caught by the pins; `scg`'s let and embedded drops survive as equivalent, since those shapes refuse any parameter whose drop does something (D159). Four-check 2,144 passed with the 18 known failures (6 ignored), every `scg` stage differential and both bootstrap fixed points green. It moves the IR all three back ends emit for such a parent, so it is at least a minor version (ADR 0076 D2), batched: the batch of oracle-moving slices ends with one bump to 0.3.0.)
+
+> **NEXT:** in the order agreed with the maintainer on 2026-10-05: D154's `init` statement locals exempt from the keep rule, an assignment into a framed binding as a drop site (D120's binding half), D158, D102 and D103, and D36's option A with D146; then the bump to 0.3.0 (ADR 0076 D2). D167 (refuse a guard live across a `perform`, or carry it) is the maintainer's call.
+
 ### ▶ RESUME HERE (2026-10-05, second slice — `origin/main` is `b84adf4` (the maintainer pushed this slice's first two commits), and its follow-up commit sits on top of it, unpushed; read `git reflog show refs/remotes/origin/main` and `git log --oneline origin/main..HEAD` at the START and AGAIN before writing either down. **The version is 0.2.0** (`96e21f2`, ADR 0076 D2, answering ADR 0077's Q6): one minor covering every oracle-moving change since 0.1.0, the first of them ADR 0075 A1. This slice: **registers D133 and D161 CLOSED** (`499bccd` fix, then `b84adf4` docs) — `scg` routed an effecting fn's body by its statement count, where the oracle routes it by what the statements are: a body of one `let` took the let shape and a body of two or more statements the chained shape, whatever they were. So D133's body (a `let` bound to a plain value before a `perform` tail), which the oracle lowers straight-line, got IR `llc` rejects, and `scg` emitted IR for bodies the oracle refuses. Now a body with statements is routed from a third parse by the oracle's conditions, all but its capture condition, which stays with the shapes' emitters (`eff_route` over `eff_kind`, a walk total over `Expr`, in `selfhost/types/cg_chained.sentinel`, with the widens the oracle's typer puts around a value); `scg` refuses with the oracle's code a body those conditions refuse, with the oracle's message or its part before the type it names but in five cases D161 lists, recorded once the body is walked or lowered so that a ported type error in it is reported first, as the oracle reports it. A `let` with no annotation bound to a call of a generic effecting fn whose return type is its type parameter is typed by the shape's emitter, which refuses the body if it does not fit. **A body with statements that calls, anywhere in it, through a name the fn binds anywhere other than only as a handler arm's continuation, or otherwise uses such a name (not a parameter) that also names one of the program's fns, is refused, wherever the binding's scope ends** (`eff_check_called`, over the bindings, calls and other uses the walk notes in `cg_eff_seen`, `cg_eff_called` and `cg_eff_read`), **and so is one that holds a `handle` with a `return` arm** (`eff_ret`; `scg` lowers the `return` arm inside the handler arm at each resume site, D164): the simpler fail-closed rules, taken in steps as the third to sixth review rounds kept finding holes in narrower ones — calls inside an argument of an effecting call or a `perform`, then names `scg`'s typer binds where the resolver does not (a `return` arm's names at each resume site in a handler arm) and the chained shape's `let`s, which it binds before their values, then the `return` arm lowered at each resume site, then a `Fn` value a `while` body binds under a fn's name, read after the loop. They refuse, where the oracle lowers them, a direct call through a `Fn` value, which `scg` does not lower as the oracle does, a call of a fn named like a name the body binds other than only as a continuation, a call through a continuation that shares its name with such a binding, any other use of such a name, other than a parameter, that also names a fn (the enclosing fn's own among them), and a body with a `return`-arm `handle`, some of which `scg` lowered to the oracle's bytes before; and `scg` also refuses a tail that calls a generic effecting fn whose return type wraps its type parameter. A body without statements is still D160's, now noted with the `tests/ui` program and the widened tail that show it. Filed **D162** (the shapes' emitters do not check a capture the oracle collects from a name the body binds outside the shape's `let`s, which it refuses), **D163** (the shapes type a `let`'s value without its annotation and bind an unannotated `let` untyped, so a generic call there names its instance apart from the oracle), **D164** (`scg`'s typer scopes a `while` body's and a `return` arm's names unlike the resolver, and binds a `return` arm's names at each resume site in a handler arm, so a later use of such a name can abort `scg` or be lowered apart from the oracle), **D165** (the oracle's capture walk does not enter a `match`, a `handle`, a `scope`, a `spawn`, an `await` or a block-wrapped `perform` a later `let`'s value ends in, so its let and chained shapes fail with an internal message on a value read only there; it widens D108) and, from the probe sweep, **D166** (`scg` discovers a generic call's instance after the instances its arguments call, where the oracle discovers it before them, so the two define those instances in different orders); notes on D12, D68(c) (a `Fn` operation parameter), D108, D143, D145 (a fifth order) and D160, and on ADR 0072's open list. ADR 0045's c35c and c35e amendments have their routing grounds marked superseded. `scg`-only, so a patch by ADR 0076 D2. Seven bounded review rounds, each lens with a construct-the-input verifier. `wf_3449ff72-45d` (routing, the classifier's walk, prose) found that the classifier's scoping of a block's names differed from the resolver's, that a `secret i64` block over a generic call was refused where HEAD matched the oracle, that a tail widened to the return type was lowered, that the chained check refused `let`s read through an earlier unannotated one, and prose and disclosure points, all fixed; it led to D162, D163 and D164. `wf_662b19f9-3fd` (the remedies) found that a name an argument binds shadowed its callee, fixed; that a generic callee returning a wrapped type parameter is taken for widened, kept as a documented over-refusal, the fail-closed direction; and prose and disclosure points, all fixed; it led to D165. The next four rounds (`wf_78ba5fa1-45c`, `wf_321b2b1d-3aa`, `wf_173cb048-9e4`, `wf_8f281a88-4e5`) each found another way a name the fn binds reached IR other than the oracle's (a call inside an argument, names `scg`'s typer binds where the resolver does not, a `return` arm, a `Fn` value read after a `while` body), so each time the rule was made simpler and wider, to the two fail-closed rules D161 states, with their over-refusals documented; they also found crash, pin, prose and disclosure points, all fixed or admitted. A seventh round, `wf_2a167a23-6fb` (the read rule, the sixth round's fixes and this round's text), was still running when the maintainer asked for these commits. It confirmed eight findings, seven of them in the text and the pins: the rule called a read what is any use of the name but as a callee, three texts left out its parameter exemption, which no seed pinned, a claim that the two rules refuse each use of a name `scg`'s typer and the resolver take apart was false, and one comment over-claimed how a `return` arm is lowered; the eighth is pre-existing and outside this slice. The follow-up commit fixes the seven and withdraws that claim, which the follow-up's own review showed false for a body the oracle lowers too; it adds a third rule, that a body with statements in which a `let` inside a `while` body or its condition binds a name the body binds anywhere else is refused, since `scg`'s typer can keep such a `let` after the loop and its chained shape binds its `let`s before it lowers any value (D164), with three refusal pins and five seeds; with the seed that pins the parameter exemption, twenty-seven in all. Register: **165 distinct ids, 70 whose heading opens `**D<n> — DONE`** (the 2026-09-22 block's rule; the id D130 is reserved and not in the public register). Four-check: **2,141 passed with exactly the 18 known Windows failures** (6 ignored), doctests and clippy clean, every `selfhost_*` differential green including both bootstrap fixed points. Sweeps, HEAD's `scg` against the final one: over the 524 `.sentinel` files in the tree, with the library and the compiler's modules staged, 486 give identical IR and 11 identical refusals, 24 neither driver compiles alone (the compiler's module parts, four front-end-error fixtures and a tool), and 3 change: the new fixture (IR `llc` rejected, now the oracle's bytes) and `c35_effecting_call_in_statement` and `c35_effecting_let_nullable`, now refused as the oracle refuses them. Over the reviews' 9,658 deduplicated probe programs, the final driver matches the oracle, by bytes or by refusal, on every one HEAD's matched it on but 378: 338 bodies the two rules refuse where the oracle lowers them (D161's over-refusals: each calls through a name it binds, reads a name it binds that also names a fn, or holds a `return` arm), 30 that D145's documented order covers, and 10 of D161's fourth message case. Mutations, each in a scratch copy of the tree against an unmutated baseline that passes: 64 runs on round 6's code over the classifier, the routing, the emitters' checks and both rules, 56 caught and 8 equivalent under the position-insensitive rules (a scope the walk draws, which binding of a name counts, a parameter's binding in the walk); and 26 on the final code, all caught: the read rule (nine), the per-fn resets of the bindings, calls, reads and refusal flag (four), the return-arm rule, and the call rule's twelve, re-run because the read rule also refuses some of their pins. M23 (any scalar counted as fitting) survived in the first round; the input that tells it apart showed the shapes' typed check recording its refusal before a ported type error later in the body, so the check now records it once the body is lowered.)
 
 > **NEXT:** register D139 (ADR 0077 amendment A1: the `define` that pushes an effecting fn's continuation frame drops its parameters), then, in the order agreed with the maintainer on 2026-10-05, D154's `init` statement locals, an assignment into a framed binding as a drop site (D120's binding half), D158, D102 and D103, and D36's option A with D146. D139 moves the IR the oracle emits, so the batch ends with one bump to 0.3.0 (ADR 0076 D2).
@@ -2124,7 +2128,11 @@ reference as you work through the milestones.
 >      instead of a diagnostic — ADR 0072 D3/D4 fixes the continuation seam at one `i64`, and
 >      nothing refuses a pointer-typed operation argument before codegen. The project's rule
 >      against panicking on user-program input makes this a defect whatever the fix: a
->      diagnostic at the type or effect stage, or support for a handle-typed argument.
+>      diagnostic at the type or effect stage, or support for a handle-typed argument. An array
+>      argument (`effect Io { take(v: [i64]) -> i64; }`, `perform Io.take(a)`) hits the same
+>      panic in inkwell, and the oracle, and `scg` where it lowers the body, pass the aggregate
+>      where `sentinel_perform_op` takes one `i64`, which `llc` rejects (found 2026-10-08 by
+>      D139's probes).
 >
 >      **D116 — the oracle and `scg` disagree on a field moved out of a block or `if` value.**
 >      Found 2026-09-25 while fixing D114's `scg` parity. For `consume(({ s }).a)` or
@@ -2542,24 +2550,44 @@ reference as you work through the milestones.
 >      times, peaks at 100.5 MB in all three back ends, against 8.4 MB for the same array in a
 >      struct. The fix is ADR 0032's recorded payload-ownership model.
 >
->      **D139 — an effecting fn in ADR 0072's let shape never frees its heap parameters (a
->      leak).** Found 2026-09-23 by the D93 investigation; re-verified 2026-09-26.
+>      **D139 — DONE (2026-10-09). An effecting fn in ADR 0072's let shape never freed its heap
+>      parameters (a leak).** Found 2026-09-23 by the D93 investigation; re-verified 2026-09-26.
 >      `fn eff(a: [i64]) -> i64 ! { Io } { let x: i64 = perform Io.read(); x + 1 }`, handled
 >      2,000,000 times, peaks at 100.5 MB in all three back ends; the direct shape with the same
 >      parameter (`{ perform Io.read() }`) peaks at 8.4 MB. (`scg`'s IR for it also differs from
->      the oracle's: it captures the parameter into a frame where the oracle captures nothing,
->      a D67 instance.)
->      The fn that pushes the frame drops none of its parameters, in the embedded and chained
->      shapes too (found 2026-10-04 by D156's review): an array parameter, or a struct holding
->      a `Shared`, that no resumer reads peaks at 69.9 to 70.0 MB over 2,000,000 calls in all
->      three back ends before D156. Since D156 `scg` refuses such a fn in its embedded and let
->      shapes, this entry's own program included (D159), and leaks only in its chained shape.
->      Since D156 a class holding a handle leaks the same way, where it balanced before because
->      its field held no unit: 69.9 to 70.0 MB through inkwell and the oracle in the embedded,
->      let and chained shapes, and through `scg` in the chained shape, against 8.3 to 8.4
->      before. The oracle also takes a block holding only a `perform` (`{ perform Io.write(41 +
->      n) }`) as embedded and leaks there (69.9), where inkwell and `scg` lower it straight-line
->      and drop the class (8.4).
+>      the oracle's: it captures the parameter into a frame where the oracle captures nothing, a
+>      D67 instance.) The fn that pushes the frame drops none of its parameters, in the embedded
+>      and chained shapes too (found 2026-10-04 by D156's review): an array parameter, or a
+>      struct holding a `Shared`, that no resumer reads peaks at 69.9 to 70.0 MB over 2,000,000
+>      calls in all three back ends before D156. Since D156 `scg` refuses such a fn in its
+>      embedded and let shapes, this entry's own program included (D159), and leaks only in its
+>      chained shape. Since D156 a class holding a handle leaks the same way, where it balanced
+>      before because its field held no unit: 69.9 to 70.0 MB through inkwell and the oracle in
+>      the embedded, let and chained shapes, and through `scg` in the chained shape, against 8.3
+>      to 8.4 before. The oracle also takes a block holding only a `perform` (`{ perform
+>      Io.write(41 + n) }`) as embedded and leaks there (69.9), where inkwell and `scg` lower it
+>      straight-line and drop the class (8.4). Closed by [ADR
+>      0077](decisions/0077-drop-flags-for-maybe-moved-bindings.md)'s D10 amendment A1
+>      (`c2533aa`): the `define` that pushes an effecting fn's continuation frame, the parent of
+>      the let, embedded and chained shapes, drops its parameter frame after the push and before
+>      it returns the continuation, in the oracle, inkwell and `scg`, and drops a parameter the
+>      parent moves on one path behind its flag. That is where the fn suspends, before the
+>      handler arm and the resumers run, so a `?Guard` parameter, which only the oracle lowers
+>      in a shape (through a generic fn), is now unlocked there, where it was never unlocked
+>      (D167). Measured on 2026-10-08 over 2,000,000 calls, the shape probes fall from 70.8 to
+>      70.9 MB to 9.3 to 9.4, a straight-line fn's figure, a parameter moved on one path from
+>      40.1 to 40.2 MB to 9.3, and the oracle's embedded block holding only a `perform` from
+>      70.8 MB to 9.5. A class built with `C::init(shared_new(5))` still peaks at 70.8 MB
+>      through inkwell, in a straight-line fn as in each shape: that is D154. The oracle and
+>      `scg` still drop nothing for a `secret`-qualified struct or class parameter, in a
+>      straight-line fn as in a shape's parent: that is D158. In `scg`'s let and embedded
+>      shapes, which refuse such a parameter (D159), the drop does nothing until D159 narrows
+>      their frame. Pinned by `tests/pass/c77_frame_pushing_parent_drops_params` (a drop on the
+>      path that moved the array frees it twice), the oracle's and inkwell's IR tests
+>      `llvm_a_frame_pushing_parent_drops_its_params` and
+>      `d139_a_frame_pushing_parent_drops_its_params` (eight and seven parents: one drop between
+>      the push and the `ret`, behind the flag only where the parent moves the parameter), and
+>      two codegen seeds in the chained shape.
 >
 >      **D140 — `==` between two arrays type-checks and borrow-checks, then fails in every back
 >      end.** Found 2026-09-25 by a review of the checker slice; re-verified 2026-09-26.
@@ -3148,6 +3176,57 @@ reference as you work through the milestones.
 >      flat (`let p: i64 = pq(41); wo(p)`) it is the oracle's. The corpus differential is green,
 >      so no corpus program reaches it. The fix is to record a call's instance before its
 >      arguments' instances, as the oracle does.
+>
+>      **D167 — an effecting fn unlocks a guard it holds across a `perform`, or a call to an
+>      effecting fn, when it suspends, before the handler arm and the resumers run.** Found
+>      2026-10-09 by D139's review; pre-existing for a guard the fn binds in its own code, and
+>      since ADR 0077 A1 (D139) also true of a guard parameter of the let, embedded and chained
+>      shapes' parent, which before was never unlocked. A guard's scope ends where its block
+>      does, after the `perform`, but the fn releases it when it returns its continuation. With
+>      `fn relock(mx: Mutex<i64>) -> i64 { let h = lock(mx); if is_some(h) { 100 } else { 200 }
+>      }` and `fn eff(m: Mutex<i64>) -> i64 ! { Io } { let g = lock(m); perform Io.read() }`,
+>      handled as `handle eff(mx) with { Io.read(k) => k(relock(mx) / 100) }`, the arm takes the
+>      lock and resumes with 1, in all three back ends; so it does with another statement before
+>      the `perform`, with the guard in a block that is the tail, with a call to an effecting fn
+>      in place of the `perform` (`let g = lock(m); inner()`), and with the guard bound in a
+>      block, ending with the `perform`, that is the first `let`'s value, in the chained shape
+>      (all three) and the let shape (inkwell and the oracle; `scg` refuses that fn, D159). A fn
+>      that holds a guard across an ordinary call keeps it locked until its exit (`relock`
+>      answers 200 there, in all three). A guard reaches a parameter only through a generic fn,
+>      so only the oracle lowers a guard parameter in a shape (inkwell refuses a generic
+>      effecting fn, D70; `scg`'s let and embedded shapes refuse the parameter, D159, and its
+>      chained shape emits IR `llc` rejects, D107); the oracle's direct shape already unlocked
+>      one at the suspension. No resumer can read the guard, since a frame carries only an `i64`
+>      or a `secret i64`, so nothing reads the protected value after the unlock; what changes is
+>      that the handler arm, or another thread, can take the lock while the fn is suspended.
+>      Holding the lock until the body ends needs the guard carried across the continuation;
+>      refusing a guard live across a `perform` is the fail-closed alternative. The maintainer's
+>      call.
+>
+>      **D168 — the oracle's and `scg`'s let and chained shapes leak the continuation frame when
+>      a `return` is taken inside the first `let`'s value.** Found 2026-10-09 by D139's review;
+>      pre-existing. The parent allocates the frame its resumers read before it lowers the first
+>      `let`'s value, and a `return` taken inside that value returns `sentinel_kont_pure`
+>      without freeing it: `fn eff(n: i64) -> i64 ! { Io } { let x: i64 = { if n > 0 { return 7
+>      } else { 0 }; perform Io.read() }; x + n }`, called 400,000 times with `n` alternating 0
+>      and 1, peaks at 12.4 to 12.5 MB through the oracle and `scg`, and so does its chained
+>      twin, against 9.3 when the `return` is never taken, before D139 and after it. A parameter
+>      is dropped on that path (the parent's return drain), so the excess is the frame alone.
+>      inkwell refuses the body (the value bound to `x` writes a variable or `return`s before it
+>      suspends, ADR 0072 A1). The fix is to free the frame on that path, to allocate it after
+>      the value, or to refuse the body as inkwell does.
+>
+>      **D169 — `scg`'s parser reads a token that cannot start an operand as the integer `0`.**
+>      Found 2026-10-09 by D139's review; pre-existing. `parse_atom`'s last arm
+>      (`selfhost/parser/parse.sentinel`) steps over any token no other arm takes and yields
+>      `Expr::Int(0)` with no diagnostic. So `40 + match e { E::B(v) => v, E::U => 0 }` (with
+>      `enum E { B(i64), U }` and `let e = E::B(2)`), which the Rust parser rejects
+>      (`sentinel::parse::unexpected_token`, "unexpected Match, expected expression"), `scg`
+>      lowers as `40 + 0`, and the program exits 40; `fn main() -> i64 { 40 + while }` exits 40
+>      too. Parenthesized, `40 + (match e { .. })` answers 42 in all three back ends. Not a
+>      parity break, since the oracle rejects these programs, but `scg` builds programs whose
+>      source means something else, or nothing. The fix is to report the token, as the Rust
+>      parser does.
 >
 >      **D78 — stale corpus fixture counts in `llvm.rs` and `README.md`, at six sites, stale
 >      before this change.** Found by D74's reviews. `crates/sentinel-driver/tests/llvm.rs`

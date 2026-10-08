@@ -5,7 +5,7 @@ HANDOVER.md, STATE.md is the source of truth. New contributors (or
 new chat sessions) should be able to read this file and understand
 the current state of the workspace without re-reading every commit.
 
-## Current State (2026-10-05)
+## Current State (2026-10-09)
 
 > **Phase C closed at the bootstrap milestone (2026-05-30); Phase D self-hosts; the
 > per-unit separate-compilation back end is functionally complete.**
@@ -14,7 +14,28 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
-**Latest (2026-10-05, second slice) — `scg` routes an effecting body with statements as the oracle
+**Latest (2026-10-09) — an effecting fn's frame-pushing `define` drops its parameters (register
+D139), after a follow-up to D161.**
+[ADR 0077](decisions/0077-drop-flags-for-maybe-moved-bindings.md)'s D10 amendment A1: the `define`
+that pushes an effecting fn's continuation frame, the parent of ADR 0072's let, embedded and chained
+shapes, returned the continuation without dropping its parameters, so a parameter whose drop does
+something and that no resumer reads leaked on every call (70.8 to 70.9 MB over 2,000,000 calls,
+against 9.3 for a fn lowered straight-line). Each parent now drops its parameter frame after the
+push and before it returns the continuation, in the oracle, inkwell and the `scg` mirror, and drops
+a parameter the parent moves on one path behind its flag; the probes fall to 9.3 to 9.4 MB. That is
+where the fn suspends, before the handler arm and the resumers run, so a `?Guard` parameter, which
+only the oracle lowers in a shape, is now unlocked there, as a guard the fn binds in its own code
+already was (D167). inkwell still keeps a class built from a fresh `init` argument, in any fn
+(D154), and the oracle and `scg` still drop nothing for a `secret`-qualified struct or class
+parameter (D158). Apart from the fixture it adds, whose IR moves in the oracle and `scg` alike and
+which runs to 42 before and after, no corpus program's output changes in any back end. Its review
+filed D167 to D169. Before it, a follow-up to D161 fixed the text and pin findings of its seventh
+review round and added a third fail-closed rule to `scg`'s routing: a body with statements in which
+a `let` inside a `while` binds a name the body binds anywhere else is refused (D164). D139 moves the
+IR all three back ends emit for such a parent, so it is at least a minor version (ADR 0076 D2); the
+batch of oracle-moving slices ends with one bump to 0.3.0.
+
+**Previously (2026-10-05, second slice) — `scg` routes an effecting body with statements as the oracle
 does (registers D133 and D161).**
 The self-hosted code generator routed an effecting fn's body by its statement count: a body of one
 `let` took the let shape and a body of two or more statements the chained shape, whatever the
