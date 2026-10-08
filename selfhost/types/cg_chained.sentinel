@@ -974,7 +974,7 @@ fn eff_unbind(ln: &mut Vec<u8>, lo: &mut Vec<i64>, ll: &mut Vec<i64>, mark: i64)
 // `%arg1`, then walks the FULL tail with `cg_ph` armed — the Perform arm emits a load
 // from the slot instead of a perform call (`cg_emit_phload`, the substituted-Var
 // equivalent) — and wraps the i64 result via `sentinel_kont_pure`.
-fn cg_embed_emit(out: &mut Vec<u8>, c: &mut TyCtx, pf: Expr, tail: Expr, rty: i64, src: &[u8], name_s: i64, name_e: i64, pv0: i64, pvn: i64, gb: &mut Vec<u8>) -> i64 {
+fn cg_embed_emit(out: &mut Vec<u8>, c: &mut TyCtx, pf: Expr, tail: Expr, rty: i64, src: &[u8], name_s: i64, name_e: i64, cgpmark: i64, pv0: i64, pvn: i64, gb: &mut Vec<u8>) -> i64 {
     let nparams: i64 = pvn - pv0;
     let cap_null: bool = nparams == 0;
     // ===== PARENT define: captured struct, the perform → kont, push, ret ptr =====
@@ -1032,6 +1032,12 @@ fn cg_embed_emit(out: &mut Vec<u8>, c: &mut TyCtx, pf: Expr, tail: Expr, rty: i6
     };
     cgo_str(c, ")\n");
     (*c).cg_used_kontpush = true;
+    // (ADR 0077 A1, register D139) drop the parameter frame before returning the continuation,
+    // where the fn suspends: before the handler arm and the resumers run. A parameter a frame
+    // carries is `i64` or `secret i64` (ADR 0072), whose drop does nothing; this shape's frame
+    // carries every parameter (D159), so here the drop does nothing until D159 narrows the
+    // frame to what the resumer reads.
+    cg_drop_frame(c, cgpmark);
     // Assemble the PARENT: `define ptr @<name>(<params>) { entry: <allocas> <body> ret ptr <kont> }`.
     (*c).cg_to_body = false;
     cgo_str(c, "define ptr @");
@@ -1129,7 +1135,7 @@ fn cg_embed_emit(out: &mut Vec<u8>, c: &mut TyCtx, pf: Expr, tail: Expr, rty: i6
 // semantics bar inspect-then-reuse — the c35d classification-copy idiom). All lets are
 // i64 (the shape requires it). `[pv0,pvn)` = the param VarId range (params are bound by
 // emit_tparams; captures[0] is the subset of params + nothing the suffix/tail uses).
-fn cg_chained_emit(out: &mut Vec<u8>, c: &mut TyCtx, body: Expr, rty: i64, src: &[u8], name_s: i64, name_e: i64, pv0: i64, pvn: i64, gb: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, body_tok0: i64) -> i64 {
+fn cg_chained_emit(out: &mut Vec<u8>, c: &mut TyCtx, body: Expr, rty: i64, src: &[u8], name_s: i64, name_e: i64, cgpmark: i64, pv0: i64, pvn: i64, gb: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, body_tok0: i64) -> i64 {
     let _rt: i64 = rty;
     let _p0: i64 = pv0;
     let _pn: i64 = pvn;
@@ -1142,7 +1148,7 @@ fn cg_chained_emit(out: &mut Vec<u8>, c: &mut TyCtx, body: Expr, rty: i64, src: 
     cg_chained_refuse_unfit(c, k, s, e, src, body_tok0, name_s, name_e, pv0, pvn, &letvids, nlets, gb);
     // Phase 3: consume the ORIGINAL body chain, emitting parent + N resumers (captures
     // computed on-demand per define from fresh re-parses).
-    let nunfit: i64 = cg_chained_walk(out, c, body, nlets, &letvids, letty, src, name_s, name_e, gb, k, s, e, body_tok0);
+    let nunfit: i64 = cg_chained_walk(out, c, body, nlets, &letvids, letty, src, name_s, name_e, cgpmark, gb, k, s, e, body_tok0);
     // (register D161) a `let` whose type `eff_route` could not read (`eff_fit`) and that, typed
     // as its value was lowered, does not fit the continuation's one `i64` slot: the oracle
     // refuses the body, with its general reason since the body has more than one statement.
@@ -1503,10 +1509,10 @@ fn cg_caps_op(c: &mut TyCtx, alloc_reg: i64, ncaps: i64) -> i64 {
 // (c35e) walk the original body chain, emitting parent (chain index 0) + chaining
 // resumers (index 1..N-1), then the LAST resumer (lowering the tail) at chain end. Answers
 // how many `let`s, typed, do not fit (`cg_chained_unfit`).
-fn cg_chained_walk(out: &mut Vec<u8>, c: &mut TyCtx, body: Expr, nlets: i64, letvids: &Vec<i64>, letty: i64, src: &[u8], name_s: i64, name_e: i64, gb: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, body_tok0: i64) -> i64 {
+fn cg_chained_walk(out: &mut Vec<u8>, c: &mut TyCtx, body: Expr, nlets: i64, letvids: &Vec<i64>, letty: i64, src: &[u8], name_s: i64, name_e: i64, cgpmark: i64, gb: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, body_tok0: i64) -> i64 {
     match body {
         Expr::Block(stmts, tail) => {
-            cg_chained_chain(out, c, stmts, tail, 0, nlets, letvids, letty, src, name_s, name_e, gb, k, s, e, body_tok0)
+            cg_chained_chain(out, c, stmts, tail, 0, nlets, letvids, letty, src, name_s, name_e, cgpmark, gb, k, s, e, body_tok0)
         },
         _ => 0,
     }
@@ -1516,7 +1522,7 @@ fn cg_chained_walk(out: &mut Vec<u8>, c: &mut TyCtx, body: Expr, nlets: i64, let
 // or resumer-(kidx-1) (kidx>=1, a chaining resumer); at SEnd, resumer-(N-1) lowers the
 // pure tail. Consumes the original body's stmt chain + tail. Answers how many `let`s, typed,
 // do not fit.
-fn cg_chained_chain(out: &mut Vec<u8>, c: &mut TyCtx, stmts: Stmts, tail: Expr, kidx: i64, nlets: i64, letvids: &Vec<i64>, letty: i64, src: &[u8], name_s: i64, name_e: i64, gb: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, body_tok0: i64) -> i64 {
+fn cg_chained_chain(out: &mut Vec<u8>, c: &mut TyCtx, stmts: Stmts, tail: Expr, kidx: i64, nlets: i64, letvids: &Vec<i64>, letty: i64, src: &[u8], name_s: i64, name_e: i64, cgpmark: i64, gb: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, body_tok0: i64) -> i64 {
     match stmts {
         Stmts::SCell(st, rest) => {
             match st {
@@ -1525,15 +1531,15 @@ fn cg_chained_chain(out: &mut Vec<u8>, c: &mut TyCtx, stmts: Stmts, tail: Expr, 
                     sink_name(gb, lnm);
                     let _t: i64 = tyopt_exp(c, lty, gb);
                     let u: i64 = if kidx == 0 {
-                        cg_chained_parent(out, c, lval, src, name_s, name_e, gb, k, s, e, body_tok0, nlets, letvids)
+                        cg_chained_parent(out, c, lval, src, name_s, name_e, cgpmark, gb, k, s, e, body_tok0, nlets, letvids)
                     } else {
                         cg_chained_resumer(out, c, lval, kidx - 1, false, letty, src, name_s, name_e, gb, k, s, e, body_tok0, nlets, letvids)
                     };
-                    u + cg_chained_chain(out, c, rest, tail, kidx + 1, nlets, letvids, letty, src, name_s, name_e, gb, k, s, e, body_tok0)
+                    u + cg_chained_chain(out, c, rest, tail, kidx + 1, nlets, letvids, letty, src, name_s, name_e, cgpmark, gb, k, s, e, body_tok0)
                 },
                 _ => {
                     // non-let — never in an emitted chained body; drop `st`, recurse.
-                    cg_chained_chain(out, c, rest, tail, kidx, nlets, letvids, letty, src, name_s, name_e, gb, k, s, e, body_tok0)
+                    cg_chained_chain(out, c, rest, tail, kidx, nlets, letvids, letty, src, name_s, name_e, cgpmark, gb, k, s, e, body_tok0)
                 },
             }
         },
@@ -1547,7 +1553,7 @@ fn cg_chained_chain(out: &mut Vec<u8>, c: &mut TyCtx, stmts: Stmts, tail: Expr, 
 // (c35e) emit the PARENT define (reuses emit_tparams's param setup — cgnext at #params,
 // param slots set, param stores in cgbody): build captures[0], lower lets[0].RHS → kont,
 // push resumer-0, ret ptr. Answers 1 when lets[0], typed, does not fit, else 0.
-fn cg_chained_parent(out: &mut Vec<u8>, c: &mut TyCtx, rhs0: Expr, src: &[u8], name_s: i64, name_e: i64, gb: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, body_tok0: i64, nlets: i64, letvids: &Vec<i64>) -> i64 {
+fn cg_chained_parent(out: &mut Vec<u8>, c: &mut TyCtx, rhs0: Expr, src: &[u8], name_s: i64, name_e: i64, cgpmark: i64, gb: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, body_tok0: i64, nlets: i64, letvids: &Vec<i64>) -> i64 {
     let mut caps0: Vec<i64> = vec_new();
     cg_chained_caps(c, k, s, e, src, body_tok0, 0, letvids, nlets, &mut caps0, gb);
     let alloc_reg: i64 = cg_build_caps_struct(c, &caps0);
@@ -1567,6 +1573,10 @@ fn cg_chained_parent(out: &mut Vec<u8>, c: &mut TyCtx, rhs0: Expr, src: &[u8], n
     cg_caps_op(c, alloc_reg, ncaps);
     cgo_str(c, ")\n");
     (*c).cg_used_kontpush = true;
+    // (ADR 0077 A1, register D139) drop the parameter frame before returning the continuation,
+    // where the fn suspends: before the handler arm and the resumers run. A parameter a frame
+    // carries is `i64` or `secret i64` (`cg_chained_refuse_unfit`), whose drop does nothing.
+    cg_drop_frame(c, cgpmark);
     // Assemble: `define ptr @<name>(<params>) { entry: <allocas> <body> ret ptr <kont> }`.
     (*c).cg_to_body = false;
     cgo_str(c, "define ptr @");

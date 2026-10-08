@@ -3382,7 +3382,7 @@ fn cg_emit_fn_eff(out: &mut Vec<u8>, c: &mut TyCtx, body: Expr, rty: i64, src: &
                         Args::Cell(pf, erest) => {
                             let _er: Args = erest;
                             cg_eff_refuse_unfit(c, src, name_s, name_e, pv0, pvn);
-                            cg_embed_emit(out, c, pf, tail, rty, src, name_s, name_e, pv0, pvn, gb)
+                            cg_embed_emit(out, c, pf, tail, rty, src, name_s, name_e, cgpmark, pv0, pvn, gb)
                         },
                         Args::End => {
                             let b0: Expr = Expr::Block(Stmts::SEnd, tail);
@@ -3400,7 +3400,7 @@ fn cg_emit_fn_eff(out: &mut Vec<u8>, c: &mut TyCtx, body: Expr, rty: i64, src: &
                                 Stmt::SLet(lmf, lnm, lty, lval) => {
                                     if route == 1 {
                                         cg_eff_refuse_unfit(c, src, name_s, name_e, pv0, pvn);
-                                        cg_letshape_emit(out, c, lnm, lty, lval, tail, rty, src, name_s, name_e, pv0, pvn, gb)
+                                        cg_letshape_emit(out, c, lnm, lty, lval, tail, rty, src, name_s, name_e, cgpmark, pv0, pvn, gb)
                                     } else {
                                         let b1: Expr = Expr::Block(Stmts::SCell(Stmt::SLet(lmf, lnm, lty, lval), Stmts::SEnd), tail);
                                         cg_eff_other(out, c, b1, route, rty, src, name_s, name_e, cgpmark, gb)
@@ -3435,7 +3435,7 @@ fn cg_emit_fn_eff(out: &mut Vec<u8>, c: &mut TyCtx, body: Expr, rty: i64, src: &
                             // capture sets; otherwise straight-line or refused.
                             let b2: Expr = Expr::Block(Stmts::SCell(st, Stmts::SCell(s2, r2)), tail);
                             if route == 2 {
-                                cg_chained_emit(out, c, b2, rty, src, name_s, name_e, pv0, pvn, gb, k, s, e, body_tok0)
+                                cg_chained_emit(out, c, b2, rty, src, name_s, name_e, cgpmark, pv0, pvn, gb, k, s, e, body_tok0)
                             } else {
                                 cg_eff_other(out, c, b2, route, rty, src, name_s, name_e, cgpmark, gb)
                             }
@@ -3502,7 +3502,7 @@ fn cg_eff_refuse_body(c: &mut TyCtx, src: &[u8], name_s: i64, name_e: i64, why: 
 // list in declaration order = the oracle's first-reference order for the c35c corpus
 // (≤1 param per let-shape fn, always used in the tail); multi-param first-ref ordering
 // is a c35d+ refinement.
-fn cg_letshape_emit(out: &mut Vec<u8>, c: &mut TyCtx, lnm: [u8], lty: TyOpt, lval: Expr, tail: Expr, rty: i64, src: &[u8], name_s: i64, name_e: i64, pv0: i64, pvn: i64, gb: &mut Vec<u8>) -> i64 {
+fn cg_letshape_emit(out: &mut Vec<u8>, c: &mut TyCtx, lnm: [u8], lty: TyOpt, lval: Expr, tail: Expr, rty: i64, src: &[u8], name_s: i64, name_e: i64, cgpmark: i64, pv0: i64, pvn: i64, gb: &mut Vec<u8>) -> i64 {
     let nparams: i64 = pvn - pv0;
     let cap_null: bool = nparams == 0;
     // ===== PARENT define: captured struct, RHS → kont, push, ret ptr =====
@@ -3565,6 +3565,12 @@ fn cg_letshape_emit(out: &mut Vec<u8>, c: &mut TyCtx, lnm: [u8], lty: TyOpt, lva
     };
     cgo_str(c, ")\n");
     (*c).cg_used_kontpush = true;
+    // (ADR 0077 A1, register D139) drop the parameter frame before returning the continuation,
+    // where the fn suspends: before the handler arm and the resumers run. A parameter a frame
+    // carries is `i64` or `secret i64` (ADR 0072), whose drop does nothing; this shape's frame
+    // carries every parameter (D159), so here the drop does nothing until D159 narrows the
+    // frame to what the resumer reads.
+    cg_drop_frame(c, cgpmark);
     // Assemble the PARENT: `define ptr @<name>(<params>) { entry: <allocas> <body> ret ptr <kont> }`.
     (*c).cg_to_body = false;
     cgo_str(c, "define ptr @");

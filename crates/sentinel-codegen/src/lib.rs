@@ -4409,6 +4409,13 @@ impl<'ctx, 'plan, 'm> CodegenCtx<'ctx, 'plan, 'm> {
             )
             .map_err(|e| CodegenError::Builder(e.to_string()))?;
 
+        // ADR 0077 A1 (register D139): drop the parameter frame before returning the
+        // continuation, where the fn suspends: before the handler arm and the resumers run,
+        // not at the end of the body. A parameter the frame carries is `i64` or `secret i64`
+        // (ADR 0072), whose drop does nothing.
+        self.emit_scope_drops(None, program)?;
+        self.scope_stack.pop();
+
         // Return the kont so the caller's handle catches it.
         self.builder
             .build_return(Some(&kont_val))
@@ -4629,6 +4636,11 @@ impl<'ctx, 'plan, 'm> CodegenCtx<'ctx, 'plan, 'm> {
                 "",
             )
             .map_err(|e| CodegenError::Builder(e.to_string()))?;
+
+        // ADR 0077 A1 (register D139): drop the parameter frame before returning the
+        // continuation, where the fn suspends: before the handler arm and the resumers run.
+        self.emit_scope_drops(None, program)?;
+        self.scope_stack.pop();
 
         // Return the kont so the caller's handle catches it.
         self.builder
@@ -4854,6 +4866,10 @@ impl<'ctx, 'plan, 'm> CodegenCtx<'ctx, 'plan, 'm> {
                 "",
             )
             .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        // ADR 0077 A1 (register D139): drop the parameter frame before returning the
+        // continuation, where the fn suspends: before the handler arm and the resumers run.
+        self.emit_scope_drops(None, program)?;
+        self.scope_stack.pop();
         self.builder
             .build_return(Some(&kont_val))
             .map_err(|e| CodegenError::Builder(e.to_string()))?;
@@ -14382,6 +14398,60 @@ fn main() -> i64 { secret_field(1) + array_field(1) + 42 }
             0,
             "@array_field: a field a class's drop never touches gets no flag:\n{body}"
         );
+    }
+
+    // ===== ADR 0077 A1 (register D139): a frame-pushing parent drops its parameters =====
+    //
+    // The parent of ADR 0072's let, embedded and chained shapes drops its parameter frame
+    // after it pushes the frame and before it returns the continuation, where the fn suspends.
+    // It used to drop none, so a parameter whose drop does something and that no resumer
+    // reads leaked on every call. `moved` moves its array on one path of its own code, so the
+    // drop sits behind the flag. A drop is memory, not an exit code, so this reads the IR.
+
+    const D139_PARENTS: &str = r#"
+effect Io { read() -> i64; }
+class C { let s: Shared<i64>; pub init(s: Shared<i64>) { self.s = s; 0 } }
+fn consume(v: [i64]) -> i64 { v[0] }
+fn let_arr(a: [i64]) -> i64 ! { Io } { let x: i64 = perform Io.read(); x + 1 }
+fn embedded_arr(a: [i64]) -> i64 ! { Io } { perform Io.read() + 1 }
+fn chained_arr(a: [i64]) -> i64 ! { Io } { let x: i64 = perform Io.read(); let y: i64 = perform Io.read(); x + y }
+fn let_class(k: C) -> i64 ! { Io } { let x: i64 = perform Io.read(); x + 1 }
+fn embedded_class(k: C) -> i64 ! { Io } { perform Io.read() + 1 }
+fn chained_class(k: C) -> i64 ! { Io } { let x: i64 = perform Io.read(); let y: i64 = perform Io.read(); x + y }
+fn moved(a: [i64], c: i64) -> i64 ! { Io } { let x: i64 = { let z: i64 = if c > 0 { consume(a) } else { 0 }; perform Io.read() }; let y: i64 = perform Io.read(); x + y }
+fn main() -> i64 {
+    let a: i64 = handle let_arr([1]) with { Io.read(k) => k(1) };
+    let b: i64 = handle embedded_arr([1]) with { Io.read(k) => k(1) };
+    let c: i64 = handle chained_arr([1]) with { Io.read(k) => k(1) };
+    let d: i64 = handle let_class(C::init(shared_new(5))) with { Io.read(k) => k(1) };
+    let e: i64 = handle embedded_class(C::init(shared_new(5))) with { Io.read(k) => k(1) };
+    let f: i64 = handle chained_class(C::init(shared_new(5))) with { Io.read(k) => k(1) };
+    let g: i64 = handle moved([1], 1) with { Io.read(k) => k(1) };
+    a + b + c + d + e + f + g
+}
+"#;
+
+    #[test]
+    fn d139_a_frame_pushing_parent_drops_its_params() {
+        let ir = compile_src_ir_with_moves(D139_PARENTS);
+        for (f, sym) in [
+            ("let_arr", "@sentinel_free("),
+            ("embedded_arr", "@sentinel_free("),
+            ("chained_arr", "@sentinel_free("),
+            ("let_class", "@sentinel_shared_release("),
+            ("embedded_class", "@sentinel_shared_release("),
+            ("chained_class", "@sentinel_shared_release("),
+            ("moved", "@sentinel_free("),
+        ] {
+            let body = ir_fn_body(&ir, f);
+            let push = body.find("@sentinel_kont_push(").expect("the parent pushes a frame");
+            let ret = body.rfind("ret ptr").expect("the parent returns the continuation");
+            assert_eq!(body.matches(sym).count(), 1, "@{f}: one drop of the parameter:\n{body}");
+            let at = body.find(sym).unwrap();
+            assert!(push < at && at < ret, "@{f}: the drop is after the push, before the `ret`:\n{body}");
+            let flagged = body.find("flag_drop:").is_some_and(|g| g < at);
+            assert_eq!(flagged, f == "moved", "@{f}: behind a moved flag only if it moves:\n{body}");
+        }
     }
 
     // ===== Register D92 / ADR 0032 A5: a `match` on a temporary frees its payload box =====

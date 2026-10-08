@@ -1217,6 +1217,11 @@ fn dump_let_shape_fn(
         )
         .unwrap();
         e.used.kont_push = true;
+        // ADR 0077 A1 (register D139): the parent drops its parameter frame before it returns
+        // the continuation, where the fn suspends: before the handler arm and the resumers run,
+        // not at the end of the body. A parameter a frame carries is `i64` or `secret i64`
+        // (ADR 0072), whose drop does nothing.
+        e.emit_scope_drops()?;
         writeln!(e.body, "  ret ptr {kont}").unwrap();
         write!(out, "define ptr @{sym}(").unwrap();
         for (i, p) in f.params.iter().enumerate() {
@@ -1412,6 +1417,11 @@ fn dump_embedded_shape_fn(
         )
         .unwrap();
         e.used.kont_push = true;
+        // ADR 0077 A1 (register D139): the parent drops its parameter frame before it returns
+        // the continuation, where the fn suspends: before the handler arm and the resumers run,
+        // not at the end of the body. A parameter a frame carries is `i64` or `secret i64`
+        // (ADR 0072), whose drop does nothing.
+        e.emit_scope_drops()?;
         writeln!(e.body, "  ret ptr {kont}").unwrap();
         write!(out, "define ptr @{sym}(").unwrap();
         for (i, p) in f.params.iter().enumerate() {
@@ -1604,6 +1614,11 @@ fn dump_chained_lets_fn(
         )
         .unwrap();
         e.used.kont_push = true;
+        // ADR 0077 A1 (register D139): the parent drops its parameter frame before it returns
+        // the continuation, where the fn suspends: before the handler arm and the resumers run,
+        // not at the end of the body. A parameter a frame carries is `i64` or `secret i64`
+        // (ADR 0072), whose drop does nothing.
+        e.emit_scope_drops()?;
         writeln!(e.body, "  ret ptr {kont}").unwrap();
         write!(out, "define ptr @{sym}(").unwrap();
         for (i, p) in f.params.iter().enumerate() {

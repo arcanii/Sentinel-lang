@@ -6,7 +6,8 @@ answered on 2026-10-05 (0.2.0, after the landing). Drafted 2026-09-25. Closes re
 [ADR 0017](0017-phase-c2-kickoff-and-region-plan.md) D8, [ADR 0046](0046-partial-move-field-soundness.md)
 D3/D4, [ADR 0065](0065-early-return.md) D4/D7, [ADR 0036](0036-loops.md) C1 and
 [ADR 0075](0075-a-bubbling-resume-leaves-its-arm.md) D1/D5 (the full list is under *Docs to
-amend*).
+amend*). Its D10 amendment A1 (2026-10-08) closes **D139**: an effecting fn's frame-pushing
+`define` drops its parameters.
 
 ## Related
 
@@ -261,7 +262,8 @@ for `return`. No secret value is stored into a flag.
   (register D153) inkwell drains those frames on every exit, an init's statement locals
   included, and a binding moved on one path there is flagged like any other, but the frame
   releases no handle (register D154).
-- The effecting-fn shape frames, which no back end drains (register D139).
+- The effecting-fn shape frames, which no back end drained (register D139): amendment A1 below
+  covers them.
 - `match` payload bindings, which are never framed; ADR 0032 defers the payload model.
 - Drops that do not depend on a move at all, such as a class's heap fields (register D137) or
   an enum's heap payloads (D138). Since ADR 0071 A4 a class's drop releases the handles its
@@ -465,3 +467,55 @@ Q1–Q5 were answered as proposed (2026-09-26). Q6 was answered on 2026-10-05: t
 - **Q5.** Move sites: exported in the `DropPlan` by span (D4), or re-derived in each Rust back
   end?
 - **Q6.** The version: this lands as at least 0.2.0 (ADR 0076 D2). Bump before it, or with it?
+
+## D10 amendment A1 (2026-10-08) — an effecting fn's frame-pushing `define` drops its parameters (register D139)
+
+D10 left out the effecting-fn shape frames, which no back end drained. The `define` that pushes
+a continuation frame — the parent of ADR 0072's let shape, embedded shape and chained shape —
+returned the continuation without dropping any of its parameters, where a fn lowered
+straight-line drops them at its exit. So a parameter whose drop does something and that no
+resumer reads leaked on every call: an array, a struct holding a `Shared`, a class holding one
+(since ADR 0071 A4, whose class drop releases the handles a class holds), and a parameter the
+parent moves on one path, on the other.
+
+Each parent now drops its parameter frame after it pushes the frame and before it returns the
+continuation, as one more drop site of D2 and D3: a parameter no move of which the parent has
+walked is dropped, and one it has moved is dropped behind its flag. Nothing a resumer reads is
+dropped there: a frame carries a parameter only if it is an `i64` or a `secret i64` (ADR
+0072), and such a value has no drop. A shape whose resumer would read any other parameter is
+refused where a back end's capture walk sees the read; where the walk misses it, the oracle's
+(registers D108, D165) and `scg`'s chained shape's (D67), the oracle stops with an internal
+message and `scg` emits IR `llc` rejects, so no back end builds a program whose resumer reads
+a parameter the parent dropped. The oracle, inkwell and the `scg` mirror all drop there; in
+inkwell the parent also pops the parameter frame there. In `scg`'s let and embedded shapes,
+whose frame carries every parameter (register D159), the drop does nothing until D159 narrows
+the frame.
+
+The drop runs where the fn suspends: the parent returns its continuation before the handler arm
+and the resumers run, while in the source a parameter's scope is the whole body, which the
+resumers finish. Since no resumer reads a parameter whose drop does something, for memory the
+difference cannot be seen. For a `?Guard` parameter it can: the parent now unlocks it at the
+suspension, where before it never unlocked it, so the handler arm, or another thread, can take
+the lock while the fn is suspended, and a `lock` that used to fail now succeeds. The direct
+shape already unlocked a guard parameter there, and each back end already unlocks there a guard
+that a fn binds in its own code and holds across a `perform` or an effecting call, wherever it
+lowers that fn (register D167), while a fn lowered straight-line holds a guard parameter until
+its exit. Only the oracle lowers a guard parameter in a shape: a guard reaches a parameter only
+through a generic fn, inkwell refuses a generic effecting fn (register D70), `scg`'s let and
+embedded shapes refuse the parameter (D159), and its chained shape emits IR `llc` rejects
+(D107).
+
+Measured on 2026-10-08 as the peak working set over 2,000,000 calls: before, 70.8 to 70.9 MB in
+each back end that lowers the shape (inkwell and the oracle in all three shapes; `scg` in the
+chained shape, since its let and embedded shapes refuse such a parameter), against 9.3 MB for
+the same parameter in a fn lowered straight-line, and 40.1 to 40.2 MB where the parent moves the
+parameter on one path; after, 9.3 to 9.4 MB in each. A class holding a handle stays at 70.8 MB
+through inkwell, in a straight-line fn as in each shape: the probe builds it with
+`C::init(shared_new(5))`, and inkwell keeps every handle unit that reaches an `init`'s parameter
+frame (register D154), which is not this. Nor is a `secret`-qualified struct or class
+parameter, for which the oracle and `scg` drop nothing, in a straight-line fn as in a shape's
+parent (register D158).
+
+It moves the IR the oracle, `scg` and inkwell emit for a shape's parent wherever a parameter's
+drop does something, so it is at least a minor version (ADR 0076 D2), batched with the other
+oracle-moving slices of the series.

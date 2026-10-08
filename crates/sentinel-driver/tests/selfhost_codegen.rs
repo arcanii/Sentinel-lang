@@ -361,6 +361,12 @@ const SEEDS: &[&str] = &[
     // oracle's does, and the callee is the fn.
     "effect Io { read() -> i64; write(x: i64) -> i64; }\neffect Ask { q(x: i64) -> i64; }\nfn pure0() -> i64 { 5 }\nfn work(x: i64) -> i64 ! { Io } { perform Io.write(x) }\nfn w() -> i64 ! { Io } { let a: i64 = work(handle pure0() with { Ask.q(x, work) => work(x) } + 33); a + 0 }\nfn main() -> i64 { handle w() with { Io.read(k) => k(41), Io.write(x, k) => k(x + 2) } }\n",
     "effect Io { read() -> i64; write(x: i64) -> i64; }\neffect Ask { q(x: i64) -> i64; }\nfn pure0() -> i64 { 5 }\nfn work(x: i64) -> i64 ! { Io } { perform Io.write(x) }\nfn w() -> i64 ! { Io } { let a: i64 = work(handle pure0() with { Ask.q(x, work) => work(x) } + 33); let a0: i64 = perform Io.read(); a + a0 - 41 }\nfn main() -> i64 { handle w() with { Io.read(k) => k(41), Io.write(x, k) => k(x + 2) } }\n",
+    // ADR 0077 A1 (register D139): the chained shape's parent drops its parameters after it pushes
+    // the frame (`scg`'s let and embedded shapes refuse such a parameter, D159): a struct holding
+    // a `Shared` that no resumer reads is released there, and an array moved into the first
+    // `let`'s effecting call is not dropped again.
+    "effect Io { read() -> i64; }\nstruct H { s: Shared<i64>, n: i64 }\nfn eff(h: H) -> i64 ! { Io } { let x: i64 = perform Io.read(); let y: i64 = perform Io.read(); x + y }\nfn main() -> i64 { handle eff(H { s: shared_new(5), n: 1 }) with { Io.read(k) => k(21) } }\n",
+    "effect Io { read() -> i64; }\nfn take(v: [i64]) -> i64 ! { Io } { perform Io.read() }\nfn eff(a: [i64], c: i64) -> i64 ! { Io } { let x: i64 = take(a); let y: i64 = perform Io.read(); x + y + c }\nfn main() -> i64 { handle eff([1, 2], 0) with { Io.read(k) => k(21) } }\n",
 ];
 
 #[test]

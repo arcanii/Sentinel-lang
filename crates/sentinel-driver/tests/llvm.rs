@@ -1383,6 +1383,63 @@ fn llvm_refuses_a_non_word_param_the_embedded_shape_would_capture() {
 }
 
 #[test]
+fn llvm_a_frame_pushing_parent_drops_its_params() {
+    // ADR 0077 A1 (register D139): the `define` that pushes a continuation frame, the parent of
+    // ADR 0072's let, embedded and chained shapes, drops its parameters after the push and
+    // before it returns the continuation, where the fn suspends. It used to drop none, so a
+    // parameter whose drop does something and that no resumer reads leaked on every call.
+    // Each parent here frees the array, or releases the handle the class holds, once, between
+    // the push and the `ret`; one moved on one path of the parent's own code is dropped behind
+    // its moved flag. A drop is memory, not an exit code, so this reads the IR.
+    let header = concat!(
+        "effect Io { read() -> i64; }\n",
+        "class C { let s: Shared<i64>; pub init(s: Shared<i64>) { self.s = s; 0 } }\n",
+        "fn consume(v: [i64]) -> i64 { v[0] }\n",
+    );
+    let two = "let x: i64 = perform Io.read(); let y: i64 = perform Io.read(); x + y";
+    let moved = "let x: i64 = { let z: i64 = if c > 0 { consume(a) } else { 0 }; perform Io.read() };";
+    for (name, params, body, arg, drop, flagged) in [
+        ("let", "a: [i64]", "let x: i64 = perform Io.read(); x + 1".to_string(), "[1, 2]", "@sentinel_free(", false),
+        ("embedded", "a: [i64]", "perform Io.read() + 1".to_string(), "[1, 2]", "@sentinel_free(", false),
+        ("chained", "a: [i64]", two.to_string(), "[1, 2]", "@sentinel_free(", false),
+        ("let_class", "k: C", "let x: i64 = perform Io.read(); x + 1".to_string(), "C::init(shared_new(5))", "@sentinel_shared_release(", false),
+        ("embedded_class", "k: C", "perform Io.read() + 1".to_string(), "C::init(shared_new(5))", "@sentinel_shared_release(", false),
+        ("chained_class", "k: C", two.to_string(), "C::init(shared_new(5))", "@sentinel_shared_release(", false),
+        ("let_moved", "a: [i64], c: i64", format!("{moved} x + 1"), "[1, 2], 1", "@sentinel_free(", true),
+        ("chained_moved", "a: [i64], c: i64", format!("{moved} let y: i64 = perform Io.read(); x + y"), "[1, 2], 1", "@sentinel_free(", true),
+    ] {
+        let ir = llvm_dump(
+            &format!("d139_{name}"),
+            &format!(
+                "{header}fn eff({params}) -> i64 ! {{ Io }} {{ {body} }}\n\
+                 fn main() -> i64 {{ handle eff({arg}) with {{ Io.read(k) => k(41) }} }}\n"
+            ),
+        );
+        let body = dump_fn_body(&ir, "eff");
+        let lines: Vec<&str> = body.lines().collect();
+        let push = lines
+            .iter()
+            .position(|l| l.contains("@sentinel_kont_push("))
+            .unwrap_or_else(|| panic!("{name}: @eff pushes a frame:\n{body}"));
+        let ret = lines
+            .iter()
+            .rposition(|l| l.starts_with("  ret ptr "))
+            .unwrap_or_else(|| panic!("{name}: @eff returns the continuation:\n{body}"));
+        let drops: Vec<usize> = (0..lines.len()).filter(|&i| lines[i].contains(drop)).collect();
+        assert_eq!(drops.len(), 1, "{name}: @eff drops its parameter once ({drop}):\n{body}");
+        assert!(
+            push < drops[0] && drops[0] < ret,
+            "{name}: @eff drops its parameter after the push and before the `ret`:\n{body}"
+        );
+        assert_eq!(
+            drop_is_behind_a_moved_flag(&lines, drops[0]),
+            flagged,
+            "{name}: @eff's drop is behind the moved flag only when its own code moves it:\n{body}"
+        );
+    }
+}
+
+#[test]
 fn llvm_survives_a_by_value_cycle_through_a_class_field() {
     // Register D157: the type checker refuses a struct that holds itself by value, but
     // follows only struct-to-struct edges, so a struct and a class that hold each other are

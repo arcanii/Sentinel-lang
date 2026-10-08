@@ -1,0 +1,45 @@
+// ADR 0077 A1 (register D139): the `define` that pushes a continuation frame drops its
+// parameters before it returns the continuation, where the fn suspends. Before, it dropped
+// none, so a parameter whose drop does something and that no resumer reads leaked on every
+// call. Each effecting fn below takes ADR 0072's chained shape, the one all three back ends
+// lower with such a parameter: an array, a class holding a `Shared`, and an array the
+// parent's own code moves on one path. A missing drop leaks; a drop on the path that moved
+// the array frees it twice.
+
+effect Io { read() -> i64; }
+class C { let s: Shared<i64>; pub init(s: Shared<i64>) { self.s = s; 0 } }
+
+fn consume(v: [i64]) -> i64 { v[0] }
+
+fn arr(a: [i64]) -> i64 ! { Io } {
+    let x: i64 = perform Io.read();
+    let y: i64 = perform Io.read();
+    x + y
+}
+
+fn cls(k: C) -> i64 ! { Io } {
+    let x: i64 = perform Io.read();
+    let y: i64 = perform Io.read();
+    x - y
+}
+
+// the first `let`'s value moves `a` when `c > 0`, so the parent drops `a` behind its flag
+fn moved(a: [i64], c: i64) -> i64 ! { Io } {
+    let x: i64 = { let z: i64 = if c > 0 { consume(a) } else { 0 }; perform Io.read() };
+    let y: i64 = perform Io.read();
+    x + y
+}
+
+fn main() -> i64 {
+    let mut i: i64 = 0;
+    let mut acc: i64 = 0;
+    while i < 2000 {
+        let c: i64 = i - (i / 2) * 2;
+        acc = acc + handle arr([1, 2]) with { Io.read(k) => k(10) };
+        acc = acc + handle cls(C::init(shared_new(5))) with { Io.read(k) => k(10) };
+        acc = acc + handle moved([1, 2], c) with { Io.read(k) => k(1) };
+        i = i + 1;
+    }
+    // 20 + 0 + 2 a round, 2000 rounds: 44000 → exit 42.
+    acc / 1000 - 2
+}

@@ -1999,6 +1999,17 @@ fn pass_c77_reference_out_of_a_join() {
 }
 
 #[test]
+fn pass_c77_frame_pushing_parent_drops_params() {
+    // ADR 0077 A1 (register D139): the `define` that pushes a continuation frame drops its
+    // parameters before it returns the continuation. Each fn takes ADR 0072's chained shape with
+    // a parameter no resumer reads (an array; a class holding a `Shared`; an array the parent
+    // moves on one path); a missing drop leaks (measured by peak memory, not by this exit code)
+    // and a drop on the path that moved the array frees it twice. 22 a round, 2000 rounds:
+    // 44000 → exit 42.
+    assert_eq!(run_exit("c77_frame_pushing_parent_drops_params.sentinel"), 42);
+}
+
+#[test]
 fn pass_selfhost_ast_drop() {
     // ADR 0039 D4: the self-host parser's recursive-AST drop gate. A
     // recursive-enum `Node` (i64 + `[u8]` + recursive payloads) built, walked

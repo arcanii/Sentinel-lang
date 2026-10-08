@@ -1058,7 +1058,12 @@ all three back ends unless noted:
   that pushes the frame drops none of its parameters, as an array or a struct holding a
   handle already leaked there (register D139). The oracle also takes a block holding only a
   `perform` as embedded and leaks there, where inkwell and `scg` lower it straight-line and
-  drop the class.
+  drop the class. Closed by ADR 0077's D10 amendment A1 (register D139): the parent drops
+  its parameter frame after the push, the oracle's embedded block holding only a `perform`
+  included. Over 2,000,000 calls the class probes fell from 70.8–70.9 MB to 9.3–9.5 in the
+  oracle and `scg`'s chained shape, and in inkwell for a class built from a place; a class
+  built with `C::init(shared_new(5))` stays at 70.8 MB through inkwell in every fn, which is
+  the bullet above (register D154).
 - an overwritten class field, or a class value overwritten whole — a binding, a struct's
   field, or through a reference (register D120).
 - in the oracle and `scg`, a `secret`-qualified class binding or parameter, a
