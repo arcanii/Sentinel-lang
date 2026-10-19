@@ -5,7 +5,7 @@ HANDOVER.md, STATE.md is the source of truth. New contributors (or
 new chat sessions) should be able to read this file and understand
 the current state of the workspace without re-reading every commit.
 
-## Current State (2026-10-09)
+## Current State (2026-10-19)
 
 > **Phase C closed at the bootstrap milestone (2026-05-30); Phase D self-hosts; the
 > per-unit separate-compilation back end is functionally complete.**
@@ -14,7 +14,24 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
-**Latest (2026-10-09) — an effecting fn's frame-pushing `define` drops its parameters (register
+**Latest (2026-10-19) — `scg`'s typer scopes a `while` body's, a `return` arm's and a `_` slot's
+names as the resolver does (registers D164, D170 and D171).**
+`scg`'s typer scoped these three kinds of name apart from the resolver. A `while` body's names
+stayed bound after the loop, so a later call of the fn of such a name aborted `scg` or was lowered
+apart from the oracle (D164). A `handle`'s `return` arm, which `scg` lowers at each pure-drain site,
+resolved its names in the scope open there, so inside a handler arm a parameter, continuation or
+pattern the arm binds stood for the outer name the `return` arm reads (D170), and its own names
+stayed bound after it (D164). And a pattern's `_` slot was a name a lookup reached, so with a `let
+_` outside the `match`, an arm reading `_` read the slot (D171). The typer now unbinds a `while`
+body's names after the loop, `cg_apply_return_arm` lowers the arm in the scope the `handle`'s body
+left and unbinds its names after it, and a `_` slot's scope entry names nothing. `scg`-only, a patch
+by ADR 0076 D2; no corpus program's output changes. D161's rules that refuse an effecting body with
+statements that holds a `handle` with a `return` arm, or in which a `let` inside a `while` body or
+condition is named like another binding, stay as fail-closed guards. A block tail D164 made `scg`
+abort on now takes D160's straight-line lowering, which answers wrong where a `perform` is among the
+block's statements (a note on D160).
+
+**Previously (2026-10-09) — an effecting fn's frame-pushing `define` drops its parameters (register
 D139), after a follow-up to D161.**
 [ADR 0077](decisions/0077-drop-flags-for-maybe-moved-bindings.md)'s D10 amendment A1: the `define`
 that pushes an effecting fn's continuation frame, the parent of ADR 0072's let, embedded and chained
