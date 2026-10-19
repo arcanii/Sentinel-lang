@@ -188,6 +188,7 @@ fn new_tyctx(mode: i64) -> TyCtx {
         cg_ret_on: false,
         cg_ret_ntok: 0,
         cg_ret_tok0: 0,
+        cg_ret_mark: 0,
         cg_ph: 0 - 1,
         cg_lastvid: 0 - 1,
         cgbody: vec_new(),

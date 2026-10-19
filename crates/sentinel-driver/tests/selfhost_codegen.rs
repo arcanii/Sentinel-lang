@@ -367,6 +367,26 @@ const SEEDS: &[&str] = &[
     // `let`'s effecting call is not dropped again.
     "effect Io { read() -> i64; }\nstruct H { s: Shared<i64>, n: i64 }\nfn eff(h: H) -> i64 ! { Io } { let x: i64 = perform Io.read(); let y: i64 = perform Io.read(); x + y }\nfn main() -> i64 { handle eff(H { s: shared_new(5), n: 1 }) with { Io.read(k) => k(21) } }\n",
     "effect Io { read() -> i64; }\nfn take(v: [i64]) -> i64 ! { Io } { perform Io.read() }\nfn eff(a: [i64], c: i64) -> i64 ! { Io } { let x: i64 = take(a); let y: i64 = perform Io.read(); x + y + c }\nfn main() -> i64 { handle eff([1, 2], 0) with { Io.read(k) => k(21) } }\n",
+    // Registers D164, D170 and D171: `scg`'s typer scopes a `while` body's, a `return` arm's and a
+    // pattern's `_` slot's names as the resolver does. A `return` arm lowered at a resume site
+    // reads the names of the scope the handle's body left, not a handler arm's parameter,
+    // continuation or pattern of the same name, also after a `handle` nested in the arm; the
+    // `return` arm's own names are unbound after it, in the arm after the resume and after the
+    // `handle`; the arm's names are in scope again after a resume; a `while` body's names are
+    // unbound after the loop; and a pattern's `_` slot is not a name a lookup reaches. A `Fn` value
+    // that a `while` body or a `return` arm's body binds under a fn's name is unbound after it:
+    // read as a `Fn` value there, the name is the fn.
+    "effect Ask { q(x: i64) -> i64; }\nfn ask1() -> i64 ! { Ask } { perform Ask.q(7) }\nfn main() -> i64 { let x: i64 = 30; handle ask1() with { Ask.q(x, k) => k(2), return v => v + x + 10 } }\n",
+    "effect Ask { q(n: i64) -> i64; }\nfn ask1() -> i64 ! { Ask } { perform Ask.q(7) }\nfn main() -> i64 { let x: i64 = 30; handle ask1() with { Ask.q(n, x) => x(n - 2), return v => v + x + 7 } }\n",
+    "effect Ask { q(n: i64) -> i64; }\nenum E { A(i64), B }\nfn ask1() -> i64 ! { Ask } { perform Ask.q(7) }\nfn main() -> i64 { let y: i64 = 1; handle ask1() with { Ask.q(n, k) => match E::A(30) { E::A(y) => k(n - 5 + y - y), _ => 0 }, return v => v + y + 39 } }\n",
+    "effect Ask { q(n: i64) -> i64; }\nfn ask1() -> i64 ! { Ask } { perform Ask.q(7) }\nfn main() -> i64 { let v: i64 = 30; handle ask1() with { Ask.q(n, k) => { let r: i64 = k(n); r + v }, return v => v + 5 } }\n",
+    "effect Ask { q(x: i64) -> i64; }\nfn ask1() -> i64 ! { Ask } { perform Ask.q(7) }\nfn main() -> i64 { handle ask1() with { Ask.q(x, k) => if x > 5 { k(x - 5) } else { k(x + 1) }, return v => v + 40 } }\n",
+    "effect Ask { q(x: i64) -> i64; }\nfn pure1() -> i64 { 5 }\nfn work() -> i64 { 42 }\nfn main() -> i64 { let n: i64 = handle pure1() with { Ask.q(x, k) => k(x), return work => work + 1 }; work() + n - 6 }\n",
+    "fn work() -> i64 { 1 }\nfn f() -> i64 { let mut i: i64 = 0; while i < 1 { let work: i64 = 1; i = i + work; } work() + i - 1 }\nfn main() -> i64 { f() + 41 }\n",
+    "enum E { A(i64), B }\nfn main() -> i64 { let _: i64 = 42; match E::A(5) { E::A(_) => _, _ => 0 } }\n",
+    "fn work(x: i64) -> i64 { x + 1 }\nfn dbl(x: i64) -> i64 { x * 2 }\nfn twice(f: Fn<i64, i64>, x: i64) -> i64 { apply(f, apply(f, x)) }\nfn main() -> i64 { let mut i: i64 = 0; while i < 1 { let work: Fn<i64, i64> = dbl; i = i + 1; } twice(work, 40) + i - 1 }\n",
+    "effect Ask { q(x: i64) -> i64; }\nfn pure1() -> i64 { 5 }\nfn work(x: i64) -> i64 { x + 1 }\nfn dbl(x: i64) -> i64 { x * 2 }\nfn twice(f: Fn<i64, i64>, x: i64) -> i64 { apply(f, apply(f, x)) }\nfn main() -> i64 { let n: i64 = handle pure1() with { Ask.q(x, k) => k(x), return v => { let work: Fn<i64, i64> = dbl; v + 1 } }; twice(work, 40) + n - 6 }\n",
+    "effect Ask { q(x: i64) -> i64; }\neffect Log { get() -> i64; }\nfn ask1() -> i64 ! { Ask } { perform Ask.q(7) }\nfn lg() -> i64 ! { Log } { perform Log.get() }\nfn main() -> i64 { let x: i64 = 30; handle ask1() with { Ask.q(x, k) => { handle lg() with { Log.get(k2) => k2(3), return w => w + 1 }; k(x - 5) }, return v => v + x + 10 } }\n",
 ];
 
 #[test]
@@ -558,20 +578,21 @@ fn sentinel_codegen_refuses_a_non_word_param_a_continuation_would_capture() {
 /// otherwise, other than a parameter, that also names a fn, is refused where the oracle lowers it,
 /// wherever the binding's scope ends: pinned with a `Fn` value called directly (a parameter, bound
 /// in a block, or a handler arm's operation parameter), which `scg` does not lower as the oracle
-/// does (ADR 0070's direct-call syntax is not mirrored); with a name `scg`'s typer binds apart from
-/// the resolver (register D164), bound in a `while` body and called, or read as a `Fn` value, after
-/// it; with a chained `let`'s own or a later `let`'s name called in its value; with such calls
-/// inside an argument of an effecting call or of a `perform`; and with calls `scg` lowered to the
-/// oracle's bytes before the rule, which it refuses all the same (a fn named like a `let` its
-/// argument binds or like a `match` arm's pattern, and a continuation named like an earlier `Fn`
-/// value). A body with statements that holds a `handle` with a `return` arm is refused the same
-/// way: pinned alone, and with four that also call through a name the `return` arm binds, in a
-/// handler arm after a resume or after the `handle`. And so is one in which a `let` inside a
-/// `while` binds a name that the body binds again, pinned with a chained `let` of that name after
-/// the loop and around it, and with a `let` of that name after the loop in a body lowered
-/// straight-line, which `scg` would lower to the oracle's bytes. Two bodies whose IR differs from
-/// the oracle's (register D163) must stay lowered. And a ported type error inside a body the oracle
-/// refuses is the answer, as it is the oracle's, whose typer runs before its code generation.
+/// does (ADR 0070's direct-call syntax is not mirrored); with a name bound in a `while` body and
+/// called, or read as a `Fn` value, after it, which `scg`'s typer bound apart from the resolver
+/// until register D164 was fixed; with a chained `let`'s own or a later `let`'s name called in its
+/// value; with such calls inside an argument of an effecting call or of a `perform`; and with calls
+/// `scg` lowered to the oracle's bytes before the rule, which it refuses all the same (a fn named
+/// like a `let` its argument binds or like a `match` arm's pattern, and a continuation named like
+/// an earlier `Fn` value). A body with statements that holds a `handle` with a `return` arm is
+/// refused the same way: pinned alone, and with four that also call through a name the `return` arm
+/// binds, in a handler arm after a resume or after the `handle`. And so is one in which a `let`
+/// inside a `while` binds a name that the body binds again, pinned with a chained `let` of that
+/// name after the loop and around it, and with a `let` of that name after the loop in a body
+/// lowered straight-line, which `scg` would lower to the oracle's bytes. Two bodies whose IR
+/// differs from the oracle's (register D163) must stay lowered. And a ported type error inside a
+/// body the oracle refuses is the answer, as it is the oracle's, whose typer runs before its code
+/// generation.
 #[test]
 fn sentinel_codegen_refuses_an_effecting_body_the_oracle_refuses() {
     const CODE: &str = "sentinel::codegen::effecting_fn_body_not_direct";
@@ -853,21 +874,21 @@ fn sentinel_codegen_refuses_an_effecting_body_the_oracle_refuses() {
         "effecting fn `w2` cannot be lowered: a `perform` or a call to an effecting fn appears outside tail position, which needs a reified frame",
     );
 
-    // The same with the value bound in a block. A name `scg`'s typer binds apart from the resolver
-    // (register D164), bound in a `while` body and called after it, which `scg` lowers apart from
-    // the oracle, or read after it as a `Fn` value. A chained `let`'s own name, or a later `let`'s,
-    // called in its value, which the chained shape binds before it lowers any value. And calls
-    // `scg` lowered to the oracle's bytes before the rule, refused all the same: a fn named like a
-    // `let` its argument binds, alone and chained, or like a `match` arm's pattern, and a
-    // continuation named like an earlier `Fn` value. And a body that holds a `handle` with a
-    // `return` arm, which `scg` lowers inside the handler arm at each resume site (`eff_ret`):
-    // alone, and with a call through a name the `return` arm binds, which `scg`'s typer also binds
-    // at each resume site, in a handler arm after a resume (the arm's own continuation when the
-    // `return` arm's value shares its name, or a fn named like its value or like a `let` its body
-    // binds) or after the `handle`. And a name a `let` inside a `while` binds that the body binds
-    // again as a chained `let`, after the loop or around it, which the chained shape binds before
-    // it lowers any value (`eff_check_while`), and, the rule being the simple one, as a `let` after
-    // the loop in a body lowered straight-line, which `scg` would lower to the oracle's bytes.
+    // The same with the value bound in a block. A name bound in a `while` body and called after it,
+    // or read after it as a `Fn` value, which `scg`'s typer bound apart from the resolver, and
+    // `scg` lowered apart from the oracle, until register D164 was fixed. A chained `let`'s own
+    // name, or a later `let`'s, called in its value, which the chained shape binds before it lowers
+    // any value. And calls `scg` lowered to the oracle's bytes before the rule, refused all the
+    // same: a fn named like a `let` its argument binds, alone and chained, or like a `match` arm's
+    // pattern, and a continuation named like an earlier `Fn` value. And a body that holds a
+    // `handle` with a `return` arm (`eff_ret`): alone, and with a call through a name the `return`
+    // arm binds, which `scg`'s typer left bound at each resume site until register D164 was fixed,
+    // in a handler arm after a resume (the arm's own continuation when the `return` arm's value
+    // shares its name, or a fn named like its value or like a `let` its body binds) or after the
+    // `handle`. And a name a `let` inside a `while` binds that the body binds again as a chained
+    // `let`, after the loop or around it, which the chained shape binds before it lowers any value
+    // (`eff_check_while`), and, the rule being the simple one, as a `let` after the loop in a body
+    // lowered straight-line, which `scg` would lower to the oracle's bytes.
     let work1 = "fn work(x: i64) -> i64 ! { Io } { perform Io.write(x) }\n";
     let askq = "effect Ask { q(x: i64) -> i64; }\nfn ask0() -> i64 ! { Ask } { perform Ask.q(0) }\nfn ask1() -> i64 ! { Ask } { perform Ask.q(1) }\n";
     for (name, body) in [

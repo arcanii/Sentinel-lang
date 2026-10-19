@@ -61,14 +61,14 @@ module types;
 // `Fn` value called directly, which `scg` does not lower as the oracle does, or that uses,
 // anywhere in it other than as a callee (reading it, assigning to it or borrowing it), a name
 // it binds that way, other than as a parameter, that also names one of the program's fns; one
-// that holds a `handle` with a `return` arm, which `scg` lowers inside the handler arm at each
-// resume site; one in which a `let` inside a `while` body or its condition binds a name the
-// body binds anywhere else, since `scg`'s typer can keep such a `let` after the loop and its
-// chained shape binds its `let`s before it lowers any value (D164); and one whose tail calls a
-// generic effecting fn whose return type wraps its type parameter (`?T`, `[T]`), which
-// `eff_route` takes for widened. Some of these walks fail before the refusal, as they fail in
-// any fn: a call with no argument through a name the typer still binds aborts, and in a
-// `return` arm's body some calls overflow the walk's stack.
+// that holds a `handle` with a `return` arm; one in which a `let` inside a `while` body or its
+// condition binds a name the body binds anywhere else, since the chained shape binds its `let`s
+// before it lowers any value (these two are fail-closed guards from before registers D164 and D170
+// were fixed, when `scg` lowered a `return` arm at a resume site in the handler arm's scope and its
+// typer kept a `while` body's `let` bound after the loop); and one whose tail calls a generic
+// effecting fn whose return type wraps its type parameter (`?T`, `[T]`), which `eff_route` takes
+// for widened. Some of these walks fail before the refusal, as they fail in any fn: in a `return`
+// arm's body some calls overflow the walk's stack, a direct call through a `Fn` value among them.
 
 // Record the refusal `code` with the message `msg`, unless one is recorded already.
 fn refuse(c: &mut TyCtx, code: [u8], msg: [u8]) -> i64 {

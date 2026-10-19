@@ -421,6 +421,8 @@ struct TyCtx {
     cg_ret_on: bool,   // (c36a) the enclosing handle has a non-identity `return v => body`
     cg_ret_ntok: i64,  // (c36a) the return var's token index (re-slice the name per site)
     cg_ret_tok0: i64,  // (c36a) the return body's start-token index (re-parse per site)
+    cg_ret_mark: i64,  // (register D170) the scope's length after the handle's body: the
+                       //   names the return arm resolves are below it
     cg_ph: i64,       // (c35d) inside an embedded-perform RESUMER: the placeholder slot
                       //   holding the resumed value (the Perform arm emits a load from it,
                       //   not a perform call); -1 everywhere else

@@ -1538,8 +1538,25 @@ fn cg_emit_resume_load(c: &mut TyCtx, kid: i64) -> i64 {
 // dispatch pure block + each k(v) pure path) per Phase B's deep-handler re-wrap
 // (`k := \v. handle (resume v) with H`). `v` binds a fresh i64 slot holding the value;
 // its name is re-sliced from `cg_ret_ntok`. Mirrors the oracle's `apply_return_arm`.
+// (registers D164, D170) The body's names resolve as the resolver resolves them, in the
+// scope the handle's body left: the names bound since (`cg_ret_mark`), which at a resume
+// site are the handler arm's, are lifted off the scope while the body lowers, then `v` and
+// whatever the body bound are unbound, and the lifted names are put back.
 fn cg_apply_return_arm(c: &mut TyCtx, vk: i64, vv: i64, src: &[u8], gb: &mut Vec<u8>) -> i64 {
     if (*c).cg_ret_on {
+        let rmark: i64 = (*c).cg_ret_mark;
+        let top: i64 = len((*c).scs);
+        let mut hs: Vec<i64> = vec_new();
+        let mut he: Vec<i64> = vec_new();
+        let mut hv: Vec<i64> = vec_new();
+        let mut hi: i64 = rmark;
+        while hi < top {
+            push(&mut hs, (*c).scs[hi]);
+            push(&mut he, (*c).sce[hi]);
+            push(&mut hv, (*c).scv[hi]);
+            hi = hi + 1;
+        }
+        truncate_scope(c, rmark);
         let ntok: i64 = (*c).cg_ret_ntok;
         let ns: i64 = (*c).cgts[ntok];
         let ne: i64 = (*c).cgte[ntok];
@@ -1560,6 +1577,14 @@ fn cg_apply_return_arm(c: &mut TyCtx, vk: i64, vv: i64, src: &[u8], gb: &mut Vec
         let mut tb: Vec<u8> = vec_new();
         let _rr: i64 = dump_texpr(&mut tb, rbody, 0 - 1, src, c, gb);
         let _tbx: [u8] = vec_to_array(tb);
+        truncate_scope(c, rmark);
+        let mut hj: i64 = 0;
+        while hj < len(hs) {
+            push(&mut (*c).scs, hs[hj]);
+            push(&mut (*c).sce, he[hj]);
+            push(&mut (*c).scv, hv[hj]);
+            hj = hj + 1;
+        }
         // The result operand is now in cglk/cglv (set by the body lowering).
         0
     } else {

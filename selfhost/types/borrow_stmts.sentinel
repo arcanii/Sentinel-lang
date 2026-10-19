@@ -16,6 +16,24 @@ fn dump_tbinds(out: &mut Vec<u8>, b: Binds, pbase: i64, payidx: i64, c: &mut TyC
             let pty: i64 = (*c).varpay[pbase + payidx];
             let nst: i64 = len((*c).nb);
             bind_name(c, nm, bvid, pty);
+            // (register D171) a `_` slot keeps its VarId, its slot and its name in the dump,
+            // but its scope entry names nothing, so no lookup reaches it: the resolver never
+            // puts a pattern's `_` in scope.
+            if len((*c).nb) - nst == 1 {
+                if (*c).nb[nst] == '_' {
+                    let _ws: i64 = pop(&mut (*c).scs);
+                    let _we: i64 = pop(&mut (*c).sce);
+                    let _wv: i64 = pop(&mut (*c).scv);
+                    push(&mut (*c).scs, nst);
+                    push(&mut (*c).sce, nst);
+                    push(&mut (*c).scv, bvid);
+                    0
+                } else {
+                    0
+                }
+            } else {
+                0
+            };
             // (8e-2) cg: bind the payload field — GEP the boxed payload struct's field
             // `payidx`, load it into a fresh hoisted slot, store, key the slot by VarId
             // (so the arm body's Var reads it). A `_` binding still gets a slot. NOT
@@ -743,7 +761,11 @@ fn dump_tstmt(out: &mut Vec<u8>, s: Stmt, src: &[u8], c: &mut TyCtx, gb: &mut Ve
                 0
             };
             push(out, ' ');
+            // (register D164) the names the body binds are unbound after the loop, as the
+            // resolver unbinds them.
+            let wmark: i64 = len((*c).scs);
             dump_texpr(out, wbody, 0 - 1, src, c, gb);
+            truncate_scope(c, wmark);
             // (8b) cg: pop loop targets, back-edge to cond, open the after block.
             if cg_on(c) {
                 let _pc: i64 = pop(&mut (*c).cg_loop_cond);

@@ -1714,6 +1714,9 @@ fn dump_te_handle(out: &mut Vec<u8>, hb: Expr, ha: HArms, hr: Ret, exp: i64, src
             (*c).cg_tailk = false;
             let bty: i64 = dump_texpr(out, hb, 0 - 1, src, c, gb);
             let body_is_kont: bool = (*c).cg_tailk;
+            // (register D170) the resolver resolves the `return` arm in the scope the body
+            // leaves, without the names a handler arm binds: record where that scope ends.
+            let ret_mark: i64 = len((*c).scs);
             let hbv: i64 = if mir_on(c) {
                 (*c).lastval
             } else {
@@ -1793,6 +1796,7 @@ fn dump_te_handle(out: &mut Vec<u8>, hb: Expr, ha: HArms, hr: Ret, exp: i64, src
             let sv_ret_on: bool = (*c).cg_ret_on;
             let sv_ret_ntok: i64 = (*c).cg_ret_ntok;
             let sv_ret_tok0: i64 = (*c).cg_ret_tok0;
+            let sv_ret_mark: i64 = (*c).cg_ret_mark;
             let hr2: Ret = match hr {
                 Ret::NoRet => {
                     (*c).cg_ret_on = false;
@@ -1802,6 +1806,7 @@ fn dump_te_handle(out: &mut Vec<u8>, hb: Expr, ha: HArms, hr: Ret, exp: i64, src
                     (*c).cg_ret_on = true;
                     (*c).cg_ret_ntok = rnt;
                     (*c).cg_ret_tok0 = rt0;
+                    (*c).cg_ret_mark = ret_mark;
                     Ret::YesRet(rn, rb, rnt, rt0)
                 },
             };
@@ -1907,6 +1912,7 @@ fn dump_te_handle(out: &mut Vec<u8>, hb: Expr, ha: HArms, hr: Ret, exp: i64, src
                 (*c).cg_ret_on = sv_ret_on;
                 (*c).cg_ret_ntok = sv_ret_ntok;
                 (*c).cg_ret_tok0 = sv_ret_tok0;
+                (*c).cg_ret_mark = sv_ret_mark;
                 0
             } else {
                 0

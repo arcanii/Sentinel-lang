@@ -131,18 +131,18 @@ fn efp_args(aa: Args) -> Args {
 // continuation (a parameter, a `let`, a pattern, a handler arm's other parameters, a `return`
 // arm's value) refuses it (5) ahead of the shapes, the straight-line route and the type-rule
 // refusal (4) (`eff_check_called` sets `cg_eff_refused`), wherever the binding's scope ends:
-// `scg` lowers such a call apart from the oracle where its typer binds the name where the
-// resolver does not, or the name holds a `Fn` value (ADR 0070's direct call is not mirrored).
-// So does any other use, anywhere in the body, of a name bound that way, other than a
-// parameter, that also names one of the program's fns (a read, an assignment's target, a
-// borrow's operand): outside the binding's scope the resolver takes the fn, unless a parameter
-// of that name is in scope. So does a `handle` with a `return` arm, which `scg` lowers inside
-// the handler arm at each resume site of the `handle` (`eff_ret`; register D164). So does a
-// name a `let` inside a `while` body or condition binds (noted `w`) that the body binds
-// anywhere else (`eff_check_while`): the typer can keep such a `let` bound after the loop (one
-// in a `match` or handler arm it unbinds after the arm), and the chained shape binds its `let`s
-// before it lowers any value, so a chained `let` of that name could be lowered apart from the
-// oracle. A call inside a handler arm through that arm's continuation resumes it, and counts as
+// `scg` lowers such a call apart from the oracle where the name holds a `Fn` value (ADR 0070's
+// direct call is not mirrored), and lowered one apart from it where its typer bound the name where
+// the resolver did not (register D164). So does any other use, anywhere in the body, of a name
+// bound that way, other than a parameter, that also names one of the program's fns (a read, an
+// assignment's target, a borrow's operand): outside the binding's scope the resolver takes the fn,
+// unless a parameter of that name is in scope. So does a `handle` with a `return` arm (`eff_ret`),
+// and a name a `let` inside a `while` body or condition binds (noted `w`) that the body binds
+// anywhere else (`eff_check_while`). Both are fail-closed guards from before registers D164 and
+// D170 were fixed, when `scg` lowered a `return` arm at a resume site in the handler arm's scope
+// and its typer kept a `while` body's `let` bound after the loop: the chained shape binds its
+// `let`s before it lowers any value, so a chained `let` of such a name could be lowered apart from
+// the oracle. A call inside a handler arm through that arm's continuation resumes it, and counts as
 // a suspension, as the oracle counts it.
 // A value "produces a continuation" as the oracle's `produces_kont` says: a
 // `perform`, a call to an effecting fn, or a block whose statements do not suspend, ending in
@@ -658,9 +658,9 @@ fn eff_harms(c: &mut TyCtx, src: &[u8], h: HArms, ln: &mut Vec<u8>, lo: &mut Vec
 }
 
 // A `handle`'s `return v => body` arm: `v` and the names the body binds are noted (`eff_bind`),
-// then the body is walked. A body with statements that holds one is refused (`cg_eff_refused`):
-// `scg` lowers a `return` arm inside the handler arm at each resume site of its `handle`
-// (register D164).
+// then the body is walked. A body with statements that holds one is refused (`cg_eff_refused`), a
+// fail-closed guard from before `scg` resolved a `return` arm's names at a resume site as the
+// resolver does (registers D164, D170).
 fn eff_ret(c: &mut TyCtx, src: &[u8], r: Ret, ln: &mut Vec<u8>, lo: &mut Vec<i64>, ll: &mut Vec<i64>) -> i64 {
     match r {
         Ret::NoRet => 0,
@@ -675,16 +675,15 @@ fn eff_ret(c: &mut TyCtx, src: &[u8], r: Ret, ln: &mut Vec<u8>, lo: &mut Vec<i64
     }
 }
 
-// The names bound in the body so far: the bytes of each in `ln`, from `lo[i]`, `ll[i]` long. A
-// call through one is a call through a variable (`eff_kind`'s `Call` arm). A name stays bound
-// once bound, but for a handler arm's, which are unbound after the arm (`eff_harms`). Each
-// binding is also noted in `cg_eff_seen` with its kind: `k` for a handler arm's continuation
-// (`eff_bind_arm`), `w` for a `let` inside a `while` body or condition (`cg_eff_inwhile`), `o`
-// for any other. A call anywhere in the body through a name with an `o` or `w` binding anywhere
-// in it, or through a parameter, refuses the body (`eff_check_called`), and so does any other
-// use of a name with an `o` or `w` binding that also names a fn, wherever the binding's scope
-// ends, so no scope `scg`'s typer draws apart from the resolver's (register D164) decides the
-// route.
+// The names bound in the body so far: the bytes of each in `ln`, from `lo[i]`, `ll[i]` long. A call
+// through one is a call through a variable (`eff_kind`'s `Call` arm). A name stays bound once
+// bound, but for a handler arm's, which are unbound after the arm (`eff_harms`). Each binding is
+// also noted in `cg_eff_seen` with its kind: `k` for a handler arm's continuation (`eff_bind_arm`),
+// `w` for a `let` inside a `while` body or condition (`cg_eff_inwhile`), `o` for any other. A call
+// anywhere in the body through a name with an `o` or `w` binding anywhere in it, or through a
+// parameter, refuses the body (`eff_check_called`), and so does any other use of a name with an `o`
+// or `w` binding that also names a fn, wherever the binding's scope ends, so the route does not
+// depend on where `scg`'s typer ends a scope (register D164).
 fn eff_bind(c: &mut TyCtx, ln: &mut Vec<u8>, lo: &mut Vec<i64>, ll: &mut Vec<i64>, nm: &[u8], kind: u8) -> i64 {
     push(&mut (*c).cg_eff_seen, kind);
     eff_note(&mut (*c).cg_eff_seen, nm);
@@ -840,12 +839,13 @@ fn eff_seen_other(c: &mut TyCtx, q: &[u8]) -> bool {
     hit
 }
 
-// (register D164) After the walk: does a `let` inside a `while` body or condition bind a name
-// (kind `w`) that the body binds anywhere else, with any kind? `scg`'s typer can keep such a
-// `let` bound after the loop (a pattern's names, a handler arm's parameters and the `let`s an
-// arm's body makes it unbinds after the arm, and such a body is refused too, by the simple
-// rule), and its chained shape binds its `let`s before it lowers any value, so a use of such a
-// name can be taken for the loop's binding. Then the body is refused (`cg_eff_refused`).
+// (register D164) After the walk: does a `let` inside a `while` body or condition bind a name (kind
+// `w`) that the body binds anywhere else, with any kind? Then the body is refused
+// (`cg_eff_refused`). A fail-closed guard from before register D164 was fixed, when `scg`'s typer
+// kept a `while` body's `let` bound after the loop: its chained shape binds its `let`s before it
+// lowers any value, so a use of such a name could be taken for the loop's binding. (A pattern's
+// names, a handler arm's parameters and the `let`s an arm's body makes are unbound after the arm; a
+// body with such a `let` in a loop is refused too, by the simple rule.)
 fn eff_check_while(c: &mut TyCtx) -> i64 {
     let n: i64 = len((*c).cg_eff_seen);
     let mut p: i64 = 0;
