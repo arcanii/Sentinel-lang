@@ -387,6 +387,28 @@ const SEEDS: &[&str] = &[
     "fn work(x: i64) -> i64 { x + 1 }\nfn dbl(x: i64) -> i64 { x * 2 }\nfn twice(f: Fn<i64, i64>, x: i64) -> i64 { apply(f, apply(f, x)) }\nfn main() -> i64 { let mut i: i64 = 0; while i < 1 { let work: Fn<i64, i64> = dbl; i = i + 1; } twice(work, 40) + i - 1 }\n",
     "effect Ask { q(x: i64) -> i64; }\nfn pure1() -> i64 { 5 }\nfn work(x: i64) -> i64 { x + 1 }\nfn dbl(x: i64) -> i64 { x * 2 }\nfn twice(f: Fn<i64, i64>, x: i64) -> i64 { apply(f, apply(f, x)) }\nfn main() -> i64 { let n: i64 = handle pure1() with { Ask.q(x, k) => k(x), return v => { let work: Fn<i64, i64> = dbl; v + 1 } }; twice(work, 40) + n - 6 }\n",
     "effect Ask { q(x: i64) -> i64; }\neffect Log { get() -> i64; }\nfn ask1() -> i64 ! { Ask } { perform Ask.q(7) }\nfn lg() -> i64 ! { Log } { perform Log.get() }\nfn main() -> i64 { let x: i64 = 30; handle ask1() with { Ask.q(x, k) => { handle lg() with { Log.get(k2) => k2(3), return w => w + 1 }; k(x - 5) }, return v => v + x + 10 } }\n",
+    // Register D160: a tail holding one `perform` beside a resume of a handler arm's own
+    // continuation, inside a `handle` the tail holds, is still the embedded shape: the resume is
+    // not a suspension point of the fn.
+    "effect Io { read() -> i64; write(x: i64) -> i64; }\neffect Ask { q(x: i64) -> i64; }\nfn w() -> i64 ! { Io } { perform Io.read() + handle 1 with { Ask.q(x, k) => k(x) } }\nfn main() -> i64 { handle w() with { Io.read(k) => k(41), Io.write(x, k) => k(x + 2) } }\n",
+    // Register D160: calls through names the routing walk keeps bound past their scope are not
+    // counted as calls to effecting fns, so these stay as they were: a fn called after a pattern
+    // or a `while` body's `let` of its name. The embedded shape's check counts only `perform`s, so
+    // these stay too: a fn called after a pattern of its name around an embedded `perform`, and a
+    // `perform` beside a call to an effecting fn that a local `handle` handles, or beside a resume
+    // after a pattern rebinds the continuation's name. The counts start again at each fn: an
+    // effecting fn whose tail calls an effecting fn does not make a later fn's tail count one.
+    "effect Io { read() -> i64; write(x: i64) -> i64; }\neffect Ask { q(x: i64) -> i64; }\nenum E { A(i64), B }\nfn one() -> i64 { 1 }\nfn w() -> i64 ! { Io } { (match E::A(5) { E::A(one) => one, _ => 0 }) + one() }\nfn main() -> i64 { handle w() with { Io.read(k) => k(7), Io.write(x, k) => k(x + 2) } }\n",
+    "effect Io { read() -> i64; write(x: i64) -> i64; }\neffect Ask { q(x: i64) -> i64; }\nenum E { A(i64), B }\nfn one() -> i64 { 1 }\nfn w() -> i64 ! { Io } { { let mut i: i64 = 0; while i < 1 { let one: i64 = 40; i = i + one; } i + one() + 1 } }\nfn main() -> i64 { handle w() with { Io.read(k) => k(7), Io.write(x, k) => k(x + 2) } }\n",
+    "effect Io { read() -> i64; write(x: i64) -> i64; }\neffect Ask { q(x: i64) -> i64; }\nenum E { A(i64), B }\nfn one() -> i64 { 1 }\nfn w() -> i64 ! { Io } { perform Io.read() + (match E::A(30) { E::A(one) => one, _ => 0 }) + one() }\nfn main() -> i64 { handle w() with { Io.read(k) => k(11), Io.write(x, k) => k(x + 2) } }\n",
+    "effect Io { read() -> i64; write(x: i64) -> i64; }\neffect Ask { q(x: i64) -> i64; }\nenum E { A(i64), B }\nfn one() -> i64 { 1 }\nfn ask1() -> i64 ! { Ask } { perform Ask.q(29) }\nfn w() -> i64 ! { Io } { perform Io.read() + handle ask1() with { Ask.q(x, k) => k(x + 2) } }\nfn main() -> i64 { handle w() with { Io.read(k) => k(11), Io.write(x, k) => k(x + 2) } }\n",
+    "effect Io { read() -> i64; write(x: i64) -> i64; }\neffect Ask { q(x: i64) -> i64; }\nenum E { A(i64), B }\nfn one() -> i64 { 1 }\nfn w() -> i64 ! { Io } { perform Io.read() + handle 1 with { Ask.q(x, k) => (match E::A(1) { E::A(k) => k, _ => 0 }) + k(x) } }\nfn main() -> i64 { handle w() with { Io.read(k) => k(7), Io.write(x, k) => k(x + 2) } }\n",
+    "effect Io { read() -> i64; write(x: i64) -> i64; }\nenum E { A(i64), B }\nfn one() -> i64 { 1 }\nfn do_work() -> i64 ! { Io } { perform Io.read() }\nfn v() -> i64 ! { Io } { do_work() }\nfn w() -> i64 ! { Io } { (match E::A(5) { E::A(one) => one, _ => 0 }) + one() }\nfn main() -> i64 { let a: i64 = handle w() with { Io.read(k) => k(7), Io.write(x, k) => k(x + 2) }; a + 36 }\n",
+    // Register D160: a tail that calls a generic effecting fn whose type parameters the oracle's
+    // typer binds from the fn's return type is not taken for widened, the type parameter bare or
+    // under `?T`, `[T]`, `Vec<T>`, `&T`, a generic struct of it, or two of these, and the oracle
+    // lowers the body.
+    "effect Io { read() -> i64; }\nstruct Box<T> { v: T }\nstruct Pair<A, B> { a: A, b: B }\nfn gopt<T>(x: T) -> ?T ! { Io } { gopt(x) }\nfn garr<T>(x: T) -> [T] ! { Io } { garr(x) }\nfn gvec<T>(x: T) -> Vec<T> ! { Io } { gvec(x) }\nfn gbox<T>(x: T) -> Box<T> ! { Io } { gbox(x) }\nfn gobox<T>(x: T) -> ?Box<T> ! { Io } { gobox(x) }\nfn gr<T>(x: &T) -> &T ! { Io } { x }\nfn gid<T>(x: T) -> T ! { Io } { gid(x) }\nfn gp<A, B>(x: A, y: B) -> Pair<B, A> ! { Io } { gp(x, y) }\nfn w1() -> ?i64 ! { Io } { gopt(5) }\nfn w2() -> [i64] ! { Io } { garr(5) }\nfn w3() -> Vec<i64> ! { Io } { gvec(5) }\nfn w4() -> Box<i64> ! { Io } { gbox(5) }\nfn w5() -> ?Box<i64> ! { Io } { gobox(5) }\nfn w6(r: &i64) -> &i64 ! { Io } { gr(r) }\nfn w7() -> Box<secret i64> ! { Io } { gbox(5) }\nfn w8() -> ?i64 ! { Io } { gid(5) }\nfn w9() -> Pair<i64, bool> ! { Io } { gp(true, 5) }\nfn main() -> i64 { 42 }\n",
 ];
 
 #[test]
@@ -571,11 +593,16 @@ fn sentinel_codegen_refuses_a_non_word_param_a_continuation_would_capture() {
 /// conditions, and `tests/ui`'s fixtures pinned with the code that the oracle refuses too are
 /// checked the same way. The exceptions to the message register D161 lists, where `scg` gives the
 /// general reason and the oracle names the type rule or a captured parameter, or fails with an
-/// internal message, are pinned too. A body without statements is still classified by
-/// `eff_classify` (register D160), so the one such fixture `scg` lowers is listed, and must stay
-/// lowered until D160 is fixed. A body with statements that calls, anywhere in it, through a name
-/// the fn binds anywhere other than only as a handler arm's continuation, or uses such a name
-/// otherwise, other than a parameter, that also names a fn, is refused where the oracle lowers it,
+/// internal message, are pinned too. A body without statements whose tail may suspend without
+/// producing a continuation is refused where `eff_classify` extracted a `perform` but the tail
+/// holds another, or it is not `i64`, or the fn is `main`, and where it extracted none but the tail
+/// holds a `perform` or a call to an effecting fn not through a name the routing walk takes for
+/// bound (it keeps some names bound past their scope, a pattern's, a loop body's and a `return`
+/// arm's among them) (register D160): pinned with tails the oracle refuses too, and with tails it
+/// lowers, refused the same way. A body with statements that calls,
+/// anywhere in it, through a name the fn binds anywhere other than only as a handler arm's
+/// continuation, or uses such a name otherwise, other than a parameter, that also names a fn, is
+/// refused where the oracle lowers it,
 /// wherever the binding's scope ends: pinned with a `Fn` value called directly (a parameter, bound
 /// in a block, or a handler arm's operation parameter), which `scg` does not lower as the oracle
 /// does (ADR 0070's direct-call syntax is not mirrored); with a name bound in a `while` body and
@@ -596,8 +623,9 @@ fn sentinel_codegen_refuses_a_non_word_param_a_continuation_would_capture() {
 #[test]
 fn sentinel_codegen_refuses_an_effecting_body_the_oracle_refuses() {
     const CODE: &str = "sentinel::codegen::effecting_fn_body_not_direct";
-    // Register D160: a body without statements that the oracle refuses and `scg` lowers.
-    const D160_LOWERED: &[&str] = &["c35_effecting_call_in_operand.sentinel"];
+    // Register D160: a `tests/ui` fixture whose body has no statements, which the oracle refuses
+    // and `scg` lowers (none: `tests/ui` has no other such fixture).
+    const D160_LOWERED: &[&str] = &[];
     let tmp = std::env::temp_dir().join(format!("snc_selfhost_cg_route_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp).expect("create temp dir");
@@ -857,6 +885,88 @@ fn sentinel_codegen_refuses_an_effecting_body_the_oracle_refuses() {
         checked += 1;
     }
     assert!(checked >= 3, "expected at least three refused `tests/ui` fixtures, got {checked}");
+
+    // Register D160: an effecting body without statements whose tail may suspend without producing
+    // a continuation is refused where `eff_classify` extracted a `perform` but the tail holds
+    // another, or it is not `i64`, or the fn is `main`, and where it extracted none but the tail
+    // holds a `perform` or a call to an effecting fn not through a name the walk takes for bound.
+    // Tails the oracle refuses too, with its message: two `perform`s, a call tail widened to the
+    // fn's return type, a `bool` `perform`, a `handle` whose body calls an effecting fn, an
+    // embedded `perform` in `main`, and a call tail of a generic effecting fn widened to the fn's
+    // return type, where the oracle's typer cannot bind the type parameter from it (`Box<T>`
+    // returned as a `?Box<i64>`, `?T` as a `secret ?i64`).
+    let ask40 = "effect Ask { q(x: i64) -> i64; }\nfn ask1() -> i64 ! { Ask } { perform Ask.q(40) }\n";
+    for (name, prog) in [
+        ("d160_two_performs", format!("{io}fn w() -> i64 ! {{ Io }} {{ perform Io.read() + perform Io.write(1) + 1 - 1 }}\n{main}")),
+        (
+            "d160_call_tail_widened",
+            format!("{io}fn work(x: i64) -> i64 ! {{ Io }} {{ perform Io.write(x) }}\nfn w() -> secret i64 ! {{ Io }} {{ work(1) }}\nfn main() -> i64 {{ declassify(handle w() with {{ Io.read(k) => k(41), Io.write(x, k) => k(x + 2), Io.flag(k) => k(true) }}) }}\n"),
+        ),
+        (
+            "d160_bool_perform",
+            format!("{io}fn pick(b: bool, x: i64, y: i64) -> i64 {{ if b {{ x }} else {{ y }} }}\nfn w() -> i64 ! {{ Io }} {{ pick(perform Io.flag(), 42, 0) }}\n{main}"),
+        ),
+        ("d160_handle_tail", format!("{io}{ask40}fn w() -> i64 ! {{ Io }} {{ handle ask1() with {{ Ask.q(x, k) => k(x + 2) }} }}\n{main}")),
+        ("d160_embedded_in_main", format!("{io}fn main() -> i64 ! {{ Io }} {{ perform Io.read() + 1 }}\n")),
+        (
+            "d160_generic_call_tail_widened_to_nullable",
+            format!("{io}struct Box<T> {{ v: T }}\nfn gbox<T>(x: T) -> Box<T> ! {{ Io }} {{ gbox(x) }}\nfn w() -> ?Box<i64> ! {{ Io }} {{ gbox(5) }}\nfn main() -> i64 {{ 42 }}\n"),
+        ),
+        (
+            "d160_generic_call_tail_widened_to_secret",
+            format!("{io}fn gopt<T>(x: T) -> ?T ! {{ Io }} {{ gopt(x) }}\nfn w() -> secret ?i64 ! {{ Io }} {{ gopt(5) }}\nfn main() -> i64 {{ 42 }}\n"),
+        ),
+    ] {
+        std::fs::write(&input, prog).expect("stage the program");
+        let (ok, oracle_msg) = oracle_says(&input);
+        assert!(!ok, "{name}: the oracle refuses it");
+        scg_refuses_as(name, &oracle_msg);
+    }
+    // A `bool` `perform` beside a call through a `Fn` parameter: the oracle names the parameter its
+    // embedded shape would carry, and `scg` gives the part before the type, from the check its
+    // embedded shape runs, run first when `eff_classify` extracted the tail's one `perform`.
+    let fnp = format!("{io}fn pick(b: bool, x: i64, y: i64) -> i64 {{ if b {{ x }} else {{ y }} }}\nfn inc(x: i64) -> i64 {{ x + 1 }}\nfn w2(f: Fn<i64, i64>) -> i64 ! {{ Io }} {{ pick(perform Io.flag(), 42, 0) + f(0) }}\nfn w() -> i64 ! {{ Io }} {{ w2(inc) }}\n{main}");
+    std::fs::write(&input, fnp).expect("stage the program");
+    let (ok, oracle_msg) = oracle_says(&input);
+    let named = "effecting fn `w2` cannot be lowered: `f` is captured across the continuation, so it must be `i64` or `secret i64`";
+    assert!(!ok && oracle_msg.starts_with(named), "d160_bool_perform_beside_a_fn_parameter: the oracle names `f`: {oracle_msg}");
+    scg_refuses_as("d160_bool_perform_beside_a_fn_parameter", named);
+    // And tails the oracle lowers that `scg` refuses, with the general reason: a `perform` among a
+    // block's statements (`scg` dropped its continuation, so under an arm that does not resume it
+    // answered wrong), one in an `if` arm, in an array literal or under a unary operator at the
+    // tail's top (`scg` emitted IR `llc` rejects), a direct `perform` widened to the fn's `secret
+    // i64` return type, which `scg` lowered to the oracle's value in other IR, and a block whose
+    // statement calls through a `Fn` parameter, which the walk takes for a call that may suspend,
+    // before a call to an effecting fn.
+    for (name, prog, who) in [
+        (
+            "d160_perform_among_a_blocks_statements",
+            format!("{io}fn one() -> i64 {{ 1 }}\nfn w() -> i64 ! {{ Io }} {{ {{ perform Io.read(); one() + 41 }} }}\n{main}"),
+            "w",
+        ),
+        (
+            "d160_perform_in_an_if_arm",
+            format!("{io}fn eat(k: i64) -> i64 {{ k }}\nfn v(c: i64, k: i64) -> i64 ! {{ Io }} {{ if c == 1 {{ eat(k) + perform Io.read() }} else {{ 0 }} }}\nfn w() -> i64 ! {{ Io }} {{ v(1, 1) }}\n{main}"),
+            "v",
+        ),
+        ("d160_perform_in_an_array_literal", format!("{io}fn w() -> i64 ! {{ Io }} {{ [perform Io.read(), 35][0] + 35 }}\n{main}"), "w"),
+        ("d160_perform_under_a_unary_operator", format!("{io}fn w() -> i64 ! {{ Io }} {{ -perform Io.read() }}\n{main}"), "w"),
+        (
+            "d160_fn_value_call_before_an_effecting_tail",
+            format!("{io}fn inc(x: i64) -> i64 {{ x + 1 }}\nfn work() -> i64 ! {{ Io }} {{ perform Io.read() }}\nfn w2(f: Fn<i64, i64>) -> i64 ! {{ Io }} {{ {{ f(1); work() }} }}\nfn w() -> i64 ! {{ Io }} {{ w2(inc) }}\n{main}"),
+            "w2",
+        ),
+        (
+            "d160_direct_perform_widened",
+            format!("{io}fn w() -> secret i64 ! {{ Io }} {{ perform Io.read() }}\nfn main() -> i64 {{ declassify(handle w() with {{ Io.read(k) => k(42), Io.write(x, k) => k(x), Io.flag(k) => k(true) }}) }}\n"),
+            "w",
+        ),
+    ] {
+        std::fs::write(&input, prog).expect("stage the program");
+        let (ok, _) = oracle_says(&input);
+        assert!(ok, "{name}: the oracle lowers it");
+        scg_refuses_as(name, &format!("effecting fn `{who}` cannot be lowered: a `perform` or a call to an effecting fn appears outside tail position, which needs a reified frame"));
+    }
 
     // Bodies the oracle lowers that call through a name the fn binds other than as a handler arm's
     // continuation, which `scg` refuses wherever the binding's scope ends (`eff_check_called`): a

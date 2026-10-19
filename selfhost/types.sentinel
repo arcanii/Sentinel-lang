@@ -375,6 +375,9 @@ struct TyCtx {
     cg_eff_called: Vec<u8>, // `eff_route`: each name the body calls through, then a space
     cg_eff_read: Vec<u8>, // `eff_route`: each name used other than as a callee, then a space
     cg_eff_inwhile: i64, // `eff_route`: how many `while` bodies (or conditions) the walk is inside
+    cg_eff_nperf: i64,   // `eff_route`: the `perform`s the walk counted (register D160)
+    cg_eff_neff: i64,    // `eff_route`: the calls to effecting fns it counted, not through a bound name
+    cg_eff_ptype: i64,   // `eff_route`: the type the last `perform` it counted resumes with
     cgak: Vec<i64>,   // call-arg stack: operand kind
     cgav: Vec<i64>,   // call-arg stack: operand value
     cgat: Vec<i64>,   // call-arg stack: operand type handle

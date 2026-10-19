@@ -8,7 +8,8 @@ module types;
 // tail [c35a], a call tail [c35b — an effecting callee's args never perform in the
 // emitted corpus, so no ufeff check is needed], a fully pure tail [c35b], or any body
 // with statements [routed by `eff_route`, below]).
-// Mirrors the oracle's `detect_embedded_shape` over the emitted-corpus shapes.
+// Mirrors the oracle's `detect_embedded_shape` over the emitted-corpus shapes; `eff_route`
+// refuses some statement-free tails it does not extract (register D160).
 fn eff_classify(body2: Expr) -> Args {
     match body2 {
         Expr::Block(st2, tail2) => {
@@ -29,7 +30,8 @@ fn eff_classify(body2: Expr) -> Args {
 }
 
 // (c35d) the tail's TOP node: a direct `perform` is the c35a shape (NOT embedded —
-// it produces a Kont* without reification); everything else searches its subtree.
+// it produces a Kont* without reification); a binary operator's operands and a call's
+// arguments are searched. A unary operator is entered only below the top (`efp_expr`).
 fn efp_top(tail2: Expr) -> Args {
     match tail2 {
         Expr::Perform(qe, qo, qa) => {
@@ -87,6 +89,20 @@ fn efp_expr(ex: Expr) -> Args {
     }
 }
 
+// (register D160) whether `eff_classify` extracted a `perform`, handing its answer back unchanged.
+fn eff_found(a: Args, found: &mut bool) -> Args {
+    match a {
+        Args::End => {
+            *found = false;
+            Args::End
+        },
+        Args::Cell(p, r) => {
+            *found = true;
+            Args::Cell(p, r)
+        },
+    }
+}
+
 fn efp_args(aa: Args) -> Args {
     match aa {
         Args::End => Args::End,
@@ -115,11 +131,23 @@ fn efp_args(aa: Args) -> Args {
 // either produces a continuation or does not suspend (`validate_effecting_fn_body`), and
 // refuses it when not. It takes neither shape for `main`. `eff_route` answers which, from a
 // classification copy of the body (consumed), by the same conditions but the captures:
-//   0 — no statements, which `eff_classify` routes;
+//   0 — no statements, and a tail that does not suspend, produces a continuation, or is the
+//       embedded shape `eff_classify` extracts with its `perform` the tail's only one, an `i64`
+//       one, outside `main` (register D160), or holds no `perform` and no call to an effecting fn
+//       but through a name the walk takes for bound;
 //   1 — the let shape;   2 — the chained shape;   3 — straight-line;
 //   4 — refused naming the type rule: the one `let`, whose value is not a block, is bound to
 //       a suspension, its type does not fit, and the tail does not suspend;
-//   5 — refused with the oracle's general reason.
+//   5 — refused with the oracle's general reason; with no statements, a tail that may suspend
+//       without producing a continuation otherwise: where `eff_classify` extracted a `perform`
+//       but the tail holds another, or it is not `i64`, or the fn is `main`, and where it
+//       extracted none but the tail holds a `perform` or a call to an effecting fn. The oracle
+//       takes its embedded shape for one `i64` `perform` anywhere in the tail and refuses the
+//       rest; `scg`'s finds it only through binary operators and call arguments from the tail's
+//       top, and unary operators below it (D160: fail-closed, so it refuses some the oracle
+//       lowers). A call through a name the walk takes for bound is not counted as a call to an
+//       effecting fn: the walk keeps some names bound past their scope, a pattern's, a loop
+//       body's and a `return` arm's among them, where the resolver takes the fn of that name.
 // The captures are left to the shapes' emitters, which refuse a parameter a frame would carry
 // that is not `i64` or `secret i64` (`cg_eff_refuse_unfit`, `cg_chained_refuse_unfit`; in the
 // let and embedded shapes any such parameter, D159). They do not refuse a name the body binds
@@ -151,12 +179,18 @@ fn efp_args(aa: Args) -> Args {
 // block's tail, and `strip_secret_widen` peels only a widen on the value itself), and a tail of
 // a type other than the fn's return type. A call of a generic effecting fn whose return type
 // is its type parameter takes the return type, and is not widened; one whose return type wraps
-// the parameter (`?T`, `[T]`) is taken for widened here, where the oracle binds the parameter
-// from the return type and lowers the body (register D161).
-fn eff_route(c: &mut TyCtx, src: &[u8], body3: Expr, rty: i64) -> i64 {
+// the parameter (`?T`, `[T]`) is taken for widened in a body with statements, where the oracle
+// lowers the body when it can bind the parameter from the return type, as for `?T` returned as a
+// `?i64` (register D161). In one without,
+// it is taken for widened only where the oracle cannot bind it so, as for `Box<T>` returned as a
+// `?Box<i64>` (`eff_unifies`, register D160).
+fn eff_route(c: &mut TyCtx, src: &[u8], body3: Expr, rty: i64, embedded: bool) -> i64 {
     match body3 {
         Expr::Block(st3, tail3) => {
             (*c).cg_eff_refused = false;
+            (*c).cg_eff_nperf = 0;
+            (*c).cg_eff_neff = 0;
+            (*c).cg_eff_ptype = 0 - 1;
             (*c).cg_eff_seen = vec_new();
             (*c).cg_eff_called = vec_new();
             (*c).cg_eff_read = vec_new();
@@ -192,7 +226,20 @@ fn eff_route(c: &mut TyCtx, src: &[u8], body3: Expr, rty: i64) -> i64 {
                 nshape == nst
             };
             if nst == 0 {
-                0
+                // (register D160) with no statements the walk counted the tail's `perform`s and
+                // calls to effecting fns alone. A call of a generic effecting fn is taken for widened
+                // here only where the oracle's typer cannot bind its type parameters from the fn's
+                // return type (`eff_unifies`).
+                let tkz: i64 = if tk0 == 2 && !eff_unifies(c, tn, rty) { 1 } else { tk0 };
+                if tkz != 1 {
+                    0
+                } else if embedded {
+                    if (*c).cg_eff_nperf == 1 && (*c).cg_eff_ptype == 0 && !(*c).cgmain { 0 } else { 5 }
+                } else if (*c).cg_eff_nperf + (*c).cg_eff_neff > 0 {
+                    5
+                } else {
+                    0
+                }
             } else if (*c).cg_eff_refused {
                 5
             } else if shaped {
@@ -324,6 +371,59 @@ fn eff_is_tparam(c: &mut TyCtx, h: i64) -> bool {
     }
 }
 
+// (register D160) Can the oracle's typer bind the type parameters in `p`, a generic callee's declared
+// return type, so that it is `a`, the fn's return type? It seeds them by matching `p` against the
+// expected type shell by shell (`unify_one`); where that fails, as for `Box<T>` against `?Box<i64>`
+// or `?T` against `secret ?i64`, it binds them from the arguments and widens the call to `a`. A
+// type parameter in `a` is taken to match. Reads the interner and interns nothing.
+fn eff_unifies(c: &mut TyCtx, p: i64, a: i64) -> bool {
+    if p == a {
+        true
+    } else if p < tbase() {
+        false
+    } else if (*c).tk[p - tbase()] == 9 {
+        true
+    } else if a < tbase() {
+        false
+    } else {
+        let pk: i64 = (*c).tk[p - tbase()];
+        let ak: i64 = (*c).tk[a - tbase()];
+        let pa: i64 = (*c).ta[p - tbase()];
+        let pb: i64 = (*c).tb[p - tbase()];
+        let aa: i64 = (*c).ta[a - tbase()];
+        let ab: i64 = (*c).tb[a - tbase()];
+        if ak == 9 {
+            true
+        } else if pk != ak {
+            false
+        } else if pk == 2 {
+            // `&T`: the mutability in `ta`, the referent in `tb`
+            if pa != aa { false } else { eff_unifies(c, pb, ab) }
+        } else if pk == 16 {
+            if eff_unifies(c, pa, aa) { eff_unifies(c, pb, ab) } else { false }
+        } else if pk == 10 {
+            // a generic struct's instance: its decl in `ta`, its argument record in `tb`
+            let mut i: i64 = (*c).girs[pb];
+            let pe: i64 = (*c).gire[pb];
+            let mut j: i64 = (*c).girs[ab];
+            let ae: i64 = (*c).gire[ab];
+            let mut ok: bool = pa == aa && pe - i == ae - j;
+            while ok && i < pe {
+                let pg: i64 = (*c).gia[i];
+                let ag: i64 = (*c).gia[j];
+                ok = eff_unifies(c, pg, ag);
+                i = i + 1;
+                j = j + 1;
+            }
+            ok
+        } else if pk == 1 || pk == 3 || pk == 4 || pk == 11 || pk == 12 || pk == 13 || pk == 17 || pk == 18 || pk == 19 {
+            eff_unifies(c, pa, aa)
+        } else {
+            false
+        }
+    }
+}
+
 // An annotation's fit, read from its syntax rather than interned, so that classifying a body
 // interns no type (the order of first interning is the order generic instances are declared
 // in, register D134). 1 — `i64`; 2 — `secret i64`; 0 — anything else. A type parameter is
@@ -408,6 +508,8 @@ fn eff_kind(c: &mut TyCtx, src: &[u8], ex: Expr, ln: &mut Vec<u8>, lo: &mut Vec<
             let oidx: i64 = op_index_lookup(c, src, eid, &po);
             *nt = op_ret(c, eid, oidx);
             *blk = false;
+            (*c).cg_eff_nperf = (*c).cg_eff_nperf + 1;
+            (*c).cg_eff_ptype = *nt;
             let _e: [u8] = pe;
             let _o: [u8] = po;
             2
@@ -428,6 +530,7 @@ fn eff_kind(c: &mut TyCtx, src: &[u8], ex: Expr, ln: &mut Vec<u8>, lo: &mut Vec<
             if bound {
                 1
             } else if effc {
+                (*c).cg_eff_neff = (*c).cg_eff_neff + 1;
                 *nt = (*c).ufret[fid - 42];
                 *blk = false;
                 2

@@ -3381,8 +3381,8 @@ fn cg_eff_refuse_unfit(c: &mut TyCtx, src: &[u8], name_s: i64, name_e: i64, pv0:
 // perform …; <pure tail> }` reifies a captured frame → a RESUMER fn + a parent,
 // `cg_letshape_emit`, two defines), the chained shape (`cg_chained_emit`), straight-line
 // (`cg_eff_normal`), or a refusal (`cg_eff_other`). A body without statements is the
-// embedded shape when `eff_classify` extracted its `perform` (`cg_embed_emit`), and
-// straight-line otherwise; that classifier is not yet the oracle's (register D160). Consumes
+// embedded shape when `eff_classify` extracted its `perform` (`cg_embed_emit`), straight-line
+// otherwise, and refused where `eff_route` refuses it (route 5, register D160). Consumes
 // `body`. `[pv0,pvn)` = the fn's param VarId range (the let shape's capture set).
 //
 // (registers D133 and D161) This routing used to count the statements: one `let` took the let
@@ -3403,16 +3403,37 @@ fn cg_emit_fn_eff(out: &mut Vec<u8>, c: &mut TyCtx, body: Expr, rty: i64, src: &
                     // No statements — the c35b shape (pure / perform / call-to-effecting
                     // tail), or the c35d EMBEDDED-perform shape (`embed` carries the
                     // unique perform, extracted from the classification copy).
-                    match embed {
-                        Args::Cell(pf, erest) => {
-                            let _er: Args = erest;
-                            cg_eff_refuse_unfit(c, src, name_s, name_e, pv0, pvn);
-                            cg_embed_emit(out, c, pf, tail, rty, src, name_s, name_e, cgpmark, pv0, pvn, gb)
-                        },
-                        Args::End => {
-                            let b0: Expr = Expr::Block(Stmts::SEnd, tail);
-                            cg_eff_normal(out, c, b0, rty, src, name_s, name_e, cgpmark, gb)
-                        },
+                    if route == 5 {
+                        // (register D160) a tail that may suspend outside the embedded shape
+                        // `scg` lowers: refused with the general reason, after the check the
+                        // embedded shape runs first, when `eff_classify` extracted the tail's one
+                        // `perform` (a parameter its frame would carry that does not fit).
+                        match embed {
+                            Args::Cell(qf, qrest) => {
+                                let _qf: Expr = qf;
+                                let _qr: Args = qrest;
+                                if (*c).cg_eff_nperf == 1 {
+                                    cg_eff_refuse_unfit(c, src, name_s, name_e, pv0, pvn)
+                                } else {
+                                    0
+                                }
+                            },
+                            Args::End => 0,
+                        };
+                        let b5: Expr = Expr::Block(Stmts::SEnd, tail);
+                        cg_eff_other(out, c, b5, 5, rty, src, name_s, name_e, cgpmark, gb)
+                    } else {
+                        match embed {
+                            Args::Cell(pf, erest) => {
+                                let _er: Args = erest;
+                                cg_eff_refuse_unfit(c, src, name_s, name_e, pv0, pvn);
+                                cg_embed_emit(out, c, pf, tail, rty, src, name_s, name_e, cgpmark, pv0, pvn, gb)
+                            },
+                            Args::End => {
+                                let b0: Expr = Expr::Block(Stmts::SEnd, tail);
+                                cg_eff_normal(out, c, b0, rty, src, name_s, name_e, cgpmark, gb)
+                            },
+                        }
                     }
                 },
                 Stmts::SCell(st, rest) => {
