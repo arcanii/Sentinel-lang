@@ -1015,14 +1015,14 @@ The rule now, in all three back ends:
   the resumer reads, which inkwell refuses too; and, in `scg`'s embedded and let shapes, a
   non-word parameter the resumer never reads, which inkwell and the oracle lower (register
   D159). `scg` refuses only where its classifier picks one of those shapes; a `perform` the
-  oracle finds inside an `if` arm or among a block's statements, `scg` still emits as IR
-  `llc` rejects or lowers straight-line (register D160), and a parameter a chained tail reads
-  only inside a form its frame walk does not enter (an `if`, a `match` or a `handle`, among
-  others) is in none of its frames, so its resumer still loads it from `%v-1`, which `llc`
-  rejects (register D67). And a declined tail that is a block ending in the `perform`, after
-  statements that do not suspend, the oracle now lowers in order through its direct shape, as
-  inkwell and `scg` do, where it used to run the `perform` first and replay the statements
-  after it.
+  oracle finds inside an `if` arm or among a block's statements, `scg` emitted as IR `llc`
+  rejects or lowered straight-line until register D160 was closed (2026-10-19), and now
+  refuses, and a parameter a chained tail reads only inside a form its frame walk does not
+  enter (an `if`, a `match` or a `handle`, among others) is in none of its frames, so its
+  resumer still loads it from `%v-1`, which `llc` rejects (register D67). And a declined tail
+  that is a block ending in the `perform`, after statements that do not suspend, the oracle
+  now lowers in order through its direct shape, as inkwell and `scg` do, where it used to run
+  the `perform` first and replay the statements after it.
 
 That also closes a leak: a handle nothing else owned, stored into a class field — `self.m =
 mutex_new(0)` in an `init` — was never released. Over 2,000,000 classes it peaked at 69.9 MB

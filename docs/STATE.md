@@ -14,7 +14,37 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
-**Latest (2026-10-19) — `scg`'s typer scopes a `while` body's, a `return` arm's and a `_` slot's
+**Latest (2026-10-19, second slice) — `scg` refuses a statement-free effecting tail it lowered apart
+from the oracle (register D160).**
+`scg` picked a statement-free effecting body's shape from a `perform` it looked for only through
+binary operators and call arguments (and unary operators below the tail's top), and took the first,
+where the oracle takes its embedded shape for a tail holding one `perform` of type `i64` anywhere,
+lowers a tail that does not suspend or produces a continuation, and refuses the rest. So `scg`
+answered wrong (two `perform`s; a `perform` among a block's statements, whose continuation it
+dropped; an embedded `perform` in `main`), emitted IR `llc` rejects, or lowered tails the oracle
+refuses. Now, fail-closed, a body without statements whose tail may suspend without producing a
+continuation is refused where `eff_classify` extracted a `perform` but the tail holds another, or it
+is not `i64`, or the fn is `main`, and where it extracted none but the tail holds a `perform` or a
+call to an effecting fn not through a name the routing walk takes for bound (it keeps some names
+bound past their scope, a pattern's, a loop body's and a `return` arm's among them). A generic call
+is taken for widened there only where the oracle's typer cannot bind the callee's type parameters
+from the fn's return type, matched shell by shell: `gbox(5)` returned as a `?Box<i64>` is refused,
+as the oracle refuses it, and `gopt(5)` returned as a `?i64` is lowered, as the oracle lowers it. A
+body without statements that the rule does not refuse is lowered as before, byte for byte. The pins
+hold tails the oracle refuses too (two `perform`s; a call tail widened to the fn's return type, as
+`work(1)` returned as a `secret i64`, `gbox(5)` as a `?Box<i64>` and `gopt(5)` as a `secret ?i64`; a
+`bool` `perform`; a `handle` whose body calls an effecting fn; `do_work() + 1`, the fixture
+`tests/ui/c35_effecting_call_in_operand`; and an embedded `perform` in `main`) and tails it lowers
+(a `perform` among a block's statements, in an `if` arm, in an array literal or under a unary
+operator at the tail's top; a block whose statement calls through a `Fn` parameter before a call to
+an effecting fn; and a direct `perform` returned as a `secret i64`). The rule refuses other tails
+the oracle lowers too, among them a `perform` in a `match`, a struct field, a cast or a `return`,
+one ending a block under a `secret i64` return type, and one as a `handle`'s body, where `llc`
+rejects the oracle's IR. No corpus program's output changes but
+`tests/ui/c35_effecting_call_in_operand`, which the oracle refuses and `scg` refuses now too.
+`scg`-only, a patch by ADR 0076 D2. Filed D172 (a computed `bool` resume).
+
+**Previously (2026-10-19) — `scg`'s typer scopes a `while` body's, a `return` arm's and a `_` slot's
 names as the resolver does (registers D164, D170 and D171).**
 `scg`'s typer scoped these three kinds of name apart from the resolver. A `while` body's names
 stayed bound after the loop, so a later call of the fn of such a name aborted `scg` or was lowered
@@ -29,7 +59,8 @@ by ADR 0076 D2; no corpus program's output changes. D161's rules that refuse an 
 statements that holds a `handle` with a `return` arm, or in which a `let` inside a `while` body or
 condition is named like another binding, stay as fail-closed guards. A block tail D164 made `scg`
 abort on now takes D160's straight-line lowering, which answers wrong where a `perform` is among the
-block's statements (a note on D160).
+block's statements (a note on D160). (Since D160's closure, 2026-10-19, such a tail is refused where
+a `perform` is among the block's statements.)
 
 **Previously (2026-10-09) — an effecting fn's frame-pushing `define` drops its parameters (register
 D139), after a follow-up to D161.**

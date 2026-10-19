@@ -124,6 +124,10 @@ reference as you work through the milestones.
 > confirming nothing pre-existing is newly refused; oracle-vs-scg byte-equality on the new
 > fixture at types, mir and llvm; and the secret-taint check in both directions.
 
+### ▶ RESUME HERE (2026-10-19, second slice — `origin/main` is `60e4c33`, and this session's commits sit on top of it, unpushed; read `git reflog show refs/remotes/origin/main` and `git log --oneline origin/main..HEAD` at the START and AGAIN before writing either down. **Register D160 CLOSED, fail-closed** (`e608c7e` fix, then this docs commit). Now a body without statements whose tail may suspend without producing a continuation is refused where `eff_classify` extracted a `perform` but the tail holds another, or it is not `i64`, or the fn is `main`, and where it extracted none but the tail holds a `perform` or a call to an effecting fn not through a name the routing walk takes for bound (it keeps some names bound past their scope, a pattern's, a loop body's and a `return` arm's among them). `eff_route` answers 5 for it, from its walk's kind of the tail and its counts of the tail's `perform`s and calls to effecting fns, and `cg_emit_fn_eff` refuses it, after the check its embedded shape runs first when `eff_classify` extracted the tail's one `perform`. Calls through names the walk takes for bound are not counted, and the embedded shape's check counts only `perform`s: a first version counted both, and refused tails `scg` had lowered to the oracle's bytes. A generic call is taken for widened there only where the oracle's typer cannot bind the callee's type parameters from the fn's return type, matched shell by shell: `gbox(5)` returned as a `?Box<i64>` is refused, as the oracle refuses it, and `gopt(5)` returned as a `?i64` is lowered, as the oracle lowers it (`eff_unifies`, which mirrors the oracle's `unify_one`). A body without statements that the rule does not refuse is lowered as before, byte for byte. The pins hold tails the oracle refuses too (two `perform`s; a call tail widened to the fn's return type, as `work(1)` returned as a `secret i64`, `gbox(5)` as a `?Box<i64>` and `gopt(5)` as a `secret ?i64`; a `bool` `perform`; a `handle` whose body calls an effecting fn; `do_work() + 1`, the fixture `tests/ui/c35_effecting_call_in_operand`; and an embedded `perform` in `main`) and tails it lowers (a `perform` among a block's statements, in an `if` arm, in an array literal or under a unary operator at the tail's top; a block whose statement calls through a `Fn` parameter before a call to an effecting fn; and a direct `perform` returned as a `secret i64`); the rule refuses other tails the oracle lowers too, among them a `perform` in a `match`, a struct field, a cast or a `return`, one ending a block under a `secret i64` return type, and one as a `handle`'s body, where `llc` rejects the oracle's IR. `scg` over the 525 `.sentinel` files: 524 identical, and `tests/ui/c35_effecting_call_in_operand` refused, which empties D161's list of D160 fixtures; over 1,446 statement-free tail files (817 from a grammar of atoms under forms, 600 from the first review's wider grammar, 29 constructed; 1,435 distinct programs), the 432 `scg` lowered to the oracle's bytes stay so; 140 the oracle lowers and 540 it rejects that `scg` lowered are refused now; 99 the oracle lowers are still lowered apart from it: 44 for causes this change does not touch (an unread parameter carried in the embedded frame, D67 and D159; a perform's argument lowered again in the resumer, D100; a block tail ending in a perform, which the oracle takes as embedded), 10 that hold a perform beside a call to an effecting fn, which `snc build` refuses (D69), and 45 that call a `Fn` parameter, which this change leaves; and 169 the oracle rejects `scg` still lowers: 165 hold a `handle` whose body does not suspend, which the oracle refuses with its general reason, and 4 it refuses with an internal message from its embedded shape. Over the reviews' 1,453 distinct probes (1,932 files with the runners' copies), 527 of them generic calls, no program `scg` lowered to the oracle's bytes changes, and over all 3,903 files the 1,196 whose `scg` output changed are refused, 12 of them refused before too and now with the oracle's reason where `scg` named a captured parameter. Each of twenty-two mutations is caught by a pin, a seed or the c35 fixture: the rule or the refusal turned off; the embedded check's `perform` count, `i64` check or `main` check dropped, or a check that no effecting call was counted added; the not-embedded refusal dropped; a `perform` or an effecting call not counted; either count not reset between fns; the check run first dropped; calls through bound names counted again; no call, or every call whose type is not the fn's return type, taken for widened; a shell of another kind taken to match; or `&T`, a generic struct's instance, `?T`, `[T]`, `Vec<T>` or a bare type parameter not matched. Five bounded review rounds, each lens with a construct-the-input verifier (`wf_19545b04-e97`, `wf_db5f0cf1-220`, `wf_419737f8-527`, `wf_b270bf86-f82`, `wf_2b39c77e-6c9`). The first found a first rule refusing three shapes of tail `scg` had lowered to the oracle's bytes, from two causes; the narrowed rule lowers them so again, and they are seeds. The second found the narrowed rule refusing generic call tails it had lowered to the oracle's bytes, and the third that the exemption added for them lowered the widened ones the oracle refuses, as HEAD did; the structural match settles both, and the fourth found no program on which it and the oracle disagree, over 218 constructed probes. The other findings, in the texts, the pins and the seeds, are fixed, but for one pre-existing item outside this change; after the fourth the texts were cut back to what the pins, the seeds and the sweeps show, and the fifth, on the texts alone, found three statements about behaviour this change leaves that were incomplete or stale, now fixed. Four-check 2,144 passed with the 18 known failures (6 ignored), every `scg` stage differential and both bootstrap fixed points green. Filed D172 (a computed `bool` resume). `scg`-only, a patch by ADR 0076 D2.)
+
+> **NEXT:** the direct `Fn`-value call in `scg` (lowered as `apply`, as the oracle does; ADR 0070's D3-revisit), then, in the order agreed with the maintainer on 2026-10-05: D154's `init` statement locals exempt from the keep rule, an assignment into a framed binding as a drop site (D120's binding half), D158, D102 and D103, and D36's option A with D146; then the bump to 0.3.0 (ADR 0076 D2). D167 is the maintainer's call.
+
 ### ▶ RESUME HERE (2026-10-19 — `origin/main` is `60e4c33` (the maintainer pushed the D161 follow-up and D139), and this slice's two commits sit on top of it, unpushed; read `git reflog show refs/remotes/origin/main` and `git log --oneline origin/main..HEAD` at the START and AGAIN before writing either down. **Registers D164, D170 and D171 CLOSED** (`24890a1` fix, then this docs commit) — `scg`'s typer scoped three kinds of name apart from the resolver: a `while` body's names stayed bound after the loop (D164); a `handle`'s `return` arm, lowered at each pure-drain site, resolved its names in the scope open there, so inside a handler arm a parameter, continuation or pattern the arm binds stood for the outer name the arm reads (D170), and its own names stayed bound after it (D164); and a pattern's `_` slot was a name a lookup reached (D171). The typer now unbinds a `while` body's names after the loop; `cg_apply_return_arm` lifts the names bound since the `handle`'s body (`cg_ret_mark`, recorded after it, saved and restored around a nested `handle`) off the scope while it lowers the arm, unbinds the arm's names after it and puts the lifted names back; and a `_` slot keeps its VarId, its slot and its name in the stage dump, but its scope entry names nothing. `scg`-only, a patch by ADR 0076 D2, batched in 0.3.0. Each program the D164 entry gave now gets the oracle's IR wherever D161's fail-closed rules do not refuse the body; they still refuse its chained-shape program and any of them in an effecting body with statements. `scg` over the 525 `.sentinel` files: identical before and after; over the 10,449 routing probes of D161's slices, 69 change and none for the worse: 42 that `scg` crashed on or lowered apart from the oracle now get its IR, 16 it crashed on now reach D161's documented refusal, and of 11 the oracle rejects, 4 now get the oracle's refusal and 7 that `scg` lowered now abort on the undefined name, as it aborts on any. D161's rules that refuse an effecting body with statements that holds a `handle` with a `return` arm, or in which a `let` inside a `while` body or condition is named like another binding, stay as fail-closed guards, their comments now saying so. Outside the sweep, a statement-free effecting body whose tail is a block holding a loop whose `let` is named like a fn the tail then calls, which aborted `scg` before, now takes D160's straight-line lowering, as the same tail already did with the `let` named otherwise: where the oracle refuses such a body `scg` lowers it, where the oracle lowers it `scg`'s IR is not the oracle's, and with a `perform` among the block's statements it answers wrong, D160's dropped continuation (a note on D160). Pinned by eleven codegen seeds; removing the lift, the unbinding after the arm, the put-back, the `while` body's unbinding, the `_` slot's hiding, the mark's recording or its restore around a `handle` nested in a handler arm is caught by them. Two bounded review rounds, each lens with a construct-the-input verifier: `wf_bcfb8340-0d3` (two lenses) confirmed eleven findings and found a twelfth plausible; the eight that blocked, all in the texts and the seeds, are fixed (two seeds rewritten, an eleventh seed for the mark's restore, which the drafts had called unobservable, and claims narrowed about which of D164's programs get the oracle's IR and which bodies D161's rules refuse), and of the four that did not, one is the note on D160 and the others need no change here; `wf_fd92e0dd-6e1` (one lens, on the rewritten texts) confirmed five, all in the drafts, all fixed, among them the note on D160, which now gives its handler and the wrong answer it uncovers. The scratchpad lost its loose files, the probe files among them, in the pause between the first round and this commit; the scripts were recovered from the session transcript and the binaries rebuilt from the same sources, and the probe sweep stands on the run before the loss. Four-check 2,144 passed with the 18 known failures (6 ignored), every `scg` stage differential and both bootstrap fixed points green.)
 
 > **NEXT:** in the order agreed with the maintainer on 2026-10-05: D154's `init` statement locals exempt from the keep rule, an assignment into a framed binding as a drop site (D120's binding half), D158, D102 and D103, and D36's option A with D146; then the bump to 0.3.0 (ADR 0076 D2). D167 (refuse a guard live across a `perform`, or carry it) is the maintainer's call.
@@ -963,7 +967,9 @@ reference as you work through the milestones.
 >      (Note, 2026-10-05, registers D133 and D161: (d) is closed, as the oracle closes it:
 >      `scg` refuses that `let`, after a walk whose output the refusal replaces. (c)'s example,
 >      `do_work(); 5`, is refused too, and the flag is still reachable through a body without
->      statements: `{ { do_work(); 5 } }` emits `ret ptr 5` (D160).)
+>      statements: `{ { do_work(); 5 } }` emits `ret ptr 5` (D160).) (Note, 2026-10-19, D160:
+>      that body is refused now; the flag stays reachable through a call `scg`'s routing walk
+>      takes for bound after its binding's scope ends, in a body the oracle refuses.)
 >
 >      **D13 — an effecting METHOD has no `Kont*` ABI at all.** `dump_method` never consults
 >      `uses_kont_abi`, so a class/impl method with an effect row is emitted with the ordinary
@@ -2889,25 +2895,26 @@ reference as you work through the milestones.
 >      word of itself (D67, D69). The oracle's embedded shape refuses one its resumer reads,
 >      `scg`'s chained shape one its frames carry, and `scg`'s embedded and let shapes any
 >      (D159); that refuses some programs the text back ends ran correctly before,
->      and `scg` refuses only where its classifier picks one of those shapes (D160). The
->      oracle now lowers in order a block tail ending in the `perform` that its embedded shape
->      declines for such a parameter, as inkwell and `scg` do. An owner never dropped now keeps
->      the units counted into a class's fields — a class temporary, a class held in an enum
->      payload or in an array or `Vec` element, a class or a field holding one moved on one
->      path only (D93), an overwritten class field or class value (D120), in inkwell a class a
->      method's or an init's frame holds (D154), an effecting fn's class parameter its
->      continuation frame does not carry (D139), and in the text back ends a
->      `secret`-qualified class binding or parameter, a `secret` class in a struct's field or
->      a class in a `secret` struct (D158) — leaks that balanced before only because the
->      field held no unit; A4 lists them with measurements, and the D120, D122, D139 and D154
->      notes add them. Pinned by
+>      and `scg` refuses only where its classifier picks one of those shapes (D160). (Note,
+>      2026-10-19: since D160's closure `scg` also refuses, with the general reason, some
+>      statement-free tails its classifier does not extract.) The oracle now lowers in order a
+>      block tail ending in the `perform` that its embedded shape declines for such a parameter,
+>      as inkwell and `scg` do. An owner never dropped now keeps the units counted into a
+>      class's fields — a class temporary, a class held in an enum payload or in an array or
+>      `Vec` element, a class or a field holding one moved on one path only (D93), an
+>      overwritten class field or class value (D120), in inkwell a class a method's or an init's
+>      frame holds (D154), an effecting fn's class parameter its continuation frame does not
+>      carry (D139), and in the text back ends a `secret`-qualified class binding or parameter,
+>      a `secret` class in a struct's field or a class in a `secret` struct (D158) — leaks that
+>      balanced before only because the field held no unit; A4 lists them with measurements, and
+>      the D120, D122, D139 and D154 notes add them. Pinned by
 >      `tests/pass/c71_class_field_handles` (23 cases; eleven misbehaved before), run through
 >      inkwell, the oracle's IR and the codegen differential, by the IR tests
 >      `a4_a_class_field_store_counts_and_a_class_drop_releases` and
->      `llvm_a_class_field_store_counts_and_a_class_drop_releases`, and by the refusal tests
->      in `tests/llvm.rs` and `selfhost_codegen.rs`. It moves the IR all three back ends emit
->      and refuses programs the text back ends lowered, so it is at least a minor version (ADR
->      0076 D2).
+>      `llvm_a_class_field_store_counts_and_a_class_drop_releases`, and by the refusal tests in
+>      `tests/llvm.rs` and `selfhost_codegen.rs`. It moves the IR all three back ends emit and
+>      refuses programs the text back ends lowered, so it is at least a minor version (ADR 0076
+>      D2).
 >
 >      **D157 — a struct and a class that hold each other by value are accepted, though they
 >      have no finite layout.** Found 2026-10-04 while landing D156. The type checker's
@@ -2951,21 +2958,21 @@ reference as you work through the milestones.
 >      word-typed twin is in `tests/pass`, and the codegen differential holds there. The fix is
 >      D67's: copy only the parameters the resumer reads, then refuse only those.
 >
->      **D160 — `scg`'s effecting-fn classifier lowers some tails the oracle refuses or lowers
->      differently, and some of those answer wrong.** Found 2026-10-04 by D156's review;
->      pre-existing (the same at HEAD). `scg` looks for a tail's `perform` only through binary
->      and unary operators and call arguments, takes the first it finds, and picks its shape
->      from that, where the oracle walks the whole tail. A tail with two `perform`s — `perform
->      Io.read() + perform Io.write(1) + n - 1` with `n == 1`, handled by `Io.read(kk) =>
->      kk(41), Io.write(x, kk) => kk(x)` — is refused by the oracle and inkwell, and `scg`
->      lowers it: the program answers 82 where its source means 42, the read's resumed value
->      standing in for both. A `perform` inside an `if` arm or among a block's statements `scg`
->      emits as IR `llc` rejects (`if c == 1 { eat(k) + perform Io.read() } else { 0 }`; `{
->      perform Io.read(); k + 41 }` with `k: i64`, which the oracle and inkwell lower to 42) or
->      lowers straight-line. Lowered straight-line, a block whose statement is a `perform` calls
->      the operation and drops the continuation it returns, so the handler's own value never
->      reaches the caller: `{ perform Io.read(); one() + 41 }`, handled by `Io.read(kk) => 7`,
->      answers 7 through inkwell and the oracle's IR and 42 through `scg`'s. The codegen
+>      **D160 — DONE (2026-10-19). `scg`'s effecting-fn classifier lowered some tails the oracle
+>      refuses or lowers differently, and some of those answered wrong.** Found 2026-10-04 by
+>      D156's review; pre-existing (the same at HEAD). `scg` looks for a tail's `perform` only
+>      through binary and unary operators and call arguments, takes the first it finds, and
+>      picks its shape from that, where the oracle walks the whole tail. A tail with two
+>      `perform`s — `perform Io.read() + perform Io.write(1) + n - 1` with `n == 1`, handled by
+>      `Io.read(kk) => kk(41), Io.write(x, kk) => kk(x)` — is refused by the oracle and inkwell,
+>      and `scg` lowers it: the program answers 82 where its source means 42, the read's resumed
+>      value standing in for both. A `perform` inside an `if` arm or among a block's statements
+>      `scg` emits as IR `llc` rejects (`if c == 1 { eat(k) + perform Io.read() } else { 0 }`;
+>      `{ perform Io.read(); k + 41 }` with `k: i64`, which the oracle and inkwell lower to 42)
+>      or lowers straight-line. Lowered straight-line, a block whose statement is a `perform`
+>      calls the operation and drops the continuation it returns, so the handler's own value
+>      never reaches the caller: `{ perform Io.read(); one() + 41 }`, handled by `Io.read(kk) =>
+>      7`, answers 7 through inkwell and the oracle's IR and 42 through `scg`'s. The codegen
 >      differential is green, so no corpus program has such a tail. The fix is for `scg` to
 >      refuse what the oracle refuses and lower what it lowers, from the same walk. (Note,
 >      2026-10-05, D161: a body WITH statements is now routed by the oracle's conditions, from
@@ -2990,7 +2997,55 @@ reference as you work through the milestones.
 >      through all three, with IR other than the oracle's; and `{ while n < 0 { let t: i64 = 1;
 >      } perform Io.read(); t() + 40 }`, handled by `Io.read(kk) => 7`, answers 42 through `scg`
 >      where the oracle answers 7: the dropped continuation above, which the same block with the
->      `let` named `u` already reached.)
+>      `let` named `u` already reached.) Closed fail-closed in `e608c7e` (2026-10-19): a body
+>      without statements whose tail may suspend without producing a continuation is refused
+>      where `eff_classify` extracted a `perform` but the tail holds another, or it is not
+>      `i64`, or the fn is `main`, and where it extracted none but the tail holds a `perform` or
+>      a call to an effecting fn not through a name the routing walk takes for bound (it keeps
+>      some names bound past their scope, a pattern's, a loop body's and a `return` arm's among
+>      them); the refusal gives the oracle's general reason, after the check `scg`'s embedded
+>      shape runs first when `eff_classify` extracted the tail's one `perform`. A generic call
+>      is taken for widened there only where the oracle's typer cannot bind the callee's type
+>      parameters from the fn's return type, matched shell by shell: `gbox(5)` returned as a
+>      `?Box<i64>` is refused, as the oracle refuses it, and `gopt(5)` returned as a `?i64` is
+>      lowered, as the oracle lowers it. A body without statements that the rule does not refuse
+>      is lowered as before, byte for byte. So each tail above that answered wrong is refused,
+>      and each that got IR `llc` rejects but D69's, a `perform` beside a call to an effecting
+>      fn, which both still lower; of the D164 note's three tails, the third is refused, and the
+>      first two are lowered as before. Some tails outside the rule are still lowered apart from
+>      the oracle, among them D69's open half: an unwidened call to an effecting fn with a
+>      `perform` in its argument, which `scg` takes for its embedded shape and the oracle lowers
+>      straight-line, and the same call ending a block, which the oracle takes for its embedded
+>      shape and `scg` lowers straight-line, each to IR `llc` rejects. And some the oracle
+>      refuses are still lowered, to IR `llc` rejects, among them a call to an effecting fn in
+>      an operand through a name the walk takes for bound, as `(match E::A(5) { E::A(do_work) =>
+>      do_work, _ => 0 }) + do_work()`. The pins hold tails the oracle refuses too (two
+>      `perform`s; a call tail widened to the fn's return type, as `work(1)` returned as a
+>      `secret i64`, `gbox(5)` as a `?Box<i64>` and `gopt(5)` as a `secret ?i64`; a `bool`
+>      `perform`; a `handle` whose body calls an effecting fn; `do_work() + 1`, the fixture
+>      `tests/ui/c35_effecting_call_in_operand`; and an embedded `perform` in `main`) and tails
+>      it lowers (a `perform` among a block's statements, in an `if` arm, in an array literal or
+>      under a unary operator at the tail's top; a block whose statement calls through a `Fn`
+>      parameter before a call to an effecting fn; and a direct `perform` returned as a `secret
+>      i64`). The rule refuses other tails the oracle lowers too, among them a `perform` in a
+>      `match`, a struct field, a cast or a `return`, one ending a block under a `secret i64`
+>      return type, and one as a `handle`'s body, where `llc` rejects the oracle's IR. Over
+>      1,446 statement-free tail files (817 from a grammar of atoms under forms, 600 from the
+>      first review's wider grammar, 29 constructed; 1,435 distinct programs), the 432 `scg`
+>      lowered to the oracle's bytes stay so; 140 the oracle lowers and 540 it rejects that
+>      `scg` lowered are refused now; 99 the oracle lowers are still lowered apart from it: 44
+>      for causes this change does not touch (an unread parameter carried in the embedded frame,
+>      D67 and D159; a perform's argument lowered again in the resumer, D100; a block tail
+>      ending in a perform, which the oracle takes as embedded), 10 that hold a perform beside a
+>      call to an effecting fn, which `snc build` refuses (D69), and 45 that call a `Fn`
+>      parameter, which this change leaves; and 169 the oracle rejects `scg` still lowers: 165
+>      hold a `handle` whose body does not suspend, which the oracle refuses with its general
+>      reason, and 4 it refuses with an internal message from its embedded shape. Over the
+>      reviews' 1,453 distinct probes (1,932 files with the runners' copies), 527 of them
+>      generic calls, no program `scg` lowered to the oracle's bytes changes, and over all 3,903
+>      files the 1,196 whose `scg` output changed are refused, 12 of them refused before too and
+>      now with the oracle's reason where `scg` named a captured parameter. Pinned in
+>      `sentinel_codegen_refuses_an_effecting_body_the_oracle_refuses` and by codegen seeds.
 >
 >      **D161 — DONE (2026-10-05). `scg` routed an effecting fn's body by its statement count,
 >      where the oracle routes it by what the statements are.** Found 2026-10-04 by D156's
@@ -3282,6 +3337,19 @@ reference as you work through the milestones.
 >      its VarId, its slot and its name in the stage dump, and its scope entry names nothing.
 >      Pinned by a codegen seed.
 >
+>      **D172 — a handler arm that resumes with a computed `bool` fails in every back end, and
+>      `snc build` fails on a literal too.** Found 2026-10-19 while probing D160; pre-existing.
+>      `effect Io { flag() -> bool; } fn w() -> i64 ! { Io } { 42 } fn main() -> i64 { handle
+>      w() with { Io.flag(k) => k(true) } }` stops `snc build` with
+>      `sentinel::codegen::verify_failed` ("Call parameter type does not match function
+>      signature"): inkwell hands the `i1` to `sentinel_kont_resume`, which takes an `i64`. The
+>      oracle and `scg` print the argument under `i64`, which holds only for a literal:
+>      `k(true)` becomes `i64 1` and runs to 42, but a computed `bool` (`let c: i64 = 3; ... k(c
+>      > 2)`) becomes `i64 %v9` for an `i1` value, which `llc` rejects ("'%v9' defined with type
+>      'i1' but expected 'i64'"). Each fails closed, with no binary, but with an internal error
+>      rather than a diagnostic. Same seam as D89 and D109 (a non-`i64` value across the
+>      continuation); the fix is a `zext` of the argument in all three back ends.
+>
 >      **D78 — stale corpus fixture counts in `llvm.rs` and `README.md`, at six sites, stale
 >      before this change.** Found by D74's reviews. `crates/sentinel-driver/tests/llvm.rs`
 >      carries them three times: a comment at line 1214 saying a `tests/pass` substring filter
@@ -3547,8 +3615,10 @@ reference as you work through the milestones.
 >      chained tail reads only inside a form its frame walk does not enter (an `if`, a `match`
 >      or a `handle`, among others) it still loads from `%v-1`, which `llc` rejects (D67). A
 >      tail the oracle takes as embedded and `scg` does not, such as an `if` or a block, `scg`
->      still emits as IR `llc` rejects or lowers straight-line (D160). The rest of A1 is still
->      not applied by either.
+>      still emits as IR `llc` rejects or lowers straight-line (D160). (Note, 2026-10-19: since
+>      D160's closure `scg` refuses some of these, an `if` and a block with a `perform` among
+>      its statements among them; D160's entry gives the rule.) The rest of A1 is still not
+>      applied by either.
 >
 >      **D68 — `snc build` PANICS on user input in three effect / spawn corners; (a) is CLOSED
 >      (2026-09-12).** Found by
