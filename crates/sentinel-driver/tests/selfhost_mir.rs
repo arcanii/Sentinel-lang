@@ -433,8 +433,9 @@ fn sentinel_ctverifier_matches_oracle_on_corpus() {
 // program does have several, NAME them all — and when a slice closes only ONE of
 // them, EDIT the entry down rather than deleting it. (`quadratic.sentinel` was
 // the worked example of a two-cause entry until the ADR 0058 mirror closed both
-// of its causes at once; `fn_value_generic.sentinel` is the live one, narrowed
-// by that same slice from float+ADR-0070 down to ADR 0070 alone.)
+// of its causes at once; `fn_value_generic.sentinel` was the next, narrowed by
+// that same slice from float+ADR-0070 down to ADR 0070 alone, until the ADR 0070
+// D14 direct-call mirror closed that cause too.)
 //
 // NOTE this file hosts TWO stages (`mir` and `ctverify`), so unlike its six
 // sibling differentials the registry is a PARAMETER of the helper rather than a
@@ -458,18 +459,6 @@ fn sentinel_ctverifier_matches_oracle_on_corpus() {
 /// dispatch it has already ported: closing it is a FIX that changes nothing
 /// downstream.
 const MIR_DEFERRED_PROGRAMS: &[(&str, &str)] = &[
-    // ADR 0070 D3-revisit: a `Fn<T,R>`-typed local called DIRECTLY (`op(x)`).
-    // scg keeps ADR 0020 D5's "vars win over fns" dispatch unconditionally, so
-    // it lowers `(v2:i64 opaque v1)` — a kont resume — where the oracle lowers
-    // `(v2:i64 call apply v0 v1)`. Already registered at codegen; this test
-    // shows it is present at MIR, i.e. upstream of where it was first seen.
-    ("examples/lang/fn_value.sentinel", "ADR 0070 D3-revisit: a direct call of a Fn-typed var lowers as a kont resume in scg"),
-    ("examples/lang/fn_value.sentinel (merged)", "ADR 0070 D3-revisit: a direct call of a Fn-typed var lowers as a kont resume in scg"),
-    // NARROWED, not deleted: this entry carried both the ADR 0058 float cause
-    // (now closed — `f64` is scalar code 4 and a literal lowers to the oracle's
-    // `(vN:f64 opaque)`) and the ADR 0070 direct call, which is still live.
-    // (`task_generic.sentinel` was float-only and IS deleted.)
-    ("examples/lang/fn_value_generic.sentinel", "ADR 0070 D3-revisit: `apply_bool` uses direct-call sugar, which scg lowers as a kont resume"),
     // (ADR 0066 M2.3b / register D34) The process-channel entry that used to sit here
     // is GONE, deleted 2026-09-03 rather than re-labelled. `scg` now types and lowers
     // `process_recv` with a context-typed element, so this program is byte-identical to

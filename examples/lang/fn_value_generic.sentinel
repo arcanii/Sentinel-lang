@@ -4,8 +4,8 @@
 // 6-element word-scalar set `Channel<T>`'s M1.2b-cont uses) — no interner
 // table, so no threading through resolve_type_expr (unlike the array/secret
 // interners). `apply(f, x)` is context-typed from `f`'s own signature, exactly
-// like `process_recv` reads its element from the channel arg. snc-only (the
-// scg mirror is deferred, like `fn_value.sentinel`/`channel_generic.sentinel`).
+// like `process_recv` reads its element from the channel arg. Its types and MIR
+// stages match in scg; its codegen stage stays deferred.
 // ADR 0070 D3-revisit unified `apply(f, x)` with direct `f(x)` syntax — both
 // type-check identically, so `apply_bool` below uses direct-call sugar
 // instead of the builtin, proving the unification holds for a non-`i64`

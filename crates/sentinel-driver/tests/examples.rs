@@ -551,11 +551,8 @@ const EXAMPLES: &[(&str, i32)] = &[
     // indirectly via the `apply(f, x)` builtin. Unblocks parameterizing a
     // worker body by its operation instead of hardcoding it (the worker_pool
     // motivation). Two different fns through the same `apply_to`: square(6) +
-    // double(3) = 36 + 6 = 42. snc-only — this one IS genuinely still deferred, in all
-    // three lists (see ADR 0070 D7). ⚠ Its old "like task_generic / f64 /
-    // process_channel_typed" citation is dead: `task_generic` was deleted and
-    // `process_channel_typed` was mirrored (register D34), so `f64` is the only live
-    // companion left.
+    // double(3) = 36 + 6 = 42. Mirrored in scg at every stage since ADR 0070 D14's
+    // direct call was; no differential list defers it any more.
     ("examples/lang/fn_value.sentinel", 42),
     // ADR 0070 (generalized, M-cont): GENERIC word-scalar Fn<T,R> — not just
     // Fn<i64,i64>. Fn<u8,u8>/Fn<f64,f64>/Fn<bool,bool>, the signature id

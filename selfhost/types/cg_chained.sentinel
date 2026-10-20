@@ -159,9 +159,10 @@ fn efp_args(aa: Args) -> Args {
 // continuation (a parameter, a `let`, a pattern, a handler arm's other parameters, a `return`
 // arm's value) refuses it (5) ahead of the shapes, the straight-line route and the type-rule
 // refusal (4) (`eff_check_called` sets `cg_eff_refused`), wherever the binding's scope ends:
-// `scg` lowers such a call apart from the oracle where the name holds a `Fn` value (ADR 0070's
-// direct call is not mirrored), and lowered one apart from it where its typer bound the name where
-// the resolver did not (register D164). So does any other use, anywhere in the body, of a name
+// this walk cannot tell a `Fn` value from a continuation by the name, so it refuses a direct call
+// through a `Fn` value fail-closed (outside these rules `scg` types one as `apply`, ADR 0070 D14),
+// and `scg` lowered such a call apart from the oracle where its typer bound the name where the
+// resolver did not (register D164). So does any other use, anywhere in the body, of a name
 // bound that way, other than a parameter, that also names one of the program's fns (a read, an
 // assignment's target, a borrow's operand): outside the binding's scope the resolver takes the fn,
 // unless a parameter of that name is in scope. So does a `handle` with a `return` arm (`eff_ret`),

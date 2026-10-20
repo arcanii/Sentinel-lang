@@ -58,7 +58,8 @@ module types;
 // class's or an impl's methods and `init`. The second also refuses bodies with statements that
 // the oracle lowers: one that calls, anywhere in it, through a name the fn binds anywhere other
 // than only as a handler arm's continuation, wherever the binding's scope ends, which covers a
-// `Fn` value called directly, which `scg` does not lower as the oracle does, or that uses,
+// `Fn` value called directly, which the routing walk cannot tell from a continuation by its
+// name, or that uses,
 // anywhere in it other than as a callee (reading it, assigning to it or borrowing it), a name
 // it binds that way, other than as a parameter, that also names one of the program's fns; one
 // that holds a `handle` with a `return` arm; one in which a `let` inside a `while` body or its
@@ -68,7 +69,9 @@ module types;
 // typer kept a `while` body's `let` bound after the loop); and one whose tail calls a generic
 // effecting fn whose return type wraps its type parameter (`?T`, `[T]`), which `eff_route` takes
 // for widened. Some of these walks fail before the refusal, as they fail in any fn: in a `return`
-// arm's body some calls overflow the walk's stack, a direct call through a `Fn` value among them.
+// arm's body some calls overflow the walk's stack, a call through an `i64` variable among them (a
+// type error the oracle reports); a direct call through a `Fn` value no longer does (ADR 0070 D14),
+// but for a handler arm's operation parameter (register D174).
 
 // Record the refusal `code` with the message `msg`, unless one is recorded already.
 fn refuse(c: &mut TyCtx, code: [u8], msg: [u8]) -> i64 {

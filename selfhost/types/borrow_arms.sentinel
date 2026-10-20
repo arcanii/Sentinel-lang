@@ -1027,8 +1027,14 @@ fn dump_te_if(out: &mut Vec<u8>, cnd: Expr, thn: Expr, els: Expr, exp: i64, src:
 fn dump_te_call(out: &mut Vec<u8>, cn: [u8], ca: Args, exp: i64, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
             // (4g) a callee resolving to an in-scope VAR is a continuation-resume
             // `k(arg)` (vars shadow fns) → `(resume-kont #vid <args> :T)`, T = the
-            // resume value's type; else a free-fn call.
+            // resume value's type, unless the var holds a `Fn` value (below); else a
+            // free-fn call.
             let kid: i64 = sc_lookup(c, &cn);
+            // (ADR 0070 D14) a `Fn<T,R>` value called directly, `f(x)`, is the `apply`
+            // builtin's call `apply(f, x)`, as the oracle types it: the variable becomes
+            // the call's first argument. A call through a handler arm's operation
+            // parameter of a `Fn` type is not mirrored in codegen (register D174).
+            let fnvar: bool = if kid >= 0 { cg_is_fn(c, env_get(c, kid)) } else { false };
             if cg_arm_ph_is(c, &cn) {
                 // (ADR 0075 D6) inside an arm-remainder RESUMER, the arm's own `k(v)` IS
                 // the resumed value: it lowers as a load of `%arg0`'s slot, and the
@@ -1049,7 +1055,7 @@ fn dump_te_call(out: &mut Vec<u8>, cn: [u8], ca: Args, exp: i64, src: &[u8], c: 
                 cg_putc(c, '\n');
                 cg_reg(c, phld);
                 0
-            } else if kid >= 0 {
+            } else if kid >= 0 && !fnvar {
                 sink_name(gb, cn);
                 let kty: i64 = env_get(c, kid);
                 // (Bar B / effects) cg: collect the resume arg FIRST, then load + clear the
@@ -1112,7 +1118,13 @@ fn dump_te_call(out: &mut Vec<u8>, cn: [u8], ca: Args, exp: i64, src: &[u8], c: 
                 };
                 krt
             } else {
-                let fid: i64 = fn_lookup(c, src, &cn);
+                let fid: i64 = if fnvar { 37 } else { fn_lookup(c, src, &cn) };
+                let cargs: Args = if fnvar {
+                    let fnm: [u8] = vec_to_array(cg_copy_name(&cn));
+                    Args::Cell(Expr::Var(fnm), ca)
+                } else {
+                    ca
+                };
                 sink_name(gb, cn);
                 append_str(out, "(call #");
                 append_int(out, fid);
@@ -1170,24 +1182,24 @@ fn dump_te_call(out: &mut Vec<u8>, cn: [u8], ca: Args, exp: i64, src: &[u8], c: 
                     0
                 };
                 let rt: i64 = if is_generic_builtin(fid) {
-                    dump_gcall(out, fid, ca, exp, src, c, gb)
+                    dump_gcall(out, fid, cargs, exp, src, c, gb)
                 } else if isgenfn {
-                    dump_generic_call(out, fid, ca, exp, src, c, gb)
+                    dump_generic_call(out, fid, cargs, exp, src, c, gb)
                 } else if fid == 37 {
                     // (ADR 0070) apply: the return type depends on the concrete
                     // Fn<T,R> passed as the first arg, not a fixed per-FnId table.
-                    dump_apply_call(out, ca, src, c, gb)
+                    dump_apply_call(out, cargs, src, c, gb)
                 } else if is_container_builtin(fid) {
                     // (ADR 0071 M1.4c) shared_new/shared_get/mutex_new/lock: the
                     // ELEMENT comes from the concrete argument's own handle, so the
                     // call's type is dynamic (the `apply` shape). This is what lets
                     // a SECRET element flow through the containers.
-                    dump_container_call(out, fid, ca, src, c, gb)
+                    dump_container_call(out, fid, cargs, src, c, gb)
                 } else if fid == 21 {
                     // (ADR 0066 M1.2b-cont) channel_new() -> Channel<elem>: the
                     // element is the EXPECTED type's element (mirroring the oracle,
                     // which reads `expected_return`), else i64. No args to dump.
-                    dump_targs(out, ca, 0 - 1, 0, src, c, gb);
+                    dump_targs(out, cargs, 0 - 1, 0, src, c, gb);
                     let cn_elem: i64 = container_elem(c, exp);
                     if cn_elem == 0 - 1 {
                         mk_channel(c, 0)
@@ -1197,18 +1209,18 @@ fn dump_te_call(out: &mut Vec<u8>, cn: [u8], ca: Args, exp: i64, src: &[u8], c: 
                 } else if fid == 23 {
                     // (ADR 0066 M1.2b-cont / M1.2c) recv(ch) -> ?<elem>: the element
                     // comes from the channel arg's handle (the reader shape).
-                    dump_channel_recv(out, ca, src, c, gb)
+                    dump_channel_recv(out, cargs, src, c, gb)
                 } else if fid == 30 {
                     // (ADR 0066 M2.3b / register D34) process_recv(p) -> ?<elem>: a
                     // `Process` is anonymous and carries NO element, so unlike `recv`
                     // the element comes from the EXPECTED type — the `channel_new`
                     // (fid 21) shape, mirroring the oracle's `expected_return` read.
-                    dump_process_recv(out, ca, exp, src, c, gb)
+                    dump_process_recv(out, cargs, exp, src, c, gb)
                 } else {
                     // (ADR 0014 D3 / ADR 0051 A5) push the callee's declared param
                     // types down onto the args. `fn_param_ty` answers -1 for a builtin,
                     // so this is a no-op for everything but a user fn.
-                    dump_targs(out, ca, fid, 0, src, c, gb);
+                    dump_targs(out, cargs, fid, 0, src, c, gb);
                     fn_ret(c, fid)
                 };
                 (*c).consuming = svf;

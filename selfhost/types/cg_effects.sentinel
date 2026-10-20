@@ -818,11 +818,20 @@ fn cg_ar_caps(c: &mut TyCtx, e: Expr, kn: &[u8]) -> i64 {
             }
         },
         Expr::Call(cn, ca) => {
+            // (ADR 0070 D14) a `Fn` value called directly is read before the arguments, as
+            // the oracle's `apply` call reads it as its first argument. It never fits a frame
+            // word, so an arm whose remainder reads one gets the oracle's panicking bubble path.
+            let fvid: i64 = sc_lookup(c, &cn);
             let hit: bool = name_eq_lit(kn, cn);
             if hit {
                 let _a: Args = ca;
                 0
             } else {
+                if fvid >= 0 && cg_is_fn(c, env_get(c, fvid)) {
+                    if cg_arcaps_has(c, fvid) { 0 } else { push(&mut (*c).arcaps, fvid); 0 }
+                } else {
+                    0
+                };
                 cg_ar_caps_args(c, ca, kn)
             }
         },

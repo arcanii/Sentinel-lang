@@ -15,9 +15,9 @@
 // two representations scg's codegen must both handle identically to the oracle.
 //
 // Only `apply(op, x)` is exercised here — never bare `op(x)` (the D3-revisit
-// direct-call syntax unification is a distinct, still-unmirrored feature;
-// scg's `dump_te_call` has the same unconditional "vars win over fns"
-// dispatch the Rust resolver does, untouched by this fixture).
+// direct-call syntax unification was a distinct feature, mirrored later in
+// scg's `dump_te_call`, which types it as this `apply` call; the codegen
+// seeds pin it).
 //
 // square(6) = 36 twice; 36 - 36 + 42 = 42.
 

@@ -244,8 +244,9 @@ fn sentinel_effect_checker_matches_oracle_on_corpus() {
 // program does have several, NAME them all — and when a slice closes only ONE of
 // them, EDIT the entry down rather than deleting it. (`quadratic.sentinel` was
 // the worked example of a two-cause entry until the ADR 0058 mirror closed both
-// of its causes at once; `fn_value_generic.sentinel` is the live one, narrowed
-// by that same slice from float+ADR-0070 down to ADR 0070 alone.)
+// of its causes at once; `fn_value_generic.sentinel` was the next, narrowed by
+// that same slice from float+ADR-0070 down to ADR 0070 alone, until the ADR 0070
+// D14 direct-call mirror closed that cause too.)
 
 /// Programs whose divergence is a KNOWN, deliberately-deferred feature gap,
 /// each with the ADR that defers it. A listed program is still COMPARED — the
@@ -267,8 +268,8 @@ fn sentinel_effect_checker_matches_oracle_on_corpus() {
 ///
 /// EMPTY, and that is a RESULT, not an oversight: this stage reproduces the
 /// oracle on every real program the oracle emits for, in both forms. The
-/// float-literal and `Fn`-direct-call gaps that show up at parse/types/mir do
-/// not reach this dump. An entry appearing here later is a genuine regression
+/// float-literal and `Fn`-direct-call gaps that showed up at parse/types/mir
+/// did not reach this dump. An entry appearing here later is a genuine regression
 /// or a genuinely new gap.
 ///
 /// CALIBRATION, so an empty list is not over-read: this dump is one

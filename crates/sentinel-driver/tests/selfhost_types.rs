@@ -388,8 +388,9 @@ fn sentinel_typer_matches_oracle_on_corpus() {
 // program does have several, NAME them all — and when a slice closes only ONE of
 // them, EDIT the entry down rather than deleting it. (`quadratic.sentinel` was
 // the worked example of a two-cause entry until the ADR 0058 mirror closed both
-// of its causes at once; `fn_value_generic.sentinel` is the live one, narrowed
-// by that same slice from float+ADR-0070 down to ADR 0070 alone.)
+// of its causes at once; `fn_value_generic.sentinel` was the next, narrowed by
+// that same slice from float+ADR-0070 down to ADR 0070 alone, until the ADR 0070
+// D14 direct-call mirror closed that cause too.)
 
 /// Programs whose divergence is a KNOWN, deliberately-deferred feature gap,
 /// each with the ADR that defers it. A listed program is still COMPARED — the
@@ -409,21 +410,6 @@ fn sentinel_typer_matches_oracle_on_corpus() {
 /// is a HOLE in dispatch it has already ported: closing it is a FIX that
 /// changes nothing downstream.
 const DEFERRED_PROGRAMS: &[(&str, &str)] = &[
-    // ADR 0070 D3-revisit: a `Fn<T,R>`-typed local called DIRECTLY (`op(x)`).
-    // scg's dispatch keeps ADR 0020 D5's "vars win over fns" unconditionally,
-    // so it types the call as a kont RESUME (`(resume-kont #4 …)`) where the
-    // oracle types the `apply` builtin (`(call #37 …)`). Already registered at
-    // codegen (selfhost_codegen.rs); this test shows the divergence is present
-    // three stages EARLIER, which is where a fix has to land.
-    ("examples/lang/fn_value.sentinel", "ADR 0070 D3-revisit: a direct call of a Fn-typed var types as a kont resume in scg"),
-    ("examples/lang/fn_value.sentinel (merged)", "ADR 0070 D3-revisit: a direct call of a Fn-typed var types as a kont resume in scg"),
-    // This entry USED to carry two causes; the ADR 0058 half is closed (`f64` is
-    // now scalar code 4 and the literal renders through `parser::append_float`),
-    // so it is NARROWED rather than deleted — the ADR 0070 direct-call cause is
-    // still live, and the remaining diff is exactly one line, `apply_bool`'s
-    // `(resume-kont …)` where the oracle has `(call #37 …)`. (Its sibling
-    // `task_generic.sentinel` was float-only and IS deleted.)
-    ("examples/lang/fn_value_generic.sentinel", "ADR 0070 D3-revisit: `apply_bool` uses direct-call sugar, which scg types as a kont resume"),
     // (ADR 0066 M2.3b / register D34) The process-channel entry that used to sit here
     // is GONE, deleted 2026-09-03 rather than re-labelled. `scg` now types and lowers
     // `process_recv` with a context-typed element, so this program is byte-identical to

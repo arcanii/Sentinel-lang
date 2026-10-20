@@ -409,6 +409,16 @@ const SEEDS: &[&str] = &[
     // under `?T`, `[T]`, `Vec<T>`, `&T`, a generic struct of it, or two of these, and the oracle
     // lowers the body.
     "effect Io { read() -> i64; }\nstruct Box<T> { v: T }\nstruct Pair<A, B> { a: A, b: B }\nfn gopt<T>(x: T) -> ?T ! { Io } { gopt(x) }\nfn garr<T>(x: T) -> [T] ! { Io } { garr(x) }\nfn gvec<T>(x: T) -> Vec<T> ! { Io } { gvec(x) }\nfn gbox<T>(x: T) -> Box<T> ! { Io } { gbox(x) }\nfn gobox<T>(x: T) -> ?Box<T> ! { Io } { gobox(x) }\nfn gr<T>(x: &T) -> &T ! { Io } { x }\nfn gid<T>(x: T) -> T ! { Io } { gid(x) }\nfn gp<A, B>(x: A, y: B) -> Pair<B, A> ! { Io } { gp(x, y) }\nfn w1() -> ?i64 ! { Io } { gopt(5) }\nfn w2() -> [i64] ! { Io } { garr(5) }\nfn w3() -> Vec<i64> ! { Io } { gvec(5) }\nfn w4() -> Box<i64> ! { Io } { gbox(5) }\nfn w5() -> ?Box<i64> ! { Io } { gobox(5) }\nfn w6(r: &i64) -> &i64 ! { Io } { gr(r) }\nfn w7() -> Box<secret i64> ! { Io } { gbox(5) }\nfn w8() -> ?i64 ! { Io } { gid(5) }\nfn w9() -> Pair<i64, bool> ! { Io } { gp(true, 5) }\nfn main() -> i64 { 42 }\n",
+    // ADR 0070 D14: a `Fn<T,R>` value called directly, `f(x)`, is `apply(f, x)`: in plain fns and
+    // `main` (nested, in a loop, an `if`, an array literal); in a handler arm before its resume, as
+    // the resume's argument, and around and after it, where the arm's remainder reads the value,
+    // which does not fit a frame word, so the arm's bubble path panics, as the oracle's does; as an
+    // effecting fn's tail, directly or in an `if`; and in a `return` arm, where `scg` overflowed its
+    // stack before.
+    "fn inc(x: i64) -> i64 { x + 1 }\nfn dbl(x: i64) -> i64 { x * 2 }\nfn twice(f: Fn<i64, i64>, x: i64) -> i64 { f(f(x)) }\nfn pick(f: Fn<i64, i64>, g: Fn<i64, i64>, c: bool) -> i64 { if c { f(3) } else { g(3) } }\nfn sum(f: Fn<i64, i64>, n: i64) -> i64 { let mut i: i64 = 0; let mut s: i64 = 0; while i < n { s = s + f(i); i = i + 1; } s }\nfn main() -> i64 { let f: Fn<i64, i64> = inc; let g = dbl; let a: [i64] = [f(1), g(2)]; f(g(f(2))) + twice(inc, 1) + pick(dbl, inc, false) + sum(inc, 3) + a[0] + a[1] + 16 }\n",
+    "effect Ask { q(x: i64) -> i64; }\nfn ask1() -> i64 ! { Ask } { perform Ask.q(7) }\nfn inc(x: i64) -> i64 { x + 1 }\nfn after(f: Fn<i64, i64>, y: i64) -> i64 { handle ask1() with { Ask.q(x, k) => { let r: i64 = k(x); f(r + y) - y } } }\nfn around(f: Fn<i64, i64>) -> i64 { handle ask1() with { Ask.q(x, k) => f(k(x)) } }\nfn before(f: Fn<i64, i64>) -> i64 { handle ask1() with { Ask.q(x, k) => k(f(x)), return v => v + 1 } }\nfn main() -> i64 { let g: Fn<i64, i64> = inc; let m: i64 = handle ask1() with { Ask.q(x, k) => { let r: i64 = k(x); g(r) } }; after(inc, 5) + around(inc) + before(inc) + m + 9 }\n",
+    "effect Io { read() -> i64; write(x: i64) -> i64; }\nfn inc(x: i64) -> i64 { x + 1 }\nfn w(n: i64, f: Fn<i64, i64>) -> i64 ! { Io } { f(n) }\nfn v(n: i64, f: Fn<i64, i64>) -> i64 ! { Io } { if n > 0 { f(n) } else { 0 } }\nfn main() -> i64 { handle w(20, inc) with { Io.read(k) => k(7), Io.write(x, k) => k(x + 2) } + handle v(20, inc) with { Io.read(k) => k(7), Io.write(x, k) => k(x + 2) } }\n",
+    "effect Ask { q(x: i64) -> i64; }\nfn ask1() -> i64 ! { Ask } { perform Ask.q(7) }\nfn inc(x: i64) -> i64 { x + 1 }\nfn run(f: Fn<i64, i64>) -> i64 { handle ask1() with { Ask.q(x, k) => k(x), return v => f(f(v)) } }\nfn main() -> i64 { let g: Fn<i64, i64> = inc; let m: i64 = handle ask1() with { Ask.q(x, k) => k(x), return v => g(v) + 1 }; run(inc) + m + 24 }\n",
 ];
 
 #[test]
@@ -604,8 +614,9 @@ fn sentinel_codegen_refuses_a_non_word_param_a_continuation_would_capture() {
 /// continuation, or uses such a name otherwise, other than a parameter, that also names a fn, is
 /// refused where the oracle lowers it,
 /// wherever the binding's scope ends: pinned with a `Fn` value called directly (a parameter, bound
-/// in a block, or a handler arm's operation parameter), which `scg` does not lower as the oracle
-/// does (ADR 0070's direct-call syntax is not mirrored); with a name bound in a `while` body and
+/// in a block, or a handler arm's operation parameter), which the routing walk cannot tell from a
+/// continuation by its name, so the rule refuses it, fail-closed (ADR 0070 D14, register D174);
+/// with a name bound in a `while` body and
 /// called, or read as a `Fn` value, after it, which `scg`'s typer bound apart from the resolver
 /// until register D164 was fixed; with a chained `let`'s own or a later `let`'s name called in its
 /// value; with such calls inside an argument of an effecting call or of a `perform`; and with calls
@@ -970,9 +981,8 @@ fn sentinel_codegen_refuses_an_effecting_body_the_oracle_refuses() {
 
     // Bodies the oracle lowers that call through a name the fn binds other than as a handler arm's
     // continuation, which `scg` refuses wherever the binding's scope ends (`eff_check_called`): a
-    // direct call through a `Fn` value, which `scg` does not lower as the oracle does (ADR 0070's
-    // direct-call syntax is not mirrored), here a parameter, which the walk also counts as a call
-    // that may suspend (`eff_kind`).
+    // direct call through a `Fn` value, here a parameter, which the routing walk cannot tell from a
+    // continuation by its name and counts as a call that may suspend (`eff_kind`).
     let direct = format!(
         "{io}fn inc(x: i64) -> i64 {{ x + 1 }}\nfn w2(f: Fn<i64, i64>) -> i64 ! {{ Io }} {{ let a: i64 = f(1); perform Io.write(a + 38) }}\nfn w() -> i64 ! {{ Io }} {{ w2(inc) }}\n{main}"
     );
@@ -1747,12 +1757,6 @@ fn sentinel_codegen_self_merges_the_compiler_and_reaches_fixed_point() {
 /// hand-maintained `snc llvm` text ORACLE and `scg` — it constrains the
 /// self-host story, not the shipped compiler.
 const DEFERRED_PROGRAMS: &[(&str, &str)] = &[
-    // ADR 0070 D3-revisit: a `Fn<T,R>`-typed local called DIRECTLY (`op(5)`).
-    // scg's `dump_te_call` keeps ADR 0020 D5's "vars win over fns" dispatch
-    // unconditionally, so it lowers the call as a kont RESUME rather than an
-    // indirect call — the most severe entry here: wrong code, not a missing
-    // feature.
-    ("examples/lang/fn_value.sentinel", "ADR 0070 D3-revisit: direct call of a Fn-typed var is unmirrored in scg (lowers as a kont resume)"),
     ("examples/lang/fn_value_generic.sentinel", "ADR 0070 M-cont: generic Fn<T,R> instantiations are snc-only"),
     // (ADR 0069 / ADR 0066 M2.4a-c, register D51 — the THREE `sealed_*` entries that
     // used to sit here are GONE, deleted rather than re-labelled. They were all one

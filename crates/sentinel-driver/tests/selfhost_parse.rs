@@ -500,8 +500,9 @@ fn sentinel_parser_matches_oracle_on_corpus() {
 // program does have several, NAME them all — and when a slice closes only ONE of
 // them, EDIT the entry down rather than deleting it. (`quadratic.sentinel` was
 // the worked example of a two-cause entry until the ADR 0058 mirror closed both
-// of its causes at once; `fn_value_generic.sentinel` is the live one, narrowed
-// by that same slice from float+ADR-0070 down to ADR 0070 alone.)
+// of its causes at once; `fn_value_generic.sentinel` was the next, narrowed by
+// that same slice from float+ADR-0070 down to ADR 0070 alone, until the ADR 0070
+// D14 direct-call mirror closed that cause too.)
 
 /// Programs whose divergence is a KNOWN, deliberately-deferred feature gap,
 /// each with the ADR that defers it. A listed program is still COMPARED — the
