@@ -159,6 +159,8 @@ Every `handle` arm's IR changes — on each exit a load, a `null` test and a gua
 oracle-moving one. (`scg`'s known mis-lowering of a direct call on a `Fn`-typed local, ADR
 0070's deferred D3-revisit and the `fn_value` entry in `DEFERRED_PROGRAMS`, goes through the
 same resume path, so it now clears that local's slot too; the entry's reason still holds.)
+(Note, 2026-10-20: `scg` now types a direct call through a `Fn`-typed local as `apply`, ADR
+0070 D14, and the entry is deleted.)
 
 ### D6. What this does not cover.
 

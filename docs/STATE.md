@@ -5,7 +5,7 @@ HANDOVER.md, STATE.md is the source of truth. New contributors (or
 new chat sessions) should be able to read this file and understand
 the current state of the workspace without re-reading every commit.
 
-## Current State (2026-10-19)
+## Current State (2026-10-20)
 
 > **Phase C closed at the bootstrap milestone (2026-05-30); Phase D self-hosts; the
 > per-unit separate-compilation back end is functionally complete.**
@@ -14,7 +14,25 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
-**Latest (2026-10-19, second slice) — `scg` refuses a statement-free effecting tail it lowered apart
+**Latest (2026-10-20) — `scg` types a direct call through a `Fn` value as `apply`, as the oracle
+does (ADR 0070 D14).**
+`scg`'s typer took a call through any variable in scope for a continuation resume, so `f(x)` on a
+`Fn<T,R>` variable was typed and lowered as a resume, where the oracle types it as `apply(f, x)` and
+lowers an indirect call. Now `dump_te_call` sends a call through a variable of a `Fn` type down the
+`apply` path, and the walk that collects what a handler arm's remainder reads collects such a
+variable, as the oracle's does; a direct call in a `return` arm, on which `scg` overflowed its
+stack, now gets the oracle's bytes, but for a handler arm's operation parameter.
+`examples/lang/fn_value.sentinel` is byte-identical to the oracle at the types, MIR and codegen
+stages, and `fn_value_generic.sentinel` at types and MIR; seven deferral entries are deleted
+(`fn_value_generic` stays on the codegen list). Limits: `scg`'s IR for a call through a handler
+arm's operation parameter of a `Fn` type still differs from the oracle's, and it fails on one in a
+`return` arm of a `handle` nested in that arm (register D174); and the routing rules still refuse,
+fail-closed, a direct call in an effecting body with statements (D161's) and in a statement-free
+tail whose block's statement calls a `Fn` value before a `perform` or a call to an effecting fn
+(D160's), since their walk cannot tell a `Fn` value from a continuation by its name. Filed D173,
+D174 and D175. `scg`-only, a patch by ADR 0076 D2.
+
+**Previously (2026-10-19, second slice) — `scg` refuses a statement-free effecting tail it lowered apart
 from the oracle (register D160).**
 `scg` picked a statement-free effecting body's shape from a `perform` it looked for only through
 binary operators and call arguments (and unary operators below the tail's top), and took the first,

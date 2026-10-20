@@ -505,3 +505,14 @@ differential stages byte-identical, both bootstrap fixed points hold.
   construction.
 - Full capturing closures (ADR 0024 D10) remain a distinct, larger future
   ADR — unaffected by this amendment.
+
+## Note (2026-10-20) — the `scg` mirror of D14
+
+`scg` now types `f(x)` on a `Fn`-typed variable as `apply(f, x)` (`dump_te_call`), so its stage dumps
+and its IR take the oracle's shape, and the walk that collects what a handler arm's remainder reads
+takes such a variable as the oracle's walk takes `apply`'s first argument (`cg_ar_caps`).
+`examples/lang/fn_value.sentinel` left the types, MIR and codegen differentials' deferral lists, and
+`fn_value_generic.sentinel` the types and MIR ones (`ca4b677`). Limits: `scg`'s IR for a call through
+a handler arm's operation parameter of a `Fn` type still differs from the oracle's (register D174);
+and registers D160's and D161's routing rules still refuse some direct calls in effecting fns,
+fail-closed.
