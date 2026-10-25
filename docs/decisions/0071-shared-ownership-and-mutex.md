@@ -9,8 +9,10 @@ implementation log + the D6/D4 amendment. `Channel<secret T>` (M1.4c-2) remains 
 amended by A1 (2026-09-25): a duplication out of a place into a new owner is counted, with the
 exceptions A1 lists; and by A2 (2026-10-03): inkwell's method and init parameter frames are
 dropped but release no handle; and by A4 (2026-10-04): a store into a class field
-is counted, and a class's drop releases the handles its fields hold. D4 is amended by A3
-(2026-10-04): a guard owns a refcount unit of its mutex.** Design
+is counted, and a class's drop releases the handles its fields hold; and by A5 (2026-10-25):
+an init's statements have a frame of their own in inkwell, so the handles their locals hold
+are released. D4 is amended by A3 (2026-10-04): a guard owns a refcount unit of its mutex.**
+Design
 PINNED with maintainer sign-off 2026-07-02. This is the M1.4 sub-phase of the ADR 0066 threading roadmap, broken out into
 its own ADR per **ADR 0066 D5** ("blocked on first designing a runtime-refcounted
 `Shared<T>` handle … a language feature in its own right, arguably bigger than the mutex
@@ -189,7 +191,9 @@ out of a place, not only out of a named binding, and into more kinds of new owne
 what it leaves out. **And by A2 (2026-10-03), below:** inkwell drops a method's and an init's
 parameters but releases no handle among them. **And by A4 (2026-10-04), below:** a
 store into a class field is counted, and a class's drop releases the handles its fields hold,
-the class-field half of the paragraph above that no back end had built.
+the class-field half of the paragraph above that no back end had built. **And by A5
+(2026-10-25), below:** an init's statements have a frame of their own in inkwell, so the
+handles their locals hold are released, while the parameters' stay kept.
 
 ### D3. Deterministic drop reuses the existing scope-exit machinery; a hard-coded drop-content arm, not a `Drop` trait. **PINNED.**
 
@@ -927,6 +931,10 @@ parameter, for a method with a `Shared` / `Mutex` parameter (bound directly or i
 parameter's field) that leaves through `return`, and for an `init` with a heap parameter or
 local, so it is at least a minor version (ADR 0076 D2).
 
+(Note, 2026-10-25: A5 gives an `init`'s statements a frame of their own, so of the units
+listed above an `init`'s own `Shared` / `Mutex` local, and a handle in a field of such a
+struct local, are released at its exit. The rest of D154 stays.)
+
 ## D4 amendment A3 (2026-10-04) — a guard owns a refcount unit of its mutex (register D155)
 
 Slice 3b gave a guard the mutex cell handle without a refcount unit of its own, on the ground
@@ -1050,7 +1058,8 @@ all three back ends unless noted:
   in all three back ends and now at 8.3–8.4.
 - in inkwell, a class passed by value to a method or an init that does not move it on, or
   bound by an init's top-level statements, which A2 lowers into the parameter frame; that
-  frame keeps its handles (A2, register D154).
+  frame keeps its handles (A2, register D154). A5 (2026-10-25) closes the second: an
+  init's statements have a frame of their own, which releases a class they bind.
 - an effecting fn's class parameter that its continuation frame does not carry — unread, or
   read only by a `perform`'s argument or the first `let`'s value, which the fn evaluates
   before it suspends — in the embedded, let and chained shapes of inkwell and the oracle, and
@@ -1115,3 +1124,59 @@ program that stores a handle into a class field or drops a class holding one, th
 ends refuse programs they lowered, and the oracle lowers in order a block tail ending in the
 `perform` that its embedded shape declines for a non-word parameter, so it is at least a minor
 version (ADR 0076 D2).
+
+## D2 amendment A5 (2026-10-25) — an init's statements have a frame of their own (register D154, its init half)
+
+A2 drops inkwell's method and init parameter frames on every exit but releases no handle in
+them, because inkwell passes such a call's handle arguments without a clone (A1). A method's
+body has a frame of its own from `lower_block`; an `init`'s statements did not: they were
+lowered into the parameter frame, so a handle one of their locals held was kept like an
+argument's. A `Shared` / `Mutex` local, a handle in a field of a struct local at any depth,
+and a class local (whose fields A4 counts) leaked one unit per `init`, although nothing but
+that local owned it. A `let` in a nested block was not affected: the block had its own frame.
+
+inkwell now gives an `init`'s statements a frame of their own, as a method's body has, and
+drops it before the parameter frame, so a handle a top-level `let` binds is released as a
+free fn's local is, and the parameters' handles stay kept. Drop order is unchanged: the
+statements' locals in reverse, then the parameters in reverse. ADR 0077 D6's drop of an
+overwritten flagged local now releases the old value's handles too, as the frame that
+declares it would. Nothing else moves: no `init` local is arena-routed (`compute_arena_routed`
+walks free fns only), and the moved-flag machinery is per binding, not per frame. The oracle
+and `scg` already released an `init`'s locals (and, under their own protocol, clone the
+argument and release the parameter), so their IR does not move; inkwell's now matches theirs
+on these locals.
+
+Releasing such a local is sound because every way a local comes to hold a handle is a counted
+unit, the same invariant a free fn's locals rely on: a read of a parameter or a parameter's
+field is cloned (A1), a struct or class value moved in from a by-value parameter brings the
+units the caller counted, and an rvalue hands on its own. About 280 probe runs over five
+routes — an rvalue or a parameter-derived local, struct and class locals, moves (on all paths
+and on one), reassignment and guards, and locals around control flow — and about 90 more from
+two reviews of the change: correctness probes, 2,000,000-iteration peak-RSS runs, controls,
+and programs `snc build` refuses. The correctness probes loop with fresh cells allocated so a
+freed one is reused, then read the caller's cell; of the programs `snc build` accepts, none
+releases a unit too many, through inkwell before or after the change or through the oracle. Over 2,000,000 `init` calls binding a
+`Shared` local, peak resident set size on macOS fell from 66.2 MB to 1.9 MB; nine route
+probes fell from 34.1–194.7 MB to 1.9–2.2 MB, the oracle's figures. What stays held is the
+rest of D154: a unit that reaches the parameter frame with no other owner — a counted
+temporary passed directly, and a handle a struct argument brought in, or a class passed by
+value, that the method or `init` only reads.
+
+Pinned by the inkwell IR test `d154_an_init_releases_the_handles_its_statements_bind` (an
+`init` whose locals hold five `Shared` and two `Mutex` — a direct local, a struct's fields, a
+class local and a nested block's — where its parameters hold two and one, so the counts tell
+the change from the old frame, from releasing the parameters too and from keeping a class
+local; and an overwritten flagged local, released at the assignment and at the exit), which
+catches each of five mutations of the change, and by `tests/pass/c71_init_local_handles`
+(eight routes deriving an `init` local from an argument passed without a clone, 2,000 times
+each with cells reused; it answered 42 before the change too, so it holds the new release to
+what was counted, and a build that also releases the parameters aborts on it). The D153 IR
+test's `init` now binds only arrays. A sweep of the other 234 `tests/pass` programs and the 68
+example programs with a `main` (merge and `--separate`; the seven socket examples built but not
+run) through inkwell before and after changed no build result, exit code or output, and no
+object but `c71_class_field_handles`'s,
+whose `L::init` gains the release of its local `h` (stored into a field, which A4 counts);
+`snc llvm` output is byte-identical for the 231 it emits, and it refuses the other three
+identically. It changes what `snc build` emits for an
+`init` whose top-level statements bind a handle, so it is at least a minor version (ADR 0076
+D2).

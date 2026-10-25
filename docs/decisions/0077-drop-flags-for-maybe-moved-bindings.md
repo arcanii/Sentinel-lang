@@ -259,9 +259,10 @@ for `return`. No secret value is stored into a flag.
 ### D10. What this does not cover.
 
 - The handles a method's or an init's parameter frame holds in inkwell. Since ADR 0071 A2
-  (register D153) inkwell drains those frames on every exit, an init's statement locals
-  included, and a binding moved on one path there is flagged like any other, but the frame
-  releases no handle (register D154).
+  (register D153) inkwell drains those frames on every exit, and a binding moved on one path
+  there is flagged like any other, but the frame releases no handle (register D154). An init's
+  statement locals were lowered into that frame too until ADR 0071 A5 (2026-10-25) gave them a
+  frame of their own, which releases their handles, D6's drop of an overwritten one included.
 - The effecting-fn shape frames, which no back end drained (register D139): amendment A1 below
   covers them.
 - `match` payload bindings, which are never framed; ADR 0032 defers the payload model.

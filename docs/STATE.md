@@ -5,7 +5,7 @@ HANDOVER.md, STATE.md is the source of truth. New contributors (or
 new chat sessions) should be able to read this file and understand
 the current state of the workspace without re-reading every commit.
 
-## Current State (2026-10-20)
+## Current State (2026-10-25)
 
 > **Phase C closed at the bootstrap milestone (2026-05-30); Phase D self-hosts; the
 > per-unit separate-compilation back end is functionally complete.**
@@ -14,7 +14,34 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
-**Latest (2026-10-20) — `scg` types a direct call through a `Fn` value as `apply`, as the oracle
+**Latest (2026-10-25) — inkwell gives an `init`'s statements a frame of their own, so the handles
+their locals hold are released (register D154, its `init` half; [ADR
+0071](decisions/0071-shared-ownership-and-mutex.md) D2 amendment A5).**
+inkwell drops a method's and an `init`'s parameter frame on every exit but releases no handle in
+it, because it passes such a call's handle arguments without a clone (A1, A2). A method's body
+has a frame of its own; an `init`'s statements did not, so a `Shared` / `Mutex` a top-level `let`
+bound, a handle in a field of such a struct local and a class such a `let` bound were kept like an
+argument: each such local leaked its unit at every `init`. They now get a frame of their own,
+dropped before the
+parameter frame, which releases what a free fn's locals would; the parameters stay kept, drop
+order is unchanged, and an overwritten flagged local's old value (ADR 0077 D6) now releases its
+handles too. The oracle and `scg` already released these locals, so their IR does not move. Over
+2,000,000 `init` calls binding a `Shared` local, peak resident set size on macOS falls from 66.2 MB
+to 1.9 MB; about 370 construct-and-run probes found no release too many. Pinned by the inkwell IR
+test `d154_an_init_releases_the_handles_its_statements_bind` (five mutations of the change, each
+caught) and `tests/pass/c71_init_local_handles` (eight routes from an argument passed without a
+clone; it answered 42 before too, and a build that also releases the parameters aborts on it).
+Through inkwell, only `c71_class_field_handles`'s object changes among the other 234 `tests/pass`
+programs and 68 examples, by one release in `L::init`, and no exit code or output changes; `snc
+llvm`'s output is byte-identical for the 231 it emits (it refuses the other three identically). Still open in D154: a counted temporary passed
+directly, and a handle a struct argument brought in, or a class passed by value, that the callee
+only reads. It changes what
+`snc build` emits for such an `init`, so it is at least a minor version (ADR 0076 D2); the bump to
+0.3.0 comes at the end of the agreed queue. Four-check on macOS: 2,165 passed, none failing,
+doctests and clippy clean, every `selfhost_*` differential green including both bootstrap fixed
+points.
+
+**Previously (2026-10-20) — `scg` types a direct call through a `Fn` value as `apply`, as the oracle
 does (ADR 0070 D14).**
 `scg`'s typer took a call through any variable in scope for a continuation resume, so `f(x)` on a
 `Fn<T,R>` variable was typed and lowered as a resume, where the oracle types it as `apply(f, x)` and
