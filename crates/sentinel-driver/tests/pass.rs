@@ -2540,6 +2540,18 @@ fn pass_c71_class_field_handles() {
 }
 
 #[test]
+fn pass_c71_init_local_handles() {
+    // Register D154, its init half: an init's statements have a frame of their own, which
+    // releases the handles their locals hold, where the parameter frame they shared kept
+    // them (a leak, which the IR test `d154_an_init_releases_the_handles_its_statements_bind`
+    // pins). inkwell passes an init its handle arguments without a clone, so a local holding
+    // a parameter's handle must hold a unit of its own, or releasing it frees the caller's
+    // cell. This passed before the fix too: it holds the release to no more than was counted.
+    // Eight cases, 1 each; 42 = all held.
+    assert_eq!(run_exit("c71_init_local_handles.sentinel"), 42);
+}
+
+#[test]
 fn pass_c71_guard_outlives_its_owner() {
     // Register D155: a successful `lock` takes a refcount unit for the guard, which its
     // unlock gives back, so moving away the struct that owns the `Mutex` while the guard

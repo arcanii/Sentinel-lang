@@ -13,7 +13,8 @@
 // `free_fn_store`, `free_fn_struct_store`, `method_local` and `init_block_local` read a
 // reused cell in all three back ends; `init_local`, `init_param`, `init_struct_param`,
 // `method_struct_param` and `method_return` in the oracle's and `scg`'s output (inkwell's
-// method and init frames keep their handles, A2); `mutex_method_local` and
+// method and init frames kept their handles then, A2, an init's statements' locals'
+// included until register D154 gave them a frame of their own); `mutex_method_local` and
 // `mutex_free_fn_store` corrupted the heap in all three. `overwrite_keeps_old` pins that an
 // overwritten field's old unit stays held: inkwell lends a method its handle argument
 // without a clone, so releasing the old value there would free the cell the argument

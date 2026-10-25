@@ -1802,8 +1802,9 @@ struct HandleContext<'ctx> {
 /// but release no handle, bound there directly or held in a field of a struct bound there.
 /// The caller passes a handle argument without a clone (ADR 0071 A1), and this frame
 /// releases none of the units that reach it: a leak where nothing else owns one (register
-/// D154), and never a release too many. An `init`'s statements are lowered into this frame
-/// too, so the handles of the locals those statements bind are kept the same way.
+/// D154), and never a release too many. Only the parameters live here: a method's body gets
+/// a frame from `lower_block`, and an `init`'s statements a frame of their own (register
+/// D154), so a handle the body binds is released as a free fn's local is.
 #[derive(Default, Clone)]
 struct ScopeFrame<'ctx> {
     vars: Vec<VarId>,
@@ -3889,6 +3890,11 @@ impl<'ctx, 'plan, 'm> CodegenCtx<'ctx, 'plan, 'm> {
                     .push(param.id);
             }
 
+            // Register D154: the statements get a frame of their own, as a method's body
+            // does in `lower_block`, so a handle a top-level `let` binds is released at the
+            // init's exit (a nested block's always had its own); only the parameters'
+            // handles are kept (D153).
+            self.scope_stack.push(ScopeFrame::default());
             // Lower stmts only — init bodies use a trailing
             // placeholder `0` per the C4.1 (1/N) workaround
             // (block.tail Option arrives later). We DON'T lower
@@ -3898,7 +3904,9 @@ impl<'ctx, 'plan, 'm> CodegenCtx<'ctx, 'plan, 'm> {
             }
             let tail = &init_def.body.tail.span;
             self.flags_mut().uncounted = Some((tail.start, tail.end));
-            // Register D153: drop the parameters and the statements' locals.
+            // Register D154: drop the statements' locals, then (D153) the parameters.
+            self.emit_scope_drops(None, program)?;
+            self.scope_stack.pop();
             self.emit_scope_drops(None, program)?;
             self.scope_stack.pop();
             self.builder
@@ -14071,11 +14079,13 @@ fn main() -> i64 {
     // ===== Register D153: a method's or an init's parameter frame is dropped, but not its handles =====
     //
     // inkwell lowers a class method's, an impl method's and a class init's parameters into
-    // a frame of their own, and an init's statements into it too. It drops that frame on
-    // every exit, as a free fn's, `return` included, but releases no handle there: not a
-    // `Shared` / `Mutex` binding, which the caller passes without a clone, and not one held
-    // in a field of a struct bound there, at any depth (its unit stays held, register
-    // D154). The frees and releases are memory, not an exit code, so this reads the IR.
+    // a frame of their own. It drops that frame on every exit, as a free fn's, `return`
+    // included, but releases no handle there: not a `Shared` / `Mutex` binding, which the
+    // caller passes without a clone, and not one held in a field of a struct bound there,
+    // at any depth (its unit stays held, register D154). An init's statements have a frame
+    // of their own, which releases its locals' handles (register D154,
+    // `d154_an_init_releases_the_handles_its_statements_bind`), so the init here binds only
+    // arrays. The frees and releases are memory, not an exit code, so this reads the IR.
 
     const D153_FRAMES: &str = r#"
 struct HS { s: Shared<i64>, m: Mutex<i64>, a: [i64] }
@@ -14084,9 +14094,8 @@ class K {
     let n: i64;
     pub init(a: [i64], s: Shared<i64>, hn: HN) {
         let t: [i64] = [a[0], 2];
-        let h: Shared<i64> = shared_new(1);
-        let hs: HS = HS { s: shared_new(3), m: mutex_new(3), a: [4] };
-        self.n = t[0] + shared_get(s) + shared_get(h) + hs.a[0] + hn.n;
+        let u: [i64] = [4];
+        self.n = t[0] + shared_get(s) + u[0] + hn.n;
         0
     }
     pub fn eat(self: &Self, a: [i64], s: Shared<i64>, mx: Mutex<i64>) -> i64 { a[0] + shared_get(s) }
@@ -14118,7 +14127,7 @@ fn main() -> i64 {
     fn d153_a_method_drops_its_parameters_but_not_a_handle() {
         let ir = compile_src_ir_with_moves(D153_FRAMES);
         // (fn, frees of its arrays: its parameters', its struct parameters' and, in an init,
-        // its locals'; one set per exit for `early` and `held`)
+        // its statements' locals'; one set per exit for `early` and `held`)
         for (f, frees) in [
             ("K__init", 4),
             ("K__eat", 1),
@@ -14138,7 +14147,7 @@ fn main() -> i64 {
             assert_eq!(
                 body.matches("@sentinel_free(").count(),
                 frees,
-                "@{f} must free every array its parameter frame holds, on every exit:\n{body}"
+                "@{f} must free every array its frames hold, on every exit:\n{body}"
             );
             assert_eq!(
                 body.matches("@sentinel_shared_release(").count(),
@@ -14149,6 +14158,90 @@ fn main() -> i64 {
                 body.matches("@sentinel_mutex_release(").count(),
                 0,
                 "@{f} releases a `Mutex` in its parameter frame:\n{body}"
+            );
+        }
+    }
+
+    // ===== Register D154 (its init half): an init's statements have a frame of their own =====
+    //
+    // inkwell lowered an init's statements into its parameter frame, which releases no handle
+    // (D153), so a handle one of their locals held was never released. They now get a frame
+    // of their own, as a method's body does, which releases what a free fn's locals would.
+    // `K::init`'s locals hold five `Shared` — `h`, `h2`, `hs.s`, the class local `q`'s field
+    // and the nested block's `t`, which had a frame of its own before too — and two `Mutex`
+    // (`hs.m`, `m2`). Its parameters hold two `Shared` (`s`, `hn.inner.s`) and one `Mutex`
+    // (`hn.inner.m`), which stay kept. So 5 and 2 tell the fix from the old frame (1 and 0),
+    // from releasing the parameters too (7 and 3) and from keeping a class local (4 and 2).
+    // `RA::init` reassigns a local moved on one path, so ADR 0077 D6 drops its old value at
+    // the assignment as the frame that declares it would: two `Shared` releases, the
+    // assignment's and the exit's, where a frame that keeps its handles gives none. A leak
+    // is memory, not an exit code, so this reads the IR.
+
+    const D154_INIT_LOCALS: &str = r#"
+struct HS { s: Shared<i64>, m: Mutex<i64>, a: [i64] }
+struct HN { inner: HS, n: i64 }
+struct HA { s: Shared<i64>, a: [i64] }
+fn eat(x: HA) -> i64 { x.a[0] }
+class Q {
+    let s: Shared<i64>;
+    pub init(s: Shared<i64>) { self.s = s; 0 }
+    pub fn get(self: &Self) -> i64 { shared_get(self.s) }
+}
+class K {
+    let n: i64;
+    pub init(a: [i64], s: Shared<i64>, hn: HN) {
+        let h: Shared<i64> = shared_new(1);
+        let hs: HS = HS { s: shared_new(3), m: mutex_new(3), a: [4] };
+        let h2: Shared<i64> = shared_new(2);
+        let m2: Mutex<i64> = mutex_new(2);
+        let q: Q = Q::init(shared_new(6));
+        let nb: i64 = { let t: Shared<i64> = shared_new(8); shared_get(t) };
+        self.n = a[0] + shared_get(s) + shared_get(h) + shared_get(h2) + hs.a[0] + q.get() + nb + hn.n;
+        0
+    }
+}
+class RA {
+    let n: i64;
+    pub init(c: bool) {
+        let mut x: HA = HA { s: shared_new(1), a: [1] };
+        if c { eat(x); 0 } else { 0 };
+        x = HA { s: shared_new(2), a: [2] };
+        self.n = 1;
+        0
+    }
+}
+fn main() -> i64 {
+    let s: Shared<i64> = shared_new(5);
+    let mx: Mutex<i64> = mutex_new(6);
+    let k: K = K::init([1, 2], s, HN { inner: HS { s: s, m: mx, a: [9] }, n: 1 });
+    let r: RA = RA::init(true);
+    0
+}
+"#;
+
+    #[test]
+    fn d154_an_init_releases_the_handles_its_statements_bind() {
+        let ir = compile_src_ir_with_moves(D154_INIT_LOCALS);
+        // (fn, its `Shared` releases, its `Mutex` releases)
+        for (f, shared_releases, mutex_releases) in [("K__init", 5, 2), ("RA__init", 2, 0)] {
+            // The `define`, not a call site, which can come first in the module.
+            let head = format!("@{f}(");
+            let body: String = ir
+                .lines()
+                .skip_while(|l| !(l.starts_with("define ") && l.contains(&head)))
+                .take_while(|l| *l != "}")
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(!body.is_empty(), "no define for @{f} in:\n{ir}");
+            assert_eq!(
+                body.matches("@sentinel_shared_release(").count(),
+                shared_releases,
+                "@{f} must release each `Shared` its statements' locals hold, and none of its parameters':\n{body}"
+            );
+            assert_eq!(
+                body.matches("@sentinel_mutex_release(").count(),
+                mutex_releases,
+                "@{f} must release each `Mutex` its statements' locals hold, and none of its parameters':\n{body}"
             );
         }
     }

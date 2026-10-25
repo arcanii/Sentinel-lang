@@ -1280,7 +1280,8 @@ fn oracle_ir_of_the_shared_duplication_program_runs() {
 
 /// ADR 0071 D2 amendment A4 (register D156): the oracle's IR of `c71_class_field_handles`
 /// runs and answers 42. Before the amendment the text back ends failed eleven of its cases —
-/// five of them only there, since inkwell's method and init frames keep their handles (A2) —
+/// five of them only there, since inkwell's method and init frames kept their handles then
+/// (A2; an init's statements' locals' included, until register D154 gave them a frame) —
 /// and `pass_c71_class_field_handles` builds the file through inkwell alone; the corpus-wide
 /// behaviour check cannot run on Windows, and the codegen differential holds `scg` to the
 /// oracle byte for byte, so this is what runs the oracle's output.
