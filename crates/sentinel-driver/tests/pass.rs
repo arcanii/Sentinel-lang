@@ -2010,6 +2010,23 @@ fn pass_c77_frame_pushing_parent_drops_params() {
 }
 
 #[test]
+fn pass_c77_assign_drops_the_old_value() {
+    // ADR 0077 A2 (register D120, its binding half): an assignment into a framed binding (a
+    // `let` or a parameter) drops the old value after lowering the right-hand side,
+    // unconditionally before any move of the binding (D2) and under its flag after one (D3).
+    // Each shape but `guards` (run twice, before the loop) runs 2000 times so freed cells are
+    // reused: a drop that ignored the flag releases a `Shared` twice or frees an array twice
+    // (and, not storing the flag back `false`, skips the new guard's unlock in `guards`), a
+    // drop before the right-hand side reads a freed value, releasing a handle inkwell lends a
+    // method's or an init's parameter frame frees the caller's cell, and an enum payload
+    // sharing its source binding's unit (no ADR 0071 A6 clone) reads a cell a later handle
+    // took over. `guards` is the exit-code witness of the change itself: the overwritten guard
+    // is unlocked only since A2 (before, the relock waited out its 10 s deadline and the
+    // program exited 1). 12 a round, 2000 rounds: 24000 → exit 42.
+    assert_eq!(run_exit("c77_assign_drops_the_old_value.sentinel"), 42);
+}
+
+#[test]
 fn pass_selfhost_ast_drop() {
     // ADR 0039 D4: the self-host parser's recursive-AST drop gate. A
     // recursive-enum `Node` (i64 + `[u8]` + recursive payloads) built, walked

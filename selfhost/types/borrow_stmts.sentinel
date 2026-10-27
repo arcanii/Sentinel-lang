@@ -685,10 +685,12 @@ fn dump_tstmt(out: &mut Vec<u8>, s: Stmt, src: &[u8], c: &mut TyCtx, gb: &mut Ve
                 let asav: i64 = (*c).cglv;
                 if cgtvid >= 0 {
                     let asslot: i64 = cg_slot_get(c, cgtvid);
-                    // (ADR 0077 D6) a binding with a moved flag (whole or field) owns its old
-                    // value unless the flag says it was moved: drop it as a drop site does,
-                    // which also stores the flags back `false` for the new value.
-                    if cg_has_any_flag(c, cgtvid) {
+                    // (ADR 0077 D6 and its amendment A2, register D120's binding half) an
+                    // assignment into a binding an open scope frame holds is a drop site of
+                    // it: its old value is dropped as the frame's exit would drop it —
+                    // unconditionally if no move of it has been walked yet, under its flag
+                    // otherwise — which also stores the flags back `false` for the new value.
+                    if cg_is_framed(c, cgtvid) {
                         let asbty: i64 = env_get(c, cgtvid);
                         cg_binding_drop(c, cgtvid, asbty, asslot);
                         0

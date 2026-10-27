@@ -1936,6 +1936,119 @@ fn drop_is_behind_a_moved_flag(body: &[&str], at: usize) -> bool {
     })
 }
 
+/// ADR 0077 amendment A2 (register D120, its binding half): an assignment into a framed
+/// binding is a drop site of it. The right-hand side is lowered first, then the old value is
+/// dropped as the frame's exit would drop it -- unconditionally if no move of it has been
+/// walked (D2), behind its flag otherwise (D3) -- then the new value is stored. Assignments
+/// into a field, through a reference and into an element are not drop sites (the field half
+/// of D120 stays open). The counts tell the change from the base (every count
+/// marked * was one lower: no drop at an assignment without a flag), from a drop that ignores
+/// the flag (`after_move`'s assignment free would not be guarded), from one that skips handles
+/// (`handle_plain`, `struct_plain`, `class_plain`, `param`, `K__init` and `K__m` would release
+/// one fewer) and from one emitted before the right-hand side (the order check). A leak is
+/// memory, not an exit code, so this reads the IR; the codegen differential holds `scg` to it.
+#[test]
+fn llvm_an_assignment_into_a_framed_binding_drops_the_old_value() {
+    // The `define`, not a call site: the oracle emits class methods after the free fns.
+    fn define<'a>(ir: &'a str, f: &str) -> Vec<&'a str> {
+        let head = format!("@{f}(");
+        ir.lines()
+            .skip_while(|l| !(l.starts_with("define ") && l.contains(&head)))
+            .take_while(|l| *l != "}")
+            .collect()
+    }
+    let ir = llvm_dump(
+        "a2_assign_drops",
+        concat!(
+            "struct H { s: Shared<i64>, a: [i64] }\n",
+            "class Q {\n",
+            "    let s: Shared<i64>;\n",
+            "    pub init(s: Shared<i64>) { self.s = s; 0 }\n",
+            "    pub fn get(self: &Self) -> i64 { shared_get(self.s) }\n",
+            "}\n",
+            "class K {\n",
+            "    let n: i64;\n",
+            "    pub init(mut a: [i64], mut s: Shared<i64>) { a = [2]; s = shared_new(2); self.n = a[0] + shared_get(s); 0 }\n",
+            "    pub fn m(self: &Self, mut a: [i64], mut s: Shared<i64>) -> i64 { a = [3]; s = shared_new(3); a[0] + shared_get(s) }\n",
+            "}\n",
+            "fn consume(v: [i64]) -> i64 { v[0] }\n",
+            "fn plain(n: i64) -> i64 { let mut a: [i64] = [1, 2]; a = [n, 2]; a[0] }\n",
+            "fn handle_plain(n: i64) -> i64 { let mut s: Shared<i64> = shared_new(1); s = shared_new(n); shared_get(s) }\n",
+            "fn struct_plain(n: i64) -> i64 { let mut h: H = H { s: shared_new(1), a: [1] }; h = H { s: shared_new(n), a: [n] }; h.a[0] }\n",
+            "fn class_plain(n: i64) -> i64 { let mut c: Q = Q::init(shared_new(1)); c = Q::init(shared_new(n)); c.get() }\n",
+            "fn in_loop(n: i64) -> i64 { let mut a: [i64] = [0]; let mut i: i64 = 0; while i < n { a = [i]; i = i + 1; } a[0] }\n",
+            "fn after_move(n: i64) -> i64 { let mut a: [i64] = [1, 2]; let r: i64 = consume(a); a = [r, 2]; r }\n",
+            "fn before_move(n: i64) -> i64 { let mut a: [i64] = [1, 2]; a = [n, 2]; consume(a) }\n",
+            "fn param(mut a: [i64], mut s: Shared<i64>) -> i64 { a = [4]; s = shared_new(4); a[0] + shared_get(s) }\n",
+            "fn field(n: i64) -> i64 { let mut h: H = H { s: shared_new(1), a: [1] }; h.a = [n]; h.a[0] }\n",
+            "fn through(r: &mut [i64]) -> i64 { *r = [5]; 0 }\n",
+            "fn element(n: i64) -> i64 { let mut a: [i64] = [1, 2]; a[0] = n; a[0] }\n",
+            "fn main() -> i64 {\n",
+            "    let s: Shared<i64> = shared_new(1);\n",
+            "    let k: K = K::init([1], s);\n",
+            "    let mut b: [i64] = [9];\n",
+            "    plain(1) + handle_plain(1) + struct_plain(1) + class_plain(1) + in_loop(2) + after_move(1)\n",
+            "        + before_move(1) + param([1], s) + field(1) + through(&mut b) + element(1) + k.m([1], s)\n",
+            "}\n",
+        ),
+    );
+    // (fn, frees, releases, drops behind a set moved flag); * = one more than before A2
+    for (f, frees, releases, guarded) in [
+        ("plain", 2, 0, 0),        // * free
+        ("handle_plain", 0, 2, 0), // * release
+        ("struct_plain", 2, 2, 0), // * both
+        ("class_plain", 0, 2, 0),  // * the class's drop releases its field's handle
+        ("in_loop", 2, 0, 0),      // * the loop body's assignment
+        ("after_move", 2, 0, 2),   // D6, unchanged: both frees behind the flag
+        ("before_move", 2, 0, 1),  // * the assignment (D2) is not behind the flag; the end is
+        ("param", 2, 2, 0),        // * a free fn's `mut` parameters
+        ("K__init", 2, 2, 0),      // * the oracle releases an init's handle parameter
+        ("K__m", 2, 2, 0),         // * and a method's
+        ("field", 1, 1, 0),        // unchanged: a field assignment keeps the old value
+        ("through", 0, 0, 0),      // unchanged
+        ("element", 1, 0, 0),      // unchanged
+    ] {
+        let body = define(&ir, f);
+        assert!(!body.is_empty(), "no define for @{f} in:\n{ir}");
+        let text = body.join("\n");
+        assert_eq!(text.matches("@sentinel_free(").count(), frees, "@{f}: frees:\n{text}");
+        assert_eq!(text.matches("_release(").count(), releases, "@{f}: releases:\n{text}");
+        let behind = body
+            .iter()
+            .enumerate()
+            .filter(|(i, l)| {
+                (l.contains("@sentinel_free(") || l.contains("_release("))
+                    && drop_is_behind_a_moved_flag(&body, *i)
+            })
+            .count();
+        assert_eq!(behind, guarded, "@{f}: drops behind a set moved flag:\n{text}");
+    }
+    // The right-hand side is lowered before the old value is dropped: the assignment's free
+    // follows the new array's allocation, and in `before_move` it is the unguarded one (D2).
+    for f in ["plain", "before_move"] {
+        let body = define(&ir, f);
+        let text = body.join("\n");
+        let allocs: Vec<usize> = body
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| l.contains("@sentinel_alloc("))
+            .map(|(i, _)| i)
+            .collect();
+        let first_free = body
+            .iter()
+            .position(|l| l.contains("@sentinel_free("))
+            .unwrap_or_else(|| panic!("@{f}: no free:\n{text}"));
+        assert!(
+            allocs.len() == 2 && allocs[1] < first_free,
+            "@{f}: the old value is dropped before the right-hand side is lowered:\n{text}"
+        );
+        assert!(
+            !drop_is_behind_a_moved_flag(&body, first_free),
+            "@{f}: the assignment's drop, walked before any move, is unconditional (D2):\n{text}"
+        );
+    }
+}
+
 /// ADR 0077: is the `sentinel_free` at `body[at]` dead because a moved flag guards it? Its
 /// block must be the false target of `br i1 %c, ...` where `%c = load i1, ptr %mfN`, and a
 /// `store i1 true, ptr %mfN` must come before that load in the same basic block.

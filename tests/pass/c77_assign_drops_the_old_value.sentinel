@@ -1,0 +1,280 @@
+// ADR 0077 amendment A2 (register D120, its binding half): an assignment into a binding an
+// open scope frame holds -- a `let` or a parameter -- is a drop site of it. The right-hand
+// side is lowered first; then the old value is dropped as that frame's exit would drop it,
+// unconditionally if no move of the binding has been lowered yet (D2) and under its moved
+// flag otherwise (D3, which also stores the flag back `false`); then the new value is
+// stored. Before, the old value was dropped only when the binding had a flag (D6), so every
+// other assignment kept it: an array or a `Vec` leaked, a `Shared` / `Mutex` unit stayed
+// held, and a `?Guard` stayed locked.
+//
+// Each shape but `guards` (run twice, before the loop) runs 2,000 times, so a freed cell is
+// reused by the next round. A drop that ran although the flag says moved releases a `Shared` twice (the runtime's debug refcount
+// check aborts) and frees an array twice; a drop before the right-hand side reads a freed
+// value; a drop that released a handle inkwell lends a method's or an init's parameter
+// frame releases the caller's unit; and an enum payload that shared its source binding's
+// unit, instead of holding one of its own (ADR 0071 A6), is read after the assignment
+// released that unit. `guards` is the exit-code witness: the guard it overwrites is
+// unlocked at the assignment only since A2, and before, the relock waited out its deadline
+// and failed.
+
+struct H { s: Shared<i64>, a: [i64] }
+
+class C {
+    let s: Shared<i64>;
+    let n: i64;
+    pub init(s: Shared<i64>, n: i64) { self.s = s; self.n = n; 0 }
+    pub fn get(self: &Self) -> i64 { shared_get(self.s) + self.n }
+    // A method's parameters, reassigned. inkwell lends `s` without a clone and its
+    // parameter frame keeps handles, so the drop here must not release it (register D153).
+    pub fn swap(self: &Self, mut s: Shared<i64>, mut a: [i64]) -> i64 {
+        let before: i64 = shared_get(s) + a[0];
+        s = shared_new(3);
+        a = [4, 5];
+        let mut t: Shared<i64> = shared_new(6);
+        t = s;
+        before + shared_get(t) + a[0]
+    }
+}
+
+class L {
+    let n: i64;
+    // An init's parameters and a local of its statements, reassigned (ADR 0071 A5: the
+    // local's frame releases handles, the parameters' frame does not in inkwell).
+    pub init(mut a: [i64], mut k: Shared<i64>) {
+        let mut t: Shared<i64> = shared_new(1);
+        t = k;
+        a = [shared_get(t), 1];
+        k = shared_new(2);
+        self.n = a[0] + shared_get(k);
+        0
+    }
+    pub fn get(self: &Self) -> i64 { self.n }
+}
+
+enum E { A(i64), B }
+enum P { Z, Hs(Shared<i64>), Hm(Mutex<i64>) }
+
+fn consume(v: [i64]) -> i64 { v[0] }
+fn id(v: [i64]) -> [i64] { v }
+fn eat(h: H) -> i64 { shared_get(h.s) + h.a[0] }
+fn eat_c(c: C) -> i64 { c.get() }
+fn grow(v: &[i64]) -> [i64] { [(*v)[0] + 1, (*v)[1]] }
+fn take<T>(g: T) -> i64 { 1 }
+fn rdp(e: &P) -> i64 {
+    match *e {
+        P::Z => 0,
+        P::Hs(h) => shared_get(h),
+        P::Hm(m) => { let g = lock(m); if is_some(g) { *g } else { 0 - 1000 } },
+    }
+}
+
+// Moved on one path, then assigned: the drop runs on the other path only. Answers 1.
+fn one_path(n: i64, k: Shared<i64>) -> i64 {
+    let mut h: H = H { s: shared_new(n), a: [n, 2] };
+    let r: i64 = if n > 0 { eat(h) } else { 0 };
+    h = H { s: k, a: [1] };
+    let mut c: C = C::init(k, 1);
+    let q: i64 = if n > 0 { eat_c(c) } else { 0 };
+    c = C::init(k, 2);
+    if n > 0 { r + q - 2 * n - 10 } else { 1 }
+}
+
+// `a = f(a)`: the right-hand side moves the old value before the drop is reached, so the
+// drop is behind the flag the move set; `id` hands back the very buffer it was given.
+// Moved on every path, then assigned: the same. Answers 1.
+fn self_feed(n: i64) -> i64 {
+    let mut a: [i64] = [n, 7];
+    a = id(a);
+    let mut b: [i64] = [n, 8];
+    let r: i64 = consume(b);
+    b = [r, 9];
+    let mut h: H = H { s: shared_new(n), a: [n] };
+    h = H { s: shared_new(eat(h)), a: [1] };
+    r - n + 1
+}
+
+// The right-hand side reads the old value, so it must be lowered before the drop: by a
+// borrow, through a field, and a handle assigned to itself. Answers 1.
+fn reads_old(n: i64) -> i64 {
+    let mut a: [i64] = [n, 7];
+    a = grow(&a);
+    a = grow(&a);
+    let mut h: H = H { s: shared_new(n), a: [n, 2] };
+    h = H { s: h.s, a: [h.a[0] + 1, h.a[1]] };
+    let mut s: Shared<i64> = shared_new(n);
+    s = s;
+    if a[0] == n + 2 && shared_get(h.s) + h.a[0] == 2 * n + 1 && shared_get(s) == n { 1 } else { 0 }
+}
+
+// An ADR 0046 field moved, then the binding assigned: the old value's other field is
+// dropped and the moved one is not (D5). Answers 1.
+fn field_then_whole(n: i64) -> i64 {
+    let mut h: H = H { s: shared_new(n), a: [n, 2] };
+    let r: i64 = consume(h.a);
+    h = H { s: shared_new(r), a: [r] };
+    let mut g: H = H { s: shared_new(n), a: [n, 2] };
+    let q: i64 = if n > 0 { consume(g.a) } else { 0 };
+    g = H { s: shared_new(q), a: [q] };
+    if r == n { 1 } else { 0 }
+}
+
+// Assignments in a loop: a body-local assigned before a `continue` and a `break`, which
+// drain it, and again before the body's end; a body-local moved on one iteration and then
+// assigned (the flag's store-back re-arms it); an outer binding assigned on every
+// iteration but the one that continues. Answers 26 with `k` holding 10.
+fn loops(k: Shared<i64>) -> i64 {
+    let mut out: H = H { s: shared_new(0), a: [0] };
+    let mut j: i64 = 0;
+    let mut acc: i64 = 0;
+    while j < 6 {
+        let mut w: H = H { s: k, a: [j, 1] };
+        w = H { s: shared_new(j), a: [j, 2] };
+        let mut v: [i64] = [j, 1];
+        let r: i64 = if j == 1 { consume(v) } else { 0 };
+        v = [r, 2];
+        j = j + 1;
+        if j == 2 { continue; 0 } else { 0 };
+        out = H { s: k, a: [j, 3] };
+        if j == 5 { break; 0 } else { 0 };
+        acc = acc + shared_get(w.s) + w.a[1];
+        w = H { s: k, a: [0, 0] };
+    }
+    acc + out.a[0] + shared_get(out.s)
+}
+
+// Handles: one assigned from a named handle (counted), a class assigned, and a `Mutex`
+// assigned while a guard of the old one is held (the guard holds a unit of its own).
+// Answers 51 with `keep` holding 10.
+fn handles(keep: Shared<i64>) -> i64 {
+    let mut s: Shared<i64> = shared_new(1);
+    s = keep;
+    let a: i64 = shared_get(s);
+    s = shared_new(2);
+    let mut c: C = C::init(keep, 1);
+    c = C::init(shared_new(3), 2);
+    let b: i64 = c.get();
+    c = C::init(keep, 3);
+    let mut m: Mutex<i64> = mutex_new(1);
+    let g = lock(m);
+    m = mutex_new(2);
+    let got: i64 = if is_some(g) { 1 } else { 0 };
+    a + shared_get(s) + b + c.get() + shared_get(keep) * 2 + got
+}
+
+// Other types whose drop does something: a `Vec`, a string, an enum, a struct holding a
+// class. Answers 9.
+struct W { c: C, n: i64 }
+fn others(k: Shared<i64>) -> i64 {
+    let mut v: Vec<i64> = vec_new();
+    push(&mut v, 1);
+    v = vec_new();
+    push(&mut v, 2);
+    let mut t: [u8] = "ab";
+    t = "xyz";
+    let mut e: E = E::A(4);
+    e = E::B;
+    e = E::A(1);
+    let x: i64 = match e { E::A(p) => p, E::B => 0 };
+    let mut w: W = W { c: C::init(k, 1), n: 1 };
+    w = W { c: C::init(k, 2), n: 2 };
+    v[0] + len(t) + x + w.n + 1
+}
+
+// An enum payload read out of a binding, and out of a binding's field, then the binding
+// assigned: the payload holds a unit of its own (ADR 0071 A6), so the release at the
+// assignment leaves it alive. Each handle made after an assignment would take over the
+// cell a payload sharing the released unit still reads. Answers 1.
+fn payloads(n: i64) -> i64 {
+    let mut s: Shared<i64> = shared_new(n);
+    let e: P = P::Hs(s);
+    s = shared_new(n + 1);
+    let s2: Shared<i64> = shared_new(n + 5);
+    let mut m: Mutex<i64> = mutex_new(n);
+    let f: P = P::Hm(m);
+    m = mutex_new(n + 1);
+    let m2: Mutex<i64> = mutex_new(n + 5);
+    let mut h: H = H { s: shared_new(n), a: [n] };
+    let g: P = P::Hs(h.s);
+    h = H { s: shared_new(n + 1), a: [n + 1] };
+    let h2: Shared<i64> = shared_new(n + 5);
+    let held: bool = rdp(&e) == n && rdp(&f) == n && rdp(&g) == n;
+    if held && shared_get(s) + shared_get(h.s) == 2 * n + 2 { 1 } else { 0 }
+}
+
+// Parameters of a free fn, reassigned. Answers 7.
+fn params(mut a: [i64], mut s: Shared<i64>) -> i64 {
+    a = [3, 4];
+    s = shared_new(4);
+    a[0] + shared_get(s)
+}
+
+effect Io { read() -> i64; }
+fn ask() -> i64 ! { Io } { perform Io.read() }
+fn ask2() -> i64 ! { Io } { let a: i64 = perform Io.read(); let b: i64 = perform Io.read(); a + b }
+fn body_assigns(n: i64) -> i64 ! { Io } { let mut a: [i64] = [n]; a = [n + 1]; perform Io.read() }
+
+// Where effects reify: an outer binding assigned in a handler arm; a binding assigned in
+// an arm's replayed remainder (ADR 0075 D6), whose resumer is a function of its own (ADR
+// 0077 D3); one assigned in a `return` arm, which is emitted once per pure-drain site; and
+// one assigned in an effecting fn's body before its `perform`. Answers 1.
+fn effects(n: i64) -> i64 {
+    let mut a: [i64] = [1, 2];
+    let r: i64 = handle ask() with { Io.read(k) => { a = [n, 2]; k(a[0]) } };
+    let q: i64 = handle ask2() with { Io.read(k) => { let x: i64 = k(1); let mut b: [i64] = [x, 1]; b = [x, 2]; x + b[1] } };
+    let p: i64 = handle ask() with { Io.read(k) => k(1), return x => { let mut b: [i64] = [x, n]; b = [n, x]; b[0] + b[1] - n } };
+    let o: i64 = handle body_assigns(n) with { Io.read(k) => k(20) };
+    if r + a[1] == n + 2 && q == 6 && p == 1 && o == 20 { 1 } else { 0 }
+}
+
+// `lock` must be bound by an immutable `let`, so a guard reaches an assignable binding only by
+// being moved into one (`let mut x = g;`, or a generic `mut` parameter); here, the
+// parameter. The guard `swap_in` overwrites is unlocked at the assignment (before A2 it
+// stayed locked, so the relock of `m1` waited out its 10 s deadline and failed). In
+// `swap_after`, a guard moved on one path is not unlocked a second time, and the new value
+// is unlocked at the scope's end, which a flag the assignment did not store back `false`
+// would skip. A failed relock answers 0 at once, so a regression costs one deadline.
+fn swap_in<T>(mut x: T, y: T) -> i64 {
+    x = y;
+    1
+}
+fn swap_after<T>(mut x: T, y: T, c: bool) -> i64 {
+    let r: i64 = if c { take(x) } else { 0 };
+    x = y;
+    r - r + 1
+}
+fn holds(m: Mutex<i64>) -> i64 {
+    let h = lock(m);
+    if is_some(h) { 1 } else { 0 }
+}
+fn guards(m1: Mutex<i64>, m2: Mutex<i64>, c: bool) -> i64 {
+    let g = lock(m1);
+    let g2 = lock(m2);
+    let r: i64 = swap_in(g, g2);
+    if holds(m1) == 1 { 0 } else { return 0 };
+    let f = lock(m1);
+    let f2 = lock(m2);
+    let q: i64 = swap_after(f, f2, c);
+    if holds(m2) + holds(m1) == 2 { 0 } else { return 0 };
+    r + q - 1
+}
+
+fn main() -> i64 {
+    let keep: Shared<i64> = shared_new(10);
+    let m1: Mutex<i64> = mutex_new(1);
+    let m2: Mutex<i64> = mutex_new(2);
+    if guards(m1, m2, true) == 1 { 0 } else { return 1 };
+    if guards(m1, m2, false) == 1 { 0 } else { return 1 };
+    let k: C = C::init(keep, 0);
+    let mut i: i64 = 0;
+    let mut acc: i64 = 0;
+    while i < 2000 {
+        let n: i64 = i - 1000;
+        let l: L = L::init([1, 2], keep);
+        acc = acc + one_path(n, keep) + self_feed(n) + reads_old(n) + field_then_whole(n)
+            + (loops(keep) - 25) + (handles(keep) - 50) + (others(keep) - 8) + (params([1, 2], keep) - 6)
+            + (k.swap(keep, [1, 2]) - 17) + (l.get() - 11) + effects(n) + payloads(n);
+        i = i + 1;
+    }
+    // 12 a round, 2000 rounds: 24000
+    if acc == 24000 && shared_get(keep) == 10 { 42 } else { 2 }
+}

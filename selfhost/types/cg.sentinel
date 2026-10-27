@@ -2239,23 +2239,6 @@ fn cg_has_flag(c: &mut TyCtx, vid: i64, f: i64) -> bool {
     hit
 }
 
-// (ADR 0077 D6) does it have any flag of binding `vid`, whole or field?
-fn cg_has_any_flag(c: &mut TyCtx, vid: i64) -> bool {
-    let n: i64 = len((*c).cgfl_v);
-    let mut i: i64 = 0;
-    let mut hit: bool = false;
-    while i < n {
-        if (*c).cgfl_v[i] == vid {
-            hit = true;
-            0
-        } else {
-            0
-        };
-        i = i + 1;
-    }
-    hit
-}
-
 // (ADR 0077 D3) is `vid` in an open scope frame (the drop pool), so a drop site can drop
 // it? Mirrors the oracle's `flaggable` frame test.
 fn cg_is_framed(c: &mut TyCtx, vid: i64) -> bool {
@@ -2371,7 +2354,7 @@ fn cg_close_flag_guard(c: &mut TyCtx, vid: i64, f: i64, sb: i64) -> i64 {
 }
 
 // (ADR 0077) one drop site of binding `vid` (type `ty`, slot `slot`): at a frame's exit,
-// at a drain, or (D6) before an assignment overwrites it. With a flag, the drop runs only
+// at a drain, or (D6, A2) before an assignment overwrites it. With a flag, the drop runs only
 // when the flag is `false` (D3); a move already walked of a binding with no flag (its type
 // needs no drop) is skipped, as every moved binding was before ADR 0077; otherwise the
 // binding is dropped (D2: no move of it walked yet). Mirrors the oracle's

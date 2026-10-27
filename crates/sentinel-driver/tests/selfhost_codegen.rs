@@ -284,20 +284,33 @@ const SEEDS: &[&str] = &[
     // the handles its fields hold and nothing else. So none for a struct of scalars, a
     // compared `?Node` in a `let`, an array moved out of a class, or a type parameter's field
     // at a struct of scalars (whose numbering must not shift the whole binding's flag), and an
-    // assignment after such a move drops nothing; one for a `secret` struct holding a
-    // `Shared` moved out of a class.
+    // assignment after such a move drops the old value with no flag to test (ADR 0077 A2;
+    // before it, nothing); one for a `secret` struct holding a `Shared` moved out of a class.
     "struct Pt { x: i64, y: i64 }\nstruct Bag { buf: [i64], pt: Pt }\nfn use_pt(p: Pt) -> i64 { p.x + p.y }\nfn main() -> i64 { let b: Bag = Bag { buf: [7, 8, 9], pt: Pt { x: 20, y: 22 } }; let r: i64 = use_pt(b.pt); r }\n",
     "struct Node { val: i64 }\nstruct Holder { name: [u8], head: ?Node }\nfn main() -> i64 { let h: Holder = Holder { name: \"abc\", head: null }; let b: bool = h.head == null; if b { 42 } else { 0 } }\n",
     "class C { let a: [i64]; let n: i64; pub init(a: [i64]) { self.a = a; self.n = 1; 0 } }\nfn consume(v: [i64]) -> i64 { v[0] }\nfn f(i: i64) -> i64 { let c: C = C::init([1, 2]); if i > 5 { consume(c.a) } else { 1 } }\nfn main() -> i64 { f(9) + f(1) + 40 }\n",
     "struct P { x: i64 }\nstruct Pair<A, B> { first: A, second: B }\nfn take<T>(g: T) -> i64 { 1 }\nfn gp<A, B>(p: Pair<A, B>, n: i64) -> i64 { if n == 0 { take(p.first) } else { if n == 1 { take(p) } else { 1 } } }\nfn main() -> i64 { let p: Pair<P, [i64]> = Pair { first: P { x: 1 }, second: [1] }; gp(p, 0) + 41 }\n",
     "struct P { x: i64 }\nstruct HQ { q: P, a: [i64] }\nfn eat_p(p: P) -> i64 { p.x }\nfn f(i: i64) -> i64 { let mut h: HQ = HQ { q: P { x: 1 }, a: [1, 2, 3, 4] }; let r: i64 = if i > 5 { eat_p(h.q) } else { 1 }; h = HQ { q: P { x: 2 }, a: [5, 6, 7, 8] }; r }\nfn main() -> i64 { f(9) + f(1) + 40 }\n",
     "struct H { s: Shared<i64>, n: i64 }\nfn eat(h: secret H) -> i64 { 1 }\nclass C { let h: secret H; let z: i64; pub init(n: i64) { self.h = H { s: shared_new(n), n: n }; self.z = n; 0 } }\nfn f(i: i64) -> i64 { let c: C = C::init(40); if i > 5 { eat(c.h) } else { 0 } }\nfn main() -> i64 { f(9) + f(1) + 41 }\n",
-    // Parity where D6 does not fire: after a class moved an array out (no flag), after a
-    // compared `?Node` field (register D117's position) and after a type parameter's field at
-    // a Copy instance, an assignment drops no old value in either back end (register D120).
+    // ADR 0077 A2 (register D120, its binding half): after a move that left no flag -- an
+    // array moved out of a class, a compared `?Node` field (register D117's position), a type
+    // parameter's field at a Copy instance -- the assignment still drops the old value as the
+    // frame's exit would, with no flag to test, in the same bytes in both back ends.
     "fn consume(v: [i64]) -> i64 { v[0] }\nclass C { let a: [i64]; let h: Shared<i64>; pub init(n: i64) { self.a = [n, 2]; self.h = shared_new(n); 0 } }\nfn f(n: i64) -> i64 { let mut c: C = C::init(1); let r: i64 = if n > 0 { consume(c.a) } else { 1 }; c = C::init(2); r }\nfn main() -> i64 { f(1) + f(0) + 40 }\n",
     "struct Node { val: i64 }\nstruct Holder { buf: [i64], head: ?Node }\nfn f(i: i64) -> i64 { let mut h: Holder = Holder { buf: [1, 2], head: null }; let r: i64 = if h.head == null { 1 } else { 0 }; h = Holder { buf: [5, 6], head: null }; r }\nfn main() -> i64 { f(1) + 41 }\n",
     "struct Pair<A, B> { first: A, second: B }\nfn take_g<T>(x: T) -> i64 { 1 }\nfn mkp<A, B>(a: A, b: B) -> Pair<A, B> { Pair { first: a, second: b } }\nfn g<T>(x: T, y: T, n: i64) -> i64 { let mut s = mkp(x, [n, 2]); let r: i64 = if n > 0 { take_g(s.first) } else { 0 }; s = mkp(y, [n, 5]); r }\nfn main() -> i64 { g(1, 2, 1) + 41 }\n",
+    // ADR 0077 A2 (register D120): an assignment into a framed binding whose type's drop does
+    // nothing, after a move that therefore got no flag, emits nothing in either back end (a
+    // struct of scalars; a unit-only enum moved on one path).
+    "struct P { x: i64 }\nfn eat(p: P) -> i64 { p.x }\nfn f(n: i64) -> i64 { let mut p: P = P { x: n }; let r: i64 = eat(p); p = P { x: 2 }; r }\nfn main() -> i64 { f(42) }\n",
+    "enum U { A, B }\nfn eat(u: U) -> i64 { 1 }\nfn f(n: i64) -> i64 { let mut u: U = U::A; let r: i64 = if n > 0 { eat(u) } else { 0 }; u = U::B; r + 41 }\nfn main() -> i64 { f(1) }\n",
+    // A `secret`-qualified struct binding assigned: the text back ends drop nothing for it, at
+    // the assignment as at the exit (register D158); inkwell drops it at both.
+    "struct H { s: Shared<i64>, a: [i64] }\nfn f(n: i64) -> i64 { let mut h: secret H = H { s: shared_new(n), a: [n] }; h = H { s: shared_new(2), a: [2] }; 42 }\nfn main() -> i64 { f(1) }\n",
+    // Assignments inside an `if` in a handler arm, to an arm local and to an outer binding.
+    "effect Io { read() -> i64; }\nfn ask() -> i64 ! { Io } { perform Io.read() }\nfn once(n: i64) -> i64 {\n    let mut a: [i64] = [1, 2];\n    handle ask() with { Io.read(k) => { let mut b: [i64] = [n, 1]; if n > 0 { b = [n, 2]; a = [n, 3]; 0 } else { 0 }; k(b[1]) } }\n}\nfn main() -> i64 { once(1) + once(0) + 39 }\n",
+    // A `match` scrutinee assigned inside its own arm.
+    "enum E { A([i64]), B }\nfn f(n: i64) -> i64 { let mut e: E = E::A([n]); let p: i64 = match e { E::A(x) => { e = E::B; x[0] }, E::B => 0 }; p }\nfn main() -> i64 { f(42) }\n",
     // A field of a compound target is not a field of a binding: `{ s }.a` moves `s` whole,
     // and so does each arm of the `if`. No field flag, and neither binding's drop is elided.
     "struct S { a: [i64], b: [i64] }\nfn consume(v: [i64]) -> i64 { v[0] }\nfn f(n: i64) -> i64 { let s: S = S { a: [40], b: [2] }; consume({ s }.a) }\nfn main() -> i64 { f(1) + 2 }\n",
@@ -1328,6 +1341,44 @@ fn oracle_ir_of_the_enum_payload_program_runs() {
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp).expect("create temp dir");
     let stem = "c71_enum_payload_handles";
+    let src = workspace_root().join("tests/pass").join(format!("{stem}.sentinel"));
+    let oracle = Command::new(env!("CARGO_BIN_EXE_snc"))
+        .arg("llvm")
+        .arg(&src)
+        .output()
+        .expect("run snc llvm");
+    assert!(
+        oracle.status.success(),
+        "snc llvm failed on {stem}:\n{}",
+        String::from_utf8_lossy(&oracle.stderr)
+    );
+    let ll = tmp.join(format!("{stem}.ll"));
+    std::fs::write(&ll, &oracle.stdout).expect("write the oracle's IR");
+    let exe = compile_ll_to_exe(&ll, &tmp.join(stem));
+    let run = Command::new(&exe).output().expect("run the program built from the oracle's IR");
+    assert_eq!(
+        run.status.code(),
+        Some(42),
+        "{stem}: built from the oracle's IR it exits {:?}; stderr:\n{}",
+        run.status,
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// ADR 0077 amendment A2 (register D120, its binding half): the oracle's IR of
+/// `c77_assign_drops_the_old_value` runs and answers 42, so the oracle's assignment drop sites
+/// free and release nothing twice or early, and the guard `guards` overwrites is unlocked
+/// (before A2 that program exited 1). `pass_c77_assign_drops_the_old_value` builds the file
+/// through inkwell alone, the corpus-wide behaviour check cannot run on Windows, and the codegen
+/// differential holds `scg` to the oracle byte for byte, so this is what runs the oracle's
+/// output.
+#[test]
+fn oracle_ir_of_the_assignment_drop_program_runs() {
+    let tmp = std::env::temp_dir().join(format!("snc_assigndrop_oracle_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).expect("create temp dir");
+    let stem = "c77_assign_drops_the_old_value";
     let src = workspace_root().join("tests/pass").join(format!("{stem}.sentinel"));
     let oracle = Command::new(env!("CARGO_BIN_EXE_snc"))
         .arg("llvm")

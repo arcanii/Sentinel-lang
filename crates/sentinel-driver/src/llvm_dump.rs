@@ -2101,12 +2101,13 @@ impl Emit<'_> {
                     let slot = *self.slots.get(id).ok_or("assign to an unbound var")?;
                     // ADR 0071 D2 amendment A1: the binding is a new owner of the value.
                     let v = self.lower_owned(value)?;
-                    // ADR 0077 D6: a binding with a moved flag (whole or field) owns its
-                    // old value unless the flag says it was moved: drop it as a drop site
-                    // does, which also stores the flags back `false` for the new value.
-                    if self.flags.whole.contains_key(id)
-                        || self.flags.field.keys().any(|(b, _)| b == id)
-                    {
+                    // ADR 0077 D6 and its amendment A2 (register D120, its binding half): an
+                    // assignment into a binding an open scope frame holds is a drop site of
+                    // it, so its old value is dropped as a frame's exit would drop it —
+                    // unconditionally if no move of it has been walked yet (D2), under its
+                    // flag otherwise (D3), which also stores the flags back `false` for the
+                    // new value.
+                    if self.scopes.iter().any(|f| f.contains(id)) {
                         self.emit_binding_drop(*id)?;
                     }
                     let llty = self.lty(target.ty)?;
@@ -3319,7 +3320,7 @@ impl Emit<'_> {
         Ok(())
     }
 
-    /// ADR 0077: one drop site of binding `id` — at a frame's exit, at a drain, or (D6)
+    /// ADR 0077: one drop site of binding `id` — at a frame's exit, at a drain, or (D6, A2)
     /// before an assignment overwrites it.
     fn emit_binding_drop(&mut self, id: VarId) -> Result<(), String> {
         let ty = match self.var_ty.get(&id) {

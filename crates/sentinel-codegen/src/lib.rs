@@ -2178,8 +2178,8 @@ struct CodegenCtx<'ctx, 'plan, 'm> {
     /// libc `sentinel_alloc`/`free`. Computed once up front by
     /// [`compute_arena_routed`] = exactly the bindings `emit_scope_drops`
     /// would `sentinel_free` (`∉ moved ∧ ≠ tail_returned`), restricted to
-    /// `let x = [primitive array literal]` in non-generic, non-effecting
-    /// fns. This *one* set drives BOTH the alloc-routing ([`lower_stmt`])
+    /// an immutable `let x = [primitive array literal]` (no `let mut`, since
+    /// ADR 0077 A2) in non-generic, non-effecting fns. This *one* set drives BOTH the alloc-routing ([`lower_stmt`])
     /// and the free-skip ([`emit_scope_drops`]) so they cannot diverge.
     /// VarIds are globally unique, so a single program-wide set is
     /// unambiguous regardless of which fn is being compiled.
@@ -5074,16 +5074,16 @@ impl<'ctx, 'plan, 'm> CodegenCtx<'ctx, 'plan, 'm> {
                     // ADR 0071 D2 amendment A1: the place is a new owner of the value — a
                     // field of a class instance too, since amendment A4.
                     let v = self.lower_owned(value, program)?;
-                    // ADR 0077 D6: a binding with a moved flag (whole or field) owns its
-                    // old value unless the flag says it was moved: drop it as a drop site
-                    // does, which also stores the flags back `false` for the new value.
+                    // ADR 0077 D6 and its amendment A2 (register D120, its binding half): an
+                    // assignment into a binding an open scope frame holds is a drop site of
+                    // it, so its old value is dropped as that frame's exit would drop it —
+                    // unconditionally if no move of it has been lowered yet (D2), under its
+                    // flag otherwise (D3), which also stores the flags back `false` for the
+                    // new value. Like the exit, it skips an arena-routed binding, though
+                    // routing takes only an immutable `let`, which no assignment can reach.
                     if let TypedExprKind::Var(id) = &target.kind {
-                        let flagged = self.current_fn.is_some_and(|f| {
-                            self.drop_flags.get(&f).is_some_and(|fl| {
-                                fl.whole.contains_key(id) || fl.field.keys().any(|(b, _)| b == id)
-                            })
-                        });
-                        if flagged {
+                        let framed = self.scope_stack.iter().any(|f| f.vars.contains(id));
+                        if framed && !self.arena_routed.contains(id) {
                             // Register D153: as the frame that declares it drops it.
                             let keep = self.declaring_frame_keeps_handles(*id);
                             self.emit_binding_drop(*id, program, keep)?;
@@ -5399,7 +5399,7 @@ impl<'ctx, 'plan, 'm> CodegenCtx<'ctx, 'plan, 'm> {
     }
 
     /// Register D153: whether the frame that declares `id` keeps its handles — a method's or
-    /// an init's parameter frame — so an assignment's drop of the old value (ADR 0077 D6)
+    /// an init's parameter frame — so an assignment's drop of the old value (ADR 0077 D6, A2)
     /// releases what that frame's own drop would, and no more.
     fn declaring_frame_keeps_handles(&self, id: VarId) -> bool {
         self.scope_stack
@@ -5409,7 +5409,7 @@ impl<'ctx, 'plan, 'm> CodegenCtx<'ctx, 'plan, 'm> {
             .is_some_and(|f| f.keeps_handles)
     }
 
-    /// ADR 0077: one drop site of binding `id` — at a frame's exit, at a drain, or (D6)
+    /// ADR 0077: one drop site of binding `id` — at a frame's exit, at a drain, or (D6, A2)
     /// before an assignment overwrites it. A binding the borrow checker records as moved is
     /// dropped unconditionally if no move of it has been lowered yet in this function (D2),
     /// and otherwise under its flag (D3); a partially moved field likewise (D5).
@@ -13360,8 +13360,9 @@ fn tail_returned_var(tail: &TypedExpr) -> Option<VarId> {
 ///
 /// **Safety bar (the airtight argument).** The routed set is, by
 /// construction, a *subset of exactly what [`CodegenCtx::emit_scope_drops`]
-/// already frees* at scope exit: a binding `x` is routed iff it is a
-/// `let x = [primitive array literal]` (element type i64/i32/bool — so
+/// already frees* at scope exit: a binding `x` is routed iff it is an
+/// immutable `let x = [primitive array literal]` (not a `let mut`, which
+/// ADR 0077 A2's assignment drop could reach; element type i64/i32/bool — so
 /// the only heap footprint is the one `{len,data}` data buffer that the
 /// `Type::Array` drop frees) AND `x ∉ moved_sources(fn)` AND
 /// `Some(x) != tail_returned_var(&B.tail)` for `x`'s declaring block `B`.
@@ -13383,8 +13384,8 @@ fn tail_returned_var(tail: &TypedExpr) -> Option<VarId> {
 /// Scope is deliberately narrow for this first slice: only non-generic
 /// (`type_params` empty), non-effecting (`!uses_kont_abi`) free
 /// functions, which always lower via the standard `lower_block` +
-/// `emit_scope_drops` path. Methods, generics, effecting fns, and
-/// non-primitive-element arrays keep the unchanged libc path. VarIds are
+/// `emit_scope_drops` path. Methods, generics, effecting fns, a `let mut`
+/// (since ADR 0077 A2) and non-primitive-element arrays keep the libc path. VarIds are
 /// globally unique, so one program-wide set is queried per binding
 /// without ambiguity.
 fn compute_arena_routed(program: &TypedProgram, drop_plan: &DropPlan) -> HashSet<VarId> {
@@ -13416,8 +13417,12 @@ fn collect_routed_block(
     let tail_var = tail_returned_var(&block.tail);
     for stmt in &block.stmts {
         match &stmt.kind {
-            TypedStmtKind::Let { id, ty, value, .. } => {
-                if is_primitive_array_lit(value, *ty)
+            TypedStmtKind::Let { id, mutable, ty, value, .. } => {
+                // ADR 0077 A2 (register D120): an assignment into a framed binding drops
+                // its old value, which for a routed binding lives in the arena, so a
+                // binding that can be assigned (a `let mut`) is not routed.
+                if !*mutable
+                    && is_primitive_array_lit(value, *ty)
                     && !moved.contains(id)
                     && Some(*id) != tail_var
                 {
@@ -14608,6 +14613,107 @@ fn main() -> i64 { secret_field(1) + array_field(1) + 42 }
             0,
             "@array_field: a field a class's drop never touches gets no flag:\n{body}"
         );
+    }
+
+    // ===== ADR 0077 amendment A2 (register D120, its binding half): an assignment into a
+    // framed binding drops the old value =====
+    //
+    // The shapes of the oracle's `llvm_an_assignment_into_a_framed_binding_drops_the_old_value`
+    // (`tests/llvm.rs`), less `through`, plus `routed`. inkwell differs from the oracle in two
+    // places, both pinned. A method's and an init's parameter frame keeps its handles (register
+    // D153) and inkwell lends those parameters without a clone, so the drop at
+    // `s = shared_new(..)` there releases nothing (`K__init`, `K__m`: 0 releases, where the
+    // oracle has 2): releasing the lent unit would free the caller's cell. And a `let mut` is no
+    // longer arena-routed (`compute_arena_routed`): the assignment skips an arena binding, so a
+    // routed one would leak every value assigned to it. `plain`, `in_loop` and `element` free on
+    // the heap where they took `sentinel_arena_alloc` before, and `routed`, an immutable `let`,
+    // still takes the arena. A leak is memory, not an exit code, so this reads the IR.
+
+    const A2_ASSIGNMENTS: &str = r#"
+struct H { s: Shared<i64>, a: [i64] }
+class Q {
+    let s: Shared<i64>;
+    pub init(s: Shared<i64>) { self.s = s; 0 }
+    pub fn get(self: &Self) -> i64 { shared_get(self.s) }
+}
+class K {
+    let n: i64;
+    pub init(mut a: [i64], mut s: Shared<i64>) { a = [2]; s = shared_new(2); self.n = a[0] + shared_get(s); 0 }
+    pub fn m(self: &Self, mut a: [i64], mut s: Shared<i64>) -> i64 { a = [3]; s = shared_new(3); a[0] + shared_get(s) }
+}
+fn consume(v: [i64]) -> i64 { v[0] }
+fn plain(n: i64) -> i64 { let mut a: [i64] = [1, 2]; a = [n, 2]; a[0] }
+fn handle_plain(n: i64) -> i64 { let mut s: Shared<i64> = shared_new(1); s = shared_new(n); shared_get(s) }
+fn struct_plain(n: i64) -> i64 { let mut h: H = H { s: shared_new(1), a: [1] }; h = H { s: shared_new(n), a: [n] }; h.a[0] }
+fn class_plain(n: i64) -> i64 { let mut c: Q = Q::init(shared_new(1)); c = Q::init(shared_new(n)); c.get() }
+fn in_loop(n: i64) -> i64 { let mut a: [i64] = [0]; let mut i: i64 = 0; while i < n { a = [i]; i = i + 1; } a[0] }
+fn after_move(n: i64) -> i64 { let mut a: [i64] = [1, 2]; let r: i64 = consume(a); a = [r, 2]; r }
+fn before_move(n: i64) -> i64 { let mut a: [i64] = [1, 2]; a = [n, 2]; consume(a) }
+fn param(mut a: [i64], mut s: Shared<i64>) -> i64 { a = [4]; s = shared_new(4); a[0] + shared_get(s) }
+fn field(n: i64) -> i64 { let mut h: H = H { s: shared_new(1), a: [1] }; h.a = [n]; h.a[0] }
+fn element(n: i64) -> i64 { let mut a: [i64] = [1, 2]; a[0] = n; a[0] }
+fn routed(n: i64) -> i64 { let a: [i64] = [1, 2]; a[0] + n }
+fn main() -> i64 {
+    let s: Shared<i64> = shared_new(1);
+    let k: K = K::init([1], s);
+    plain(1) + handle_plain(1) + struct_plain(1) + class_plain(1) + in_loop(2) + after_move(1)
+        + before_move(1) + param([1], s) + field(1) + element(1) + routed(1) + k.m([1], s)
+}
+"#;
+
+    #[test]
+    fn a2_an_assignment_into_a_framed_binding_drops_the_old_value() {
+        // The `define`, not a call site, which can come first in the module.
+        fn define<'a>(ir: &'a str, f: &str) -> Vec<&'a str> {
+            let head = format!("@{f}(");
+            ir.lines()
+                .skip_while(|l| !(l.starts_with("define ") && l.contains(&head)))
+                .take_while(|l| *l != "}")
+                .collect()
+        }
+        let ir = compile_src_ir_with_moves(A2_ASSIGNMENTS);
+        // (fn, frees, shared releases, arena allocations, frees inside a `flag_drop` block)
+        for (f, frees, releases, arena, guarded) in [
+            ("plain", 2, 0, 0, 0),        // before: 0 frees, 1 arena allocation
+            ("handle_plain", 0, 2, 0, 0), // before: 1 release
+            ("struct_plain", 2, 2, 0, 0), // before: 1 and 1
+            ("class_plain", 0, 2, 0, 0),  // before: 1
+            ("in_loop", 2, 0, 0, 0),      // before: 0 frees, 1 arena allocation
+            ("after_move", 2, 0, 0, 2),   // D6, unchanged
+            ("before_move", 2, 0, 0, 1),  // before: 1 free, the guarded one
+            ("param", 2, 2, 0, 0),        // before: 1 and 1
+            ("K__init", 2, 0, 0, 0),      // before: 1 free; the kept handle is never released
+            ("K__m", 2, 0, 0, 0),         // before: 1 free
+            ("field", 1, 1, 0, 0),        // unchanged
+            ("element", 1, 0, 0, 0),      // before: 0 frees, 1 arena allocation (a `let mut`)
+            ("routed", 0, 0, 1, 0),       // unchanged: an immutable `let` is still routed
+        ] {
+            let lines = define(&ir, f);
+            assert!(!lines.is_empty(), "no define for @{f} in:\n{ir}");
+            let body = lines.join("\n");
+            assert_eq!(body.matches("@sentinel_free(").count(), frees, "@{f}: frees:\n{body}");
+            assert_eq!(
+                body.matches("@sentinel_shared_release(").count(),
+                releases,
+                "@{f}: releases:\n{body}"
+            );
+            assert_eq!(
+                body.matches("@sentinel_arena_alloc(").count(),
+                arena,
+                "@{f}: arena allocations:\n{body}"
+            );
+            let mut inside = false;
+            let mut n = 0;
+            for l in &lines {
+                // A block label, before the `; preds = ...` comment LLVM prints after it.
+                let label = l.split(';').next().unwrap_or("").trim_end();
+                if !l.starts_with(' ') && label.ends_with(':') {
+                    inside = l.starts_with("flag_drop");
+                }
+                n += usize::from(inside && l.contains("@sentinel_free("));
+            }
+            assert_eq!(n, guarded, "@{f}: frees behind a moved flag:\n{body}");
+        }
     }
 
     // ===== ADR 0077 A1 (register D139): a frame-pushing parent drops its parameters =====
