@@ -883,7 +883,11 @@ the others (D93, as before A1), and `scg` did too when a field of it is read on 
 the paths that do not move it, so all three balance there too: 8.3–8.4 MB over 2,000,000
 alternating calls of either shape, against 39.2 before. The IR differs, so the corpus carries
 no such program. An assignment still does not release the value it overwrites (register D120, a
-leak), so `v = s` now leaves one unit held rather than releasing one too many.
+leak), so `v = s` now leaves one unit held rather than releasing one too many. (Since ADR 0077's
+D6 amendment A2, 2026-10-28, an assignment into a binding an open scope frame holds releases the
+value it overwrites as that frame's exit would (inkwell's method and init parameter frames still
+keep their handles, A2), so `v = s` balances; into a field, through a reference or into an element it still does not,
+register D120's field half.)
 
 Pinned by `tests/pass/c71_shared_place_duplications.sentinel`, which reads a `Shared` out of
 a place into every owner above (a `Mutex` into two of them), three times over, and answers
@@ -964,7 +968,10 @@ frees the cell either. A guard stays Move (slice 3b's decision 3), so at most on
 gives back the one unit. A guard that is never unlocked — the shapes registered as D22, D64,
 D93, D117, D120 and D122 — now keeps its cell for good, a leak of one cell per acquire, where
 a debug build aborted and a release build freed the cell, still locked, at its owner's last
-release; the lock stayed held either way.
+release; the lock stayed held either way. (Since ADR 0077's D6 amendment A2, 2026-10-28, an
+overwritten guard binding is unlocked at the assignment. A guard reaches one only by being moved
+into it — `let mut x = g;`, or a generic `mut` parameter — since `lock` must be bound by an
+immutable `let`.)
 
 The symbols, their signatures and every back end's emitted IR are unchanged: only the runtime
 moves, so inkwell, the oracle and `scg` are fixed together. It amends `abi-v1` §5's contract
@@ -1008,11 +1015,13 @@ The rule now, in all three back ends:
   also how a struct's drop reaches a class in one of its fields — though the text back ends'
   struct drop skips a `secret`-qualified field (register D158). inkwell's method and init
   parameter frames keep a class's handles, as they keep every handle (A2).
-- An overwritten field keeps the unit it held, as every assignment does (register D120): a
-  leak. Releasing it is not safe in inkwell, which lends a method its handle argument without
-  a clone (A1, A2): in `k.swap_then_read(k.s)` the argument and the field are one cell, so
-  releasing the field's old value when the method assigns `self.s` would free the cell the
-  argument still points at.
+- An overwritten field keeps the unit it held, as every assignment did until ADR 0077's D6
+  amendment A2 (2026-10-28), which releases what an assignment into a framed binding overwrites
+  (outside inkwell's method and init parameter frames, which keep their handles, A2); into a
+  field it is still kept (register D120's field half): a leak. Releasing it is not safe in
+  inkwell, which lends a method its handle argument without a clone (A1, A2): in
+  `k.swap_then_read(k.s)` the argument and the field are one cell, so releasing the field's old
+  value when the method assigns `self.s` would free the cell the argument still points at.
 - A class and a struct can hold each other by value. The type checker refuses a struct that
   holds itself, but follows only struct-to-struct edges, so a cycle through a class field is
   accepted though it has no finite layout (register D157). The walk keeps the aggregate types
@@ -1082,7 +1091,11 @@ all three back ends unless noted:
   built with `C::init(shared_new(5))` stays at 70.8 MB through inkwell in every fn, which is
   the bullet above (register D154).
 - an overwritten class field, or a class value overwritten whole — a binding, a struct's
-  field, or through a reference (register D120).
+  field, or through a reference (register D120). Since ADR 0077's D6 amendment A2 (2026-10-28)
+  a class binding overwritten whole releases the old instance's handles: `c = C::init(t)`
+  2,000,000 times peaks at 66.2 MB before and 2.0 after, in all three back ends (macOS peak
+  resident set size). A class field, a struct's field holding a class and a class overwritten
+  through a reference still keep them (D120's field half).
 - in the oracle and `scg`, a `secret`-qualified class binding or parameter, a
   `secret`-qualified class held in a struct's field, or a class held in a `secret`-qualified
   struct binding or parameter: they drop no `secret`-qualified binding or parameter, and their

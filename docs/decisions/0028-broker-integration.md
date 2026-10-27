@@ -31,7 +31,10 @@ shipped per the implementation map below, with one correction to the
     `sentinel_arena_exit`. A program-wide `compute_arena_routed` pre-pass
     produces a `HashSet<VarId>` = *exactly* the bindings `emit_scope_drops`
     frees (`∉ moved ∧ ≠ tail_returned`), restricted to `let x = [i64/i32/
-    bool array literal]` in **non-generic, non-effecting fns**. That one
+    bool array literal]` in **non-generic, non-effecting fns** (and, since
+    [ADR 0077](0077-drop-flags-for-maybe-moved-bindings.md) A2, 2026-10-28, to an
+    immutable `let`: an assignment into a framed binding drops its old value,
+    which for a routed binding would be the arena's). That one
     set drives both the alloc-routing (`lower_stmt`→`lower_array_lit`) and
     the free-skip (`emit_scope_drops`); the per-scope arena handle lives
     in a new `ScopeFrame` (replacing the bare `Vec<VarId>`), created
@@ -211,7 +214,9 @@ from those **dropped at scope exit** (non-escaping; the ones codegen
 currently `sentinel_free`s). (Since [ADR 0077](0077-drop-flags-for-maybe-moved-bindings.md), 2026-10-05, a binding
 moved on some paths is also dropped at scope exit on the others, under a
 flag; arena routing still takes only bindings moved nowhere, so the arena
-never holds one of those.) The non-escaping, scope-exit-freed bindings
+never holds one of those. Since its amendment A2, 2026-10-28, an
+assignment into a binding drops the value it overwrites, so routing takes
+no `let mut` either.) The non-escaping, scope-exit-freed bindings
 are exactly the allocations safe to place in a per-scope **bump arena**
 that is reset on scope exit. So:
 

@@ -7,7 +7,10 @@ answered on 2026-10-05 (0.2.0, after the landing). Drafted 2026-09-25. Closes re
 D3/D4, [ADR 0065](0065-early-return.md) D4/D7, [ADR 0036](0036-loops.md) C1 and
 [ADR 0075](0075-a-bubbling-resume-leaves-its-arm.md) D1/D5 (the full list is under *Docs to
 amend*). Its D10 amendment A1 (2026-10-08) closes **D139**: an effecting fn's frame-pushing
-`define` drops its parameters.
+`define` drops its parameters. Its D6 amendment A2 (2026-10-28) closes **D120**'s binding half:
+an assignment into a binding an open scope frame holds drops the value it overwrites, as that
+frame's exit would drop it. A2 also
+amends [ADR 0028](0028-broker-integration.md) A1: inkwell routes no `let mut` into a scope arena.
 
 ## Related
 
@@ -195,9 +198,9 @@ slot; see Q2.
 
 The whole-function moved-source sets stay as they are. The `snc borrow` dump reads them (so its
 golden and seed do not change), and so do inkwell's arena routing, which keeps excluding every
-binding moved anywhere, ADR 0071's clone decision (see *Implementation*), and each drop site, to
-tell a binding or field the checker records as moved, whose drop D2 or D3 then decides, from
-one it does not.
+binding moved anywhere (and, since amendment A2, every `let mut`), ADR 0071's clone decision (see
+*Implementation*), and each drop site, to tell a binding or field the checker records as moved,
+whose drop D2 or D3 then decides, from one it does not.
 
 ### D5. Fields.
 
@@ -219,7 +222,12 @@ it, into a binding never moved, or into one whose only moved fields are fields i
 nothing with) keeps today's behaviour, which does not drop the old value either
 (`v = [5, 6, 7, 8]` after `let mut v = [1, 2, 3, 4]` measures 36.1 against 8.4, and so does
 the same assignment followed by `consume(v)`); so does an assignment into a field. That is a
-separate leak, register D120 (Q3).
+separate leak, register D120 (Q3). Amendment A2 (2026-10-28) closes its binding half: an
+assignment into a binding an open scope frame holds now drops the old value as that frame's exit
+would drop it, unconditionally before any move of the binding was walked (D2) and under its flag
+after (D3); what that exit keeps, the assignment keeps too (see A2's *What stays open*). An
+assignment into a field, through a reference or into an element still keeps it: register D120's
+field half.
 
 ### D7. Every drop action is guarded, guards included.
 
@@ -269,15 +277,21 @@ for `return`. No secret value is stored into a flag.
 - Drops that do not depend on a move at all, such as a class's heap fields (register D137) or
   an enum's heap payloads (D138). Since ADR 0071 A4 a class's drop releases the handles its
   fields hold, and a moved field is guarded by its flag there as in a struct's drop.
-- An assignment into a binding with no flag (walked before any move of it, into a binding
-  never moved, or into one whose only moved fields are fields its drop does nothing with), or
-  into a field (D6; register D120). So an array moved out of a class holding a `Shared`, then
-  `c = C::init(..)`, keeps the old instance's handle: 54.6 MB over 600,000 calls in all three
-  back ends, against 36.1 for the class's array leak alone (D137). D6 does not count a field
-  moved without a flag because the back ends' records of field moves differ there — at
-  register D117's positions (a field compared with `null` or discarded) and at a type
-  parameter's field at a Copy instance, the oracle and inkwell record a move that `scg` does
-  not — and a D6 keyed on those records made the oracle's and `scg`'s IR differ.
+- An assignment into a field, through a reference or into an element (D6; register D120's
+  field half). Until amendment A2 (2026-10-28) this bullet also held an assignment into a
+  binding with no flag (walked before any move of it, into a binding never moved, or into one
+  whose only moved fields are fields its drop does nothing with): an array moved out of a class
+  holding a `Shared`, then `c = C::init(..)`, kept the old instance's handle (54.6 MB over
+  600,000 calls in all three back ends, against 36.1 for the class's array leak alone, D137,
+  measured when this ADR landed, 2026-10-05, as the kernel peak working set of its *Measured*
+  paragraph, so not comparable with A2's macOS figures below).
+  D6 did not count a field moved without a flag because the back ends' records of field moves
+  differ there — at register D117's positions (a field compared with `null` or discarded) and
+  at a type parameter's field at a Copy instance, the oracle and inkwell record a move that
+  `scg` does not — and a D6 keyed on those records made the oracle's and `scg`'s IR differ. A2
+  keys the assignment's drop on the binding's frame instead, which the three back ends agree
+  on; that shape now keeps only the class's array (40.6 MB before and 21.3 after over 600,000
+  calls, macOS peak resident set size, in all three back ends).
 - ADR 0046 D5's deferred projections.
 
 ### D11. Later, optional: skip the test where a binding is moved on every path.
@@ -291,9 +305,10 @@ is an optimization with its own oracle-moving landing, not part of this ADR's fi
 ## Implementation (2026-10-05)
 
 Landed with the proposed answers to Q1–Q5 (D2 + D3; the flag set at the read; D6 for a flagged
-binding only, the general assignment leak staying register D120; D22 closed by the flag; move
-sites exported in the `DropPlan`). Q6: the version went to 0.2.0 in its own commit right after
-this landed. What the implementation settled that the decisions above left open:
+binding only, the general assignment leak staying register D120 until amendment A2 (2026-10-28)
+dropped the old value of any framed binding; D22 closed by the flag; move sites exported in the
+`DropPlan`). Q6: the version went to 0.2.0 in its own commit right after this landed. What the
+implementation settled that the decisions above left open:
 
 - **A move site is keyed by its binding as well as its span** — `(VarId, start, end)`, and
   `(VarId, field, start, end)` for an ADR 0046 field — so two reads that happen to share a span
@@ -312,7 +327,8 @@ this landed. What the implementation settled that the decisions above left open:
   an open frame, so some of its flags guard a drop that does nothing.
 - **D6 counts a field's flag as a flag.** An assignment into a binding with a whole or a field
   flag drops the old value as a drop site does, which stores every one of its flags back
-  `false`.
+  `false`. Since amendment A2 the gate is the binding's frame, not its flags; the drop still
+  stores every flag back `false`.
 - **Fail closed.** D2's unconditional drop of a binding the checker records as moved is sound
   only if every move of it in the code the walk emits was walked. The oracle and inkwell check
   that at the end of each body and refuse the program ("a move of binding #n … was not
@@ -323,7 +339,7 @@ this landed. What the implementation settled that the decisions above left open:
   agrees with the per-site answer on every accepted program: a read in an owning context of a
   binding the checker treats as Move is a consuming read, so it is itself a move site.
 - inkwell keeps its `tail_returned` skip beside the flag, and its arena routing, which excludes
-  every binding moved anywhere, is unchanged.
+  every binding moved anywhere, is unchanged. (Amendment A2 makes it also exclude a `let mut`.)
 - **It landed after ADR 0071 A2 and A4.** inkwell's method and init parameter frames, which A2
   drains but lets release no handle, pass that on to every drop in them: a drop site's, and
   D6's drop of an overwritten binding, which takes it from the frame that declares the binding.
@@ -371,6 +387,13 @@ moved on one branch stayed locked on the other) and exits 42 now.
 - The oracle's and `scg`'s IR agree at a drain that precedes a move, where they disagree today.
 - Drops stay at scope exit, so no borrow rule changes and no program that compiles today stops
   compiling.
+- (Amendment A2, 2026-10-28.) Register D120's binding half closes: an assignment into a framed
+  binding drops the value it overwrites as that frame's exit would drop it, in all three back ends,
+  so such a binding overwritten in a loop no longer grows the heap where its exit's drop frees what
+  it holds (66.1 to 162.9 MB over 2,000,000 assignments before, 1.8 to 2.2 after; macOS peak
+  resident set size, debug builds), and an overwritten guard is unlocked. The exceptions (inkwell's
+  method and init parameter frames' handles; what a drop does not free, D137, D138, D158) are under
+  the amendment's *What stays open*.
 
 ### Negative
 
@@ -385,6 +408,11 @@ moved on one branch stayed locked on the other) and exits 42 now.
   not measured.
 - The Rust back ends gain a walk-order "moved so far" set per function, which they do not
   keep today.
+- (Amendment A2.) Each assignment into a framed binding whose type needs a drop now emits that drop,
+  where it emitted none before unless the binding had a flag: in the corpus as it stood, three of
+  the 340 files the oracle emits gained one drop each. And inkwell routes no `let mut` into a scope
+  arena, so one that is only ever index-assigned, which was routed before, is allocated and freed on
+  the heap: four of the 41 corpus programs whose objects used an arena no longer do.
 
 ### Neutral
 
@@ -463,7 +491,9 @@ Q1–Q5 were answered as proposed (2026-09-26). Q6 was answered on 2026-10-05: t
 - **Q2.** Set the flag at the read (D4; the `f(v, return 1)` family leaks, as today) or adopt
   ADR 0074 D1's rule (set it once the consuming operation's operands have all been evaluated)?
 - **Q3.** D6 covers assignment into a flagged binding only. Fix assignment into any binding
-  (the old value is never dropped) in the same slice, or separately?
+  (the old value is never dropped) in the same slice, or separately? (Answered separately, as
+  proposed. The binding half landed as D6 amendment A2 on 2026-10-28; an assignment into a field,
+  through a reference or into an element stays open, register D120's field half.)
 - **Q4.** D22: close it with the flag (unlock at scope exit) or keep the pin D22 leaned toward?
 - **Q5.** Move sites: exported in the `DropPlan` by span (D4), or re-derived in each Rust back
   end?
@@ -520,3 +550,149 @@ parent (register D158).
 It moves the IR the oracle, `scg` and inkwell emit for a shape's parent wherever a parameter's
 drop does something, so it is at least a minor version (ADR 0076 D2), batched with the other
 oracle-moving slices of the series.
+
+## D6 amendment A2 (2026-10-28) — an assignment into a framed binding is a drop site (register D120, its binding half)
+
+D6 dropped the value an assignment overwrites only when the binding had a moved flag, whole or
+field. Any other binding kept it: one assigned before any move of it was walked, one never
+moved, or one moved only in fields its drop does nothing with. So `x = e` leaked `x`'s old value
+at every assignment, in all three back ends — an array's or a string's buffer, a `Vec`, the
+handles a struct or a class holds, a `Shared` or `Mutex` unit — and an overwritten guard stayed
+locked (register D120). D10 listed the gap, and Q3 left it to a slice of its own.
+
+An assignment `x = e` into a binding an open scope frame holds is now a drop site of `x`, one
+more in D1's list, in inkwell, the oracle and `scg`. After `e` is lowered, `x`'s old value is
+dropped as that frame's exit would drop it — unconditionally if no move of `x` has been walked
+yet (D2), under its flag otherwise (D3), which also stores its flags back `false` for the new
+value, as D6 did — and then the new value is stored. The gate is the frame test the exits
+already apply (the oracle's `scopes`; inkwell's `scope_stack`; `scg`'s `cg_is_framed`, which
+mirrors the oracle's test and already decided which bindings get a flag), in place of D6's test
+for a flag; `scg`'s `cg_has_any_flag` is removed. An assignment into a field, through a
+reference or into an element is unchanged.
+
+It is sound for these reasons:
+
+- **The right-hand side runs first.** Whatever `e` moves out of `x` (`a = bump(a)`) has been
+  walked when the drop is emitted, so the drop is guarded by the flag that move set; whatever `e`
+  reads out of `x` by place (`h = H { s: h.s, n: 1 }`) has been counted by then (ADR 0071 A1). A
+  mutant that drops regardless of the flag frees `a = bump(a)`'s old value a second time: exit
+  133, a trap, through inkwell and the oracle's IR.
+- **It is decided like every other drop site** (D2, D3). Within one entry into the scope, the old
+  value is dropped once, at the assignment, and the new value is the binding's from then on,
+  dropped at the next assignment or at an exit; the store back re-arms the flag for it.
+- **Only a framed binding.** The gate is the frame test every exit applies, so an assignment drops a
+  binding only where an exit of the same walk would drop it, and a binding no open frame holds is
+  dropped at neither. (A `match` payload binding cannot be assigned: `assign_to_immutable`. A
+  handler arm's parameter can be only when its operation declares it `mut`, and no back end builds
+  an arm that assigns such a parameter whose drop does something: register D68 (c).) A `mut`
+  parameter is in its fn's parameter frame. Because the gate is the frame and not the records of
+  field moves, D10's parity problem does not arise: the three differential seeds that pinned it (a
+  class that moved an array out, a compared `?Node` field, a type parameter's field at a Copy
+  instance, each then assigned) now drop at the assignment, with the same bytes from the oracle and
+  `scg`.
+- **No reference into the old value survives.** The checker refuses an assignment to a binding
+  while a reference into it is live (`write_while_borrowed`), a reference that left an `if`
+  (*Context*'s reference case) or came back from a call included.
+- **Every unit the old value holds is its own.** ADR 0071's A1, A4 and A6 count each `Shared` /
+  `Mutex` a binding receives out of a place, so releasing the old value's handles releases no
+  unit another owner holds. That is why this waited for A6 (register D176): built on the tree
+  before A6, an enum payload made from the binding (`let e: E = E::Hs(s); s = shared_new(7);`)
+  held `s`'s handle without a unit, the assignment released the cell under it, and three of the
+  review's probes then read another cell's value or aborted, in all three back ends; on top of
+  A6 they answer 42.
+- **inkwell's method and init parameter frames keep their handles** (ADR 0071 A2), because
+  inkwell lends such a call its handle arguments without a clone. The assignment takes the keep
+  rule from the frame that declares the binding, as D6's drop did. A mutant that releases them
+  there kills a program that assigns a method's `mut p: Shared<i64>` parameter (exit 133).
+- **inkwell's arena routing takes no `let mut`.** A routed binding's buffer lives in its scope's
+  arena, whose exit skips the binding's drop. An assignment could neither free the old buffer,
+  which is the arena's, nor skip the drop without leaking every value assigned to the binding,
+  which comes from the heap: a mutant that routes a `let mut` again peaks at 66.6 MB over
+  2,000,000 assignments. `compute_arena_routed` takes an immutable `let` only, which no
+  assignment can reach, amending [ADR 0028](0028-broker-integration.md) A1's predicate; the
+  assignment still skips a routed binding, as the exit does, but none is assignable.
+
+What stays open:
+
+- An assignment into a field, through a reference or into an element (`h.a = [..]`, `(*r).s = s`,
+  `xs[i] = v`) keeps the old value: register D120's field half. `h.a = [i, 1, 2, 3]` in a loop peaks
+  at 66.1 MB over 2,000,000 assignments, before and after, in all three back ends. For a class
+  field, inkwell's lent method arguments make a release unsafe (ADR 0071 A4).
+- inkwell keeps a handle assigned into a method's or an init's `mut` parameter. That frame keeps
+  every handle it holds, the lent one and one the body assigns alike, so the assigned unit is
+  never released: `fn put(self: &Self, mut p: Shared<i64>) -> i64 { p = shared_new(3);
+  shared_get(p) }`, called 2,000,000 times, peaks at 66.2 MB through inkwell before and after,
+  and at 1.9–2.0 MB in the oracle and `scg`, which clone the argument and release the parameter,
+  and now release the overwritten clone at the assignment too. It joins register D154.
+- An overwritten value is dropped as its exit would drop it, and no further: a class's heap fields
+  stay held (register D137), an enum's payload heap (D138), the rest of D154, and in the oracle and
+  `scg` what they drop at no exit either, such as a `secret`-qualified struct or class binding
+  (D158). An array moved out of a class holding a `Shared`, then `c = C::init(2)`, peaks at 40.6 MB
+  over 600,000 calls before and 21.3 after, in all three back ends, the rest being the second
+  instance's array (D137); a `secret H` holding a `Shared`, overwritten 2,000,000 times, peaks at
+  66.2 MB before and after in the oracle and `scg`, where inkwell falls from 66.2 to 1.9.
+
+Measured on macOS as the peak resident set size (`/usr/bin/time -l`, the second of two runs),
+with debug builds of `snc` and `scg` from HEAD (`bd3dc03`: ADR 0071 A6, without this amendment)
+and from the change, the oracle's and `scg`'s IR linked against the same debug runtime. A build
+from before A6 measures within 0.1 MB of HEAD on every row. Every run gives the expected answer,
+and again under `MallocScribble`, `MallocGuardEdges` and `MallocErrorAbort`, and `scg`'s IR is
+byte-identical to the oracle's on every program, before and after.
+
+| 2,000,000 iterations | before: inkwell / oracle / `scg` (MB) | after (MB) |
+|---|---|---|
+| `a = [i, 2, 3, 4]` into a `let mut a: [i64]` in `main`'s loop | 66.6 / 66.1 / 66.1 | 1.9 / 1.8 / 1.9 |
+| a fn's `let mut` array assigned once, the fn called 2,000,000 times | 66.8 / 66.1 / 66.1 | 1.8 / 1.8 / 1.9 |
+| the same binding then returned as the fn's tail, or as a block's | 66.1 | 1.9 |
+| `s = shared_new(i)` into a `let mut s: Shared<i64>` | 66.2 | 1.9 / 1.9 / 2.0 |
+| a struct holding a `Shared`, a `Mutex` and an array, overwritten | 162.8 / 162.9 / 162.9 | 2.2 |
+| a class holding a `Shared`, `c = C::init(t)` | 66.2 | 2.0 |
+| a `Vec<i64>` and a string, overwritten | 66.1 / 66.1 / 66.2 | 1.9 |
+| a free fn's `mut` array and `mut` `Shared` parameters, assigned | 66.3 | 2.0 |
+| D6's own shapes: after a maybe-move; `a = bump(a)` | 1.8–1.9 | 1.8–1.9 |
+
+`lock` must be bound by an immutable `let`, so a guard reaches an assignable binding only by being
+moved into one: `let mut x = g;`, or a generic `mut` parameter at `?Guard<i64>`. Overwriting it
+(`x = h;`, or `g = h` in `fn swap_in<T>(mut g: T, h: T)`) now unlocks the old guard at the
+assignment: a program that locks the same mutex again afterwards timed out there before (it waited
+out the runtime's 10 s lock deadline, then gave a wrong answer) and now answers 42 at once, in all
+three back ends.
+
+Pinned by `tests/pass/c77_assign_drops_the_old_value` (twelve shapes a round, 2,000 rounds with
+freed cells reused, and `guards`, whose relock waited out its deadline before the change and
+exited 1), its oracle-IR run (`selfhost_codegen::oracle_ir_of_the_assignment_drop_program_runs`),
+IR count tests in the oracle (`llvm_an_assignment_into_a_framed_binding_drops_the_old_value`)
+and in inkwell (`a2_an_assignment_into_a_framed_binding_drops_the_old_value`), and five codegen
+seeds: an assignment whose drop does nothing after a move that set no flag (a struct of
+scalars; a unit-only enum), a `secret` struct binding, assignments inside an `if` in a handler
+arm, and a `match` scrutinee assigned inside its own arm. Between them they catch the change
+reverted in all three back ends, in the oracle alone or in `scg` alone; a drop that ignores the
+moved flag; inkwell routing a `let mut` into a scope arena again (only the inkwell count test
+sees that: the routed binding leaks and the answer stays right); inkwell releasing a method's
+or an init's parameter frame's handles at the assignment; and the change built without A6 (the
+fixture's `payloads`, which reassigns the binding a payload was made from).
+
+A matched `snc llvm` sweep of the 484 other `.sentinel` files in `tests/pass`, `tests/ui`,
+`examples` and `sentinel_library` changes no verdict: 337 are byte-identical, 144 refused by both
+with identical messages, and 3 changed, each by a drop inserted right before the store into the
+assigned binding — `c71_shared_place_duplications`'s `assign` and `c71_init_local_handles`'s
+`LR::init` release the `Shared` that `v = s` and `h = s` overwrite (one unit per call, held before;
+their answers, 94 and 42, do not change), and `tests/ui/c25_payload_after_conditional_reassign`,
+which `snc build` refuses, frees the old box at `e = E::B`. With SSA names and block labels
+normalized, each diff is insertions only, and each inserted run loads the slot the next instruction
+stores into. A matched `snc build` and run of the other 304 programs — the 236 in `tests/pass` and
+the 68 examples with a `main`, all through the merge path and the 68 examples also with
+`--separate`, the seven socket examples built but not run — plain and under the malloc checks, and a
+malloc-checked run of the oracle's IR for the 284 of them it emits, changes no build result, exit
+code or output. Six merge objects change, and one `--separate` object: the two fixtures above, by
+one release each, and four programs whose only arena-routed binding was a `let mut` array literal
+that is only ever index-assigned (`c55_index_assign`, `c59_borrow_index`,
+`c77_return_in_an_index_place` and `examples/math/inplace`, the last in both builds), which now take
+it from the heap and free it at the exit; of the 304 merge objects, 41 used a scope arena before
+(111 `sentinel_arena_alloc` call sites) and 37 now (107), `c54_scope_arena`'s unchanged among them.
+The oracle emits the same IR for the self-hosted compiler's sources before and after — the ten
+module roots in `selfhost/`, byte for byte — since those sources assign whole only scalars and
+references (a scan of their `let mut` bindings and `mut` parameters finds no other); `scg`, built
+from them, emits the oracle's bytes for the merged `codegen` root. It changes what all three back
+ends emit for an assignment into a framed binding whose drop does something and that had no moved
+flag, so it is at least a minor version (ADR 0076 D2).

@@ -5,7 +5,7 @@ HANDOVER.md, STATE.md is the source of truth. New contributors (or
 new chat sessions) should be able to read this file and understand
 the current state of the workspace without re-reading every commit.
 
-## Current State (2026-10-27)
+## Current State (2026-10-28)
 
 > **Phase C closed at the bootstrap milestone (2026-05-30); Phase D self-hosts; the
 > per-unit separate-compilation back end is functionally complete.**
@@ -14,7 +14,34 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
-**Latest (2026-10-27) — an enum constructor's arguments are a new owner: a `Shared` / `Mutex`
+**Latest (2026-10-28) — an assignment into a framed binding drops the value it overwrites
+(register D120, its binding half; [ADR 0077](decisions/0077-drop-flags-for-maybe-moved-bindings.md)
+D6 amendment A2).**
+ADR 0077 D6 dropped an overwritten value only when the binding had a moved flag, so every other
+`x = e` leaked the old value, in all three back ends: an array's or a string's buffer, a `Vec`, the
+handles a struct or a class holds, a `Shared` or `Mutex` unit, and an overwritten guard stayed
+locked. Now an assignment into a binding an open scope frame holds is a drop site of it, in inkwell,
+the oracle and `scg`: after the right-hand side is lowered, the old value is dropped as the frame's
+exit would drop it — unconditionally before any move of the binding was walked, under its moved flag
+after — and then the new value is stored. inkwell's method and init parameter frames still keep
+their handles (ADR 0071 A2), and inkwell no longer routes a `let mut` into a scope arena. An
+assignment into a field, through a reference or into an element still keeps the old value (D120's
+field half). It lands after ADR 0071 A6, without which releasing an overwritten `Shared` freed the
+cell under an enum payload built from it. Over 2,000,000 assignments, peak resident set size on
+macOS falls from 66.1–66.8 MB to 1.8–2.0 for an array, a `Shared`, a class holding one, a `Vec` and
+a string, and from 162.8–162.9 MB to 2.2 for a struct holding a `Shared`, a `Mutex` and an array, in
+all three back ends. Pinned by `tests/pass/c77_assign_drops_the_old_value`, its oracle-IR run, IR
+count tests in the oracle and inkwell, and five codegen seeds. `snc llvm` over the 484 other
+`.sentinel` files changes three, each by one drop before the assignment's store, and refuses nothing
+new; the other 304 programs, built merge (the 68 examples also `--separate`) and run (the seven
+socket examples built, not run), change no exit code or output (six merge objects and one
+`--separate` object change: two by one release, the other five, of four programs, by losing their
+scope arena); the oracle's IR of the self-hosted compiler's sources does not move. It moves emitted
+IR, so at least a minor version (ADR 0076 D2). Four-check on macOS: 2,174 passed, none failing,
+doctests and clippy clean, every `selfhost_*` differential green including both bootstrap fixed
+points. Next, in the agreed order: D158.
+
+**Previously (2026-10-27) — an enum constructor's arguments are a new owner: a `Shared` / `Mutex`
 read out of a place into a payload is counted (register D176; [ADR
 0071](decisions/0071-shared-ownership-and-mutex.md) D2 amendment A6).**
 ADR 0071 A1 had left an enum-construct argument uncounted, so `E::Hs(s)` stored `s`'s handle
