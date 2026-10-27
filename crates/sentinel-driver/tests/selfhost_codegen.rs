@@ -1316,6 +1316,43 @@ fn oracle_ir_of_the_class_field_program_runs() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
+/// ADR 0071 D2 amendment A6: the oracle's IR of `c71_enum_payload_handles` runs and answers 42.
+/// Before the amendment every case but the two controls read a freed cell through the oracle's
+/// output, `block_local` only there and in `scg`'s (inkwell hands a block's own local on as its
+/// tail, A1); `pass_c71_enum_payload_handles` builds the file through inkwell alone, the
+/// corpus-wide behaviour check cannot run on Windows, and the codegen differential holds `scg`
+/// to the oracle byte for byte, so this is what runs the oracle's output.
+#[test]
+fn oracle_ir_of_the_enum_payload_program_runs() {
+    let tmp = std::env::temp_dir().join(format!("snc_enumpay_oracle_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).expect("create temp dir");
+    let stem = "c71_enum_payload_handles";
+    let src = workspace_root().join("tests/pass").join(format!("{stem}.sentinel"));
+    let oracle = Command::new(env!("CARGO_BIN_EXE_snc"))
+        .arg("llvm")
+        .arg(&src)
+        .output()
+        .expect("run snc llvm");
+    assert!(
+        oracle.status.success(),
+        "snc llvm failed on {stem}:\n{}",
+        String::from_utf8_lossy(&oracle.stderr)
+    );
+    let ll = tmp.join(format!("{stem}.ll"));
+    std::fs::write(&ll, &oracle.stdout).expect("write the oracle's IR");
+    let exe = compile_ll_to_exe(&ll, &tmp.join(stem));
+    let run = Command::new(&exe).output().expect("run the program built from the oracle's IR");
+    assert_eq!(
+        run.status.code(),
+        Some(42),
+        "{stem}: built from the oracle's IR it exits {:?}; stderr:\n{}",
+        run.status,
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
 /// ADR 0075 A1, for the one effecting-fn shape the corpus differential cannot hold: an
 /// EMBEDDED shape (`perform Op(arg) + rest`) with a bubbling `handle` in each of its two
 /// defines -- one in the perform's argument, which the parent lowers, and one in the rest

@@ -2490,7 +2490,9 @@ fn pass_c71_generic_container_arg_rc() {
     //
     // Measured on this fixture against a pre-change stage binary: `#new + #clone -
     // #release` was -4 for Shared and -1 for Mutex; post-fix both balance at 0 and the
-    // module is byte-identical to the oracle.
+    // module is byte-identical to the oracle. Since ADR 0071 A6 (register D176) Shared
+    // counts +1: `Holder::With(u)` now gets a clone, which the enum's box-only drop
+    // (register D138) never releases.
     //
     // The exit code CANNOT catch this defect: `run_exit` builds through inkwell, which
     // emitted the clone correctly all along, and scg's IR is never linked into anything
@@ -2549,6 +2551,22 @@ fn pass_c71_init_local_handles() {
     // cell. This passed before the fix too: it holds the release to no more than was counted.
     // Eight cases, 1 each; 42 = all held.
     assert_eq!(run_exit("c71_init_local_handles.sentinel"), 42);
+}
+
+#[test]
+fn pass_c71_enum_payload_handles() {
+    // ADR 0071 D2 amendment A6: an enum constructor's payload is a new owner of its arguments,
+    // so a `Shared` / `Mutex` read out of a place there is cloned. Before, the payload shared
+    // the place's unit, so a payload that outlived the place -- returned, held in a struct or a
+    // class, built in an inner block, read from a parameter, a field, a deref or `self` --
+    // pointed at a freed cell once the place's owner released it: each of the first 18 cases
+    // read a reused cell or aborted, through inkwell as through the text back ends, and
+    // `block_local` in the text back ends only, which
+    // `selfhost_codegen::oracle_ir_of_the_enum_payload_program_runs` and the codegen
+    // differential pin. The enum's drop frees its box only (register D138), so the counted
+    // unit stays held, a leak the IR tests `a6_an_enum_construct_counts_a_place_read` and
+    // `llvm_an_enum_construct_counts_a_place_read` count. 21 cases, 1 each; 42 = all held.
+    assert_eq!(run_exit("c71_enum_payload_handles.sentinel"), 42);
 }
 
 #[test]

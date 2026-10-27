@@ -241,3 +241,26 @@ fn embedded_perform_builds_let_with_method_call() {
     assert_eq!(got, "100\n100\n103\n106\n");
     assert_eq!(run.status.code(), Some(0));
 }
+
+/// ADR 0071 D2 amendment A6 / register D68 (c): inkwell binds a handler arm's operation
+/// parameter as an `i64` word whatever its declared type, so a `Shared` read out of one is an
+/// integer, not a pointer. A6 lowers an enum constructor's arguments in the owning context, which
+/// brought `E::Hs(x)` on such a parameter to the clone `let y: Shared<i64> = x;` already reached,
+/// and both panicked there. Neither is lowered: each is refused with a diagnostic, never a panic.
+#[test]
+fn a_handle_bound_by_a_handler_arm_is_refused_not_a_panic() {
+    const REASON: &str = "is bound as an `i64`, not as a pointer";
+    let head = "enum E { A, Hs(Shared<i64>) }\n\
+                fn rd(e: &E) -> i64 { match *e { E::A => 0, E::Hs(h) => shared_get(h) } }\n\
+                effect Put { put(s: Shared<i64>) -> i64; }\n";
+    for (name, arm) in [
+        ("arm_param_into_enum", "{ let e: E = E::Hs(x); k(rd(&e)) }"),
+        ("arm_param_into_let", "{ let y: Shared<i64> = x; k(shared_get(y)) }"),
+    ] {
+        let src = format!(
+            "{head}fn once(v: i64) -> i64 {{\n    handle v with {{\n        Put.put(x, k) => {arm}\n    }}\n}}\n\
+             fn main() -> i64 {{ once(42) }}\n"
+        );
+        assert_refused(name, &src, "sentinel::codegen::builder", REASON);
+    }
+}

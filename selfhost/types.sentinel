@@ -303,10 +303,10 @@ struct TyCtx {
     // `dump_texpr_node` moves it here; an arm that never sets it leaves `false`.
     cg_place: bool,
     cg_placen: bool,
-    // (ADR 0071 D2 amendment A1) `dump_cargs` walks the arguments of a class init, a
+    // (ADR 0071 D2 amendments A1, A6) `dump_cargs` walks the arguments of a class init, a
     // method and a qualified call (whose callees drop their parameters, so each argument
-    // goes to a new owner) and of an enum construct and a `perform` (which are not): set
-    // by the caller.
+    // goes to a new owner), of an enum construct (whose payload owns them, A6), and of a
+    // `perform` (which does not): set by the caller.
     cg_ownargs: bool,
     // --- (7/N) MIR lowering (ADR 0044) — built ONLY under `mode == 2` as a guarded
     //     side-effect of the pass-2 walk; PER-FN (reset in `type_fn`). Everything is
@@ -382,10 +382,13 @@ struct TyCtx {
     cgav: Vec<i64>,   // call-arg stack: operand value
     cgat: Vec<i64>,   // call-arg stack: operand type handle
     cg_collecting: bool, // true while a call walks its args (gates cg_collect)
-    cg_ufarg: bool,    // (ADR 0071 M1.4a slice 3) true while collecting a USER-fn
-                       // call's args (fid>=40) — gates the Shared-Var rc++ clone so
-                       // it fires only for owning params, NOT builtin args (borrow)
-                       // nor construct/array elements (reset in dump_cargs/elems).
+    cg_ufarg: bool,    // (ADR 0071 M1.4a slice 3; D2 amendments A1, A6) true while
+                       // collecting args that go to a new owner: a USER-fn call's
+                       // (fid>=40), and, set from `cg_ownargs` in `dump_cargs`, a class
+                       // init's, a method's, a qualified call's and (A6) an enum
+                       // construct's. It gates the Shared-Var rc++ clone so it fires
+                       // only for an owning param or payload, NOT builtin args (borrow)
+                       // nor a `perform`'s nor array elements (reset in dump_cargs/elems).
     cg_used_alloc: bool, // (8c-2) module emits `declare sentinel_alloc` iff set
     cg_used_realloc: bool, // (8d-Vec) `declare sentinel_realloc`
     cg_used_panic: bool, // (8c-2) module emits `declare sentinel_panic_oob` iff set

@@ -6601,7 +6601,10 @@ impl<'ctx, 'plan, 'm> CodegenCtx<'ctx, 'plan, 'm> {
                 self.enum_payload_struct_type(enum_id, variant_index, program);
             let mut agg = payload_struct_ty.get_undef();
             for (i, a) in args.iter().enumerate() {
-                let v = self.lower_expr(a, program)?;
+                // ADR 0071 D2 amendment A6: the payload is a new owner of each argument, so
+                // a `Shared` / `Mutex` read out of a place is counted; the enum's box-only
+                // drop never releases it (register D138), a leak rather than an alias.
+                let v = self.lower_owned(a, program)?;
                 agg = self
                     .builder
                     .build_insert_value(agg, v, i as u32, "enum_payload")
@@ -7874,9 +7877,20 @@ impl<'ctx, 'plan, 'm> CodegenCtx<'ctx, 'plan, 'm> {
             Type::Mutex(_) => (self.mutex_clone_fn, "mutex_clone"),
             _ => return Ok(lowered),
         };
+        // inkwell binds a handler arm's operation parameter, and a `return` arm's value, as an
+        // `i64` word whatever its declared type (register D68 (c)), so a handle read out of one
+        // is an integer, not a pointer: refuse it rather than panic.
+        let BasicValueEnum::PointerValue(handle) = lowered else {
+            return Err(CodegenError::Builder(
+                "a `Shared` / `Mutex` bound by a handler arm (an operation's parameter or a \
+                 `return` arm's value) is not lowered: such a value is bound as an `i64`, not \
+                 as a pointer (register D68 (c))"
+                    .to_string(),
+            ));
+        };
         let cloned = self
             .builder
-            .build_call(clone_fn, &[lowered.into_pointer_value().into()], name)
+            .build_call(clone_fn, &[handle.into()], name)
             .map_err(|e| CodegenError::Builder(e.to_string()))?
             .try_as_basic_value()
             .left()
@@ -14367,6 +14381,109 @@ fn main() -> i64 {
                 n += usize::from(inside && l.contains(sym));
             }
             assert_eq!(n, guarded, "@{f}: {sym} behind a moved flag:\n{body}");
+        }
+    }
+
+    // ===== ADR 0071 D2 amendment A6: an enum constructor's payload owns its arguments =====
+    //
+    // A `Shared` / `Mutex` read out of a place into an enum constructor is cloned, and the
+    // place's own drop still releases its unit; an rvalue hands its own unit on, a Move
+    // argument moves, and a struct literal's field was already counted (A1). The enum's drop
+    // frees its box only (register D138), so the counted unit stays held -- a leak, not an exit
+    // code -- so this reads the IR. inkwell hands a block's own local on as its tail (A1), where
+    // the oracle clones it and releases the local; both balance.
+
+    const A6_ENUM_ARGS: &str = r#"
+struct H { s: Shared<i64>, n: i64 }
+enum E { A, Hs(Shared<i64>), Hm(Mutex<i64>), Two(Shared<i64>, Shared<i64>), Hh(H) }
+enum F { N, S(Shared<i64>) }
+enum E2 { B, In(E) }
+class K {
+    let s: Shared<i64>;
+    pub init(s: Shared<i64>) { self.s = s; 0 }
+    pub fn wrap(self: &Self) -> E { E::Hs(self.s) }
+}
+fn getf(r: &H) -> Shared<i64> { (*r).s }
+fn from_local() -> E { let s: Shared<i64> = shared_new(1); E::Hs(s) }
+fn from_param(s: Shared<i64>) -> E { E::Hs(s) }
+fn from_deref(r: &H) -> E { E::Hs((*r).s) }
+fn from_field() -> E { let h: H = H { s: shared_new(1), n: 1 }; E::Hs(h.s) }
+fn from_payload(f: &F) -> F { match *f { F::N => F::N, F::S(x) => F::S(x) } }
+fn from_mutex() -> E { let m: Mutex<i64> = mutex_new(1); E::Hm(m) }
+fn twice() -> E { let s: Shared<i64> = shared_new(1); E::Two(s, s) }
+fn tails(c: bool) -> E { let s: Shared<i64> = shared_new(1); E::Hs(if c { s } else { shared_new(2) }) }
+fn nested() -> E2 { let s: Shared<i64> = shared_new(1); E2::In(E::Hs(s)) }
+fn block_local() -> E { E::Hs({ let t: Shared<i64> = shared_new(1); t }) }
+fn from_rvalue() -> E { E::Hs(shared_new(1)) }
+fn from_call(r: &H) -> E { E::Hs(getf(r)) }
+fn from_mutex_rvalue() -> E { E::Hm(mutex_new(1)) }
+fn from_struct_lit() -> E { let s: Shared<i64> = shared_new(1); E::Hh(H { s: s, n: 1 }) }
+fn moved_struct(h: H) -> E { E::Hh(h) }
+fn main() -> i64 {
+    let h: H = H { s: shared_new(3), n: 1 };
+    let k: K = K::init(shared_new(9));
+    let f: F = F::S(shared_new(8));
+    let a: E = from_local();
+    let b: E = from_param(shared_new(2));
+    let c: E = from_deref(&h);
+    let d: E = from_field();
+    let g: F = from_payload(&f);
+    let e: E = from_mutex();
+    let i: E = twice();
+    let j: E = tails(true);
+    let l: E2 = nested();
+    let bl: E = block_local();
+    let m: E = from_rvalue();
+    let n: E = from_call(&h);
+    let o: E = from_mutex_rvalue();
+    let p: E = from_struct_lit();
+    let q: E = moved_struct(H { s: shared_new(4), n: 1 });
+    let r: E = k.wrap();
+    0
+}
+"#;
+
+    #[test]
+    fn a6_an_enum_construct_counts_a_place_read() {
+        let ir = compile_src_ir_with_moves(A6_ENUM_ARGS);
+        // (fn, shared clones, mutex clones, shared releases, mutex releases)
+        for (f, sc, mc, sr, mr) in [
+            ("K__wrap", 1, 0, 0, 0),
+            ("from_local", 1, 0, 1, 0),
+            ("from_param", 1, 0, 1, 0),
+            ("from_deref", 1, 0, 0, 0),
+            ("from_field", 1, 0, 1, 0),
+            ("from_payload", 1, 0, 0, 0),
+            ("from_mutex", 0, 1, 0, 1),
+            ("twice", 2, 0, 1, 0),
+            ("tails", 1, 0, 1, 0),
+            ("nested", 1, 0, 1, 0),
+            // a block's own local is handed on as its tail, not cloned and released (A1)
+            ("block_local", 0, 0, 0, 0),
+            ("from_rvalue", 0, 0, 0, 0),
+            ("from_call", 0, 0, 0, 0),
+            ("from_mutex_rvalue", 0, 0, 0, 0),
+            ("from_struct_lit", 1, 0, 1, 0),
+            // `h` moves into the payload; its release sits behind its moved flag (ADR 0077)
+            ("moved_struct", 0, 0, 1, 0),
+        ] {
+            // The `define`, not a call site, which can come first in the module.
+            let head = format!("@{f}(");
+            let body: String = ir
+                .lines()
+                .skip_while(|l| !(l.starts_with("define ") && l.contains(&head)))
+                .take_while(|l| *l != "}")
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(!body.is_empty(), "no define for @{f} in:\n{ir}");
+            for (sym, want) in [
+                ("@sentinel_shared_clone(", sc),
+                ("@sentinel_mutex_clone(", mc),
+                ("@sentinel_shared_release(", sr),
+                ("@sentinel_mutex_release(", mr),
+            ] {
+                assert_eq!(body.matches(sym).count(), want, "@{f}: {sym} count:\n{body}");
+            }
         }
     }
 

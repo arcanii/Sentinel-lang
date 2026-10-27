@@ -1315,6 +1315,115 @@ fn llvm_a_class_field_store_counts_and_a_class_drop_releases() {
 }
 
 #[test]
+fn llvm_an_enum_construct_counts_a_place_read() {
+    // ADR 0071 D2 amendment A6: an enum constructor's payload is a new owner of each of its
+    // arguments, so a `Shared` / `Mutex` read out of a place there -- a local, a parameter, a
+    // deref, a field, a method's `self` field, another payload's binding, a block's or an
+    // `if`'s tail, a block's own local, the same place twice, an inner construct -- is cloned,
+    // and the place's own drop still releases its unit. An rvalue (`shared_new`, `mutex_new`,
+    // a call's result) hands its own unit on and is not cloned; a Move argument moves; a
+    // struct literal's field was already counted (A1). The enum's drop frees its box only
+    // (register D138), so the counted unit stays held: a leak, which no exit code shows, so
+    // this reads the IR. `tests/pass/c71_enum_payload_handles` shows what the missing clone did.
+    let ir = llvm_dump(
+        "a6_enum_args",
+        concat!(
+            "struct H { s: Shared<i64>, n: i64 }\n",
+            "enum E { A, Hs(Shared<i64>), Hm(Mutex<i64>), Two(Shared<i64>, Shared<i64>), Hh(H) }\n",
+            "enum F { N, S(Shared<i64>) }\n",
+            "enum E2 { B, In(E) }\n",
+            "class K {\n",
+            "    let s: Shared<i64>;\n",
+            "    pub init(s: Shared<i64>) { self.s = s; 0 }\n",
+            "    pub fn wrap(self: &Self) -> E { E::Hs(self.s) }\n",
+            "}\n",
+            "fn getf(r: &H) -> Shared<i64> { (*r).s }\n",
+            "fn from_local() -> E { let s: Shared<i64> = shared_new(1); E::Hs(s) }\n",
+            "fn from_param(s: Shared<i64>) -> E { E::Hs(s) }\n",
+            "fn from_deref(r: &H) -> E { E::Hs((*r).s) }\n",
+            "fn from_field() -> E { let h: H = H { s: shared_new(1), n: 1 }; E::Hs(h.s) }\n",
+            "fn from_payload(f: &F) -> F { match *f { F::N => F::N, F::S(x) => F::S(x) } }\n",
+            "fn from_mutex() -> E { let m: Mutex<i64> = mutex_new(1); E::Hm(m) }\n",
+            "fn twice() -> E { let s: Shared<i64> = shared_new(1); E::Two(s, s) }\n",
+            "fn tails(c: bool) -> E { let s: Shared<i64> = shared_new(1); E::Hs(if c { s } else { shared_new(2) }) }\n",
+            "fn nested() -> E2 { let s: Shared<i64> = shared_new(1); E2::In(E::Hs(s)) }\n",
+            "fn block_local() -> E { E::Hs({ let t: Shared<i64> = shared_new(1); t }) }\n",
+            "fn from_rvalue() -> E { E::Hs(shared_new(1)) }\n",
+            "fn from_call(r: &H) -> E { E::Hs(getf(r)) }\n",
+            "fn from_mutex_rvalue() -> E { E::Hm(mutex_new(1)) }\n",
+            "fn from_struct_lit() -> E { let s: Shared<i64> = shared_new(1); E::Hh(H { s: s, n: 1 }) }\n",
+            "fn moved_struct(h: H) -> E { E::Hh(h) }\n",
+            "fn main() -> i64 {\n",
+            "    let h: H = H { s: shared_new(3), n: 1 };\n",
+            "    let k: K = K::init(shared_new(9));\n",
+            "    let f: F = F::S(shared_new(8));\n",
+            "    let a: E = from_local();\n",
+            "    let b: E = from_param(shared_new(2));\n",
+            "    let c: E = from_deref(&h);\n",
+            "    let d: E = from_field();\n",
+            "    let g: F = from_payload(&f);\n",
+            "    let e: E = from_mutex();\n",
+            "    let i: E = twice();\n",
+            "    let j: E = tails(true);\n",
+            "    let l: E2 = nested();\n",
+            "    let bl: E = block_local();\n",
+            "    let m: E = from_rvalue();\n",
+            "    let n: E = from_call(&h);\n",
+            "    let o: E = from_mutex_rvalue();\n",
+            "    let p: E = from_struct_lit();\n",
+            "    let q: E = moved_struct(H { s: shared_new(4), n: 1 });\n",
+            "    let r: E = k.wrap();\n",
+            "    0\n",
+            "}\n",
+        ),
+    );
+    // (fn, shared clones, mutex clones, shared releases, mutex releases)
+    for (f, sc, mc, sr, mr) in [
+        // a place read: one clone each, and the place's own drop still releases
+        ("K__wrap", 1, 0, 0, 0),
+        ("from_local", 1, 0, 1, 0),
+        ("from_param", 1, 0, 1, 0),
+        ("from_deref", 1, 0, 0, 0),
+        ("from_field", 1, 0, 1, 0),
+        ("from_payload", 1, 0, 0, 0),
+        ("from_mutex", 0, 1, 0, 1),
+        ("twice", 2, 0, 1, 0),
+        // the `if` hands the context to each branch: the `s` path clones, `shared_new` does not
+        ("tails", 1, 0, 1, 0),
+        ("nested", 1, 0, 1, 0),
+        // the oracle clones a block's own local and releases it at the block's end (inkwell
+        // hands it on instead, A1; both balance)
+        ("block_local", 1, 0, 1, 0),
+        // an rvalue hands its own unit on
+        ("from_rvalue", 0, 0, 0, 0),
+        ("from_call", 0, 0, 0, 0),
+        ("from_mutex_rvalue", 0, 0, 0, 0),
+        // the struct literal's field is the owner A1 already counted; the construct adds none
+        ("from_struct_lit", 1, 0, 1, 0),
+        // a Move argument moves: no clone, and `h`'s drop sits behind its moved flag (ADR 0077)
+        ("moved_struct", 0, 0, 1, 0),
+    ] {
+        // The `define`, not a call site: the oracle emits class methods after the free fns.
+        let head = format!("@{f}(");
+        let body: String = ir
+            .lines()
+            .skip_while(|l| !(l.starts_with("define ") && l.contains(&head)))
+            .take_while(|l| *l != "}")
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!body.is_empty(), "no define for @{f} in:\n{ir}");
+        for (sym, want) in [
+            ("@sentinel_shared_clone(", sc),
+            ("@sentinel_mutex_clone(", mc),
+            ("@sentinel_shared_release(", sr),
+            ("@sentinel_mutex_release(", mr),
+        ] {
+            assert_eq!(body.matches(sym).count(), want, "@{f}: {sym} count:\n{body}");
+        }
+    }
+}
+
+#[test]
 fn llvm_refuses_a_non_word_param_the_embedded_shape_would_capture() {
     // ADR 0072 D4 and register D69: the embedded shape's parent copies each param its resumer
     // reads into the frame with an 8-byte load, and the resumer rebuilds the param from that

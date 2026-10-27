@@ -3131,9 +3131,12 @@ impl Emit<'_> {
             }
             let pstruct = format!("{{ {} }}", field_lls.join(", "));
             // Lower the args, then build the payload aggregate (declaration order).
+            // ADR 0071 D2 amendment A6: the payload is a new owner of each argument, so a
+            // `Shared` / `Mutex` read out of a place is counted; the enum's box-only drop
+            // never releases it (register D138), a leak rather than an alias.
             let mut ops = Vec::with_capacity(args.len());
             for a in args {
-                ops.push((self.lty(a.ty)?, self.lower_expr(a)?));
+                ops.push((self.lty(a.ty)?, self.lower_owned(a)?));
             }
             let mut agg = "undef".to_string();
             for (i, (fty, op)) in ops.iter().enumerate() {

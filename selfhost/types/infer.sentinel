@@ -26,10 +26,11 @@ fn dump_cargs(out: &mut Vec<u8>, a: Args, ps: i64, pe: i64, pidx: i64, src: &[u8
     let svc: bool = (*c).consuming;
     (*c).consuming = true;
     // (ADR 0071 D2 amendment A1) the arguments of a class init, a method or a qualified
-    // call go to parameters the callee drops, so each is walked in the owning context;
-    // those of an enum construct or a `perform` are not (the caller sets `cg_ownargs`,
-    // and it is consumed here so a nested walk does not inherit it). The oracle's
-    // `lower_args` is the owning half.
+    // call go to parameters the callee drops, so each is walked in the owning context, and
+    // since amendment A6 so are an enum construct's, whose payload owns them; a `perform`'s
+    // are not (the caller sets `cg_ownargs`, and it is consumed here so a nested walk does
+    // not inherit it). The oracle's `lower_args` and `lower_enum_construct` are the owning
+    // half.
     let own_args: bool = (*c).cg_ownargs;
     (*c).cg_ownargs = false;
     let svu: bool = (*c).cg_ufarg;

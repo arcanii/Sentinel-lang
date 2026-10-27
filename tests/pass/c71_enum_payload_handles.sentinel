@@ -1,0 +1,366 @@
+// ADR 0071 D2 amendment A6: an enum constructor's payload is a new owner of each of its
+// arguments, so a `Shared` / `Mutex` read out of a place there is counted (cloned). Before,
+// `E::Hs(s)` stored `s`'s handle in the payload without a unit of its own, so once the owner
+// of `s` released the cell while the enum lived on, the payload pointed at a freed cell.
+//
+// Each case loops 200 times. It builds an enum whose payload outlives the place its handle
+// was read from: returned from a fn, held in a struct or a class, built in an inner block,
+// read from a fn's, an init's or a method's parameter, a field, a deref, a method's `self`
+// field, a generic fn's parameter, a block or `if` tail, twice into one payload, nested in
+// another enum's payload, in a handler arm, a `Mutex`, a `Shared<secret i64>`, and a
+// block's own local as its tail. Then `churn` / `churn_m` / `churn_s` allocates and releases
+// cells of the same size, so a freed cell is reused, and the case reads the payload. Before
+// the change each of the first 18 cases read a reused cell, or aborted on the debug runtime,
+// in all three back ends, and `block_local` in the oracle's and `scg`'s output (inkwell hands
+// a block's own local on as its tail, A1). `rvalue` and `struct_literal` are controls that
+// held before too: an rvalue hands its own unit on, and a struct literal's fields were
+// already counted (A1).
+//
+// The enum's drop frees its box only (register D138), so each unit counted here stays held:
+// a leak, never a release too many.
+//
+// Exit 42 = all 21 cases held.
+
+struct H { s: Shared<i64>, n: i64 }
+struct W { e: E, n: i64 }
+
+enum E { A, Hs(Shared<i64>), Two(Shared<i64>, Shared<i64>), Hm(Mutex<i64>), Hh(H) }
+enum E2 { B, In(E) }
+enum SE { Z, Ss(Shared<secret i64>) }
+
+effect Io { read() -> i64; }
+
+class C {
+    let e: E;
+    pub init(v: i64) { let s: Shared<i64> = shared_new(v); self.e = E::Hs(s); 0 }
+    pub fn get(self: &Self) -> i64 { rd(&self.e) }
+}
+
+class CP {
+    let e: E;
+    pub init(s: Shared<i64>) { self.e = E::Hs(s); 0 }
+    pub fn get(self: &Self) -> i64 { rd(&self.e) }
+}
+
+class K {
+    let s: Shared<i64>;
+    pub init(s: Shared<i64>) { self.s = s; 0 }
+    pub fn wrap(self: &Self) -> E { E::Hs(self.s) }
+    pub fn wrap_arg(self: &Self, t: Shared<i64>) -> E { E::Hs(t) }
+}
+
+fn churn() -> i64 {
+    let mut i: i64 = 0;
+    while i < 50 { let o: Shared<i64> = shared_new(999); i = i + 1; }
+    0
+}
+
+fn churn_m() -> i64 {
+    let mut i: i64 = 0;
+    while i < 50 { let o: Mutex<i64> = mutex_new(999); i = i + 1; }
+    0
+}
+
+fn churn_s() -> i64 {
+    let mut i: i64 = 0;
+    while i < 50 { let x: secret i64 = 999; let o: Shared<secret i64> = shared_new(x); i = i + 1; }
+    0
+}
+
+fn rd(e: &E) -> i64 {
+    match *e {
+        E::A => 0,
+        E::Hs(h) => shared_get(h),
+        E::Two(a, b) => shared_get(a) + shared_get(b),
+        E::Hm(m) => { let g = lock(m); if is_some(g) { *g } else { 0 } },
+        E::Hh(h) => shared_get(h.s),
+    }
+}
+
+fn rd2(e: &E2) -> i64 { match *e { E2::B => 0, E2::In(x) => rd(&x) } }
+
+fn rds(e: &SE) -> i64 { match *e { SE::Z => 0, SE::Ss(h) => declassify(shared_get(h)) } }
+
+fn mk(v: i64) -> E { let s: Shared<i64> = shared_new(v); E::Hs(s) }
+fn wrap(s: Shared<i64>) -> E { E::Hs(s) }
+fn wrap_g<T>(x: T, s: Shared<i64>) -> E { E::Hs(s) }
+fn use_after(e: E) -> i64 { churn(); rd(&e) }
+fn ask() -> i64 ! { Io } { perform Io.read() }
+fn mk_field(v: i64) -> E { let h: H = H { s: shared_new(v), n: 1 }; E::Hs(h.s) }
+fn wrap_ref(r: &H) -> E { E::Hs((*r).s) }
+fn mk_two(v: i64) -> E { let s: Shared<i64> = shared_new(v); E::Two(s, s) }
+fn mk_block(v: i64) -> E { let s: Shared<i64> = shared_new(v); E::Hs({ s }) }
+fn mk_if(v: i64, c: bool) -> E {
+    let s: Shared<i64> = shared_new(v);
+    let t: Shared<i64> = shared_new(v);
+    E::Hs(if c { s } else { t })
+}
+fn mk_nested(v: i64) -> E2 { let s: Shared<i64> = shared_new(v); E2::In(E::Hs(s)) }
+fn mk_mutex(v: i64) -> E { let m: Mutex<i64> = mutex_new(v); E::Hm(m) }
+fn mk_secret(v: secret i64) -> SE { let s: Shared<secret i64> = shared_new(v); SE::Ss(s) }
+fn mk_block_local(v: i64) -> E { E::Hs({ let t: Shared<i64> = shared_new(v); t }) }
+fn mk_rvalue(v: i64) -> E { E::Hs(shared_new(v)) }
+fn mk_struct_lit(v: i64) -> E { let s: Shared<i64> = shared_new(v); E::Hh(H { s: s, n: 1 }) }
+
+fn returned() -> i64 {
+    let mut i: i64 = 0;
+    let mut ok: bool = true;
+    while i < 200 {
+        let e: E = mk(42);
+        churn();
+        ok = ok && rd(&e) == 42;
+        i = i + 1;
+    }
+    if ok { 1 } else { 0 }
+}
+
+fn param_source() -> i64 {
+    let mut i: i64 = 0;
+    let mut ok: bool = true;
+    while i < 200 {
+        let e: E = wrap(shared_new(42));
+        churn();
+        ok = ok && rd(&e) == 42;
+        i = i + 1;
+    }
+    if ok { 1 } else { 0 }
+}
+
+fn inner_block() -> i64 {
+    let mut i: i64 = 0;
+    let mut ok: bool = true;
+    while i < 200 {
+        let e: E = { let s: Shared<i64> = shared_new(42); E::Hs(s) };
+        churn();
+        ok = ok && rd(&e) == 42;
+        i = i + 1;
+    }
+    if ok { 1 } else { 0 }
+}
+
+fn in_struct() -> i64 {
+    let mut i: i64 = 0;
+    let mut ok: bool = true;
+    while i < 200 {
+        let w: W = { let s: Shared<i64> = shared_new(42); W { e: E::Hs(s), n: 1 } };
+        churn();
+        ok = ok && rd(&w.e) == 42 && w.n == 1;
+        i = i + 1;
+    }
+    if ok { 1 } else { 0 }
+}
+
+fn in_class() -> i64 {
+    let mut i: i64 = 0;
+    let mut ok: bool = true;
+    while i < 200 {
+        let c: C = C::init(42);
+        churn();
+        ok = ok && c.get() == 42;
+        i = i + 1;
+    }
+    if ok { 1 } else { 0 }
+}
+
+fn init_param() -> i64 {
+    let mut i: i64 = 0;
+    let mut ok: bool = true;
+    while i < 200 {
+        let c: CP = { let t: Shared<i64> = shared_new(42); CP::init(t) };
+        churn();
+        ok = ok && c.get() == 42;
+        i = i + 1;
+    }
+    if ok { 1 } else { 0 }
+}
+
+fn field_source() -> i64 {
+    let mut i: i64 = 0;
+    let mut ok: bool = true;
+    while i < 200 {
+        let e: E = mk_field(42);
+        churn();
+        ok = ok && rd(&e) == 42;
+        i = i + 1;
+    }
+    if ok { 1 } else { 0 }
+}
+
+fn deref_source() -> i64 {
+    let mut i: i64 = 0;
+    let mut ok: bool = true;
+    while i < 200 {
+        let e: E = { let h: H = H { s: shared_new(42), n: 1 }; wrap_ref(&h) };
+        churn();
+        ok = ok && rd(&e) == 42;
+        i = i + 1;
+    }
+    if ok { 1 } else { 0 }
+}
+
+fn self_field() -> i64 {
+    let mut i: i64 = 0;
+    let mut ok: bool = true;
+    while i < 200 {
+        let e: E = { let t: Shared<i64> = shared_new(42); let k: K = K::init(t); k.wrap() };
+        churn();
+        ok = ok && rd(&e) == 42;
+        i = i + 1;
+    }
+    if ok { 1 } else { 0 }
+}
+
+fn method_param() -> i64 {
+    let mut i: i64 = 0;
+    let mut ok: bool = true;
+    while i < 200 {
+        let k: K = K::init(shared_new(1));
+        let e: E = { let t: Shared<i64> = shared_new(42); k.wrap_arg(t) };
+        churn();
+        ok = ok && rd(&e) == 42;
+        i = i + 1;
+    }
+    if ok { 1 } else { 0 }
+}
+
+fn generic_body() -> i64 {
+    let mut i: i64 = 0;
+    let mut ok: bool = true;
+    while i < 200 {
+        let e: E = { let t: Shared<i64> = shared_new(42); wrap_g(7, t) };
+        churn();
+        ok = ok && rd(&e) == 42;
+        i = i + 1;
+    }
+    if ok { 1 } else { 0 }
+}
+
+fn handler_arm() -> i64 {
+    let mut i: i64 = 0;
+    let mut ok: bool = true;
+    while i < 200 {
+        let r: i64 = handle ask() with {
+            Io.read(k) => k(use_after({ let s: Shared<i64> = shared_new(42); E::Hs(s) }))
+        };
+        ok = ok && r == 42;
+        i = i + 1;
+    }
+    if ok { 1 } else { 0 }
+}
+
+fn two_in_one() -> i64 {
+    let mut i: i64 = 0;
+    let mut ok: bool = true;
+    while i < 200 {
+        let e: E = mk_two(21);
+        churn();
+        ok = ok && rd(&e) == 42;
+        i = i + 1;
+    }
+    if ok { 1 } else { 0 }
+}
+
+fn block_tail() -> i64 {
+    let mut i: i64 = 0;
+    let mut ok: bool = true;
+    while i < 200 {
+        let e: E = mk_block(42);
+        churn();
+        ok = ok && rd(&e) == 42;
+        i = i + 1;
+    }
+    if ok { 1 } else { 0 }
+}
+
+fn if_tail() -> i64 {
+    let mut i: i64 = 0;
+    let mut ok: bool = true;
+    while i < 200 {
+        let e: E = mk_if(42, i < 100);
+        churn();
+        ok = ok && rd(&e) == 42;
+        i = i + 1;
+    }
+    if ok { 1 } else { 0 }
+}
+
+fn nested() -> i64 {
+    let mut i: i64 = 0;
+    let mut ok: bool = true;
+    while i < 200 {
+        let e: E2 = mk_nested(42);
+        churn();
+        ok = ok && rd2(&e) == 42;
+        i = i + 1;
+    }
+    if ok { 1 } else { 0 }
+}
+
+fn mutex_payload() -> i64 {
+    let mut i: i64 = 0;
+    let mut ok: bool = true;
+    while i < 200 {
+        let e: E = mk_mutex(42);
+        churn_m();
+        ok = ok && rd(&e) == 42;
+        i = i + 1;
+    }
+    if ok { 1 } else { 0 }
+}
+
+fn secret_payload() -> i64 {
+    let mut i: i64 = 0;
+    let mut ok: bool = true;
+    while i < 200 {
+        let x: secret i64 = 42;
+        let e: SE = mk_secret(x);
+        churn_s();
+        ok = ok && rds(&e) == 42;
+        i = i + 1;
+    }
+    if ok { 1 } else { 0 }
+}
+
+fn block_local() -> i64 {
+    let mut i: i64 = 0;
+    let mut ok: bool = true;
+    while i < 200 {
+        let e: E = mk_block_local(42);
+        churn();
+        ok = ok && rd(&e) == 42;
+        i = i + 1;
+    }
+    if ok { 1 } else { 0 }
+}
+
+fn rvalue() -> i64 {
+    let mut i: i64 = 0;
+    let mut ok: bool = true;
+    while i < 200 {
+        let e: E = mk_rvalue(42);
+        churn();
+        ok = ok && rd(&e) == 42;
+        i = i + 1;
+    }
+    if ok { 1 } else { 0 }
+}
+
+fn struct_literal() -> i64 {
+    let mut i: i64 = 0;
+    let mut ok: bool = true;
+    while i < 200 {
+        let e: E = mk_struct_lit(42);
+        churn();
+        ok = ok && rd(&e) == 42;
+        i = i + 1;
+    }
+    if ok { 1 } else { 0 }
+}
+
+fn main() -> i64 {
+    let n: i64 = returned() + param_source() + inner_block() + in_struct() + in_class()
+        + init_param() + field_source() + deref_source() + self_field() + method_param()
+        + generic_body() + two_in_one() + block_tail() + if_tail() + nested() + handler_arm()
+        + mutex_payload() + secret_payload() + block_local() + rvalue() + struct_literal();
+    if n == 21 { 42 } else { n }
+}

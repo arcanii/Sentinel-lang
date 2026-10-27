@@ -954,6 +954,9 @@ fn dump_texpr_arm(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyC
                 } else {
                     0
                 };
+                // (ADR 0071 D2 amendment A6) the payload is a new owner of each argument, so a
+                // `Shared` / `Mutex` read out of a place is counted: owning args.
+                (*c).cg_ownargs = true;
                 dump_cargs(out, qa, 0 - 1, 0 - 1, 0, src, c, gb);
                 if cg_on(c) {
                     (*c).cg_collecting = cg_ec_col;

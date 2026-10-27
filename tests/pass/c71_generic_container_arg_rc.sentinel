@@ -20,17 +20,16 @@
 //   - `takes_one(m)`         the `Mutex` branch of the helper, a separate arm from
 //                            `Shared` emitting `sentinel_mutex_clone`.
 //
-// TWO NEGATIVE cases matter more than any of those, because each pins one half of the
-// decision; before ADR 0071 D2 amendment A1 a wrong implementation that dropped either passed
+// A NEGATIVE case matters more than any of those, because it pins one half of the
+// decision; before ADR 0071 D2 amendment A1 a wrong implementation that dropped it passed
 // every positive case above AND the rest of the corpus, and `c71_shared_place_duplications`
-// now pins both as well:
+// now pins it as well:
 //   - `takes_zero(shared_new(1))`  an RVALUE source. It TRANSFERS its unit, so the oracle
 //                                  emits NO clone. Since ADR 0071 D2 amendment A1 the
 //                                  decision is `dump_texpr_node`'s: only a node that reads
 //                                  out of a place is cloned. Let a call's node claim to be
 //                                  one and this over-clones — a permanent leak, D31's
 //                                  mirror image.
-//   - `Holder::With(u)`            an ENUM-CONSTRUCT payload (below).
 //
 // A COMPOUND argument whose tail is a binding (`takes_one({ s })`) was a third negative
 // case before A1: the oracle cloned only a bare binding, and `scg`'s `ndump` leaf test
@@ -38,10 +37,13 @@
 // made it a duplication like any other (a block hands the owning context to its tail), so
 // the oracle and `scg` both clone it now, and the `ndump` test is gone from that path.
 //
-// The enum payload: `Holder::With(u)` is an enum-CONSTRUCT argument, not a user-fn owning
-// param. Its walker, `dump_cargs`, is asked not to own there, so `cg_ufarg` stays off and
-// the payload gets no owning context; turn it on and it over-clones. The codegen differential
-// pins that here and on `c71_shared_place_duplications`'s `E::A(s)`.
+// The enum payload: `Holder::With(u)` is an enum-CONSTRUCT argument. It was a second negative
+// case until ADR 0071 D2 amendment A6: `dump_cargs` was asked not to own there, so the payload
+// got no clone and shared `u`'s unit, and a payload that outlived its source pointed at a
+// freed cell (`c71_enum_payload_handles`). Since A6 the construct sets `cg_ownargs` and the
+// payload is cloned like any new owner; the codegen differential pins that clone here and on
+// `c71_shared_place_duplications`'s `E::A(s)`. The enum's drop frees its box only (register
+// D138), so that unit stays held: a leak, which no exit code shows.
 //
 // ⚠ THE EXIT CODE CANNOT CATCH THIS DEFECT AT ALL, and saying "it is the weaker
 // assertion" would understate it. `run_exit` builds through inkwell, which emitted the
@@ -79,7 +81,7 @@ fn takes_two<T>(x: T, y: T) -> i64 {
     9
 }
 
-// Contributes 0 so the negative cases below leave the trace arithmetic alone.
+// Contributes 0 so the negative case below leaves the trace arithmetic alone.
 fn takes_zero<T>(x: T) -> i64 {
     0
 }
@@ -99,7 +101,8 @@ fn main() -> i64 {
     let c: i64 = takes_two(s, t);
     let d: i64 = takes_one(m);
 
-    // The two NEGATIVE cases. Each must emit NO clone; see the header.
+    // The NEGATIVE case emits NO clone; the enum payload, since ADR 0071 A6, emits one. See
+    // the header.
     let e: i64 = takes_zero(shared_new(1));
     let u: Shared<i64> = shared_new(0);
     let h: Holder = Holder::With(u);
