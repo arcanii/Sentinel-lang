@@ -11,7 +11,9 @@ exceptions A1 lists; and by A2 (2026-10-03): inkwell's method and init parameter
 dropped but release no handle; and by A4 (2026-10-04): a store into a class field
 is counted, and a class's drop releases the handles its fields hold; and by A5 (2026-10-25):
 an init's statements have a frame of their own in inkwell, so the handles their locals hold
-are released. D4 is amended by A3 (2026-10-04): a guard owns a refcount unit of its mutex.**
+are released; and by A6 (2026-10-27): an enum constructor's arguments are a new owner, so a
+`Shared` / `Mutex` read out of a place there is counted. D4 is amended by A3 (2026-10-04): a
+guard owns a refcount unit of its mutex.**
 Design
 PINNED with maintainer sign-off 2026-07-02. This is the M1.4 sub-phase of the ADR 0066 threading roadmap, broken out into
 its own ADR per **ADR 0066 D5** ("blocked on first designing a runtime-refcounted
@@ -193,7 +195,10 @@ parameters but releases no handle among them. **And by A4 (2026-10-04), below:**
 store into a class field is counted, and a class's drop releases the handles its fields hold,
 the class-field half of the paragraph above that no back end had built. **And by A5
 (2026-10-25), below:** an init's statements have a frame of their own in inkwell, so the
-handles their locals hold are released, while the parameters' stay kept.
+handles their locals hold are released, while the parameters' stay kept. **And by A6
+(2026-10-27), below:** an enum constructor's arguments are a new owner too, so a handle read
+out of a place into a payload is counted; the enum's box-only drop never releases it
+(register D138), a leak rather than an alias.
 
 ### D3. Deterministic drop reuses the existing scope-exit machinery; a hard-coded drop-content arm, not a `Drop` trait. **PINNED.**
 
@@ -808,7 +813,8 @@ The rule now, in all three back ends:
   path merely rooted at a binding moved elsewhere is not moved by the read — `take(h.s)`
   before `h` is moved on still clones.
 - An enum-construct argument, and an assignment into a field of a class instance, keep D2's
-  original treatment (the assignment until A4, which counts it). A value read out of a class
+  original treatment (the assignment until A4, and the enum-construct argument until A6, which
+  count them). A value read out of a class
   field, like one read out of a `match` arm's payload binding, is a place read and is cloned
   into a new owner.
 - A handle cannot be `secret`-qualified: `secret Shared<T>` and `secret Mutex<T>` are a type
@@ -834,7 +840,9 @@ stays held — a leak, and never a release too many:
   three back ends and now at 8.4.)
 - A struct literal that nothing drops — read in place (`H { s: s, n: 1 }.n`), or stored where
   it is never released (an array literal, `push`, an enum constructor) — still counts its
-  fields, so the units they took stay held. So does a method, qualified-call or class-init
+  fields, so the units they took stay held. Since A6 a `Shared` / `Mutex` read out of a place
+  straight into an enum constructor is counted too, and its unit stays held the same way. So
+  does a method, qualified-call or class-init
   argument in inkwell, whose parameter frame releases no handle (A2, register D154; before
   A2 that frame was dropped only at a method's `return`, D119). Register D122.
 - A call's result that nothing drops — read in place by a builtin (`shared_get(getf(&h))`)
@@ -1180,3 +1188,57 @@ whose `L::init` gains the release of its local `h` (stored into a field, which A
 identically. It changes what `snc build` emits for an
 `init` whose top-level statements bind a handle, so it is at least a minor version (ADR 0076
 D2).
+
+## D2 amendment A6 (2026-10-27) — an enum constructor's arguments are a new owner (register D176)
+
+A1 left an enum-construct argument on D2's original treatment: a `Shared` / `Mutex` read out of
+a place into `E::Hs(s)` was not cloned, so the payload held the handle without a unit of its
+own. Where the place's owner released the cell while the enum lived on — the enum returned from
+the fn that bound `s`, held in a struct or a class, or built in an inner block — the payload
+pointed at a freed cell, and its next use read or locked freed memory. The checker accepted
+such programs, in all three back ends. Found 2026-10-26 by the review of register D120's
+binding half, which would also have released such a place's unit at an assignment.
+
+The rule now, in all three back ends: an enum constructor's arguments are lowered in the owning
+context — the oracle's and inkwell's `lower_enum_construct` lower each through `lower_owned`,
+and `scg` sets `cg_ownargs` before the construct's `dump_cargs` — so a `Shared` / `Mutex` read
+out of a place (a binding, a parameter, a deref, a field or a `self` field, a `match` arm's
+payload binding, or one of those as a block's or an `if`'s tail) is cloned. A value not read
+out of a place (`shared_new`, `mutex_new`, a call's result) hands its own unit on, a Move
+argument still moves, and a struct literal's fields were already counted (A1). inkwell hands a
+block's own local on as its tail, where the oracle and `scg` clone it and release the local;
+both balance. A `perform`'s arguments stay out of the owning context: no back end builds a `perform` of
+an operation whose parameter is not an `i64` or a `secret i64`, a `Shared` or `Mutex` one
+among them (register D68 (c)), so no handle reaches a `perform`'s argument. A handler arm
+can still read such a parameter when the operation is handled but never performed, and
+inkwell binds every arm parameter as an `i64`: a construct on a `Shared` one now reached
+`clone_handle` with an integer, which panicked, as `let y: Shared<i64> = x;` in such an arm
+already did. `clone_handle` now refuses both with a diagnostic
+(`embedded_perform::a_handle_bound_by_a_handler_arm_is_refused_not_a_panic`).
+
+The enum's drop frees its box only (ADR 0032 A1, register D138), so the unit the construct
+counts is never released: a leak, never a release too many. Over 2,000,000 `E::Hs(s)` with `s`
+a local, peak resident set size on macOS rose from 2.0 MB to 66.2–66.3 MB in inkwell and the
+oracle, what `E::Hs(shared_new(i))` measured before and after. A payload drop (ADR 0032's
+payload-ownership model, D138) will balance it, since the payload now holds the unit such a drop
+would release.
+
+Pinned by `tests/pass/c71_enum_payload_handles`, whose 21 cases each loop 200 times with freed
+cells reused: before the change it failed in all three back ends (on macOS a trap in the system
+allocator, exit 133; the text back ends' output now and then ran to the end and answered 2)
+— eighteen cases misbehaved in each, and `block_local` in the oracle's and `scg`'s output only — while the
+two controls (an rvalue, a struct literal) held. `pass_c71_enum_payload_handles` builds it
+through inkwell, `selfhost_codegen::oracle_ir_of_the_enum_payload_program_runs` runs the
+oracle's IR, and the codegen differential holds `scg` to the oracle byte for byte. An extra
+clone is a leak no exit code shows, so the IR tests `a6_an_enum_construct_counts_a_place_read`
+(inkwell) and `llvm_an_enum_construct_counts_a_place_read` (the oracle) count each fn's clones
+and releases, the rvalue, call-result, struct-literal and moved-struct rows included. Reverting
+the change in the oracle only, in inkwell only, in `scg` only or in all three is each caught.
+A matched `snc llvm` sweep of the 483 other `.sentinel` files in `tests/pass`, `tests/ui`,
+`examples` and `sentinel_library` changes no verdict and no byte but in `c71_generic_container_arg_rc`
+(`Holder::With(u)`) and `c71_shared_place_duplications` (`match_payload`'s `E::A(s)`), each by
+one clone, and each answers as before (42, 94); a matched `snc build` and run of the other 303 programs (235 in `tests/pass` and the 68
+examples with a `main`), merge and `--separate`, changes only those two objects and no exit code or output. The oracle emits the same IR for the self-hosted compiler's sources before and after, and
+both bootstrap fixed points hold. It changes
+what all three back ends emit for a program that builds an enum from a handle read out of a
+place, so it is at least a minor version (ADR 0076 D2).

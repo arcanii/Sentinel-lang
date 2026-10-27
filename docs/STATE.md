@@ -5,7 +5,7 @@ HANDOVER.md, STATE.md is the source of truth. New contributors (or
 new chat sessions) should be able to read this file and understand
 the current state of the workspace without re-reading every commit.
 
-## Current State (2026-10-25)
+## Current State (2026-10-27)
 
 > **Phase C closed at the bootstrap milestone (2026-05-30); Phase D self-hosts; the
 > per-unit separate-compilation back end is functionally complete.**
@@ -14,7 +14,26 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
-**Latest (2026-10-25) — inkwell gives an `init`'s statements a frame of their own, so the handles
+**Latest (2026-10-27) — an enum constructor's arguments are a new owner: a `Shared` / `Mutex`
+read out of a place into a payload is counted (register D176; [ADR
+0071](decisions/0071-shared-ownership-and-mutex.md) D2 amendment A6).**
+ADR 0071 A1 had left an enum-construct argument uncounted, so `E::Hs(s)` stored `s`'s handle
+without a unit of its own, and a payload that outlived `s`'s owner — returned from the fn that
+bound it, held in a struct or a class, built in an inner block — pointed at a freed cell. The
+checker accepted such programs, in all three back ends. The construct's arguments are now lowered in the owning context in inkwell, the oracle and
+`scg`, so a place read is cloned; an
+rvalue still hands its own unit on and a Move argument still moves. The enum's drop frees its box
+only (register D138), so the counted unit leaks: 2,000,000 constructions from a local peak at 66.2
+MB, against 2.0 before. Pinned by `tests/pass/c71_enum_payload_handles` (21 cases; before, it failed in all three back ends — on macOS a trap in the system
+allocator), its oracle-IR run, and IR count tests in
+inkwell and the oracle. `snc llvm` over the 483 other files changes two, by one clone each; 303 other programs built
+and run change no exit code or output; the oracle's IR of the self-hosted compiler's sources
+does not move. It
+moves emitted IR, so at least a minor version (ADR 0076 D2). Four-check on macOS: 2,170 passed, none failing,
+doctests and clippy clean, every `selfhost_*` differential green including both bootstrap fixed
+points. Found by the review of register D120's binding half, which lands next.
+
+**Previously (2026-10-25) — inkwell gives an `init`'s statements a frame of their own, so the handles
 their locals hold are released (register D154, its `init` half; [ADR
 0071](decisions/0071-shared-ownership-and-mutex.md) D2 amendment A5).**
 inkwell drops a method's and an `init`'s parameter frame on every exit but releases no handle in
@@ -1623,7 +1642,9 @@ Windows failures and both bootstrap fixed points byte-identical. The fixture car
 NEGATIVE cases, because the mutation lens showed that dropping either of the gate's other
 conjuncts — `mvbv` or `cg_ufarg` — passes every positive case AND the entire corpus: an
 rvalue argument and an enum-construct payload each over-clone, which is D31's mirror image
-(a permanent leak).
+(a permanent leak). (Since ADR 0071 A6, 2026-10-27, the enum-construct payload is an owning
+context and clones, the uncounted payload having dangled; only the rvalue case is negative
+now.)
 
 **⚠ The third negative case — the compound argument the `ndump` test exists for — CANNOT
 be written as a pass fixture, and finding out why was the most useful thing in this

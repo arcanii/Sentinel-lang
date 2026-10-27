@@ -124,7 +124,11 @@ reference as you work through the milestones.
 > confirming nothing pre-existing is newly refused; oracle-vs-scg byte-equality on the new
 > fixture at types, mir and llvm; and the secret-taint check in both directions.
 
-### ▶ RESUME HERE (2026-10-25 — start here. `origin/main` was `4756cee` when this was written, and this slice's two commits sit on top of it, unpushed; read `git reflog show refs/remotes/origin/main` and `git log --oneline origin/main..HEAD` at the START and AGAIN before writing either down. **Register D154's `init` half CLOSED** (`f850e77` fix, then this docs commit) by [ADR 0071](decisions/0071-shared-ownership-and-mutex.md) D2 amendment **A5**: inkwell gives an `init`'s statements a frame of their own, as a method's body has from `lower_block`, dropped before the parameter frame, so a `Shared` / `Mutex` a top-level `let` binds, a handle in a field of such a struct local and a class such a `let` binds are released at the `init`'s exit, as a free fn's locals are; the parameters' handles stay kept (D153). inkwell-only: the oracle and `scg` already released these locals, so no oracle byte moves and there is no `scg` mirror. Over 2,000,000 `init` calls binding a `Shared` local, peak resident set size on macOS falls from 66.2 MB to 1.9 MB. One bounded construct-and-run workflow (`wf_832e331a-781`: five acquisition routes, three review lenses, a reproduce-or-refute verifier for each finding rated minor or worse) ran about 370 probes and found no release too many; its verified findings on the change were test gaps and stale prose, all acted on: the D154 pin is its own IR test, `d154_an_init_releases_the_handles_its_statements_bind` (a class local and a flagged ADR 0077 D6 reassignment included, counts chosen so the old frame, releasing the parameters too and keeping a class local each fail; five mutations, each caught), the D153 test's `init` binds only arrays, and `tests/pass/c71_init_local_handles` (eight routes deriving an `init` local from an argument passed without a clone, 2,000 times each with cells reused) holds the release to what was counted: it answered 42 before the change too, and a build that also releases the parameters aborts on it. Corpus: through inkwell before and after, the other 234 `tests/pass` programs and the 68 examples with a `main` (merge and `--separate`) change no exit code or output and no object but `c71_class_field_handles`'s, whose `L::init` gains the release of its local; `snc llvm` is byte-identical on the 231 it emits and refuses the other three identically. A second bounded round over the whole diff (`wf_bd7a9378-804`, three lenses with verifiers) found no defect in the code or the tests, and nine in the prose, all fixed. Four-check on macOS: **2,165 passed, none failing**, doctests and clippy clean, every `selfhost_*` differential green including both bootstrap fixed points. It changes what `snc build` emits for such an `init`, so it is at least a minor version (ADR 0076 D2). Nothing new was filed; what the workflow found outside the change is pre-existing and already registered (`spawn` in a class `init` panics inkwell; D120's overwritten value; D154's parameter half) or was reported to the maintainer directly.)
+### ▶ RESUME HERE (2026-10-27 — start here. `origin/main` was `4756cee` when this was written, and this session's commits sit on top of it, unpushed; read `git reflog show refs/remotes/origin/main` and `git log --oneline origin/main..HEAD` at the START and AGAIN before writing either down. **Register D176 CLOSED** (`f84bf1f` fix, then this docs commit) by [ADR 0071](decisions/0071-shared-ownership-and-mutex.md) D2 amendment **A6**: an enum constructor's arguments are lowered in the owning context in all three back ends (inkwell, the oracle and `scg`), so a `Shared` / `Mutex` read out of a place into a payload is cloned. Before, the payload held the handle without a unit of its own, so a payload that outlived its source pointed at a freed cell; the checker accepted such programs. Found by the review of D120's binding half, which is implemented, validated and STASHED (`git stash list`: "D120-binding-half …") because it would have released that uncounted unit at an assignment too; it lands next, on top of this. The counted unit leaks under the enum's box-only drop (D138): 2,000,000 constructions from a local peak at 66.2 MB, against 2.0 before. The maintainer chose this fix and cleared describing it openly. Pinned by `tests/pass/c71_enum_payload_handles` (21 cases; before, it failed in all three back ends — on macOS a trap in the system allocator), its oracle-IR run, and IR count tests in inkwell and the oracle; reverting the change in any one back end, or in all three, is caught. One review workflow (`wf_4777b402-af8`: two probe routes, two sweep/plan lenses, a verifier per finding above info) found no release too many or wrong value; its verified findings — the missing pins, stale comments and docs, and an inkwell panic the construct newly reached for a handle read out of a handler arm's operation parameter (now a diagnostic in `clone_handle`, pinned by `embedded_perform::a_handle_bound_by_a_handler_arm_is_refused_not_a_panic`) — are all acted on; a second review round over the prose found nine more, all fixed. Sweeps, BASE (`1ec80e7`) against NEW, over everything but the new fixture: `snc llvm` over 483 files changes 2 (one clone each), refuses nothing new; `snc build` and run of 303 programs, merge and `--separate`, change two objects and no exit code or output; the oracle's IR of the self-hosted compiler's sources does not move. Four-check on macOS: **2,170 passed, none failing**, doctests and clippy clean, every `selfhost_*` differential green including both bootstrap fixed points. At least a minor version (ADR 0076 D2).)
+
+> **NEXT:** D120's binding half (stashed, see above): `git stash pop` it, rerun its probes — the enum-payload ones that blocked it first — and its four-check, then land it with its pins and docs. Then, in the order agreed on 2026-10-05: D158, D102 and D103, and D36's option A with D146; then the bump to 0.3.0 (ADR 0076 D2). D167 is the maintainer's call. Open: D172, D173, D174, D175, and the rest of D154 (a counted temporary passed directly, and a handle a struct argument brought in, or a class passed by value, that the method or `init` only reads).
+
+### ▶ RESUME HERE (2026-10-25 — superseded by the block above. `origin/main` was `4756cee` when this was written, and this slice's two commits sit on top of it, unpushed; read `git reflog show refs/remotes/origin/main` and `git log --oneline origin/main..HEAD` at the START and AGAIN before writing either down. **Register D154's `init` half CLOSED** (`f850e77` fix, then this docs commit) by [ADR 0071](decisions/0071-shared-ownership-and-mutex.md) D2 amendment **A5**: inkwell gives an `init`'s statements a frame of their own, as a method's body has from `lower_block`, dropped before the parameter frame, so a `Shared` / `Mutex` a top-level `let` binds, a handle in a field of such a struct local and a class such a `let` binds are released at the `init`'s exit, as a free fn's locals are; the parameters' handles stay kept (D153). inkwell-only: the oracle and `scg` already released these locals, so no oracle byte moves and there is no `scg` mirror. Over 2,000,000 `init` calls binding a `Shared` local, peak resident set size on macOS falls from 66.2 MB to 1.9 MB. One bounded construct-and-run workflow (`wf_832e331a-781`: five acquisition routes, three review lenses, a reproduce-or-refute verifier for each finding rated minor or worse) ran about 370 probes and found no release too many; its verified findings on the change were test gaps and stale prose, all acted on: the D154 pin is its own IR test, `d154_an_init_releases_the_handles_its_statements_bind` (a class local and a flagged ADR 0077 D6 reassignment included, counts chosen so the old frame, releasing the parameters too and keeping a class local each fail; five mutations, each caught), the D153 test's `init` binds only arrays, and `tests/pass/c71_init_local_handles` (eight routes deriving an `init` local from an argument passed without a clone, 2,000 times each with cells reused) holds the release to what was counted: it answered 42 before the change too, and a build that also releases the parameters aborts on it. Corpus: through inkwell before and after, the other 234 `tests/pass` programs and the 68 examples with a `main` (merge and `--separate`) change no exit code or output and no object but `c71_class_field_handles`'s, whose `L::init` gains the release of its local; `snc llvm` is byte-identical on the 231 it emits and refuses the other three identically. A second bounded round over the whole diff (`wf_bd7a9378-804`, three lenses with verifiers) found no defect in the code or the tests, and nine in the prose, all fixed. Four-check on macOS: **2,165 passed, none failing**, doctests and clippy clean, every `selfhost_*` differential green including both bootstrap fixed points. It changes what `snc build` emits for such an `init`, so it is at least a minor version (ADR 0076 D2). Nothing new was filed; what the workflow found outside the change is pre-existing and already registered (`spawn` in a class `init` panics inkwell; D120's overwritten value; D154's parameter half) or was reported to the maintainer directly.)
 
 > **NEXT:** the items agreed with the maintainer, in the order agreed on 2026-10-05, D154's `init` half now done: an assignment into a framed binding as a drop site (D120's binding half), D158, D102 and D103, and D36's option A with D146; then the bump to 0.3.0 (ADR 0076 D2). D167 is the maintainer's call. Open and filed before this slice: D172 (a handler arm resuming with a computed `bool`), D173 (`scg` lacks the oracle's refusal of a `handle` body that suspends other than directly), D174 (a call through a `Fn`-typed operation parameter in a handler arm) and D175 (the arm-remainder walk's name scope). The rest of D154 — a counted temporary passed directly, and a handle a struct argument brought in, or a class passed by value, that the method or `init` only reads — stays open.
 
@@ -2278,7 +2282,8 @@ reference as you work through the milestones.
 >      place (a generic parameter at `Shared` — which also closes an older leak: HEAD's
 >      oracle and inkwell cloned a moved generic parameter passed to a call and never released
 >      the clone). An enum-construct argument and an assignment into a class field keep D2's
->      treatment (the assignment until D156, ADR 0071 A4, which counts it); a read out of a
+>      treatment (the assignment until D156, ADR 0071 A4, and the enum-construct argument
+>      until D176, ADR 0071 A6, which count them); a read out of a
 >      class field is cloned like any other place read. A
 >      `secret`-qualified handle (`secret Shared<T>`, `secret Mutex<T>`) is now a type error,
 >      `SecretHandle`: the secret belongs inside the container. The reviews found two more
@@ -2305,6 +2310,11 @@ reference as you work through the milestones.
 >      each peak at 70.8–70.9 MB, against 9.2–9.3 MB before A1; an element that is never
 >      read leaks before and after (70.8–70.9 MB). Before A1 the element's unit went to its
 >      first reader, which balanced one read — a second read released one unit too many.
+>      Since D176 (ADR 0071 A6, 2026-10-27) a handle read out of a place straight into an
+>      enum constructor is counted too, and stays held the same way: 2,000,000 `E::Hs(s)` with
+>      `s` a local peak at 66.2 MB, against 2.0 before, when the payload had no unit of its own
+>      (macOS peak resident set size, in inkwell and the oracle, not the working-set measure
+>      above).
 >      Three more owners of the same kind came out of the later review rounds. A call's
 >      result that nothing drops — `shared_get(getf(&h))`, or `getf(&h);` discarded, with
 >      `fn getf(r: &H) -> Shared<i64> { (*r).s }` — keeps the unit the callee now counts into
@@ -2574,7 +2584,10 @@ reference as you work through the milestones.
 >      D93 investigation; re-verified 2026-09-26. ADR 0032's drop frees an enum value's box but
 >      not what its payload owns: `let e = E::V([i + 1, 2, 3, 4]);`, matched or not, 2,000,000
 >      times, peaks at 100.5 MB in all three back ends, against 8.4 MB for the same array in a
->      struct. The fix is ADR 0032's recorded payload-ownership model.
+>      struct. The fix is ADR 0032's recorded payload-ownership model. (Note, 2026-10-27:
+>      since ADR 0071 A6, D176, a `Shared` / `Mutex` in a payload holds a unit of its own, so a
+>      payload drop that releases it balances; before A6 a handle read out of a place into a
+>      payload held none, and such a drop would have released one unit too many.)
 >
 >      **D139 — DONE (2026-10-09). An effecting fn in ADR 0072's let shape never freed its heap
 >      parameters (a leak).** Found 2026-09-23 by the D93 investigation; re-verified 2026-09-26.
@@ -3416,6 +3429,22 @@ reference as you work through the milestones.
 >      parameter `f` takes the panicking bubble path in `scg`, where the oracle builds the
 >      remainder's frame; both run to 42 when nothing bubbles, and `apply(f, r)` in its place
 >      did the same at HEAD. The fix is to scope a pattern's names in the walk.
+>
+>      **D176 — DONE (2026-10-27, `f84bf1f`, [ADR
+>      0071](decisions/0071-shared-ownership-and-mutex.md) D2 amendment A6). An enum constructor's
+>      payload held a `Shared` / `Mutex` read out of a place without a unit of its own.** Found
+>      2026-10-26 by the review of D120's binding half, which would also have released such a
+>      place's unit at an assignment. `E::Hs(s)` stored `s`'s handle uncounted (ADR 0071 A1 had
+>      kept an enum-construct argument on D2's treatment), so a payload that outlived the owner of
+>      `s` — returned from the fn that bound it, held in a struct or a class, built in an inner
+>      block — pointed at a freed cell, and its next use read or locked freed memory, in all three
+>      back ends. The checker accepted such programs. The construct's arguments are now lowered in
+>      the owning context in all three back ends (inkwell, the oracle and `scg`), so a place read
+>      is cloned; that unit stays held, since the enum's drop frees its box only (D138, D122):
+>      2,000,000 `E::Hs(s)` with `s` a local peak at 66.2 MB, against 2.0 before. Pinned by
+>      `tests/pass/c71_enum_payload_handles` (21 cases; it failed in all three back ends before),
+>      its oracle-IR run, and IR tests in inkwell and the oracle. Moves emitted IR, so at least a
+>      minor version (ADR 0076 D2).
 >
 >      **D78 — stale corpus fixture counts in `llvm.rs` and `README.md`, at six sites, stale
 >      before this change.** Found by D74's reviews. `crates/sentinel-driver/tests/llvm.rs`
@@ -4459,7 +4488,10 @@ reference as you work through the milestones.
 >      the oracle. It carries two negative cases — an RVALUE argument and an
 >      ENUM-CONSTRUCT payload — because the mutation lens showed a wrong implementation
 >      dropping either of the gate's other two conjuncts (`mvbv`, `cg_ufarg`) passes every
->      positive case and the whole corpus. ⚠ **It was OBSERVED a slice earlier and not filed**: the ADR
+>      positive case and the whole corpus. (Note, 2026-10-27: since ADR 0071 A6, D176, an enum
+>      construct's arguments are an owning context, so the fixture's `Holder::With(u)` now pins
+>      a clone where it pinned none; its rvalue case is the remaining negative one.) ⚠ **It was
+>      OBSERVED a slice earlier and not filed**: the ADR
 >      0016 A1 work hit it, excluded containers from `c16_mono_key_handle_tags` because of
 >      it, and described it in that fixture's header as "`scg` drops the refcount `clone` on
 >      a container passed as a GENERIC call argument" — accurate, and never given a number,
