@@ -14,7 +14,40 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
-**Latest (2026-10-28) — an assignment into a framed binding drops the value it overwrites
+**Latest (2026-10-28, second slice) — a `secret`-qualified value drops as its inner type does, in
+all three back ends (register D158; [ADR 0019](decisions/0019-phase-c3-kickoff-and-effects-plan.md)
+D5 amendment A3).**
+Since C3.1 inkwell has stripped the `secret` qualifier before it picks a drop, so a `secret T` is
+freed or released as a `T` is. The text back ends did not: the oracle's `needs_drop` answered
+`false` for every `secret T` and its `emit_drop_for_binding` had no arm for one, and `scg`'s
+`cg_needs_drop` and `cg_emit_drop` dispatched on the qualified type. So in the oracle's and `scg`'s
+output a `secret`-qualified array, string, `Vec`, enum, struct or class binding or parameter was
+dropped nowhere — at no exit, drain, assignment or frame-pushing parent — and a struct's or a
+generic instance's drop walked past a `secret`-qualified field: a leak, never a release too many.
+Both now strip the qualifier first, as inkwell does, and give a `secret`-qualified binding or field
+moved on one path the moved flag inkwell gives it; inkwell does not change. A `secret` buffer is
+freed with `sentinel_free` (libc `free`), as inkwell frees it, and is neither zeroed nor mlocked;
+the mlocked cells zeroed at their last release are a `Shared` or `Mutex` with a `secret` payload.
+Over 2,000,000 iterations, peak resident set size on macOS of the oracle's and `scg`'s output falls
+from 18.0–66.4 MB to 1.8–2.2 on every `secret` shape probed (a `secret [i64]` local from 66.1 to
+1.8–1.9, a `secret` struct holding a `Mutex` from 66.4 to 2.2), matching inkwell's, except where
+inkwell keeps an `init` parameter's handles (register D154). Pinned by
+`tests/pass/c31_secret_aggregate_drops` (twelve shapes, 2,000 rounds with cells reused), its
+oracle-IR run, an IR count test in the oracle (23 functions), and four new codegen seeds; the change
+reverted in both text back ends (only the count test sees that) or either half reverted in either
+one is caught. `snc llvm` over the 485 other `.sentinel` files in `tests/pass`, `tests/ui`,
+`examples` and `sentinel_library` changes two, each by a moved flag and a drop behind it that never
+runs, and refuses nothing new; the other 305 programs, built merge (the 68 examples also
+`--separate`) and run (the seven socket examples built, not run), change no exit code or output, and
+every inkwell object is byte-identical; the oracle's IR of the self-hosted compiler's sources does
+not move. Probes through all three back ends, before and after, over two sets of 3,024 and 3,484
+programs `snc build` accepts found no double free, use after free, release too many, or wrong
+answer, abort or refusal that HEAD did not already give. It moves the IR the oracle and `scg` emit,
+so at least a minor version (ADR 0076 D2). Four-check on macOS: **2,177 passed, none failing**,
+doctests and clippy clean, every `selfhost_*` differential green including both bootstrap fixed
+points. Next, in the agreed order: D102 and D103.
+
+**Previously (2026-10-28) — an assignment into a framed binding drops the value it overwrites
 (register D120, its binding half; [ADR 0077](decisions/0077-drop-flags-for-maybe-moved-bindings.md)
 D6 amendment A2).**
 ADR 0077 D6 dropped an overwritten value only when the binding had a moved flag, so every other

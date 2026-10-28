@@ -888,7 +888,9 @@ Settled with the owner (as 5/N–7/N were), recommendations grounded in the scou
     lower(inner)`; Sentinel's Declassify arm flows the inner operand untouched); the `T → secret T` widen is
     a no-op (`cg_widen` only wraps nullable, kind 4). Drop stays no-op for secret scalars (`needs_drop`/
     `cg_needs_drop` false — secret scalars own no heap; a hypothetical `secret Struct` drop is deferred,
-    unexercised).
+    unexercised). (Note, 2026-10-28: that drop landed as [ADR
+    0019](0019-phase-c3-kickoff-and-effects-plan.md) D5 amendment A3, register D158: `needs_drop` and
+    `cg_needs_drop` now follow a `secret T`'s inner type, and the drops strip the qualifier.)
   - **Validation:** the 5 fixtures byte-identical (`scg` == `snc llvm`) + behaviourally equal to inkwell +
     leak-free (no heap). Modes 0–3 byte-identical; BOTH fixed-point paths preserved. Four-check green (1476
     tests). **NEXT: generics (mono)** — `dump_fn` type_params Err (lib.rs:198), `llvm_ty` GenericInstance,

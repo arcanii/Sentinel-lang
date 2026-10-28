@@ -72,6 +72,11 @@ combines effect_decl + annotated fn + secret typing +
 declassify-before-branching in one program; stdout "42",
 exit 0.
 
+**D5 amendment A3 (2026-10-28)**, a third amendment, after the
+*Revisit* section, closes register **D158**: a `secret T` drops
+as its inner type does, in all three back ends. inkwell always
+did; the oracle (`snc llvm`) and `scg` dropped nothing for one.
+
 Date: 2026-05-28
 Related:
   - **0011** (Phase C1 kickoff — ACCEPTED): the parallel-tree
@@ -330,6 +335,9 @@ Surface syntax (D6's lexer adds the `secret` keyword):
 The `Type: Copy` invariant survives — `SecretId` is `u32`. The
 interner table lives alongside `refs:`, `generic_instances:`,
 `structs:` on `TypedProgram`.
+
+What a `secret T` drops is set by D5 amendment A3 (2026-10-28,
+below): exactly what a `T` drops, in every back end.
 
 ### D6. Declassify: `declassify(e)` as a special form.
 
@@ -942,6 +950,193 @@ landed. Per-D revisit triggers:
   (effects can finally be discharged) — may relax to "main has
   to handle all effects" rather than "main can't have any
   effects."
+
+## D5 amendment A3 (2026-10-28) — a `secret`-qualified value drops as its inner type does, in all three back ends (register D158)
+
+D5 makes `secret T` a type of its own, `Type::Secret(SecretId)`, whose `SecretData` carries the
+inner `T`, and C3.1 lowers it as `T` (the *Appendix*: "Secret(T) lowers identically to T"). D5
+never said what it drops. inkwell has answered since C3.1: `emit_drop_for_binding` and
+`field_type_needs_drop_inner` strip one `secret` layer before they pick a drop, so a `secret T`
+is freed or released as a `T` is. This amendment makes that rule part of D5 and holds the two
+text back ends to it: **a value of type `secret T` drops exactly as a value of type `T` does —
+at the same drop sites, behind the same moved flags, by the same walk — in inkwell, the oracle
+(`snc llvm`) and `scg`.** One layer is all there is: `secret secret T` does not parse.
+
+The text back ends did not follow it. The oracle's `needs_drop` answered `false` for every
+`secret T` — its arm, written down when `needs_drop` became an exhaustive match (`61bcac3`; the
+`_ => false` before it gave the same answer), said that a `secret` wraps only word scalars, so a
+droppable inner was unrepresentable — and its `emit_drop_for_binding` had no arm for one.
+`scg`'s `cg_needs_drop` and `cg_emit_drop` dispatched on the qualified type without stripping
+it; the self-host port had left "a hypothetical `secret Struct` drop" deferred ([ADR
+0045](0045-self-host-port-codegen.md), its secret slice). The premise did not hold:
+`secret [i64]`, `secret [u8]`, `secret Vec<i64>` and a `secret`-qualified struct, enum or class
+all type-check, as does a struct with a `secret`-qualified field; only a `secret`-qualified
+`Shared` or `Mutex` is refused (ADR 0071's `SecretHandle`). So in the oracle's and `scg`'s
+output such a binding or parameter was dropped nowhere — not at a scope exit, a `return`,
+`break` or `continue` drain, a handler arm's exit, an assignment ([ADR
+0077](0077-drop-flags-for-maybe-moved-bindings.md) A2), a generic instance's parameter frame or
+an effecting fn's frame-pushing parent (ADR 0077 A1) — and a struct's or a generic instance's
+drop walked past a `secret`-qualified field: always a leak, never a release too many.
+`[secret T]`, an array of secrets, is an `Array` and was always freed, and ADR 0071 A4's class
+drop already stripped the qualifier for a class's fields.
+
+Now the oracle's `needs_drop` follows the inner type of a `secret T`, its `emit_drop_for_binding`
+strips the qualifier (`unsecret`) before it dispatches, and `scg`'s `cg_needs_drop` and
+`cg_emit_drop` strip it (`strip_secret`) first. inkwell does not change. Because `needs_drop` also
+decides which moved bindings and fields get a flag (ADR 0077 D3, D5), and an exit or an assignment
+skips a binding whose move was walked without one, the text back ends now give a moved flag, as
+inkwell does, to a `secret`-qualified binding moved on one path (by `declassify` or by a call) and
+to a `secret`-qualified field moved out of a struct, and drop each behind its flag.
+
+**What it frees, and how.** What inkwell's drop frees, with the same calls: an array's, a string's
+or a `Vec`'s buffer and an enum's box with `sentinel_free`, which is libc `free`; a `Shared` or
+`Mutex` held in a `secret`-qualified struct or class with `sentinel_shared_release` /
+`sentinel_mutex_release`. (inkwell routes only a public array literal into a scope arena, never a
+`secret` one, so where the public twin is bulk-freed by `sentinel_arena_exit`, a `secret` array is
+freed by `sentinel_free` at the same exit.) The qualifier adds no drop action, in any back end: a
+`secret` buffer is neither zeroed nor mlocked, as in inkwell's output all along, so its bytes may
+stay in the freed block, and in an allocation that reuses it, until something overwrites them;
+before, the text back ends' output left them in a block never freed. The memory Sentinel mlocks at
+allocation and zeroes at the last release is a `Shared` or `Mutex` cell whose payload is a `secret`
+scalar (ADR 0071, `sentinel_shared_new_secret` / `sentinel_mutex_new_secret`). Wiping a heap
+`secret` buffer is not designed; inbound request R1
+([`inbound-requests.md`](../inbound-requests.md)) asks for it for `[secret u8]` / `Vec<secret u8>`,
+and this amendment does not provide it.
+
+For a program `snc build` builds, it is sound for these reasons:
+
+- **It is inkwell's rule, unchanged.** `snc build` has dropped a `secret T` as `T` since C3.1,
+  so the corpus and every program built since run it. The change moves no inkwell object (all 305
+  merge and 280 `--separate` objects of the sweep below are byte-identical), and for ten of the
+  fifteen probes in the table below the oracle now emits, byte for byte, the IR of the probe's twin
+  without the qualifier.
+- **Ownership already looked through the qualifier.** The borrow checker's `is_copy_type` and
+  `scg`'s `is_move_type` strip `secret`, so a `secret T` binding is moved as a `T` binding is, and a
+  `secret`-qualified field of a struct is partially moved ([ADR
+  0046](0046-partial-move-field-soundness.md)) as any other field is. The text back ends' move
+  bookkeeping reads the type only through `needs_drop` (a class's fields through `holds_handle`,
+  which already looked through it), and `needs_drop` now gives such a binding or field the moved
+  flag (ADR 0077) inkwell gives it. A drop the change adds is the drop a `T` binding gets at the
+  same site; on a path that moved the value, it sits behind the flag that move set.
+- **Few operations reach a `secret` aggregate.** The type checker refuses a field access, an
+  index or a method call on a `secret` value, so one can only be bound, moved, widened,
+  borrowed, declassified or assigned; `declassify`, a widening and a by-value argument move
+  their operand. The probes cover each of these.
+- **The handles it releases were counted.** The type checker refuses a `secret`-qualified `Shared`
+  or `Mutex` (`SecretHandle`), so no program `snc build` builds holds one, and a handle held in a
+  `secret`-qualified struct or class was counted into it as into the same value without the
+  qualifier (ADR 0071 A1, A4, A6), so its release gives back that owner's own unit.
+
+Measured on macOS as the peak resident set size (`/usr/bin/time -l`, decimal MB, the second of
+two runs), with debug builds of `snc` and `scg` from HEAD (`113f559`, ADR 0077 A2, without this
+amendment) and from the change, each linked against its own build's runtime (the two are
+byte-identical). Every run answers 42, plain and again under `MallocScribble`,
+`MallocGuardEdges` and `MallocErrorAbort`, and `scg`'s IR is byte-identical to the oracle's on
+every probe, before and after.
+
+| 2,000,000 iterations | before: inkwell / oracle / `scg` (MB) | after (MB) |
+|---|---|---|
+| a `secret [i64]` local | 1.9 / 66.1 / 66.1 | 1.9 / 1.9 / 1.8 |
+| a `secret [u8]` (a string) local | 1.8 / 34.0 / 33.9 | 1.8 / 1.9 / 1.8 |
+| a `secret Vec<i64>` local | 1.9 / 34.0 / 34.0 | 1.9 |
+| a `secret` struct holding an array | 1.8 / 34.0 / 34.0 | 1.8 / 1.9 / 1.9 |
+| a `secret` struct holding a `Shared` | 1.9 / 66.2 / 66.2 | 2.0 |
+| a `secret` struct holding a `Mutex` | 2.2 / 66.4 / 66.4 | 2.2 |
+| a `secret` class holding a `Shared` | 2.0 / 66.2 / 66.2 | 2.0 |
+| a `secret` struct holding a class | 2.0 / 66.2 / 66.2 | 2.0 / 1.9 / 1.9 |
+| a public struct with a `secret [i64]` field | 1.9 / 34.0 / 34.0 | 1.9 / 1.8 / 1.9 |
+| a public struct with a `secret` class field | 2.0 / 66.2 / 66.2 | 2.0 / 1.9 / 1.9 |
+| a `secret` struct parameter holding an array | 1.9 / 34.0 / 34.0 | 1.9 |
+| a `secret` class parameter holding a `Shared` | 1.9 / 66.2 / 66.2 | 2.0 |
+| a `secret` binding declassified on every other call, dropped behind its flag on the rest | 1.9 / 18.0 / 18.0 | 1.9 / 1.8 / 1.9 |
+| a `secret [i64]` assigned in a loop | 1.9 / 66.1 / 66.1 | 1.8 / 1.9 / 1.8 |
+| a `secret` struct holding a `Shared`, assigned in a loop | 1.9 / 66.2 / 66.2 | 2.0 / 2.0 / 1.9 |
+
+Each probe's twin without the qualifier measures 1.8 to 2.5 MB in every back end, before and after.
+The probes holding a `Shared`, a `Mutex` or a class, but the one assigned in a loop, drop the value
+in an inner block or a callee and then read or relock the cell, so a release too many would answer
+wrong. After the change `leaks --atExit` finds no leak in any probe's or twin's executables. One
+more probe and its twin, an `init` parameter holding a `Shared` that the `init` only reads, stay at
+66.2 MB through inkwell, `secret` or not, which is register D154; there the `secret` probe's oracle
+and `scg` output fall from 66.2 to 2.0 and 1.9, what the twin's already measured, and leak nothing.
+
+A matched `snc llvm` sweep of the 485 `.sentinel` files, other than the new fixture, in
+`tests/pass`, `tests/ui`, `examples` and `sentinel_library` changes no verdict: 339 byte-identical,
+144 refused by both with identical messages, and 2 changed, `tests/pass/c19_widen_arm_family`'s
+`main` and `tests/pass/c71_class_field_handles`'s `SK__init`, each by a moved flag and a drop behind
+it, of the `secret [i64]` that `declassify(from_array)` moves and of the `secret K` parameter that
+`self.k = k` moves. Neither drop runs, since the move comes first on every path; with SSA names and
+labels normalized both diffs are insertions only, and inkwell's IR has the same flag. Of
+`demos/win32`'s three files one is identical and two are refused by both. A matched `snc build` and
+run of 305 programs (the 237 in `tests/pass` and the 68 examples with a `main`, merged, the examples
+also `--separate`; the seven socket examples built, not run), plain and under the malloc checks, and
+of the oracle's IR for the 285 it emits, changes no build result, exit code or output, and every
+merge and `--separate` object is byte-identical. The oracle's IR of the ten self-hosted module roots
+does not move, since those sources declare no `secret`-typed binding, parameter, field or return;
+the `cg.sentinel` change itself moves the five roots that include it, in `cg_needs_drop` and
+`cg_emit_drop` only, and `scg` built from them emits the oracle's bytes for the merged `codegen`
+root. `scg` equals the oracle on 341 of the 342 corpus files the oracle emits (the exception,
+`examples/lang/delegation`, is the known named-impl qualification gap, the same before) and on all
+116 codegen seeds; the two seeds that hold a `secret` struct, one moved out of a class and one
+assigned, move in both alike.
+
+The probes built each program through inkwell, the oracle's IR and `scg`'s IR with both builds, and
+ran it under the malloc checks (the first set plain as well). One set crosses 25 kinds of
+`secret`-qualified value (top-level `secret` arrays, strings, `Vec`s, structs, enums, classes and
+generic instances, and public structs, generic instances and enum payloads with a `secret`-qualified
+part) with up to 132 ways to move or drop one (3,174 programs; the 18 `declassify` and widening ways
+apply only to the 18 kinds that are themselves `secret`), beside 31 hand-written programs and one
+cross-module program, nearly all 2,000 rounds each: of the 3,024 programs `snc build` accepts, every
+run answers 42 before and after; the oracle lowers 3,013 of the 3,023 single-file ones, as it did
+before, its IR moves in 2,906 of them and `scg`'s equals it in all; ADR 0077's fail-closed refusal
+never fires, and no back end refuses anything new. The other set generates 3,786 programs from
+earlier drop-path generators with bindings, parameters, fields and payloads made `secret`-qualified,
+3,484 of which `snc build` accepts: none crashes, aborts or answers differently where it did not
+before, gains a refusal or a new `scg`/oracle difference, and the oracle's IR moves in every one.
+What HEAD already did stays as it was: 92 stop at the runtime's ADR 0075 D6 abort (a handler arm
+resumed into another operation) through inkwell and the oracle, `scg` refuses 730 (D159: a captured
+parameter is not a word), and in four of the 92 its output runs on instead. Counted by `leaks
+--atExit` on a sample of 392 of them, the heap blocks the oracle's output leaves live at exit fall
+from 6,843,269 to 596,586 (inkwell's: 1,271,039): fewer in 381 programs and the same in 11, never
+more than before and never more than inkwell's. What the oracle's output still leaves, inkwell's
+leaves too: an enum payload's heap, a class's heap fields and the old value of a field assignment.
+
+No corpus program's behaviour changes. Before the change the codegen seeds caught a revert of the
+drop dispatch (through the two seeds that hold a `secret` struct) but not of `needs_drop`, and a
+revert in both text back ends together left them agreeing, so no existing test saw it; the pins are
+what hold it. Pinned by `tests/pass/c31_secret_aggregate_drops` (twelve shapes of `secret`-qualified
+arrays, strings, `Vec`s, enums, structs and classes: moved on one path, as parameters, assigned, as
+a struct's fields, into an init's and a method's parameters, across effecting fns and handler arms,
+through `declassify` and widening, in loops, at generic instances; 2,000 rounds with freed cells
+reused), its oracle-IR run
+(`selfhost_codegen::oracle_ir_of_the_secret_aggregate_drop_program_runs`), the oracle's IR count
+test `llvm_a_secret_qualified_value_drops_as_its_inner_type` (frees, releases and flag-guarded drops
+in 23 functions), and four codegen seeds beside the existing `secret H` assignment seed. Only the
+count test sees the change reverted in both text back ends, which then agree in dropping nothing.
+The seeds and the codegen differential see either half reverted in either back end alone. A drop the
+change added, if duplicated or run on the path that moved its value, aborts the fixture or changes
+its answer wherever it runs: 154 of 238 such IR mutants; the other 84 never take effect on any path
+the fixture runs (a drop where its value was always moved, or a guard whose flag is always false
+there).
+
+It moves the IR the oracle and `scg` emit wherever a `secret`-qualified value's inner type needs
+a drop, and not inkwell's, so it is at least a minor version (ADR 0076 D2); it goes out with the
+bump to 0.3.0 that ends the agreed batch.
+
+What stays open:
+
+- **A `secret T` drops no further than `T`.** What `T`'s drop leaves, its `secret` form leaves
+  too, in every back end: an enum payload's own heap (register D138; a `secret` enum with an
+  array payload leaks 999 blocks over 1,000 rounds in all three back ends after the change, as
+  the public enum does, where the text back ends leaked 1,998 before), a class's heap fields
+  (D137), the old value of an assignment into a field (D120's field half), and in inkwell the
+  handles a method's or an init's parameter frame keeps (D154).
+- **No zeroing.** A `secret` buffer is freed as a public one is (above); scrubbing one is
+  undesigned (inbound request R1 asks for it for `[secret u8]`).
+- **`scg`'s let and embedded shapes** still refuse an effecting fn with a `secret`-qualified
+  aggregate parameter (register D159), as they refuse any parameter that is not a word; the
+  oracle lowers such a fn and now drops the parameter in the frame-pushing parent, as inkwell
+  does.
 
 ## Appendix: estimated implementation footprint
 

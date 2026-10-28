@@ -354,8 +354,10 @@ implementation settled that the decisions above left open:
   and nothing else (ADR 0071 A4). So a field that is a struct of scalars, a unit-only enum or
   (in the text back ends) a compared `?Node` gets no flag when it is moved, nor does an array
   moved out of a class, while a `secret`-qualified struct holding a `Shared` moved out of a
-  class does. Each back end applies the rule to its own drops: inkwell's struct drop also frees
-  a `?Struct`'s box and drops a `secret`-qualified field, so it flags those.
+  class does. Each back end applies the rule to its own drops: inkwell's struct drop also frees a
+  `?Struct`'s box, so it flags a moved one, and every back end's struct drop drops a
+  `secret`-qualified field, so each flags a moved one (the text back ends since [ADR
+  0019](0019-phase-c3-kickoff-and-effects-plan.md) D5 amendment A3, 2026-10-28, register D158).
 - **A field's base is a binding read directly**, as the oracle's test for a `Var` target says.
   `scg` had taken the binding the last `Var` in a compound target read (`s` in `{ s }.a`; `t`
   in `(if c { s } else { t }).a`, whichever arm ran) and recorded a field move of it the checker
@@ -392,8 +394,9 @@ moved on one branch stayed locked on the other) and exits 42 now.
   so such a binding overwritten in a loop no longer grows the heap where its exit's drop frees what
   it holds (66.1 to 162.9 MB over 2,000,000 assignments before, 1.8 to 2.2 after; macOS peak
   resident set size, debug builds), and an overwritten guard is unlocked. The exceptions (inkwell's
-  method and init parameter frames' handles; what a drop does not free, D137, D138, D158) are under
-  the amendment's *What stays open*.
+  method and init parameter frames' handles; what a drop does not free, D137 and D138) are under the
+  amendment's *What stays open*, which also named D158, since closed by [ADR
+  0019](0019-phase-c3-kickoff-and-effects-plan.md) D5 amendment A3 (2026-10-28).
 
 ### Negative
 
@@ -543,9 +546,11 @@ the same parameter in a fn lowered straight-line, and 40.1 to 40.2 MB where the 
 parameter on one path; after, 9.3 to 9.4 MB in each. A class holding a handle stays at 70.8 MB
 through inkwell, in a straight-line fn as in each shape: the probe builds it with
 `C::init(shared_new(5))`, and inkwell keeps every handle unit that reaches an `init`'s parameter
-frame (register D154), which is not this. Nor is a `secret`-qualified struct or class
-parameter, for which the oracle and `scg` drop nothing, in a straight-line fn as in a shape's
-parent (register D158).
+frame (register D154), which is not this. Nor was a `secret`-qualified struct or class parameter,
+for which the oracle and `scg` dropped nothing, in a straight-line fn as in a shape's parent
+(register D158); since [ADR 0019](0019-phase-c3-kickoff-and-effects-plan.md) D5 amendment A3
+(2026-10-28) they drop it as inkwell does, in the parent too (in `scg`, its chained shape's parent;
+its let and embedded shapes refuse such a fn, register D159).
 
 It moves the IR the oracle, `scg` and inkwell emit for a shape's parent wherever a parameter's
 drop does something, so it is at least a minor version (ADR 0076 D2), batched with the other
@@ -625,12 +630,14 @@ What stays open:
   and at 1.9–2.0 MB in the oracle and `scg`, which clone the argument and release the parameter,
   and now release the overwritten clone at the assignment too. It joins register D154.
 - An overwritten value is dropped as its exit would drop it, and no further: a class's heap fields
-  stay held (register D137), an enum's payload heap (D138), the rest of D154, and in the oracle and
-  `scg` what they drop at no exit either, such as a `secret`-qualified struct or class binding
-  (D158). An array moved out of a class holding a `Shared`, then `c = C::init(2)`, peaks at 40.6 MB
-  over 600,000 calls before and 21.3 after, in all three back ends, the rest being the second
-  instance's array (D137); a `secret H` holding a `Shared`, overwritten 2,000,000 times, peaks at
-  66.2 MB before and after in the oracle and `scg`, where inkwell falls from 66.2 to 1.9.
+  stay held (register D137), an enum's payload heap (D138) and the rest of D154. An array moved out
+  of a class holding a `Shared`, then `c = C::init(2)`, peaks at 40.6 MB over 600,000 calls before
+  and 21.3 after, in all three back ends, the rest being the second instance's array (D137). In the
+  oracle and `scg` what they dropped at no exit stayed held, a `secret`-qualified binding (D158): a
+  `secret H` holding a `Shared`, overwritten 2,000,000 times, peaked at 66.2 MB before and after in
+  their output, where A2 took inkwell's from 66.2 to 1.9. Since [ADR
+  0019](0019-phase-c3-kickoff-and-effects-plan.md) D5 amendment A3 (2026-10-28) they drop it as
+  inkwell does: 2.0 MB in the oracle's output and 1.9 in `scg`'s.
 
 Measured on macOS as the peak resident set size (`/usr/bin/time -l`, the second of two runs),
 with debug builds of `snc` and `scg` from HEAD (`bd3dc03`: ADR 0071 A6, without this amendment)

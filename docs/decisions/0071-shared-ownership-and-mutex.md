@@ -1012,9 +1012,11 @@ The rule now, in all three back ends:
   before (register D137). A field the binding was partially moved out of is skipped, as a
   struct's is (ADR 0046); since ADR 0077 it is released behind its moved flag on the paths
   that did not move it. A class needs a drop exactly when it holds such a handle, which is
-  also how a struct's drop reaches a class in one of its fields — though the text back ends'
-  struct drop skips a `secret`-qualified field (register D158). inkwell's method and init
-  parameter frames keep a class's handles, as they keep every handle (A2).
+  also how a struct's drop reaches a class in one of its fields, a `secret`-qualified field
+  included: in the text back ends since [ADR 0019](0019-phase-c3-kickoff-and-effects-plan.md)
+  D5 amendment A3 (2026-10-28), before which their struct drop skipped such a field (register
+  D158). inkwell's method and init parameter frames keep a class's handles, as they keep every
+  handle (A2).
 - An overwritten field keeps the unit it held, as every assignment did until ADR 0077's D6
   amendment A2 (2026-10-28), which releases what an assignment into a framed binding overwrites
   (outside inkwell's method and init parameter frames, which keep their handles, A2); into a
@@ -1098,8 +1100,13 @@ all three back ends unless noted:
   through a reference still keep them (D120's field half).
 - in the oracle and `scg`, a `secret`-qualified class binding or parameter, a
   `secret`-qualified class held in a struct's field, or a class held in a `secret`-qualified
-  struct binding or parameter: they drop no `secret`-qualified binding or parameter, and their
-  struct drop skips a `secret`-qualified field (register D158). inkwell drops each.
+  struct binding or parameter: they dropped no `secret`-qualified binding or parameter, and
+  their struct drop skipped a `secret`-qualified field (register D158). inkwell drops each.
+  Closed by [ADR 0019](0019-phase-c3-kickoff-and-effects-plan.md) D5 amendment A3 (2026-10-28):
+  a `secret T` drops as `T` does, in all three back ends. Over 2,000,000 iterations a `secret`
+  class binding and a `secret` class parameter holding a `Shared`, a `secret` class in a
+  struct's field and a class in a `secret` struct binding each peaked at 66.2 MB in the
+  oracle's and `scg`'s output and now at 1.9–2.0, as in inkwell (macOS peak resident set size).
 
 These are the owners found; any other owner that is never dropped keeps the unit the same way.
 
