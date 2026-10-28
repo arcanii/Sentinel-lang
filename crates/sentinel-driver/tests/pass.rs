@@ -1915,6 +1915,19 @@ fn pass_c75_bubble_replays_the_remainder() {
 }
 
 #[test]
+fn pass_c75_replay_is_d3_or_refused() {
+    // ADR 0075 A3 (registers D102, D103, D104): a remainder is replayed only in the shapes A3
+    // argues give ADR 0020 D3's answer. Seventeen refused shapes (in free fns, an impl method, a
+    // class init and a class method), each over a body that performs once, so each emits
+    // the abort and never takes it (the differentials hold `scg`'s emission to the
+    // oracle's); seven kept ones over bodies that bubble, each answering D3's value. A
+    // kept arm refused would abort; a refused arm's pure path is unchanged. The oracle's IR
+    // is run by `oracle_ir_of_the_arm_remainder_programs_runs`, and what a refused arm does
+    // when it DOES bubble is `every_back_end_aborts_a_replay_not_proven_d3`. Exit = 42.
+    assert_eq!(run_exit("c75_replay_is_d3_or_refused.sentinel"), 42);
+}
+
+#[test]
 fn pass_c75_remainder_moves_a_local() {
     // ADR 0075 D6 / A1: a replayed remainder that MOVES a heap local, in a free fn, a
     // generic fn at two instances, an impl method, a class method and a class init. Each

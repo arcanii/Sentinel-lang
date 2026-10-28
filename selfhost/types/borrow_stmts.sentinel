@@ -312,6 +312,9 @@ fn dump_thparams(out: &mut Vec<u8>, b: Binds, c: &mut TyCtx, first: bool, eid: i
                 op_param_ty(c, eid, oidx, pi)
             };
             bind_name(c, nm, pvid, pty);
+            // (ADR 0075 A3) each entry binds a handler arm's parameters again, so no
+            // replayed arm remainder may capture one.
+            push(&mut (*c).cg_unst, pvid);
             push(out, '#');
             append_int(out, pvid);
             dump_thparams(out, rest, c, false, eid, oidx, pi + 1)
@@ -562,6 +565,8 @@ fn dump_tstmt(out: &mut Vec<u8>, s: Stmt, src: &[u8], c: &mut TyCtx, gb: &mut Ve
                 letexp
             };
             bind_name(c, lnm, lvid, letty);
+            // (ADR 0075 A3) a `let mut` is one no replayed arm remainder may capture.
+            if lmf { push(&mut (*c).cg_unst, lvid); 0 } else { 0 };
             // (7/N) MIR: the let's value is its current SSA value (the RHS's `lastval`).
             if mir_on(c) {
                 let lv: i64 = (*c).lastval;

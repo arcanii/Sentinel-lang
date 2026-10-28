@@ -41,8 +41,8 @@ use sentinel_borrow_check::{DropPlan, MethodKey};
 // Bar B / generics: reuse the inkwell backend's monomorphic-instance discovery so the
 // oracle monomorphizes the same set, in the same order, as the production codegen.
 use sentinel_codegen::{
-    arm_remainder_verdict, arm_resume_class, collect_mono_instantiations, ArmRemainderInfo,
-    ArmResumeClass,
+    arm_bubble_plan, collect_mono_instantiations, handle_is_nested, replay_unstable_bindings,
+    ArmRemainderInfo,
 };
 use sentinel_resolve::{
     EffectId, EnumId, FnId, StructId, VarId, APPLY_FN_ID, ARG_COUNT_FN_ID, ARG_FN_ID,
@@ -109,7 +109,8 @@ struct RuntimeSyms {
     free: bool,
     panic_oob: bool,
     /// ADR 0075 D6: `sentinel_kont_panic_remainder` — the class (A) abort, called on the
-    /// bubble path of a `k(v)` whose remainder cannot be replayed.
+    /// bubble path of a `k(v)` whose remainder cannot be replayed, or (A3) whose replay is
+    /// not proven to be D3's answer.
     kont_panic_remainder: bool,
     str_eq: bool,
     read_file: bool,
@@ -832,12 +833,14 @@ pub fn dump(program: &TypedProgram, drop_plan: &DropPlan) -> Result<String, Stri
     // symbols the bodies actually use — can be placed BEFORE them in the module.
     let mut fns_buf = String::new();
     let mut used = RuntimeSyms::default();
+    // ADR 0075 A3: the bindings no replayed arm remainder may copy, once for the program.
+    let replay_unstable = &replay_unstable_bindings(program);
     // Non-generic fns first; generic fn DEFS are monomorphized below (not dumped raw).
     let mut fns: Vec<&TypedFnDef> =
         program.fns.iter().filter(|f| f.type_params.is_empty()).collect();
     fns.sort_by_key(|f| f.id.0);
     for f in fns {
-        dump_fn(f, program, drop_plan, &mut fns_buf, &mut used)?;
+        dump_fn(f, program, drop_plan, replay_unstable, &mut fns_buf, &mut used)?;
         fns_buf.push('\n');
     }
     // Then one monomorphic `define` per instance — substitute the generic def to a
@@ -851,7 +854,9 @@ pub fn dump(program: &TypedProgram, drop_plan: &DropPlan) -> Result<String, Stri
             .find(|f| f.id == *fn_id)
             .ok_or("mono instance references an unknown fn")?;
         let sym = mangle_mono_name(&gdef.name, args, program);
-        dump_fn_named(mono_def, program, drop_plan, &mut fns_buf, &mut used, &sym)?;
+        dump_fn_named(
+            mono_def, program, drop_plan, replay_unstable, &mut fns_buf, &mut used, &sym,
+        )?;
         fns_buf.push('\n');
     }
     // Class init + method bodies, then impl method bodies (Bar B / classes). Each is a
@@ -863,8 +868,9 @@ pub fn dump(program: &TypedProgram, drop_plan: &DropPlan) -> Result<String, Stri
         if let Some(init) = &cd.init {
             let sym = format!("{}__init", cd.name);
             dump_method(
-                program, drop_plan, &mut fns_buf, &mut used, &sym, MethodKey::ClassInit(cd.id),
-                init.self_var_id, Type::Class(cd.id), &init.params, None, &init.body,
+                program, drop_plan, replay_unstable, &mut fns_buf, &mut used, &sym,
+                MethodKey::ClassInit(cd.id), init.self_var_id, Type::Class(cd.id), &init.params,
+                None, &init.body,
             )?;
             fns_buf.push('\n');
         }
@@ -872,8 +878,8 @@ pub fn dump(program: &TypedProgram, drop_plan: &DropPlan) -> Result<String, Stri
             let sym = format!("{}__{}", cd.name, m.name);
             let key = MethodKey::ClassMethod(cd.id, mi as u32);
             dump_method(
-                program, drop_plan, &mut fns_buf, &mut used, &sym, key, m.self_var_id,
-                Type::Class(cd.id), &m.params, Some(m.return_type), &m.body,
+                program, drop_plan, replay_unstable, &mut fns_buf, &mut used, &sym, key,
+                m.self_var_id, Type::Class(cd.id), &m.params, Some(m.return_type), &m.body,
             )?;
             fns_buf.push('\n');
         }
@@ -900,8 +906,8 @@ pub fn dump(program: &TypedProgram, drop_plan: &DropPlan) -> Result<String, Stri
             };
             let key = MethodKey::ImplMethod(imp.id, mi as u32);
             dump_method(
-                program, drop_plan, &mut fns_buf, &mut used, &sym, key, m.self_var_id,
-                self_ty, &m.params, Some(m.return_type), &m.body,
+                program, drop_plan, replay_unstable, &mut fns_buf, &mut used, &sym, key,
+                m.self_var_id, self_ty, &m.params, Some(m.return_type), &m.body,
             )?;
             fns_buf.push('\n');
         }
@@ -955,10 +961,11 @@ fn dump_fn(
     f: &TypedFnDef,
     program: &TypedProgram,
     drop_plan: &DropPlan,
+    replay_unstable: &HashSet<VarId>,
     out: &mut String,
     used: &mut RuntimeSyms,
 ) -> Result<(), String> {
-    dump_fn_named(f, program, drop_plan, out, used, &f.name)
+    dump_fn_named(f, program, drop_plan, replay_unstable, out, used, &f.name)
 }
 
 /// Emit a fn `define` under symbol `sym` — `f.name` for a normal fn, or the mangled
@@ -969,6 +976,7 @@ fn dump_fn_named(
     f: &TypedFnDef,
     program: &TypedProgram,
     drop_plan: &DropPlan,
+    replay_unstable: &HashSet<VarId>,
     out: &mut String,
     used: &mut RuntimeSyms,
     sym: &str,
@@ -986,21 +994,25 @@ fn dump_fn_named(
         // captured-state struct, lower the RHS to a Kont*, `sentinel_kont_push` the
         // frame), returning early. Other performing bodies still defer (c35d+).
         if let Some(info) = detect_let_shape(f, program) {
-            return dump_let_shape_fn(f, &info, program, drop_plan, out, used, sym);
+            return dump_let_shape_fn(f, &info, program, drop_plan, replay_unstable, out, used, sym);
         }
         // c35d: an embedded-perform body (a statement-free tail mixing exactly ONE
         // `perform` into pure context — `perform Op() + 1`, `f(perform Op())`) also
         // reifies a captured frame: the parent lowers JUST the perform; the resumer
         // lowers the tail with the perform substituted by the resumed value.
         if let Some(perform) = detect_embedded_shape(f, program) {
-            return dump_embedded_shape_fn(f, perform, program, drop_plan, out, used, sym);
+            return dump_embedded_shape_fn(
+                f, perform, program, drop_plan, replay_unstable, out, used, sym,
+            );
         }
         // c35e: chained effecting lets (2+ `let v: i64 = <produces-kont>` + a pure
         // tail) — N+1 defines: the parent pushes resumer-0 onto let-0's kont; each
         // resumer-i binds let-i + its captures, then performs let-(i+1) and pushes
         // resumer-(i+1) (the runtime bubbles the fresh kont); the last wraps the tail.
         if let Some(info) = detect_chained_lets_shape(f, program) {
-            return dump_chained_lets_fn(f, &info, program, drop_plan, out, used, sym);
+            return dump_chained_lets_fn(
+                f, &info, program, drop_plan, replay_unstable, out, used, sym,
+            );
         }
         validate_effecting_fn_body(f, program)?;
     }
@@ -1039,6 +1051,7 @@ fn dump_fn_named(
         handle_depth: 0,
         current_scope: None,
         flags: DropFlags::default(),
+        replay_unstable,
     };
     // Allocas are HOISTED to the entry block: param slots, `let` slots, and the
     // if-result slot all land in `e.allocas` (emitted first), while stores/loads/
@@ -1136,6 +1149,7 @@ fn dump_let_shape_fn(
     info: &LetShapeInfo<'_>,
     program: &TypedProgram,
     drop_plan: &DropPlan,
+    replay_unstable: &HashSet<VarId>,
     out: &mut String,
     used: &mut RuntimeSyms,
     sym: &str,
@@ -1176,6 +1190,7 @@ fn dump_let_shape_fn(
         handle_depth: 0,
         current_scope: None,
         flags: DropFlags::default(),
+        replay_unstable,
         };
         e.scopes.push(Vec::new());
         for (i, p) in f.params.iter().enumerate() {
@@ -1269,6 +1284,7 @@ fn dump_let_shape_fn(
         handle_depth: 0,
         current_scope: None,
         flags: DropFlags::default(),
+        replay_unstable,
         };
         e.scopes.push(Vec::new());
         // Bind the let var to the resumed value (`%arg0`).
@@ -1329,11 +1345,13 @@ fn dump_let_shape_fn(
 /// own `Emit`, `next: 0`), matching the Sentinel side's `cg_reset`. They do share one
 /// arm-remainder sequence and one list of those resumers, emitted after the LAST frame
 /// (ADR 0075 A1).
+#[allow(clippy::too_many_arguments)]
 fn dump_embedded_shape_fn(
     f: &TypedFnDef,
     perform: &TypedExpr,
     program: &TypedProgram,
     drop_plan: &DropPlan,
+    replay_unstable: &HashSet<VarId>,
     out: &mut String,
     used: &mut RuntimeSyms,
     sym: &str,
@@ -1375,6 +1393,7 @@ fn dump_embedded_shape_fn(
         handle_depth: 0,
         current_scope: None,
         flags: DropFlags::default(),
+        replay_unstable,
         };
         e.scopes.push(Vec::new());
         for (i, p) in f.params.iter().enumerate() {
@@ -1469,6 +1488,7 @@ fn dump_embedded_shape_fn(
         handle_depth: 0,
         current_scope: None,
         flags: DropFlags::default(),
+        replay_unstable,
         };
         e.scopes.push(Vec::new());
         // Bind the placeholder slot to the resumed value (`%arg0`).
@@ -1557,6 +1577,7 @@ fn dump_chained_lets_fn(
     info: &ChainedLetsInfo<'_>,
     program: &TypedProgram,
     drop_plan: &DropPlan,
+    replay_unstable: &HashSet<VarId>,
     out: &mut String,
     used: &mut RuntimeSyms,
     sym: &str,
@@ -1596,6 +1617,7 @@ fn dump_chained_lets_fn(
         handle_depth: 0,
         current_scope: None,
         flags: DropFlags::default(),
+        replay_unstable,
         };
         e.scopes.push(Vec::new());
         for (i, p) in f.params.iter().enumerate() {
@@ -1666,6 +1688,7 @@ fn dump_chained_lets_fn(
         handle_depth: 0,
         current_scope: None,
         flags: DropFlags::default(),
+        replay_unstable,
         };
         e.scopes.push(Vec::new());
         // Bind let-`level` to the resumed value (`%arg0`).
@@ -1742,6 +1765,7 @@ fn mangle_impl_method(imp: &sentinel_types::ImplData, method: &str) -> String {
 fn dump_method(
     program: &TypedProgram,
     drop_plan: &DropPlan,
+    replay_unstable: &HashSet<VarId>,
     out: &mut String,
     used: &mut RuntimeSyms,
     sym: &str,
@@ -1787,6 +1811,7 @@ fn dump_method(
         handle_depth: 0,
         current_scope: None,
         flags: DropFlags::default(),
+        replay_unstable,
     };
     // `self` is `%arg0` — bound by `self_var`, with its body type recorded as the class
     // (so `Var(self)` loads `%Class.N` and `self.f` GEPs the class). It is BORROWED, not
@@ -1851,9 +1876,11 @@ fn dump_method(
 /// and the instruction buffer.
 /// Bar B / effects (ADR 0020) + ADR 0075: one enclosing `handle` ARM's dispatch context —
 /// `(loop_block, current_kont_slot, return_arm, scope_floor, remainder)`. The last is ADR
-/// 0075 D6's plan for a bubbling `k(v)` in THAT arm: `None` when the arm is `Tail` or
-/// `Diverging` and the bubble may branch away, `Some(Ok(_))` when its remainder is reified
-/// onto the bubbled kont, and `Some(Err(_))` for class (A), where the bubble aborts. The
+/// 0075 D6's plan for a bubbling `k(v)` in THAT arm: `None` when `arm_bubble_plan` lets the
+/// bubble branch away (the arm never resumes, is `Tail`, or is `Diverging` as a lone arm of a
+/// `handle` that is not nested and whose body holds none, ADR 0075 A3), `Some(Ok(_))` when its
+/// remainder is reified onto the bubbled kont, and `Some(Err(_))` for class (A), where the
+/// bubble aborts. The
 /// verdict itself is `sentinel_codegen`'s, shared with inkwell, so the two back ends cannot
 /// disagree about which arms are which -- only about how each is emitted.
 type HandleFrame = (
@@ -2011,6 +2038,10 @@ struct Emit<'a> {
     current_scope: Option<u32>,
     /// ADR 0077: this body's moved flags and its walk-order moves.
     flags: DropFlags,
+    /// ADR 0075 A3: the bindings no replayed arm remainder may copy at the bubble
+    /// (`replay_unstable_bindings`), computed once for the program in [`dump`] and shared
+    /// by every `Emit`, as inkwell holds one for its module.
+    replay_unstable: &'a HashSet<VarId>,
 }
 
 impl Emit<'_> {
@@ -3944,10 +3975,13 @@ impl Emit<'_> {
         writeln!(self.body, "  %v{ck} = load ptr, ptr %v{cks}").unwrap();
         let opid = self.fresh();
         writeln!(self.body, "  %v{opid} = load i32, ptr %v{ck}").unwrap();
+        // ADR 0075 A3: a `handle` nested in another one, or whose body holds one, is outside
+        // the argument that makes a replayed remainder D3's answer.
+        let nested = handle_is_nested(body, is_nested);
         // If-else chain over the arms: each compares op_id, branches to the arm or the
         // next check. The current check block starts as the loop block; each arm opens a
         // fresh next-check block to continue in.
-        for arm in arms {
+        for (index, arm) in arms.iter().enumerate() {
             let oid = encode_op_id(arm.effect_id, arm.op_index);
             let cmp = self.fresh();
             writeln!(self.body, "  %v{cmp} = icmp eq i32 %v{opid}, {oid}").unwrap();
@@ -3966,18 +4000,19 @@ impl Emit<'_> {
                 .param_var_ids
                 .last()
                 .ok_or("type-check guarantees the kont VarId is present")?;
-            let remainder = match arm_resume_class(&arm.body, arm_kont) {
-                Some(ArmResumeClass::Tail) | Some(ArmResumeClass::Diverging) | None => None,
-                Some(ArmResumeClass::Observable) => {
-                    let var_ty = self.var_ty.clone();
-                    Some(arm_remainder_verdict(
-                        &arm.body,
-                        arm_kont,
-                        &move |id| var_ty.get(&id).copied(),
-                        self.program,
-                    ))
-                }
-            };
+            let program = self.program;
+            let unstable = self.replay_unstable;
+            let var_ty = &self.var_ty;
+            let remainder = arm_bubble_plan(
+                arms,
+                index,
+                arm_kont,
+                return_arm,
+                nested,
+                unstable,
+                &|id| var_ty.get(&id).copied(),
+                program,
+            );
             self.handle_stack.push((
                 loop_b,
                 cks,
@@ -4181,9 +4216,9 @@ impl Emit<'_> {
         let (loop_b, cks, ret_arm, arm_floor, remainder) = frame;
         writeln!(self.body, "bb{bubble_b}:").unwrap();
         // ADR 0075 D6: the rest of THIS arm does not run after the branch. Reify it onto
-        // the bubbled kont when the verdict allows, so the inner dispatch replays it when
-        // the chain drains (ADR 0020 D3's re-wrap); abort when it does not, rather than
-        // drop it silently.
+        // the bubbled kont when `arm_bubble_plan` allows, so the inner dispatch replays it
+        // when the chain drains (ADR 0020 D3's re-wrap, for the arms A3 admits); abort when
+        // it does not, rather than drop it silently or replay it out of D3's order.
         let abort_bubble = match &remainder {
             None => false,
             Some(Ok(info)) => {
@@ -4324,6 +4359,7 @@ impl Emit<'_> {
             handle_depth: 0,
             current_scope: None,
             flags: DropFlags::default(),
+            replay_unstable: self.replay_unstable,
         };
         e.scopes.push(Vec::new());
         let v_slot = e.alloca("i64");

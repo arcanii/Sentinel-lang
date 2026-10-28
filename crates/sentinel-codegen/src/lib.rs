@@ -63,8 +63,8 @@ use sentinel_types::{
     shared_elem_for, type_display, ArrayElem, ClassData, GenericInstanceData,
     GenericInstanceId, ImplData,
     NullableInner, RefData, SecretData, Type, TypedBlock, TypedExpr, TypedExprKind, TypedFnDef,
-    TypedFnSignature, TypedHandlerArm, TypedMatchArm, TypedPattern, TypedProgram, TypedReturnArm,
-    TypedStmt, TypedStmtKind, TypedStructDecl,
+    TypedFnSignature, TypedHandlerArm, TypedMatchArm, TypedParam, TypedPattern, TypedProgram,
+    TypedReturnArm, TypedStmt, TypedStmtKind, TypedStructDecl,
 };
 
 #[derive(Debug, thiserror::Error, miette::Diagnostic)]
@@ -636,7 +636,8 @@ pub fn compile_to_object_for_module(
         let panic_type = void_ty.fn_type(&[i64_ty.into(), i64_ty.into()], false);
         module.add_function("sentinel_panic_oob", panic_type, None)
     };
-    // ADR 0075 D6: class (A) -- a bubbling `k(v)` whose remainder cannot be replayed.
+    // ADR 0075 D6: class (A) -- a bubbling `k(v)` whose remainder cannot be replayed, or
+    // (A3) whose replay is not proven to be D3's answer.
     let kont_panic_remainder_fn = {
         let void_ty = context.void_type();
         module.add_function(
@@ -1653,6 +1654,7 @@ pub fn compile_to_object_for_module(
             embedded_perform_resumers,
             chained_lets_resumers,
             handle_stack: Vec::new(),
+            replay_unstable: replay_unstable_bindings(program),
             arm_kont_slots: Vec::new(),
             handle_depth: 0,
             current_fn: None,
@@ -1765,12 +1767,12 @@ struct HandleContext<'ctx> {
     loop_block: inkwell::basic_block::BasicBlock<'ctx>,
     current_kont_slot: PointerValue<'ctx>,
     return_arm: Option<TypedReturnArm>,
-    /// ADR 0075 D6: what the ARM currently being lowered does with a bubbling `k(v)`.
-    /// `None` for a `Tail` or `Diverging` arm, whose bubble may branch away (the arm has
-    /// no observable remainder, or returns before one could run). `Some(Ok(_))` carries
-    /// the remainder to push onto the bubbled kont; `Some(Err(why))` is class (A) --
-    /// the remainder cannot be replayed and the bubble path aborts rather than dropping
-    /// it. Per ARM, so the context is pushed inside the arm loop.
+    /// ADR 0075 D6: what the ARM currently being lowered does with a bubbling `k(v)`, as
+    /// [`arm_bubble_plan`] decides it. `None` when the bubble may branch away (a `Tail`
+    /// arm, or a `Diverging` one in a lone, un-nested `handle` — ADR 0075 A3).
+    /// `Some(Ok(_))` carries the remainder to push onto the bubbled kont; `Some(Err(why))`
+    /// is class (A) -- the replay is not proven to give D3's answer and the bubble path
+    /// aborts rather than answer. Per ARM, so the context is pushed inside the arm loop.
     remainder: Option<Result<ArmRemainderInfo, String>>,
     /// ADR 0075 D2: `scope_stack.len()` the instant before an arm's body is
     /// lowered — the index the arm's own block frame takes. A bubbling `k(v)`
@@ -2127,6 +2129,9 @@ struct CodegenCtx<'ctx, 'plan, 'm> {
     /// block; `current_kont_slot` is an alloca holding the kont
     /// the switch reads next iteration.
     handle_stack: Vec<HandleContext<'ctx>>,
+    /// ADR 0075 A3: the bindings no replayed arm remainder may copy at the bubble
+    /// ([`replay_unstable_bindings`]), computed once for the program.
+    replay_unstable: HashSet<VarId>,
     /// ADR 0074 D1/D2: the continuation slot (`kont_var`) of every handler
     /// arm whose body is being lowered, innermost last. The slot is the
     /// ownership record: `k(v)` clears it before resuming, so on any exit a
@@ -10175,8 +10180,9 @@ impl<'ctx, 'plan, 'm> CodegenCtx<'ctx, 'plan, 'm> {
         // ADR 0075 D6: the rest of THIS arm does not run after the branch. When the arm
         // has an observable remainder, push it onto the bubbled kont as a continuation
         // frame first, so the inner dispatch replays it when the chain drains -- which is
-        // ADR 0020 D3's re-wrap. When the verdict refuses it (class A), abort here rather
-        // than drop it: the answer would be wrong, not merely unsupported.
+        // ADR 0020 D3's re-wrap only where `arm_bubble_plan` admits it (A3). When the plan
+        // refuses it (class A), abort here rather than drop it or replay it: the answer
+        // would be wrong, or right only by luck of the shape.
         match handle_ctx.remainder.clone() {
             None => {}
             Some(Ok(info)) => {
@@ -10530,7 +10536,10 @@ impl<'ctx, 'plan, 'm> CodegenCtx<'ctx, 'plan, 'm> {
         // merge. Collect (value, block) pairs for the phi.
         let mut arm_results: Vec<(BasicValueEnum<'ctx>, inkwell::basic_block::BasicBlock<'ctx>)> =
             Vec::with_capacity(arms.len());
-        for (arm, arm_bb) in arms.iter().zip(arm_blocks.iter()) {
+        // ADR 0075 A3: a `handle` nested in another one, or whose body holds one, is outside
+        // the argument that makes a replayed remainder D3's answer.
+        let nested = handle_is_nested(body, is_nested);
+        for (index, (arm, arm_bb)) in arms.iter().zip(arm_blocks.iter()).enumerate() {
             self.builder.position_at_end(*arm_bb);
             self.bind_handler_arm_params(arm, current_kont)?;
             // ADR 0075 D6: decide what THIS arm's bubble does before lowering it. The
@@ -10542,20 +10551,17 @@ impl<'ctx, 'plan, 'm> CodegenCtx<'ctx, 'plan, 'm> {
                 .param_var_ids
                 .last()
                 .expect("type-check guarantees the kont VarId is present");
-            let remainder = match arm_resume_class(&arm.body, arm_kont) {
-                // The arm's value IS the resume's, or the arm returns first: nothing
-                // observable follows the bubble, so it may branch away as it always has.
-                Some(ArmResumeClass::Tail) | Some(ArmResumeClass::Diverging) | None => None,
-                Some(ArmResumeClass::Observable) => {
-                    let vars = self.vars.clone();
-                    Some(arm_remainder_verdict(
-                        &arm.body,
-                        arm_kont,
-                        &move |id| vars.get(&id).map(|(_, ty)| *ty),
-                        program,
-                    ))
-                }
-            };
+            let vars = &self.vars;
+            let remainder = arm_bubble_plan(
+                arms,
+                index,
+                arm_kont,
+                return_arm,
+                nested,
+                &self.replay_unstable,
+                &|id| vars.get(&id).map(|(_, ty)| *ty),
+                program,
+            );
             // Push the dispatch context so any k(v) call inside an
             // arm body's lowering can branch back to loop_block on
             // bubble (see [`Self::lower_resume_kont`]). The return
@@ -11776,16 +11782,20 @@ fn is_susp(expr: &TypedExpr, k: Susp) -> bool {
 /// the dispatch loop, so whatever follows it in the arm does not run. ADR 0020 D3 says
 /// `k(v)` IS `handle (kont.resume v) with H`, so the arm's remainder belongs inside that
 /// inner dispatch -- abandoning it is right only when there is nothing to abandon, or when
-/// the re-entered arm leaves the function before the remainder could have run.
+/// the re-entered arm leaves the function before the remainder could have run, which holds
+/// for a lone arm in an un-nested `handle` only ([`arm_bubble_plan`], ADR 0075 A3).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ArmResumeClass {
     /// The arm's value IS the `k(v)`'s value: the resume is reached from the arm body
     /// through nothing but a block's tail, an `if` branch's tail and a `match` arm's tail.
     /// Re-dispatching produces exactly what the arm would have, so the branch is correct.
     Tail,
-    /// Not `Tail`, but the arm always `return`s, so the entry that re-enters it returns
-    /// first and the abandoned remainder is unreachable under D3 as well. Measured:
-    /// `return k(21)` answers 42 and `return k(1) + 10` answers 12, both D3's answers.
+    /// Not `Tail`, but the arm always `return`s. In a `handle` with this one op arm, not
+    /// nested and whose body holds no `handle` ([`handle_is_nested`]), the entry that
+    /// re-enters it returns first and the abandoned remainder is
+    /// unreachable under D3 as well: `return k(21)` answers 42 and `return k(1) + 10`
+    /// answers 12, both D3's answers. Beside another op arm it is not: there the entry D3
+    /// returns from is the one that bubbled first (ADR 0075 A3).
     Diverging,
     /// Anything else: the remainder is observable and the branch drops it. `k(1) + 10`
     /// answers 12 where D3 gives 22.
@@ -11945,7 +11955,14 @@ fn resume_prefix_block(b: &TypedBlock, kont: VarId) -> Prefix {
     let mut seen_opaque = false;
     for st in &b.stmts {
         let p = match &st.kind {
-            TypedStmtKind::Let { value, .. } => resume_prefix(value, kont),
+            // ADR 0075 A3: a `let mut` bound before the resume is bound again, to its first
+            // value, when the remainder is replayed, and the replay does not run the `k(v)`'s
+            // argument, so a write the argument makes to it is lost there (`{ let mut m = 0;
+            // let r = k({ m = 7; 1 }); r + m }` read 0 where D3 reads 7). Refused as observable.
+            TypedStmtKind::Let { value, mutable, .. } => match resume_prefix(value, kont) {
+                Prefix::Trivial if *mutable => Prefix::Opaque,
+                other => other,
+            },
             TypedStmtKind::Assign { target, value } => {
                 // The write itself is observable, so a resume after it is blocked.
                 match resume_prefix(target, kont) {
@@ -12041,7 +12058,8 @@ pub fn arm_remainder_verdict(
     // so the replay is the same computation only if nothing before it can be observed.
     if resume_prefix(arm_body, kont) != Prefix::Resume {
         return Err("the arm evaluates something before its `k(v)` that is not a literal or \
-                    a name, and the remainder is replayed from the top of the arm, so \
+                    a name, or binds a `let mut` there, and the remainder is replayed from the \
+                    top of the arm without the `k(v)`'s argument, so \
                     everything before the resume would run a second time"
             .to_string());
     }
@@ -12062,6 +12080,14 @@ pub fn arm_remainder_verdict(
     if remainder_leaves_the_arm(&remainder) {
         return Err("its remainder contains a `return`, `break` or `continue`, and the \
                     replay runs outside the function the arm is written in"
+            .to_string());
+    }
+    // ADR 0075 A3 (register D104): the replay runs in a free function, outside any
+    // `scope concurrent` around the arm, so a task it spawned would not be the scope's
+    // and nothing would await it. Refused rather than given a scope protocol.
+    if remainder_is_concurrent(&remainder) {
+        return Err("its remainder has a `scope`, `spawn` or `await`, and the replay runs \
+                    outside the `scope concurrent` the arm is written in"
             .to_string());
     }
     let mut refs: Vec<VarId> = Vec::new();
@@ -12091,6 +12117,307 @@ pub fn arm_remainder_verdict(
         ));
     }
     Ok(ArmRemainderInfo { captured, remainder, placeholder_id })
+}
+
+/// ADR 0075 A3 (registers D102, D103): what a bubbling `k(v)` in `arms[index]` does, decided
+/// once for both Rust back ends so they cannot classify an arm differently (`scg`'s
+/// `cg_ar_classify` is the mirror):
+///
+/// - `None`: branch away and leave the rest of the arm. The arm never resumes, its value is
+///   the resume's (`Tail`), or it always `return`s after the resume (`Diverging`) in a
+///   `handle` where that abandons nothing D3 would run: one op arm, not nested.
+/// - `Some(Ok(_))`: replay the remainder from a frame pushed onto the bubbled kont (D6).
+/// - `Some(Err(_))`: class (A), abort at the bubble.
+///
+/// The replay is ADR 0020 D3's answer only where the order in which replayed remainders
+/// run cannot show and none of them is lost, and D6's own gates do not make it so: a
+/// replayed remainder runs inside a LATER entry's `k(v)`, oldest first, and one that no
+/// later `k(v)` drains is released unrun. ADR 0075 A3 argues (checked by probes and sweeps,
+/// not proven) that it is D3's answer when every remainder replayed for one activation of
+/// the `handle` is the same computation and some later entry drains
+/// them all: the arm resumes on every path (D6's gate), every other op arm resumes exactly
+/// once in tail position on every path, the `return` arm is absent or returns its value,
+/// and the remainder copies nothing that can differ between entries -- no `let mut`, no
+/// `mut` parameter, no handler arm's parameter ([`replay_unstable_bindings`]) -- and binds
+/// no `let mut` before its `k(v)` (`resume_prefix`). Without any one of those, a program was
+/// measured answering wrongly with no diagnostic. A `handle` nested in another one, or whose
+/// body holds one ([`handle_is_nested`]), is outside that argument and is refused.
+/// Everything else is (A): fail-closed, so a program this refuses was either wrong or not
+/// proven right.
+#[allow(clippy::too_many_arguments)]
+pub fn arm_bubble_plan(
+    arms: &[TypedHandlerArm],
+    index: usize,
+    kont: VarId,
+    return_arm: Option<&TypedReturnArm>,
+    nested: bool,
+    unstable: &HashSet<VarId>,
+    ty_of: &dyn Fn(VarId) -> Option<Type>,
+    program: &TypedProgram,
+) -> Option<Result<ArmRemainderInfo, String>> {
+    let arm = &arms[index];
+    match arm_resume_class(&arm.body, kont)? {
+        ArmResumeClass::Tail => None,
+        // `return k(1) + 10` with a tail sibling: the entry that bubbled first is the one
+        // whose `return` D3 takes, and here the last entry's is taken instead.
+        ArmResumeClass::Diverging if arms.len() == 1 && !nested => None,
+        ArmResumeClass::Diverging => Some(Err(
+            "the arm returns after its `k(v)`, and in a `handle` with another op arm, or a \
+             nested one, branching away does not leave the `return` D3 would take"
+                .to_string(),
+        )),
+        ArmResumeClass::Observable => Some(
+            arm_remainder_verdict(&arm.body, kont, ty_of, program)
+                .and_then(|info| replay_is_d3(arms, index, return_arm, nested, unstable, info)),
+        ),
+    }
+}
+
+/// ADR 0075 A3: is a `handle` outside the argument [`arm_bubble_plan`]'s replay rests on?
+/// It is when it is nested in another one (`is_nested`: the back end's own `handle` depth,
+/// which counts a `handle` written inside an arm), and when its body holds one anywhere, not
+/// only as the whole body: an operation the inner one does not handle reaches this one's
+/// arms. Both Rust back ends call this; `scg` counts the `handle`s it walks in the body.
+pub fn handle_is_nested(body: &TypedExpr, is_nested: bool) -> bool {
+    let mut holds = false;
+    visit_body_nodes(body, &mut |node| {
+        if let BodyNode::Expr(e) = node {
+            holds |= matches!(e.kind, TypedExprKind::Handle { .. });
+        }
+    });
+    is_nested || holds
+}
+
+/// ADR 0075 A3: the gates [`arm_bubble_plan`] adds to [`arm_remainder_verdict`]'s, which are
+/// about the arm alone; these are about the `handle` around it and what the remainder copies.
+fn replay_is_d3(
+    arms: &[TypedHandlerArm],
+    index: usize,
+    return_arm: Option<&TypedReturnArm>,
+    nested: bool,
+    unstable: &HashSet<VarId>,
+    info: ArmRemainderInfo,
+) -> Result<ArmRemainderInfo, String> {
+    if nested {
+        return Err("the `handle` is nested in, or its body holds, another `handle`, and a \
+                    replayed remainder is not proven to run where D3 runs it there"
+            .to_string());
+    }
+    if arms.iter().enumerate().any(|(i, a)| i != index && !resumes_once_in_tail(a)) {
+        return Err("another op arm of the `handle` does not resume exactly once in tail \
+                    position, so a replayed remainder can run out of D3's order or not at all"
+            .to_string());
+    }
+    if return_arm.is_some_and(|ra| !returns_its_value(ra)) {
+        return Err("the `return` arm does more than return its value, and a replayed \
+                    remainder runs before it where D3 runs it after"
+            .to_string());
+    }
+    if info.captured.iter().any(|id| unstable.contains(id)) {
+        return Err("its remainder reads a `let mut`, a `mut` parameter or a handler arm's \
+                    parameter, and a replayed remainder works on the copy taken when the arm \
+                    bubbled"
+            .to_string());
+    }
+    Ok(info)
+}
+
+/// Does a sibling arm resume its own continuation exactly once, unconditionally, as the
+/// arm's value? Such an arm's remainder is the identity, so it does not reorder a remainder
+/// replayed through it, and it drops one only by leaving the function or a loop before its
+/// `k(v)` (a `return`, `break` or `continue` ahead of it), which abandons the pending
+/// remainders under D3 as well.
+fn resumes_once_in_tail(arm: &TypedHandlerArm) -> bool {
+    let Some(&kont) = arm.param_var_ids.last() else {
+        return false;
+    };
+    count_susp(&arm.body, Susp::Resume(kont)) == 1
+        && resume_in_tail_position(&arm.body, kont)
+        && susp_unconditional(&arm.body, Susp::Resume(kont)) == Some(true)
+}
+
+/// Is the `return` arm `return v => v`? Read through the widenings the typer inserts, which
+/// change no value; `scg` asks the same question of the syntax, where there are none.
+fn returns_its_value(ra: &TypedReturnArm) -> bool {
+    let mut e = &ra.body;
+    loop {
+        match &e.kind {
+            TypedExprKind::WidenToSecret(inner) | TypedExprKind::WidenToNullable(inner) => {
+                e = inner
+            }
+            TypedExprKind::Var(id) => return *id == ra.value_var_id,
+            _ => return false,
+        }
+    }
+}
+
+/// ADR 0075 A3 (registers D102, D103): the bindings a replayed remainder may not copy at
+/// the bubble, program-wide (a `VarId` is unique across the program): every `let mut` and
+/// `mut` parameter, whose copy goes stale when the remainder or anything after the bubble
+/// writes it, and every handler arm's parameter, which each entry binds again, so the
+/// remainders replayed for different entries are different computations and the order they
+/// run in shows. `scg` records the same set as it binds (`cg_unst`).
+pub fn replay_unstable_bindings(program: &TypedProgram) -> HashSet<VarId> {
+    let mut set: HashSet<VarId> = HashSet::new();
+    let mut def = |params: &[TypedParam], body: &TypedBlock| {
+        set.extend(params.iter().filter(|p| p.mutable).map(|p| p.id));
+        visit_block_nodes(body, &mut |node| match node {
+            BodyNode::Stmt(TypedStmtKind::Let { id, mutable: true, .. }) => {
+                set.insert(*id);
+            }
+            BodyNode::Expr(TypedExpr { kind: TypedExprKind::Handle { arms, .. }, .. }) => {
+                for arm in arms {
+                    set.extend(arm.param_var_ids.iter().copied());
+                }
+            }
+            _ => {}
+        });
+    };
+    for f in &program.fns {
+        def(&f.params, &f.body);
+    }
+    for cd in &program.class_decls {
+        if let Some(init) = &cd.init {
+            def(&init.params, &init.body);
+        }
+        for m in &cd.methods {
+            def(&m.params, &m.body);
+        }
+    }
+    for imp in &program.impl_decls {
+        for m in &imp.methods {
+            def(&m.params, &m.body);
+        }
+    }
+    set
+}
+
+/// Does the remainder start or wait on a task?
+fn remainder_is_concurrent(expr: &TypedExpr) -> bool {
+    let mut found = false;
+    visit_body_nodes(expr, &mut |node| {
+        if let BodyNode::Expr(e) = node {
+            found |= matches!(
+                e.kind,
+                TypedExprKind::Scope { .. }
+                    | TypedExprKind::Spawn { .. }
+                    | TypedExprKind::Await { .. }
+            );
+        }
+    });
+    found
+}
+
+/// One node of a typed body, as [`visit_body_nodes`] reaches it.
+enum BodyNode<'a> {
+    Expr(&'a TypedExpr),
+    Stmt(&'a TypedStmtKind),
+}
+
+/// Visit `expr` and every expression and statement under it, parents first. Total over
+/// `TypedExprKind` and `TypedStmtKind`, so a variant added later cannot hide a node from a
+/// predicate built on it.
+fn visit_body_nodes<'a>(expr: &'a TypedExpr, f: &mut dyn FnMut(BodyNode<'a>)) {
+    f(BodyNode::Expr(expr));
+    match &expr.kind {
+        TypedExprKind::IntLit(_)
+        | TypedExprKind::BoolLit(_)
+        | TypedExprKind::NullLit
+        | TypedExprKind::FloatLit(_)
+        | TypedExprKind::CharLit(_)
+        | TypedExprKind::StringLit(_)
+        | TypedExprKind::Var(_)
+        | TypedExprKind::FnRef(_) => {}
+        TypedExprKind::Unary(_, inner)
+        | TypedExprKind::WidenToNullable(inner)
+        | TypedExprKind::WidenToSecret(inner)
+        | TypedExprKind::Cast(inner)
+        | TypedExprKind::Return(inner)
+        | TypedExprKind::Declassify(inner) => visit_body_nodes(inner, f),
+        TypedExprKind::Binary(_, l, r)
+        | TypedExprKind::Cmp(_, l, r)
+        | TypedExprKind::Logic(_, l, r) => {
+            visit_body_nodes(l, f);
+            visit_body_nodes(r, f);
+        }
+        TypedExprKind::Block(b) | TypedExprKind::Scope { body: b, .. } => visit_block_nodes(b, f),
+        TypedExprKind::If { cond, then_branch, else_branch } => {
+            visit_body_nodes(cond, f);
+            visit_block_nodes(then_branch, f);
+            visit_block_nodes(else_branch, f);
+        }
+        TypedExprKind::Perform { args, .. }
+        | TypedExprKind::Call { args, .. }
+        | TypedExprKind::ResumeKont { args, .. }
+        | TypedExprKind::ClassInit { args, .. }
+        | TypedExprKind::QualifiedCall { args, .. }
+        | TypedExprKind::EnumConstruct { args, .. } => {
+            for a in args {
+                visit_body_nodes(a, f);
+            }
+        }
+        TypedExprKind::StructLit { fields, .. } => {
+            for e in fields {
+                visit_body_nodes(e, f);
+            }
+        }
+        TypedExprKind::ArrayLit { elements, .. } => {
+            for e in elements {
+                visit_body_nodes(e, f);
+            }
+        }
+        TypedExprKind::FieldAccess { target, .. } => visit_body_nodes(target, f),
+        TypedExprKind::Index { target, index, .. } => {
+            visit_body_nodes(target, f);
+            visit_body_nodes(index, f);
+        }
+        TypedExprKind::MethodCall { target, args, .. }
+        | TypedExprKind::ImplMethodCall { target, args, .. } => {
+            visit_body_nodes(target, f);
+            for a in args {
+                visit_body_nodes(a, f);
+            }
+        }
+        TypedExprKind::Handle { body, arms, return_arm, .. } => {
+            visit_body_nodes(body, f);
+            for arm in arms {
+                visit_body_nodes(&arm.body, f);
+            }
+            if let Some(ra) = return_arm.as_deref() {
+                visit_body_nodes(&ra.body, f);
+            }
+        }
+        TypedExprKind::Match { scrutinee, arms, .. } => {
+            visit_body_nodes(scrutinee, f);
+            for arm in arms {
+                visit_body_nodes(&arm.body, f);
+            }
+        }
+        TypedExprKind::Spawn { call, .. } => visit_body_nodes(call, f),
+        TypedExprKind::Await { task_expr, .. } => visit_body_nodes(task_expr, f),
+    }
+}
+
+/// [`visit_body_nodes`] over a block: each statement, then what it holds, then the tail.
+fn visit_block_nodes<'a>(b: &'a TypedBlock, f: &mut dyn FnMut(BodyNode<'a>)) {
+    for st in &b.stmts {
+        f(BodyNode::Stmt(&st.kind));
+        match &st.kind {
+            TypedStmtKind::Let { value, .. } | TypedStmtKind::Expr(value) => {
+                visit_body_nodes(value, f)
+            }
+            TypedStmtKind::Assign { target, value } => {
+                visit_body_nodes(target, f);
+                visit_body_nodes(value, f);
+            }
+            TypedStmtKind::While { cond, body } => {
+                visit_body_nodes(cond, f);
+                visit_block_nodes(body, f);
+            }
+            TypedStmtKind::Break | TypedStmtKind::Continue => {}
+        }
+    }
+    visit_body_nodes(&b.tail, f);
 }
 
 /// Does `expr` contain a `return`, `break` or `continue`? The replay runs in a free
@@ -15059,9 +15386,10 @@ fn main() -> i64 { drains() }
         // still evaluates TO the resume.
         assert_eq!(class_of("{ let t: i64 = 1; k(20 + t) }"), Some(Tail));
 
-        // Diverging -- the arm returns, so the entry that re-enters it returns first and
-        // the remainder is unreachable under D3 too. `return k(21)` answers 42 and
-        // `return k(1) + 10` answers 12, both D3's answers.
+        // Diverging -- the arm returns, so, as this one is the `handle`'s only op arm, the
+        // entry that re-enters it returns first and the remainder is unreachable under D3
+        // too. `return k(21)` answers 42 and `return k(1) + 10` answers 12, both D3's
+        // answers. (Beside another op arm `arm_bubble_plan` refuses it, ADR 0075 A3.)
         assert_eq!(class_of("return k(21)"), Some(Diverging));
         assert_eq!(class_of("return k(1) + 10"), Some(Diverging));
         assert_eq!(class_of("{ let a: i64 = k(1); return a + 1 }"), Some(Diverging));

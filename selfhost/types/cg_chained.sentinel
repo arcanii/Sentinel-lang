@@ -1329,12 +1329,13 @@ fn cg_chained_bind(c: &mut TyCtx, stmts: Stmts, letvids: &mut Vec<i64>, letty: &
         Stmts::SCell(st, rest) => {
             match st {
                 Stmt::SLet(lmf, lnm, lty, lval) => {
-                    let _lmf: bool = lmf;
                     let ty: i64 = tyopt_exp(c, lty, gb);
                     *letty = ty;
                     let vid: i64 = (*c).nextvid;
                     (*c).nextvid = (*c).nextvid + 1;
                     bind_name(c, lnm, vid, ty);
+                    // (ADR 0075 A3) a `let mut` is one no replayed arm remainder may capture.
+                    if lmf { push(&mut (*c).cg_unst, vid); 0 } else { 0 };
                     push(letvids, vid);
                     cg_walk_ex(c, lval, false, scratch, gb);
                     let r: i64 = cg_chained_bind(c, rest, letvids, letty, scratch, gb);

@@ -37,6 +37,8 @@ fn emit_tparams(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src
         let vid: i64 = (*c).nextvid;
         (*c).nextvid = (*c).nextvid + 1;
         bind_src(c, src, ns, ne, vid, pty);
+        // (ADR 0075 A3) a `mut` parameter is one no replayed arm remainder may capture.
+        if pm { push(&mut (*c).cg_unst, vid); 0 } else { 0 };
         // (7/N) MIR: the param is an SSA param of the entry block; bind var_defs.
         if mir_on(c) {
             let mc: i64 = (*c).mir_cur;

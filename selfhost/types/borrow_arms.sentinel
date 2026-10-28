@@ -1724,7 +1724,14 @@ fn dump_te_handle(out: &mut Vec<u8>, hb: Expr, ha: HArms, hr: Ret, exp: i64, src
             // is PURE (an i64 needing a kont_pure wrap — `handle 42`). At the END this
             // handle sets cg_tailk = is_nested (its own result's kont-ness).
             (*c).cg_tailk = false;
+            // (ADR 0075 A3) a `handle` whose body holds a `handle` has its replays refused, as
+            // a nested one does. Every `handle` walked counts itself in `cg_h_seen`, so the
+            // count moves across the body's walk exactly when the body holds one. Mirrors the
+            // shared `handle_is_nested`.
+            (*c).cg_h_seen = (*c).cg_h_seen + 1;
+            let seen0: i64 = (*c).cg_h_seen;
             let bty: i64 = dump_texpr(out, hb, 0 - 1, src, c, gb);
+            let hb_handle: bool = (*c).cg_h_seen > seen0;
             let body_is_kont: bool = (*c).cg_tailk;
             // (register D170) the resolver resolves the `return` arm in the scope the body
             // leaves, without the names a handler arm binds: record where that scope ends.
@@ -1809,6 +1816,8 @@ fn dump_te_handle(out: &mut Vec<u8>, hb: Expr, ha: HArms, hr: Ret, exp: i64, src
             let sv_ret_ntok: i64 = (*c).cg_ret_ntok;
             let sv_ret_tok0: i64 = (*c).cg_ret_tok0;
             let sv_ret_mark: i64 = (*c).cg_ret_mark;
+            // (ADR 0075 A3) whether the `return` arm is absent or `return v => v`.
+            let mut ret_id: bool = true;
             let hr2: Ret = match hr {
                 Ret::NoRet => {
                     (*c).cg_ret_on = false;
@@ -1819,7 +1828,17 @@ fn dump_te_handle(out: &mut Vec<u8>, hb: Expr, ha: HArms, hr: Ret, exp: i64, src
                     (*c).cg_ret_ntok = rnt;
                     (*c).cg_ret_tok0 = rt0;
                     (*c).cg_ret_mark = ret_mark;
-                    Ret::YesRet(rn, rb, rnt, rt0)
+                    let rb2: Expr = match rb {
+                        Expr::Var(rv) => {
+                            ret_id = cg_same_name(&rv, &rn);
+                            Expr::Var(rv)
+                        },
+                        _ => {
+                            ret_id = false;
+                            rb
+                        },
+                    };
+                    Ret::YesRet(rn, rb2, rnt, rt0)
                 },
             };
             // (7c, ADR 0026 A1) MIR: a handle lowers its body, then each operation arm's body
@@ -1828,7 +1847,28 @@ fn dump_te_handle(out: &mut Vec<u8>, hb: Expr, ha: HArms, hr: Ret, exp: i64, src
             // are unbound here, so each use lowers to a fresh Opaque of the type this typer
             // gave it, as the oracle's `lookup_var` does with the oracle's. The two typers
             // still differ on a resume's type (D7) and a handle's type (D151).
-            dump_tharms(out, ha, src, c, gb, is_nested);
+            // (ADR 0075 A3) what `cg_ar_classify` needs to know about this `handle` before
+            // it judges any one arm: how many op arms it has and how many of them are not a
+            // single tail resume, whether its `return` arm returns its value, and whether it
+            // is nested. Saved and restored, because a `handle` inside an arm sets its own.
+            let sv_narms: i64 = (*c).cg_h_narms;
+            let sv_nnon: i64 = (*c).cg_h_nnon;
+            let sv_retid: bool = (*c).cg_h_retid;
+            let sv_nest: bool = (*c).cg_h_nest;
+            let ha2: HArms = if cg_on(c) {
+                (*c).cg_h_narms = 0;
+                (*c).cg_h_nnon = 0;
+                cg_h_scan(c, ha, src)
+            } else {
+                ha
+            };
+            (*c).cg_h_retid = ret_id;
+            (*c).cg_h_nest = is_nested || hb_handle;
+            dump_tharms(out, ha2, src, c, gb, is_nested);
+            (*c).cg_h_narms = sv_narms;
+            (*c).cg_h_nnon = sv_nnon;
+            (*c).cg_h_retid = sv_retid;
+            (*c).cg_h_nest = sv_nest;
             dump_tret(out, hr2, bty, src, c, gb);
             close_ty(out, bty, c);
             // (cg) the PURE_RETURN check (the chain's tail) + the merge; restore state.

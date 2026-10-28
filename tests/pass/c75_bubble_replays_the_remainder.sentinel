@@ -1,7 +1,8 @@
 // ADR 0075 D6 (register D87): a bubbling `k(v)` no longer ABANDONS the rest of its arm.
 // Slice 1 made the bubble drain the arm's scopes; this is the other half — the arm's
 // REMAINDER is reified onto the bubbled continuation, so the inner dispatch replays it
-// when the chain drains (ADR 0020 D3's `k := \v. handle (kont.resume v) with H`).
+// when the chain drains (ADR 0020 D3's `k := \v. handle (kont.resume v) with H`, for the
+// arms ADR 0075 A3 admits; each `handle` here has one arm and `return v => v`).
 //
 // `two()` performs twice, so the first `k(v)` in each arm below bubbles. Before this
 // slice the branch went straight back to the dispatch loop and everything after the

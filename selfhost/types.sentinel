@@ -573,8 +573,9 @@ struct TyCtx {
     cg_h_depth: i64,  // (c36b) dynamic handle nesting depth; `> 1` ⇒ this handle is nested
                       //   (its result is a Kont* the enclosing handle dispatches on)
     cg_h_rcls: i64,   // (ADR 0075 D6) what THIS arm's bubble does: 0 = branch away (the
-                      //   arm is Tail or Diverging, or never resumes), 1 = reify its
-                      //   remainder onto the bubbled kont, 2 = class (A), abort.
+                      //   arm is Tail, never resumes, or is Diverging in a lone un-nested
+                      //   arm, A3), 1 = reify its remainder onto the bubbled kont, 2 =
+                      //   class (A), abort.
     cg_h_cbase: i64,  // (ADR 0075 D6) where THIS arm's captures start in `arcaps`. The
                       //   list is a STACK, not a scratch buffer: a `handle` nested inside
                       //   an arm classifies while the outer arm's entry is still live.
@@ -632,6 +633,18 @@ struct TyCtx {
     arshe: Vec<i64>,  //   pattern or a nested arm's parameters, concatenated, and where each
                       //   ends: while their arm is walked, `cg_ar_caps` takes such a name
                       //   for a local even when a binding around the arm has it too.
+    cg_unst: Vec<i64>, // (ADR 0075 A3) the VarIds no replayed remainder may capture: every
+                      //   `let mut`, `mut` parameter and handler arm parameter, recorded as it
+                      //   is bound (VarIds are never reused). Mirrors `sentinel-codegen`'s
+                      //   `replay_unstable_bindings`.
+    cg_h_narms: i64,  // (ADR 0075 A3) the op arms of the `handle` whose arms are being lowered,
+    cg_h_nnon: i64,   //   and how many of them do NOT resume exactly once, on every path,
+                      //   in tail position (`cg_h_scan`). Saved and restored around a
+                      //   nested `handle`.
+    cg_h_retid: bool, // (ADR 0075 A3) that `handle`'s `return` arm is absent or `return v => v`
+    cg_h_nest: bool,  // (ADR 0075 A3) that `handle` is nested in, or its body holds, a `handle`
+    cg_h_seen: i64,   // (ADR 0075 A3) how many `handle`s have been walked so far; it moves
+                      //   across a `handle` body's walk exactly when the body holds one.
     cg_h_btok: i64,   // (ADR 0075 D6) the arm BODY's first token, for the disposable
                       //   classification copy a bubbling `k(v)` is judged on.
     cg_h_kont: i64,   // (ADR 0075 D6) the arm's own continuation VID. A `handle` inside an

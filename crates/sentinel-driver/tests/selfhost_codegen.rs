@@ -448,6 +448,17 @@ const SEEDS: &[&str] = &[
     // (where `scg` took the panicking bubble path), an `i64` `let mut` (where it captured the
     // outer binding into the frame), and a pattern name that the remainder reads again, outside
     // the `match`, as the outer binding (which it captures). Each `handle` bubbles once.
+    // ADR 0075 A3: a `return v => v` the typer widens to a `secret i64` is still the identity
+    // (`returns_its_value` reads through the widening; `scg` judges the syntax), so the arm
+    // is replayed (exit 18 + 24 = 42 in all three back ends). Here, not in `tests/pass`: the
+    // two typers still place the widening differently around a `handle` (registers D7, D151).
+    "effect Io { read() -> i64; }\nfn reads() -> i64 ! { Io } { let a: i64 = perform Io.read(); let b: i64 = perform Io.read(); let c: i64 = perform Io.read(); a + b + c }\nfn main() -> i64 { let key: secret i64 = 5; let r: secret i64 = handle reads() with { Io.read(k) => k(1) + key, return v => v }; declassify(r) + 24 }\n",
+    // ADR 0075 A3: a remainder in a frame of a chained effecting fn may not capture the fn's
+    // `mut` parameter or a `let mut` the chain binds (the first two `handle`s are class (A));
+    // an immutable `let` it may (the third is replayed). `snc build` refuses the program
+    // (a `handle` in a `perform`'s argument), so it is pinned here, as
+    // `c75_effecting_frames_share_resumers` is.
+    "effect Io { read() -> i64; }\neffect Ask { get(x: i64) -> i64; }\nfn two() -> i64 ! { Io } { let a: i64 = perform Io.read(); let b: i64 = perform Io.read(); a + b }\nfn ch(mut p: i64) -> i64 ! { Ask } {\n    let mut a: i64 = perform Ask.get(handle two() with { Io.read(k) => { let r: i64 = k(1); r + p } });\n    let b: i64 = perform Ask.get(handle two() with { Io.read(k) => { let r: i64 = k(1); r + a } });\n    let c: i64 = perform Ask.get(handle two() with { Io.read(k) => { let r: i64 = k(1); r + b } });\n    a + b + c\n}\nfn main() -> i64 { handle ch(1) with { Ask.get(x, k) => k(x) } }\n",
     "effect Ask { q(x: i64) -> i64; }\nenum E { A(i64), B }\nenum F { A(Fn<i64, i64>), B }\nfn ask2() -> i64 ! { Ask } { let a: i64 = perform Ask.q(1); let b: i64 = perform Ask.q(2); a + b }\nfn dbl(n: i64) -> i64 { n * 2 }\nfn pat_fn(f: Fn<i64, i64>) -> i64 { handle ask2() with { Ask.q(x, k) => { let r: i64 = k(x); match F::A(dbl) { F::A(f) => f(r) + 28, F::B => 0 } } } }\nfn pat_int() -> i64 { let mut m: i64 = 1000; m = m + 1; let x: i64 = handle ask2() with { Ask.q(x, k) => { let r: i64 = k(x); match E::A(7) { E::A(m) => r + m, E::B => r } } }; x + m }\nfn pat_then_outer() -> i64 { let y: i64 = 5; handle ask2() with { Ask.q(x, k) => { let r: i64 = k(x); (match E::A(1) { E::A(y) => y, E::B => 0 }) + r + y } } }\nfn main() -> i64 { pat_fn(dbl) + pat_int() + pat_then_outer() - 1087 }\n",
 ];
 
@@ -1231,6 +1242,8 @@ fn oracle_ir_of_the_handler_arm_exit_programs_runs() {
 ///   its parent's drop plan for a value the remainder moves.
 /// - `c75_remainder_capture_types` misses it if a remainder whose only capture is an `i64`
 ///   is refused rather than replayed (its bubble then aborts).
+/// - `c75_replay_is_d3_or_refused` aborts if an arm ADR 0075 A3 keeps is refused, and
+///   misses 42 if one it keeps answers other than D3's value.
 ///
 /// Whether `scg` RECORDS a remainder's moves is `scg`'s mechanism, not the oracle's; the
 /// corpus differential is what catches that.
@@ -1242,6 +1255,7 @@ fn oracle_ir_of_the_arm_remainder_programs_runs() {
     let dir = workspace_root().join("tests/pass");
     for (stem, want) in [
         ("c75_bubble_replays_the_remainder", 42),
+        ("c75_replay_is_d3_or_refused", 42),
         ("c75_remainder_moves_a_local", 42),
         ("c75_remainder_capture_types", 42),
     ] {
@@ -1267,6 +1281,137 @@ fn oracle_ir_of_the_arm_remainder_programs_runs() {
             String::from_utf8_lossy(&run.stderr)
         );
     }
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// ADR 0075 A3 (registers D102, D103, D104): each program here BUBBLES through an arm whose
+/// replay the amendment refuses, and every back end aborts there with the A3 diagnostic instead
+/// of answering. Before the amendment most of them answered wrongly with no diagnostic (the
+/// comment on each of those gives the old answer and ADR 0020 D3's) and the others right only
+/// by luck of the shape; `scg` alone answered `two_resumes_return`, which the other two already
+/// refused, and `spawns`, on which inkwell failed LLVM verification. At least one program per
+/// gate, so a gate dropped from the shared verdict, from `scg`'s mirror or from one back end's
+/// call fails here. The oracle cannot lower a `spawn` in a handler arm (register D105) and
+/// refuses a `handle` body that holds a `handle` without being one, so `spawns` and
+/// `body_holds_a_handle` are held to inkwell and `scg` only.
+#[test]
+fn every_back_end_aborts_a_replay_not_proven_d3() {
+    const IO: &str = "effect Io { read() -> i64; write() -> i64; }\n\
+        effect Lg { log() -> i64; }\n\
+        effect Em { emit(x: i64) -> i64; }\n\
+        fn two() -> i64 ! { Io } { let a: i64 = perform Io.read(); let b: i64 = perform Io.write(); a + b }\n\
+        fn reads() -> i64 ! { Io } { let a: i64 = perform Io.read(); let b: i64 = perform Io.read(); let c: i64 = perform Io.read(); a + b + c }\n\
+        fn logs() -> i64 ! { Lg } { let a: i64 = perform Lg.log(); let b: i64 = perform Lg.log(); a + b }\n\
+        fn emits() -> i64 ! { Em } { let a: i64 = perform Em.emit(1); let b: i64 = perform Em.emit(2); let c: i64 = perform Em.emit(3); a + b + c }\n";
+    let programs: &[(&str, String, bool)] = &[
+        // Another op arm has a remainder: 35, D3 80.
+        ("two_remainders", format!("{IO}fn main() -> i64 {{ handle two() with {{ Io.read(k) => k(1) * 10, Io.write(k) => k(2) + 5 }} }}\n"), true),
+        // Another op arm answers without resuming: 7, D3 70.
+        ("sibling_answers", format!("{IO}fn main() -> i64 {{ handle two() with {{ Io.read(k) => k(1) * 10, Io.write(k) => 7 }} }}\n"), true),
+        // Another op arm resumes on one path only: 7, D3 70.
+        ("sibling_resumes_on_one_path", format!("{IO}fn main() -> i64 {{ handle two() with {{ Io.read(k) => k(1) * 10, Io.write(k) => if 1 > 2 {{ k(2) }} else {{ 7 }} }} }}\n"), true),
+        // The `return` arm adds: 250, D3 700 (over two reads; `reads` performs three).
+        ("return_arm_adds", format!("{IO}fn rd2() -> i64 ! {{ Io }} {{ let a: i64 = perform Io.read(); let b: i64 = perform Io.read(); a + b }}\nfn main() -> i64 {{ handle rd2() with {{ Io.read(k) => k(1) * 10, return v => v + 5 }} }}\n"), true),
+        // The remainder reads the arm's parameter: 123, D3 321.
+        ("reads_its_parameter", format!("{IO}fn main() -> i64 {{ handle emits() with {{ Em.emit(n, k) => k(0) * 10 + n }} }}\n"), true),
+        // The `k(v)`'s argument writes a `let mut` bound in the arm before it: 10, D3 24.
+        ("arm_local_let_mut", format!("{IO}fn main() -> i64 {{ handle reads() with {{ Io.read(k) => {{ let mut m: i64 = 0; let r: i64 = k({{ m = 7; 1 }}); r + m }} }} }}\n"), true),
+        // The remainder reads a `let mut` bound in a `while` body (right by luck: 15).
+        ("let_mut_in_a_loop", format!("{IO}fn main() -> i64 {{ let mut i: i64 = 0; let mut s: i64 = 0; while i < 2 {{ let mut t: i64 = i; t = t + 1; s = s + handle reads() with {{ Io.read(k) => k(1) + t }}; i = i + 1; }} s }}\n"), true),
+        // The remainder writes a `let mut`: `base` ends at 101, where D3 leaves 103.
+        ("writes_a_let_mut", format!("{IO}fn main() -> i64 {{ let mut base: i64 = 100; let x: i64 = handle reads() with {{ Io.read(k) => {{ let r: i64 = k(1); base = base + 1; r }} }}; x + base }}\n"), true),
+        // The remainder reads a `let mut` another arm writes: 3, D3 103.
+        ("reads_a_let_mut", format!("{IO}fn main() -> i64 {{ let mut base: i64 = 0; handle two() with {{ Io.read(k) => k(1) + base, Io.write(k) => {{ base = 100; k(2) }} }} }}\n"), true),
+        // The remainder reads a `mut` parameter (right by luck: nothing writes it).
+        ("reads_a_mut_param", format!("{IO}fn f(mut base: i64) -> i64 {{ base = base + 1; handle reads() with {{ Io.read(k) => k(1) + base }} }}\nfn main() -> i64 {{ f(12) }}\n"), true),
+        // The arm returns after its `k(v)` beside another op arm: 1003, D3 13.
+        ("returns_beside_a_sibling", format!("{IO}fn f() -> i64 {{ let x: i64 = handle two() with {{ Io.read(k) => return k(1) + 10, Io.write(k) => k(2) }}; x + 1000 }}\nfn main() -> i64 {{ f() }}\n"), true),
+        // The `handle` is nested in another (right by luck: the inner one handles all).
+        ("nested", format!("{IO}fn main() -> i64 {{ handle (handle logs() with {{ Lg.log(k) => k(1) + 10 }}) with {{ Io.read(k) => k(5) }} }}\n"), true),
+        // The `handle`'s body is a `handle` (right by luck: 80).
+        ("body_is_a_handle", format!("{IO}fn rd2() -> i64 ! {{ Io }} {{ let a: i64 = perform Io.read(); let b: i64 = perform Io.read(); a + b }}\nfn main() -> i64 {{ handle (handle rd2() with {{ Lg.log(k) => k(1) }}) with {{ Io.read(k) => k(10) * 2 }} }}\n"), true),
+        // A lone arm that returns after its `k(v)`, in a nested `handle` (right by luck: 12).
+        ("nested_lone_return", format!("{IO}fn f() -> i64 {{ let x: i64 = handle (handle logs() with {{ Lg.log(k) => return k(1) + 10 }}) with {{ Io.read(k) => k(5) }}; x + 1000 }}\nfn main() -> i64 {{ f() }}\n"), true),
+        // The `handle`'s body holds a `handle` without being one (right by luck: 80). The
+        // oracle refuses the body (it suspends other than directly), so this is held to
+        // inkwell and `scg` only.
+        ("body_holds_a_handle", format!("{IO}fn rd2() -> i64 ! {{ Io }} {{ let a: i64 = perform Io.read(); let b: i64 = perform Io.read(); a + b }}\nfn main() -> i64 {{ handle {{ handle rd2() with {{ Lg.log(k) => k(1) }} }} with {{ Io.read(k) => k(10) * 2 }} }}\n"), false),
+        // Two `k(v)`s, returning on every path: `scg` took it for class (X) and answered 2.
+        ("two_resumes_return", format!("{IO}fn rd2() -> i64 ! {{ Io }} {{ let a: i64 = perform Io.read(); let b: i64 = perform Io.read(); a + b }}\nfn f() -> i64 {{ handle rd2() with {{ Io.read(k) => {{ let a: i64 = k(1); if a > 100 {{ return k(2) }} else {{ return a }} }} }} }}\nfn main() -> i64 {{ f() }}\n"), true),
+        // The remainder spawns (register D104): inkwell failed LLVM verification, `scg` ran it.
+        ("spawns", format!("{IO}fn double(x: i64) -> i64 ! {{ Async }} {{ x * 2 }}\nfn main() -> i64 {{ scope concurrent {{ let x: i64 = handle reads() with {{ Io.read(k) => {{ let v: i64 = k(1); let t = spawn double(v); t.await }} }}; x }} }}\n"), false),
+    ];
+    let tmp = std::env::temp_dir().join(format!("snc_replay_abort_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).expect("create temp dir");
+    let cg = build_sentinel_codegen(&tmp);
+    let work = tmp.join("work");
+    std::fs::create_dir_all(&work).expect("create work dir");
+    let input = work.join("input.sentinel");
+    let mut wrong: Vec<String> = Vec::new();
+    let mut check = |name: &str, back_end: &str, run: std::process::Output| {
+        let stderr = String::from_utf8_lossy(&run.stderr);
+        if run.status.success()
+            || !stderr.contains("is not proven to replay correctly (ADR 0075 D6, A3)")
+        {
+            wrong.push(format!(
+                "  {name} ({back_end}): {:?}, stdout {:?}, stderr {stderr:?}",
+                run.status,
+                String::from_utf8_lossy(&run.stdout)
+            ));
+        }
+    };
+    for (name, src, oracle_lowers) in programs {
+        std::fs::write(&input, src).expect("stage the program");
+        let ink = tmp.join(format!("{name}_inkwell"));
+        let built = Command::new(env!("CARGO_BIN_EXE_snc"))
+            .arg("build")
+            .arg(&input)
+            .arg("-o")
+            .arg(&ink)
+            .output()
+            .expect("run snc build");
+        assert!(
+            built.status.success(),
+            "snc build refused {name}:\n{}",
+            String::from_utf8_lossy(&built.stderr)
+        );
+        check(name, "inkwell", Command::new(&ink).output().expect("run the inkwell build"));
+        if *oracle_lowers {
+            let oracle = Command::new(env!("CARGO_BIN_EXE_snc"))
+                .arg("llvm")
+                .arg(&input)
+                .output()
+                .expect("run snc llvm");
+            assert!(
+                oracle.status.success(),
+                "snc llvm refused {name}:\n{}",
+                String::from_utf8_lossy(&oracle.stderr)
+            );
+            let ll = tmp.join(format!("{name}_oracle.ll"));
+            std::fs::write(&ll, &oracle.stdout).expect("write the oracle's IR");
+            let exe = compile_ll_to_exe(&ll, &tmp.join(format!("{name}_oracle")));
+            check(name, "oracle", Command::new(&exe).output().expect("run the oracle build"));
+        }
+        let sentinel = Command::new(&cg)
+            .current_dir(&work)
+            .output()
+            .expect("run the Sentinel codegen");
+        assert!(
+            sentinel.status.success(),
+            "scg failed on {name}:\n{}",
+            String::from_utf8_lossy(&sentinel.stderr)
+        );
+        let ll = tmp.join(format!("{name}_scg.ll"));
+        std::fs::write(&ll, &sentinel.stdout).expect("write scg's IR");
+        let exe = compile_ll_to_exe(&ll, &tmp.join(format!("{name}_scg")));
+        check(name, "scg", Command::new(&exe).output().expect("run the scg build"));
+    }
+    assert!(
+        wrong.is_empty(),
+        "a bubble through a refused arm did not abort with the ADR 0075 A3 diagnostic:\n{}",
+        wrong.join("\n")
+    );
     let _ = std::fs::remove_dir_all(&tmp);
 }
 

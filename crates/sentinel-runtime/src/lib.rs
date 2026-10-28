@@ -97,18 +97,28 @@ pub extern "C" fn sentinel_panic_oob(idx: i64, len: i64) -> ! {
 }
 
 /// ADR 0075 D6 (register D87): a handler arm's `k(v)` resumed into another operation --
-/// the resume BUBBLED -- and the rest of that arm cannot be replayed as a continuation
-/// frame, so it would silently not run. Abort instead. Never returns.
+/// the resume BUBBLED -- and the rest of that arm is not proven to replay as ADR 0020 D3
+/// runs it, so branching away would answer wrongly or by luck. Abort instead. Never
+/// returns.
 ///
-/// Reached only from a `k(v)` the compiler classified (A): one whose remainder the
-/// arm-remainder verdict refuses (it is guarded, something observable runs before it, it
-/// suspends, it leaves the arm, or a name it reads does not fit a continuation slot). The
-/// diagnostic names the arm's own shape rather than the continuation, because the arm is
-/// what has to change.
+/// Reached only from a `k(v)` the compiler classified (A) (`arm_bubble_plan`, ADR 0075 D6
+/// and A3). Either the arm's own remainder cannot be replayed: the arm resumes more than
+/// once, the resume is guarded, something other than a literal or a name (or a `let mut`)
+/// comes before it, the remainder suspends, leaves the arm or holds a `scope`, `spawn` or
+/// `await`, or the resume,
+/// the arm or a name the remainder reads is not an `i64` or a `secret i64`. Or the replay is
+/// outside the shapes ADR 0075 A3 argues give D3's answer: another op arm does not resume
+/// exactly once, on every path, in tail position, the `return` arm does more than return
+/// its value, the remainder reads a
+/// binding that can change between entries, the arm returns after its `k(v)` beside
+/// another op arm, or the `handle` is nested in another one or its body holds one. The
+/// message is fixed and says neither which arm nor why; what has to change may be another
+/// arm or the `handle` around it.
 #[no_mangle]
 pub extern "C" fn sentinel_kont_panic_remainder() -> ! {
     eprintln!(
-        "sentinel: a handler arm resumed into another operation, and the rest of the arm          cannot be replayed (ADR 0075 D6)"
+        "sentinel: a handler arm resumed into another operation, and the rest of the arm \
+         is not proven to replay correctly (ADR 0075 D6, A3)"
     );
     std::process::abort();
 }
@@ -3151,7 +3161,9 @@ mod tests {
     /// D6 gets there by pushing the remainder onto the BUBBLED kont before re-dispatching.
     /// `sentinel_kont_push` appends at the chain's tail and `sentinel_kont_resume` replays
     /// head -> tail, so the remainder runs after the computation under it drains — which is
-    /// exactly the re-wrap. No runtime change is needed for it; this test is what says so.
+    /// the re-wrap for this one-arm shape. In general it is not: remainders replayed this way
+    /// run oldest first and can be lost (register D102), so ADR 0075 A3 limits where the
+    /// compiler pushes one. No runtime change is needed for it; this test is what says so.
     #[test]
     fn a_frame_pushed_onto_a_bubbled_kont_is_the_arms_remainder() {
         const READ: u32 = 0;
