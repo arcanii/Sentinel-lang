@@ -2049,6 +2049,123 @@ fn llvm_an_assignment_into_a_framed_binding_drops_the_old_value() {
     }
 }
 
+/// ADR 0019 D5 (register D158): a `secret T` drops as its inner type does. The oracle's
+/// `needs_drop` answered `false` for a `secret T` and `emit_drop_for_binding` had no arm for
+/// one, so a `secret`-qualified array, string, `Vec`, enum, struct or class binding or
+/// parameter was never dropped, and a struct's walk (a plain struct's or a generic
+/// instance's) skipped a `secret`-qualified field; inkwell strips the qualifier first. Each
+/// row's comment gives the base's counts where they differ. A drop dispatch that does not
+/// strip gives the base's counts on every row; a `needs_drop` that answers `false` again
+/// gives a moved `secret` binding no flag, so its drop is elided, and walks past the field
+/// (`fields`, `boxed`, `one_path`, `field_path`, `declass` and `generic` fail). A moved
+/// binding's drop must sit behind its flag: on the path that moved it, it would free the
+/// value twice. A leak is memory, not an exit code, so this reads the IR; the codegen
+/// differential holds `scg` to it.
+#[test]
+fn llvm_a_secret_qualified_value_drops_as_its_inner_type() {
+    // The `define`, not a call site: the oracle emits class methods after the free fns.
+    fn define<'a>(ir: &'a str, f: &str) -> Vec<&'a str> {
+        let head = format!("@{f}(");
+        ir.lines()
+            .skip_while(|l| !(l.starts_with("define ") && l.contains(&head)))
+            .take_while(|l| *l != "}")
+            .collect()
+    }
+    let ir = llvm_dump(
+        "d158_secret_drops",
+        concat!(
+            "struct H { s: Shared<i64>, a: [i64] }\n",
+            "struct G { a: secret [i64], b: [i64], h: secret H }\n",
+            "struct Bx<T> { v: T, n: i64 }\n",
+            "enum E { P([i64]), Q }\n",
+            "effect Io { read() -> i64; }\n",
+            "class C {\n",
+            "    let s: Shared<i64>;\n",
+            "    pub init(s: Shared<i64>) { self.s = s; 0 }\n",
+            "}\n",
+            "class K {\n",
+            "    let n: i64;\n",
+            "    pub init(a: secret [i64], n: i64) { self.n = n; 0 }\n",
+            "    pub fn m(self: &Self, v: secret [i64], h: secret H) -> i64 { self.n }\n",
+            "}\n",
+            "fn eat(v: secret [i64]) -> i64 { 1 }\n",
+            "fn take<T>(x: T) -> i64 { 1 }\n",
+            "fn ask() -> i64 ! { Io } { perform Io.read() }\n",
+            "fn arr(n: i64) -> i64 { let a: secret [i64] = [n, 1]; 0 }\n",
+            "fn text(n: i64) -> i64 { let s: secret [u8] = \"ab\"; 0 }\n",
+            "fn vec(n: i64) -> i64 { let v: Vec<i64> = vec_new(); let s: secret Vec<i64> = v; 0 }\n",
+            "fn strukt(n: i64) -> i64 { let h: secret H = H { s: shared_new(n), a: [n] }; 0 }\n",
+            "fn klass(n: i64) -> i64 { let k: secret C = C::init(shared_new(n)); 0 }\n",
+            "fn enm(n: i64) -> i64 { let e: secret E = E::P([n]); 0 }\n",
+            "fn fields(n: i64) -> i64 { let g: G = G { a: [n], b: [n], h: H { s: shared_new(n), a: [n] } }; 0 }\n",
+            "fn boxed(n: i64) -> i64 { let b: Bx<secret [i64]> = Bx { v: [n], n: 1 }; 0 }\n",
+            "fn params(a: secret [i64], h: secret H) -> i64 { 0 }\n",
+            "fn one_path(n: i64) -> i64 { let a: secret [i64] = [n, 1]; if n > 0 { eat(a) } else { 0 } }\n",
+            "fn field_path(n: i64) -> i64 { let g: G = G { a: [n], b: [n], h: H { s: shared_new(n), a: [n] } }; if n > 0 { eat(g.a) } else { 0 } }\n",
+            "fn assign(n: i64) -> i64 { let mut a: secret [i64] = [1]; a = [n]; 0 }\n",
+            "fn declass(n: i64) -> i64 { let a: secret [i64] = [n]; let p: [i64] = declassify(a); 0 }\n",
+            "fn widened(n: i64) -> i64 { let p: [i64] = [n]; let a: secret [i64] = p; 0 }\n",
+            "fn generic(n: i64) -> i64 { let a: secret [i64] = [n]; take(a) }\n",
+            "fn in_loop(n: i64) -> i64 { let mut j: i64 = 0; while j < n { let x: secret [i64] = [j]; if j == 2 { break; 0 } else { 0 }; j = j + 1; } 0 }\n",
+            "fn in_arm(n: i64) -> i64 { handle ask() with { Io.read(k) => { let b: secret [i64] = [n]; k(1) } } }\n",
+            "fn par(a: secret [i64]) -> i64 ! { Io } {\n",
+            "    let x: i64 = perform Io.read();\n",
+            "    let y: i64 = perform Io.read();\n",
+            "    x + y\n",
+            "}\n",
+            "fn main() -> i64 {\n",
+            "    let k: K = K::init([1], 1);\n",
+            "    let s: Shared<i64> = shared_new(1);\n",
+            "    arr(1) + text(1) + vec(1) + strukt(1) + klass(1) + enm(1) + fields(1) + boxed(1)\n",
+            "        + params([1], H { s: s, a: [1] }) + one_path(1) + field_path(1) + assign(1) + declass(1)\n",
+            "        + widened(1) + generic(1) + in_loop(3) + in_arm(1) + k.m([1], H { s: s, a: [1] })\n",
+            "        + handle par([1]) with { Io.read(k) => k(1) } + 17\n",
+            "}\n",
+        ),
+    );
+    // (fn, frees, releases, drops behind a set moved flag); "was" = the base's counts
+    for (f, frees, releases, guarded) in [
+        ("arr", 1, 0, 0),               // was 0/0/0: a `secret` array binding
+        ("text", 1, 0, 0),              // was 0/0/0: a `secret` string
+        ("vec", 2, 0, 1),               // was 1/0/1: only the widened `Vec`'s flagged drop
+        ("strukt", 1, 1, 0),            // was 0/0/0: a `secret` struct's array and handle
+        ("klass", 0, 1, 0),             // was 0/0/0: a `secret` class releases its handle
+        ("enm", 1, 0, 0),               // was 0/0/0: a `secret` enum frees its box
+        ("fields", 3, 1, 0),            // was 1/0/0: the walk dropped only the public field
+        ("boxed", 1, 0, 0),             // was 0/0/0: a generic instance's `secret` field
+        ("params", 2, 1, 0),            // was 0/0/0: `secret` parameters
+        ("eat", 1, 0, 0),               // was 0/0/0
+        ("one_path", 1, 0, 1),          // was 0/0/0: moved on one path, behind its flag
+        ("field_path", 3, 1, 1),        // was 1/0/0: a `secret` field moved on one path
+        ("assign", 2, 0, 0),            // was 0/0/0: at the assignment (ADR 0077 A2) and exit
+        ("declass", 2, 0, 1),           // was 1/0/0: `declassify` moved `a`: behind its flag
+        ("widened", 2, 0, 1),           // was 1/0/1: the binding widened into
+        ("generic", 1, 0, 1),           // was 0/0/0: moved into `take`, behind its flag
+        ("take__sec_arr_i64", 1, 0, 0), // was 0/0/0: the instance drops its parameter
+        ("in_loop", 2, 0, 0),           // was 0/0/0: at the `break` and at the body's end
+        ("in_arm", 2, 0, 0),            // was 0/0/0: an arm local, bubbling and pure
+        ("K__init", 1, 0, 0),           // was 0/0/0: an init's parameter
+        ("K__m", 2, 1, 0),              // was 0/0/0: a method's parameters
+        ("par", 1, 0, 0),               // was 0/0/0: the frame-pushing parent's (ADR 0077 A1)
+        ("C__init", 0, 1, 0),           // unchanged, a control
+    ] {
+        let body = define(&ir, f);
+        assert!(!body.is_empty(), "no define for @{f} in:\n{ir}");
+        let text = body.join("\n");
+        assert_eq!(text.matches("@sentinel_free(").count(), frees, "@{f}: frees:\n{text}");
+        assert_eq!(text.matches("_release(").count(), releases, "@{f}: releases:\n{text}");
+        let behind = body
+            .iter()
+            .enumerate()
+            .filter(|(i, l)| {
+                (l.contains("@sentinel_free(") || l.contains("_release("))
+                    && drop_is_behind_a_moved_flag(&body, *i)
+            })
+            .count();
+        assert_eq!(behind, guarded, "@{f}: drops behind a set moved flag:\n{text}");
+    }
+}
+
 /// ADR 0077: is the `sentinel_free` at `body[at]` dead because a moved flag guards it? Its
 /// block must be the false target of `br i1 %c, ...` where `%c = load i1, ptr %mfN`, and a
 /// `store i1 true, ptr %mfN` must come before that load in the same basic block.

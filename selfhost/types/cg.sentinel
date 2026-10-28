@@ -1558,8 +1558,10 @@ fn cg_is_field_moved(c: &mut TyCtx, fnidx: i64, vid: i64, fidx: i64) -> bool {
 // (8d-drops-2) does a value of type `ty` own heap that scope-exit must `sentinel_free`?
 // An array / `Vec` always does; a struct does iff some field does (recursive — a struct
 // of only scalars drops nothing); a class does iff it holds a `Shared` / `Mutex` (ADR 0071
-// A4). Mirrors `needs_drop`.
-fn cg_needs_drop(c: &mut TyCtx, ty: i64) -> bool {
+// A4). A `secret T` drops as its inner type does (ADR 0019 D5, register D158). Mirrors
+// `needs_drop`.
+fn cg_needs_drop(c: &mut TyCtx, ty0: i64) -> bool {
+    let ty: i64 = strip_secret(c, ty0);
     if cg_is_array(c, ty) {
         true
     } else if cg_is_vec(c, ty) {
@@ -1919,7 +1921,11 @@ fn cg_emit_handle_drops(c: &mut TyCtx, ty: i64, slot: i64, vid: i64, seen: &mut 
 // a Move-typed field consumed by value is owned + freed by the consumer, so it is ELIDED
 // here (a double-free otherwise). `vid = -1` for every NESTED / recursive field drop
 // (deep paths deferred — D5), mirroring the oracle's `&BTreeSet::new()` for nested fields.
-fn cg_emit_drop(c: &mut TyCtx, ty: i64, slot: i64, vid: i64) -> i64 {
+//
+// (ADR 0019 D5, register D158) a `secret T` drops as its inner type does and lowers as
+// it does: the qualifier is stripped before dispatching, as the oracle and inkwell do.
+fn cg_emit_drop(c: &mut TyCtx, ty0: i64, slot: i64, vid: i64) -> i64 {
+    let ty: i64 = strip_secret(c, ty0);
     if cg_is_array(c, ty) {
         let adv: i64 = cg_dst(c);
         cgo_str(c, "load { i64, ptr }, ptr %v");

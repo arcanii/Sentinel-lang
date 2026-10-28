@@ -3563,6 +3563,9 @@ impl Emit<'_> {
         ty: Type,
         fields: Option<(VarId, &BTreeSet<u32>)>,
     ) -> Result<(), String> {
+        // ADR 0019 D5 (register D158): a `secret T` drops as its inner type does, and
+        // lowers as it does; strip the qualifier before dispatching, as inkwell does.
+        let ty = self.unsecret(ty);
         match ty {
             Type::Array(_) => {
                 let v = self.fresh();
@@ -6275,6 +6278,12 @@ fn holds_handle_inner(ty: Type, program: &TypedProgram, seen: &mut Vec<Type>) ->
 fn needs_drop(ty: Type, program: &TypedProgram) -> bool {
     match ty {
         Type::Array(_) | Type::Vec(_) => true,
+        // ADR 0019 D5 (register D158): a `secret T` drops as its inner type does — a
+        // `secret [u8]`, a `secret` struct or class — as inkwell's drop strips it.
+        Type::Secret(id) => program
+            .secrets
+            .get(id.0 as usize)
+            .is_some_and(|s| needs_drop(s.inner, program)),
         // ADR 0071 M1.4a slice 3: a `Shared<T>` handle drops via
         // `sentinel_shared_release` (rc--) — the first Copy-yet-needs-drop type.
         Type::Shared(_) => true,
@@ -6331,9 +6340,6 @@ fn needs_drop(ty: Type, program: &TypedProgram) -> bool {
         | Type::Bool
         | Type::F64
         | Type::U128
-        // secret wraps only word scalars (a droppable inner is unrepresentable),
-        // so a `secret T` carries nothing to free.
-        | Type::Secret(_)
         //   - leaked/borrowed pointers + handles: a `ptr`/`&T` owns nothing; the
         //     concurrency + Fn handles are `Copy` and deliberately LEAKED
         //     (`needs_drop == false` is their defining trait — the refcounted

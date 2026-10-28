@@ -304,9 +304,20 @@ const SEEDS: &[&str] = &[
     // struct of scalars; a unit-only enum moved on one path).
     "struct P { x: i64 }\nfn eat(p: P) -> i64 { p.x }\nfn f(n: i64) -> i64 { let mut p: P = P { x: n }; let r: i64 = eat(p); p = P { x: 2 }; r }\nfn main() -> i64 { f(42) }\n",
     "enum U { A, B }\nfn eat(u: U) -> i64 { 1 }\nfn f(n: i64) -> i64 { let mut u: U = U::A; let r: i64 = if n > 0 { eat(u) } else { 0 }; u = U::B; r + 41 }\nfn main() -> i64 { f(1) }\n",
-    // A `secret`-qualified struct binding assigned: the text back ends drop nothing for it, at
-    // the assignment as at the exit (register D158); inkwell drops it at both.
+    // A `secret`-qualified struct binding assigned: in every back end the old value is dropped
+    // at the assignment and the new one at the exit, as a `secret T` drops as its inner type
+    // (ADR 0019 D5, register D158; before it the text back ends dropped neither).
     "struct H { s: Shared<i64>, a: [i64] }\nfn f(n: i64) -> i64 { let mut h: secret H = H { s: shared_new(n), a: [n] }; h = H { s: shared_new(2), a: [2] }; 42 }\nfn main() -> i64 { f(1) }\n",
+    // ADR 0019 D5 (register D158): a `secret T` drops as its inner type does, in both back ends.
+    // `cg_emit_drop` strips the qualifier: top-level `secret` bindings and parameters of each
+    // droppable kind -- an array, a string, a `Vec`, a struct, an enum and a class.
+    "struct H { s: Shared<i64>, a: [i64] }\nenum E { P([i64]), Q }\nclass C { let s: Shared<i64>; pub init(s: Shared<i64>) { self.s = s; 0 } }\nfn g(a: secret [i64], h: secret H) -> i64 { 0 }\nfn f(n: i64) -> i64 { let a: secret [i64] = [n, 1]; let s: secret [u8] = \"ab\"; let v: Vec<i64> = vec_new(); let sv: secret Vec<i64> = v; let h: secret H = H { s: shared_new(n), a: [n] }; let e: secret E = E::P([n]); let k: secret C = C::init(shared_new(n)); 42 }\nfn main() -> i64 { f(1) + g([1], H { s: shared_new(1), a: [1] }) }\n",
+    // `cg_needs_drop` strips it: a struct's walk and a generic instance's drop a `secret` field.
+    "struct H { s: Shared<i64>, a: [i64] }\nstruct G { a: secret [i64], n: i64, h: secret H }\nstruct Bx<T> { v: T, n: i64 }\nfn f(n: i64) -> i64 { let g: G = G { a: [n, 1], n: n, h: H { s: shared_new(n), a: [n] } }; let b: Bx<secret [i64]> = Bx { v: [n], n: n }; g.n + b.n + 40 }\nfn main() -> i64 { f(1) }\n",
+    // ... and a `secret` binding or parameter moved on one path gets a moved flag (ADR 0077).
+    "fn eat(v: secret [i64]) -> i64 { 1 }\nfn f(n: i64, p: secret [i64]) -> i64 { let a: secret [i64] = [n, 1]; if n > 0 { eat(a) + eat(p) } else { 0 } }\nfn main() -> i64 { f(1, [1]) + f(0, [2]) + 40 }\n",
+    // ... and so does a `secret` field moved on one path; then each binding is assigned (A2).
+    "struct G { a: secret [i64], b: [i64] }\nfn eat(v: secret [i64]) -> i64 { 1 }\nfn f(n: i64) -> i64 { let mut g: G = G { a: [n], b: [n] }; let r: i64 = if n > 0 { eat(g.a) } else { 0 }; g = G { a: [2], b: [2] }; let mut a: secret [i64] = [n]; let q: i64 = if n > 0 { eat(a) } else { 0 }; a = [3]; r + q }\nfn main() -> i64 { f(1) + f(0) + 40 }\n",
     // Assignments inside an `if` in a handler arm, to an arm local and to an outer binding.
     "effect Io { read() -> i64; }\nfn ask() -> i64 ! { Io } { perform Io.read() }\nfn once(n: i64) -> i64 {\n    let mut a: [i64] = [1, 2];\n    handle ask() with { Io.read(k) => { let mut b: [i64] = [n, 1]; if n > 0 { b = [n, 2]; a = [n, 3]; 0 } else { 0 }; k(b[1]) } }\n}\nfn main() -> i64 { once(1) + once(0) + 39 }\n",
     // A `match` scrutinee assigned inside its own arm.
@@ -1379,6 +1390,45 @@ fn oracle_ir_of_the_assignment_drop_program_runs() {
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp).expect("create temp dir");
     let stem = "c77_assign_drops_the_old_value";
+    let src = workspace_root().join("tests/pass").join(format!("{stem}.sentinel"));
+    let oracle = Command::new(env!("CARGO_BIN_EXE_snc"))
+        .arg("llvm")
+        .arg(&src)
+        .output()
+        .expect("run snc llvm");
+    assert!(
+        oracle.status.success(),
+        "snc llvm failed on {stem}:\n{}",
+        String::from_utf8_lossy(&oracle.stderr)
+    );
+    let ll = tmp.join(format!("{stem}.ll"));
+    std::fs::write(&ll, &oracle.stdout).expect("write the oracle's IR");
+    let exe = compile_ll_to_exe(&ll, &tmp.join(stem));
+    let run = Command::new(&exe).output().expect("run the program built from the oracle's IR");
+    assert_eq!(
+        run.status.code(),
+        Some(42),
+        "{stem}: built from the oracle's IR it exits {:?}; stderr:\n{}",
+        run.status,
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// ADR 0019 D5 (register D158): the oracle's IR of `c31_secret_aggregate_drops` runs and
+/// answers 42, so the drops the oracle now emits for a `secret`-qualified value -- a binding,
+/// a parameter, a struct's field, at an assignment, behind a moved flag, in an effecting fn's
+/// parent and in a handler arm -- free and release nothing twice or early. Before the change
+/// the oracle dropped none of them (a leak, which no exit code shows; `tests/llvm.rs` counts
+/// them). `pass_c31_secret_aggregate_drops` builds the file through inkwell alone, the
+/// corpus-wide behaviour check cannot run on Windows, and the codegen differential holds
+/// `scg` to the oracle byte for byte, so this is what runs the oracle's output.
+#[test]
+fn oracle_ir_of_the_secret_aggregate_drop_program_runs() {
+    let tmp = std::env::temp_dir().join(format!("snc_secretdrop_oracle_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).expect("create temp dir");
+    let stem = "c31_secret_aggregate_drops";
     let src = workspace_root().join("tests/pass").join(format!("{stem}.sentinel"));
     let oracle = Command::new(env!("CARGO_BIN_EXE_snc"))
         .arg("llvm")

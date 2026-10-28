@@ -2027,6 +2027,24 @@ fn pass_c77_assign_drops_the_old_value() {
 }
 
 #[test]
+fn pass_c31_secret_aggregate_drops() {
+    // ADR 0019 D5 (register D158): a `secret T` drops as its inner type does. Twelve shapes of
+    // `secret`-qualified arrays, strings, `Vec`s, enums, structs and classes: moved on one
+    // path, as parameters, assigned, as a struct's fields (moved, and moved on one path), into
+    // an init's and a method's parameters, across effecting fns and handler arms, into enum
+    // payloads, through `declassify` and widening, in loops, at generic instances, a string, a
+    // `Vec`, a struct holding a class and a class holding a struct, and drained by a `return`.
+    // Each runs 2000 times with freed cells reused, so a drop on a path that moved the value,
+    // of a field a move took, of a binding `declassify` or a widening moved, or of a parameter
+    // its callee owns frees an array twice or releases a `Shared` twice (the runtime's debug
+    // refcount check aborts), or reads a cell a later allocation took over. inkwell has always
+    // stripped the qualifier, so this holds its drops; the oracle's output is run by
+    // `oracle_ir_of_the_secret_aggregate_drop_program_runs`, and the codegen differential
+    // holds `scg` to the oracle. 12 a round, 2000 rounds: 24000 → exit 42.
+    assert_eq!(run_exit("c31_secret_aggregate_drops.sentinel"), 42);
+}
+
+#[test]
 fn pass_selfhost_ast_drop() {
     // ADR 0039 D4: the self-host parser's recursive-AST drop gate. A
     // recursive-enum `Node` (i64 + `[u8]` + recursive payloads) built, walked
