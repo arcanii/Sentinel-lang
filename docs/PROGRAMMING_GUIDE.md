@@ -473,6 +473,20 @@ fn main() -> i64 {
 }
 ```
 
+An arm whose value *is* `k(...)` needs no replay, so the check below never stops it. Code
+after `k(...)` in an arm (`k(1) + 10`, or `{ let r = k(1); r * 3 }`) has to be replayed
+later when the resumed computation performs again before it finishes, and the compiler
+replays it only in shapes argued and checked to give the deep-handler answer. In short: one
+`k(...)` in the arm, reached on every path, with only literals and names (and no `let mut`)
+before it; every other operation arm of the `handle` ending in a single `k(...)`; no
+`return` arm other than `return v => v`; nothing in the arm outside the `k(...)` itself,
+before or after it, that reads a `let mut`, a `mut` parameter or a handler arm's parameter,
+and nothing after it that performs, leaves the arm or starts a task; and a `handle` that is
+neither nested in another one nor holds one in its body. ADR 0075 (D6 and A3) has the full
+list. Elsewhere, when such a `k(...)` does have to replay the rest of its arm, the program
+stops at run time with "the rest of the arm is not proven to replay correctly" instead of
+replaying it in a shape not shown to give that answer.
+
 Effects are part of a function's type: a function that performs an unhandled
 effect must declare it in its signature with `! { EffectName }` (you'll see this
 on `Async` in the concurrency section). An unhandled effect at `main` is a

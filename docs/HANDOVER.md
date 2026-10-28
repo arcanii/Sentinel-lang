@@ -124,7 +124,11 @@ reference as you work through the milestones.
 > confirming nothing pre-existing is newly refused; oracle-vs-scg byte-equality on the new
 > fixture at types, mir and llvm; and the secret-taint check in both directions.
 
-### ▶ RESUME HERE (2026-10-28, second slice — start here. `origin/main` was `d779a2e` when this was written (the maintainer has pushed this slice's fix), and this slice's other two commits sit on top of it, unpushed; read `git reflog show refs/remotes/origin/main` and `git log --oneline origin/main..HEAD` at the START and AGAIN before writing either down. **Register D158 CLOSED** (`d779a2e` fix, `5df2d1f` its comments corrected after the review below, then this docs commit) by [ADR 0019](decisions/0019-phase-c3-kickoff-and-effects-plan.md) D5 amendment **A3**: a `secret T` drops as its inner type `T` does — at the same sites, behind the same moved flags, by the same walk — in all three back ends (inkwell, the oracle and `scg`). inkwell has always stripped the qualifier before it picks a drop. The oracle's `needs_drop` answered `false` for every `secret T` and its `emit_drop_for_binding` had no arm for one, and `scg`'s `cg_needs_drop` and `cg_emit_drop` dispatched on the qualified type, so in their output a `secret`-qualified array, string, `Vec`, enum, struct or class binding or parameter was dropped nowhere — wider than the entry as filed, which named the struct and the class — and a struct's or a generic instance's drop walked past a `secret`-qualified field: a leak, never a release too many. Now `needs_drop` follows the inner type and the text back ends' drops strip the qualifier first; inkwell does not change. A `secret` buffer is freed with `sentinel_free`, as inkwell frees it: neither zeroed nor mlocked (the mlocked cells zeroed at their last release are a `Shared` or `Mutex` with a `secret` payload). Over 2,000,000 iterations (macOS peak resident set size, debug builds, HEAD `113f559` against the change), the oracle's and `scg`'s output fall from 18.0–66.4 MB to 1.8–2.2 on every `secret` shape probed — a `secret [i64]`, string or `Vec` local, a `secret` struct holding an array, a `Shared` or a `Mutex`, a `secret` class, a public struct with a `secret` field, `secret` parameters, a binding moved on one path, assignments in a loop — what inkwell's measures (but for an `init` parameter the `init` only reads, which inkwell keeps, D154); the oracle's IR of ten of those probes is now byte for byte its twin's without the qualifier. Pinned by `tests/pass/c31_secret_aggregate_drops` (twelve shapes, 2,000 rounds with cells reused), its oracle-IR run, an IR count test in the oracle (23 functions), and four new codegen seeds; the change reverted in both text back ends (only the count test sees that) or either half reverted in either one is caught. Two review workflows. The first (`wf_4b9387e4-1bd`: soundness probes of 25 kinds of `secret`-qualified value moved or dropped up to 132 ways, the earlier drop-path generators made `secret`, the corpus and self-hosted sweeps, the measurements, the pins run against HEAD and four mutants, and the docs drafted, a verifier per job) found no regression in a program `snc build` builds. Its verified findings in the change are acted on: the comment on the `secret H` assignment seed was stale, the seeds did not see a `needs_drop` revert (now three of the four new seeds do), and the amendment's number collided with ADR 0019's A1 (it is A3); its other findings, none a regression in a program `snc build` builds, went to the maintainer first, as §0's drop-path rule asks. The second (`wf_39a536ef-b42`: the final texts of the docs and of the change's comments, through four lenses — facts against the evidence and the code, security over-claims, cross-document consistency, prose — each with an adversarial verifier) confirmed 42 findings, several of them found by more than one lens, every one in a comment, the docs or the commit message, none in the code: the soundness claim needed its scope (a program `snc build` builds); a `secret T` binding cannot be partially moved (only a `secret`-qualified field can); `needs_drop` decides the moved flags, not which bindings an exit drops; a freed buffer's bytes may stay in an allocation that reuses it; a stray `needs_drop` doc comment in `llvm_dump.rs` still said a `secret` needs no drop; probe counts, a mis-cited refusal cause (D159), and wording. All are fixed (the comments in `5df2d1f`) but one in `d779a2e`'s message, pushed before the review ended: it says inkwell's output measures 1.8–2.2 MB on every `secret` shape probed, where the `init`-parameter probe stays at 66.2 (D154). Sweeps, HEAD against the change, beside the same runtime, over everything but the new fixture: `snc llvm` over the 485 `.sentinel` files in `tests/pass`, `tests/ui`, `examples` and `sentinel_library` — 339 byte-identical, 144 refused by both with identical messages, 2 changed (`c19_widen_arm_family`, `c71_class_field_handles`), each by a moved flag and a drop behind it that never runs, the move coming first on every path; `snc build` and a run of 305 programs (237 in `tests/pass` and 68 examples with a `main`, all merged and the examples also `--separate`; the seven socket examples built, not run), plain and under the malloc checks, and a run of the oracle's IR for 285 of them — no build result, exit code or output changes, and every inkwell object is byte-identical; the oracle's IR of the ten self-hosted module roots does not move (their sources declare no `secret`-typed binding, parameter, field or return); `scg` equals the oracle on all 116 codegen seeds and on 341 of the 342 files the oracle emits, counting the one of `demos/win32`'s three it emits (the exception, `examples/lang/delegation`, is the known named-impl gap, the same before). Probes through all three back ends, both builds, malloc-checked (the first set plain too): 3,024 programs `snc build` accepts (25 kinds of `secret`-qualified value moved or dropped up to 132 ways, plus 31 hand-written and one cross-module), nearly all 2,000 rounds each, and 3,484 more from the earlier drop-path generators made `secret` — no double free, use after free, release too many, or wrong answer, abort, refusal or `scg`/oracle difference that HEAD did not already give (92 of the 3,484 stop at the runtime's ADR 0075 D6 abort through inkwell and the oracle, and `scg` refuses 730, before and after); on a sample of 392 the heap blocks the oracle's output leaves live at exit fall from 6,843,269 to 596,586 (inkwell's: 1,271,039). Four-check on macOS: **2,177 passed, none failing**, doctests and clippy clean, every `selfhost_*` differential green including both bootstrap fixed points. It moves the IR the oracle and `scg` emit, not inkwell's, so at least a minor version (ADR 0076 D2).)
+### ▶ RESUME HERE (2026-10-29 — start here. `origin/main` was `d779a2e` when this was written; the previous slice's `5df2d1f` and `e3e0577` and this slice's commits sit on top of it, unpushed; read `git reflog show refs/remotes/origin/main` and `git log --oneline origin/main..HEAD` at the START and AGAIN before writing either down. **Registers D102, D103 and D104 CLOSED, fail-closed** (`753c667` fix, then this docs commit), by [ADR 0075](decisions/0075-a-bubbling-resume-leaves-its-arm.md) amendment A3, the maintainer's choice of the register's first option (2026-10-28), and **D175 DONE** before it (`de64ccb`, `scg`-only). A handler arm's remainder is replayed after a bubbling `k(v)` only where every other op arm resumes exactly once, unconditionally, in tail position, the `return` arm is absent or `return v => v`, the arm binds no `let mut` before its `k(v)`, nothing the remainder captures is a `let mut`, a `mut` parameter or a handler arm's parameter, the remainder holds no `scope` / `spawn` / `await`, and the `handle` is neither nested nor holds one in its body; class (X) is kept for a lone, un-nested arm; everything else aborts at its bubble. One shared function, `arm_bubble_plan` in `sentinel-codegen` (with `handle_is_nested` and `replay_unstable_bindings`), decides for inkwell and the oracle; `scg` mirrors it (`cg_ar_classify`, with `dump_te_handle` recording what it needs about the `handle` and `cg_unst` the unstable VarIds). The investigation that preceded it (workflow `wf_ad2cb1c3-16d`) is where the (X) and one-arm shapes, D177 and D178 come from; the review of the change (`wf_b08331ec-8b6`, three lenses, each finding verified by constructing it) found the `let mut`-before-`k(v)` hole (pre-existing, the gates first kept it), the block-wrapped nested body, an oracle cost quadratic in the definitions holding a `handle`, four test gaps and the text over-claims, all fixed, and a further oracle-only hoist filed under D69; a second round over the fixed tree (`wf_8249eb22-cfb`) found no wrong answer in about 4,000 generated programs and sixteen text corrections, all made (among them the order of a replayed remainder and the `return` arm, which the first texts had backwards). Pins, mutations, sweeps: see A3 and STATE's Latest. Four-check on macOS **2,179 passed, none failing**, doctests and clippy clean, every `selfhost_*` differential green including both bootstrap fixed points. Filed D177 and D178. Moves the oracle's IR where an arm's class flips (no tracked `.sentinel` file's; one codegen seed's), and turns answers into aborts: a minor version, batched into 0.3.0.)
+
+> **NEXT:** in the order agreed on 2026-10-05, D102 and D103 now done: D36's option A with D146; then the bump to 0.3.0 (ADR 0076 D2). D167 is the maintainer's call. Open: D172, D173, D174, D177, D178, D120's field half (an assignment into a field, through a reference or into an element), and the rest of D154 (a counted temporary passed directly; a handle a struct argument brought in, or a class passed by value, that the method or `init` only reads; and a handle assigned into a method's or an init's `mut` parameter). Replaying what ADR 0075 A3 refuses (pending remainders per activation of a `handle`) is deferred to an ADR of its own, when wanted. Seen during the investigation and not filed, as an unported refusal (ADR 0041 A14): `scg` compiles a `let` that redeclares a name in scope, which the resolver refuses.
+
+### ▶ RESUME HERE (2026-10-28, second slice — superseded by the block above. `origin/main` was `d779a2e` when this was written (the maintainer has pushed this slice's fix), and this slice's other two commits sit on top of it, unpushed; read `git reflog show refs/remotes/origin/main` and `git log --oneline origin/main..HEAD` at the START and AGAIN before writing either down. **Register D158 CLOSED** (`d779a2e` fix, `5df2d1f` its comments corrected after the review below, then this docs commit) by [ADR 0019](decisions/0019-phase-c3-kickoff-and-effects-plan.md) D5 amendment **A3**: a `secret T` drops as its inner type `T` does — at the same sites, behind the same moved flags, by the same walk — in all three back ends (inkwell, the oracle and `scg`). inkwell has always stripped the qualifier before it picks a drop. The oracle's `needs_drop` answered `false` for every `secret T` and its `emit_drop_for_binding` had no arm for one, and `scg`'s `cg_needs_drop` and `cg_emit_drop` dispatched on the qualified type, so in their output a `secret`-qualified array, string, `Vec`, enum, struct or class binding or parameter was dropped nowhere — wider than the entry as filed, which named the struct and the class — and a struct's or a generic instance's drop walked past a `secret`-qualified field: a leak, never a release too many. Now `needs_drop` follows the inner type and the text back ends' drops strip the qualifier first; inkwell does not change. A `secret` buffer is freed with `sentinel_free`, as inkwell frees it: neither zeroed nor mlocked (the mlocked cells zeroed at their last release are a `Shared` or `Mutex` with a `secret` payload). Over 2,000,000 iterations (macOS peak resident set size, debug builds, HEAD `113f559` against the change), the oracle's and `scg`'s output fall from 18.0–66.4 MB to 1.8–2.2 on every `secret` shape probed — a `secret [i64]`, string or `Vec` local, a `secret` struct holding an array, a `Shared` or a `Mutex`, a `secret` class, a public struct with a `secret` field, `secret` parameters, a binding moved on one path, assignments in a loop — what inkwell's measures (but for an `init` parameter the `init` only reads, which inkwell keeps, D154); the oracle's IR of ten of those probes is now byte for byte its twin's without the qualifier. Pinned by `tests/pass/c31_secret_aggregate_drops` (twelve shapes, 2,000 rounds with cells reused), its oracle-IR run, an IR count test in the oracle (23 functions), and four new codegen seeds; the change reverted in both text back ends (only the count test sees that) or either half reverted in either one is caught. Two review workflows. The first (`wf_4b9387e4-1bd`: soundness probes of 25 kinds of `secret`-qualified value moved or dropped up to 132 ways, the earlier drop-path generators made `secret`, the corpus and self-hosted sweeps, the measurements, the pins run against HEAD and four mutants, and the docs drafted, a verifier per job) found no regression in a program `snc build` builds. Its verified findings in the change are acted on: the comment on the `secret H` assignment seed was stale, the seeds did not see a `needs_drop` revert (now three of the four new seeds do), and the amendment's number collided with ADR 0019's A1 (it is A3); its other findings, none a regression in a program `snc build` builds, went to the maintainer first, as §0's drop-path rule asks. The second (`wf_39a536ef-b42`: the final texts of the docs and of the change's comments, through four lenses — facts against the evidence and the code, security over-claims, cross-document consistency, prose — each with an adversarial verifier) confirmed 42 findings, several of them found by more than one lens, every one in a comment, the docs or the commit message, none in the code: the soundness claim needed its scope (a program `snc build` builds); a `secret T` binding cannot be partially moved (only a `secret`-qualified field can); `needs_drop` decides the moved flags, not which bindings an exit drops; a freed buffer's bytes may stay in an allocation that reuses it; a stray `needs_drop` doc comment in `llvm_dump.rs` still said a `secret` needs no drop; probe counts, a mis-cited refusal cause (D159), and wording. All are fixed (the comments in `5df2d1f`) but one in `d779a2e`'s message, pushed before the review ended: it says inkwell's output measures 1.8–2.2 MB on every `secret` shape probed, where the `init`-parameter probe stays at 66.2 (D154). Sweeps, HEAD against the change, beside the same runtime, over everything but the new fixture: `snc llvm` over the 485 `.sentinel` files in `tests/pass`, `tests/ui`, `examples` and `sentinel_library` — 339 byte-identical, 144 refused by both with identical messages, 2 changed (`c19_widen_arm_family`, `c71_class_field_handles`), each by a moved flag and a drop behind it that never runs, the move coming first on every path; `snc build` and a run of 305 programs (237 in `tests/pass` and 68 examples with a `main`, all merged and the examples also `--separate`; the seven socket examples built, not run), plain and under the malloc checks, and a run of the oracle's IR for 285 of them — no build result, exit code or output changes, and every inkwell object is byte-identical; the oracle's IR of the ten self-hosted module roots does not move (their sources declare no `secret`-typed binding, parameter, field or return); `scg` equals the oracle on all 116 codegen seeds and on 341 of the 342 files the oracle emits, counting the one of `demos/win32`'s three it emits (the exception, `examples/lang/delegation`, is the known named-impl gap, the same before). Probes through all three back ends, both builds, malloc-checked (the first set plain too): 3,024 programs `snc build` accepts (25 kinds of `secret`-qualified value moved or dropped up to 132 ways, plus 31 hand-written and one cross-module), nearly all 2,000 rounds each, and 3,484 more from the earlier drop-path generators made `secret` — no double free, use after free, release too many, or wrong answer, abort, refusal or `scg`/oracle difference that HEAD did not already give (92 of the 3,484 stop at the runtime's ADR 0075 D6 abort through inkwell and the oracle, and `scg` refuses 730, before and after); on a sample of 392 the heap blocks the oracle's output leaves live at exit fall from 6,843,269 to 596,586 (inkwell's: 1,271,039). Four-check on macOS: **2,177 passed, none failing**, doctests and clippy clean, every `selfhost_*` differential green including both bootstrap fixed points. It moves the IR the oracle and `scg` emit, not inkwell's, so at least a minor version (ADR 0076 D2).)
 
 > **NEXT:** in the order agreed on 2026-10-05, D158 now done: D102 and D103, and D36's option A with D146; then the bump to 0.3.0 (ADR 0076 D2). D167 is the maintainer's call. Open: D172, D173, D174, D175, D120's field half (an assignment into a field, through a reference or into an element), and the rest of D154 (a counted temporary passed directly; a handle a struct argument brought in, or a class passed by value, that the method or `init` only reads; and a handle assigned into a method's or an init's `mut` parameter).
 
@@ -1941,51 +1945,78 @@ reference as you work through the milestones.
 >
 >      `snc build` and the oracle are correct, and no corpus program has these shapes. A
 >      truncate between entries would fix only the last; the first two need each capture's name
->      bound to its `arwc` VarId at the start of every entry.
+>      bound to its `arwc` VarId at the start of every entry. Since ADR 0075 A3 the second
+>      cannot arise: an arm whose remainder captures its own parameter is class (A), so no
+>      resumer is drained for it, and all three back ends abort at its bubble.
 >
->      **D102 — replayed arm remainders run in the REVERSE of ADR 0020 D3's order, and can be
->      lost: a wrong answer with no diagnostic, in all three back ends.** Found 2026-09-23 by the
->      D99 review; introduced by ADR 0075 slice 2 (`e22a050`), whose text claimed D3's answer.
->      The bubble pushes the arm's remainder onto the tail of the bubbled kont, so it runs inside
->      a LATER entry's `k(v)` — the one whose resume runs that chain to completion — before that
->      entry's own code after it; a remainder whose chain no later `k(v)` completes is released
->      with it and never runs. D3 (`k := \v. handle (kont.resume v) with H`) finishes the inner
->      entry first and applies the outer remainder to its value. Over a `two()` that reads and
->      then writes, `handle two() with { Io.read(k) => k(1) * 10, Io.write(k) => k(2) + 5 }`
->      answers 35 in every back end where D3 answers (1 + 2 + 5) * 10 = 80; with a third
->      operation (`* 10`, `+ 5`, `* 2`) it answers 130 for 170; `Io.read(k) => k(1) * 10,
->      Io.write(k) => 7` answers 7 for 70, and `Io.read(k) => k(1) + 10, Io.write(k) => 7` 7 for
->      17. No c75 fixture shows either effect: each bubbling `handle` there has one arm, whose
->      entries all run the same remainder and all resume. No memory-safety or secret-flow
->      consequence was found: captures are `i64` / `secret i64` values, and only which remainders
->      run, and in what order, changes. The fix is a design choice — narrow class (R) to arms
->      whose replay cannot be observed, or keep pending remainders per activation — so it is the
->      maintainer's.
+>      **D102 — CLOSED, fail-closed (2026-10-29, `753c667`, [ADR
+>      0075](decisions/0075-a-bubbling-resume-leaves-its-arm.md) A3). Replayed arm remainders
+>      ran in the REVERSE of ADR 0020 D3's order, and could be lost: a wrong answer with no
+>      diagnostic, in all three back ends.** Found 2026-09-23 by the D99 review; introduced by
+>      ADR 0075 slice 2 (`e22a050`), whose text claimed D3's answer. The bubble pushes the arm's
+>      remainder onto the tail of the bubbled kont, so it runs inside a LATER entry's `k(v)` —
+>      the one whose resume runs that chain to completion — before that entry's own code after
+>      it; a remainder whose chain no later `k(v)` completes is released with it and never runs.
+>      D3 (`k := \v. handle (kont.resume v) with H`) finishes the inner entry first and applies
+>      the outer remainder to its value. Over a `two()` that reads and then writes, `handle
+>      two() with { Io.read(k) => k(1) * 10, Io.write(k) => k(2) + 5 }` answers 35 in every back
+>      end where D3 answers (1 + 2 + 5) * 10 = 80; with a third operation (`* 10`, `+ 5`, `* 2`)
+>      it answers 130 for 170; `Io.read(k) => k(1) * 10, Io.write(k) => 7` answers 7 for 70, and
+>      `Io.read(k) => k(1) + 10, Io.write(k) => 7` 7 for 17. No c75 fixture shows either effect:
+>      each bubbling `handle` there has one arm, whose entries all run the same remainder and
+>      all resume. No memory-safety or secret-flow consequence was found: captures are `i64` /
+>      `secret i64` values, and only which remainders run, and in what order, changes. The fix
+>      is a design choice — narrow class (R) to arms whose replay cannot be observed, or keep
+>      pending remainders per activation — so it is the maintainer's. The maintainer chose the
+>      first (2026-10-28). A remainder is now replayed only where every other op arm resumes
+>      exactly once, unconditionally, in tail position, the `return` arm is absent or returns
+>      its value, nothing the remainder captures can differ between entries (D103), the arm
+>      binds no `let mut` before its `k(v)`, and the `handle` is neither nested nor holds one in
+>      its body; elsewhere the bubble aborts. The investigation found one-arm shapes too (an arm
+>      that reads its own parameter, `k(0) * 10 + n`, 123 for 321; `return v => v + 5`, 250 for
+>      700), and class (X) unsound beside another op arm, which A3 refuses as well: `Io.read(k)
+>      => return k(1) + 10, Io.write(k) => k(2)` in a fn that returns `x + 1000` answered 1003
+>      where D3 answers 13. Its review found a one-arm shape the gates first kept: a `let mut`
+>      bound before the `k(v)` and written by its argument, which the replay binds again without
+>      running the argument (`{ let mut m: i64 = 0; let r: i64 = k({ m = 7; 1 }); r + m }` over
+>      three reads, 10 for 24); A3 refuses it too. Replaying what A3 refuses is the second
+>      option, deferred to an ADR of its own.
 >
->      **D103 — a replayed remainder works on COPIES of the outer variables it reads, taken at
->      the bubble: its own writes are lost, and writes made after the bubble are not seen. A
->      wrong answer with no diagnostic, in all three back ends.** Found 2026-09-23 by the D99
->      review; from ADR 0075 slice 2 (`e22a050`). `arm_remainder_verdict` captures each outer
->      name the remainder reads BY VALUE into the `i64[N]` frame when the arm bubbles, and never
->      asks whether the remainder assigns it, takes `&mut` of it, or reads a `let mut` that other
->      code may write. So `let mut base: i64 = 100; let x: i64 = handle three() with { Io.read(k)
->      => { let r: i64 = k(1); base = base + 1; r } }; base` answers 101 where D3 answers 103 (of
->      N arm entries, the N-1 whose remainders are replayed lose their write), and with `let mut
->      base: i64 = 0;`, `handle two() with { Io.read(k) => k(1) + base, Io.write(k) => { base =
->      100; k(2) } }` over a `two()` that reads and then writes answers 3 where D3 answers 103
->      (the replayed `+ base` reads the copy taken before the write arm ran). A write BEFORE the
+>      **D103 — CLOSED, fail-closed (2026-10-29, `753c667`, [ADR
+>      0075](decisions/0075-a-bubbling-resume-leaves-its-arm.md) A3). A replayed remainder
+>      worked on COPIES of the outer variables it reads, taken at the bubble: its own writes
+>      were lost, and writes made after the bubble were not seen. A wrong answer with no
+>      diagnostic, in all three back ends.** Found 2026-09-23 by the D99 review; from ADR 0075
+>      slice 2 (`e22a050`). `arm_remainder_verdict` captures each outer name the remainder reads
+>      BY VALUE into the `i64[N]` frame when the arm bubbles, and never asks whether the
+>      remainder assigns it, takes `&mut` of it, or reads a `let mut` that other code may write.
+>      So `let mut base: i64 = 100; let x: i64 = handle three() with { Io.read(k) => { let r:
+>      i64 = k(1); base = base + 1; r } }; base` answers 101 where D3 answers 103 (of N arm
+>      entries, the N-1 whose remainders are replayed lose their write), and with `let mut base:
+>      i64 = 0;`, `handle two() with { Io.read(k) => k(1) + base, Io.write(k) => { base = 100;
+>      k(2) } }` over a `two()` that reads and then writes answers 3 where D3 answers 103 (the
+>      replayed `+ base` reads the copy taken before the write arm ran). A write BEFORE the
 >      resume (class T) is unaffected. Likely fix: class (A) for an arm whose remainder captures
->      a `let mut` binding at all, in the shared verdict and in `scg`'s `cg_ar_classify`.
+>      a `let mut` binding at all, in the shared verdict and in `scg`'s `cg_ar_classify`. Done
+>      so, and wider: an arm whose remainder captures a `let mut`, a `mut` parameter or any
+>      handler arm's parameter is class (A), which also covers a `let mut` the remainder writes
+>      through `&mut`, one an enclosing `handle`'s arm writes, and one a `k(v)` argument writes
+>      before the copy is taken (`base + k({ base = 100; 1 })` answered 103 for 3).
 >
->      **D104 — the back ends disagree on whether an arm-remainder resumer inherits the
->      enclosing `scope concurrent`.** Found 2026-09-23 by the D99 review; from ADR 0075 slice 2.
->      inkwell's `emit_arm_remainder_resumer` saves and clears its builder state but not
->      `current_scope`, so a replayed remainder that `spawn`s under an enclosing scope refers to
->      the PARENT's `%scope_enter` from inside the resumer, and LLVM verification fails
->      ("Instruction does not dominate all uses"). The oracle and `scg` build the resumer with
->      no scope, so the task is never registered with the scope and is not awaited at its exit.
->      No corpus program spawns in a remainder. ADR 0075 A1 settles what a resumer takes from its
->      parent — name, drop plan, place — and scope membership is the open fourth.
+>      **D104 — CLOSED, fail-closed (2026-10-29, `753c667`, [ADR
+>      0075](decisions/0075-a-bubbling-resume-leaves-its-arm.md) A3). The back ends disagreed on
+>      whether an arm-remainder resumer inherits the enclosing `scope concurrent`.** Found
+>      2026-09-23 by the D99 review; from ADR 0075 slice 2. inkwell's
+>      `emit_arm_remainder_resumer` saves and clears its builder state but not `current_scope`,
+>      so a replayed remainder that `spawn`s under an enclosing scope refers to the PARENT's
+>      `%scope_enter` from inside the resumer, and LLVM verification fails ("Instruction does
+>      not dominate all uses"). The oracle and `scg` build the resumer with no scope, so the
+>      task is never registered with the scope and is not awaited at its exit. No corpus program
+>      spawns in a remainder. ADR 0075 A1 settles what a resumer takes from its parent — name,
+>      drop plan, place — and scope membership is the open fourth. A3 settles it by refusing: a
+>      remainder that holds a `scope`, `spawn` or `await` is class (A), in the shared verdict
+>      and in `scg`, so no resumer runs one. inkwell now builds such a program and, like `scg`,
+>      aborts at its bubble; the oracle still cannot lower a `spawn` in an arm (D105).
 >
 >      **D105 — the oracle's spawn-target walk skips handler bodies and arms, `match`
 >      arms and most operand positions, so a `spawn` there calls an undefined
@@ -3490,15 +3521,22 @@ reference as you work through the milestones.
 >      oracle runs the program to 42. The fix is to type such a parameter as the oracle does in
 >      codegen, or to refuse the arm.
 >
->      **D175 — the walk that collects what a handler arm's remainder reads resolves a name in
->      the scope around the arm.** Found 2026-10-20 by the review of the direct-call mirror;
+>      **D175 — DONE (2026-10-28, `de64ccb`). The walk that collects what a handler arm's
+>      remainder reads resolved a name in the scope around the arm.** Found 2026-10-20 by the
+>      review of the direct-call mirror;
 >      pre-existing. `cg_ar_caps` looks a name up where the arm begins, so a `match` pattern
 >      inside the remainder that rebinds an outer name is taken for the outer binding. With
 >      `enum E { A(Fn<i64, i64>), B }`, `handle ask1() with { Ask.q(x, k) => { let r: i64 =
 >      k(x); match E::A(dbl) { E::A(f) => f(r) + 28, E::B => 0 } } }` in a fn with a `Fn`
 >      parameter `f` takes the panicking bubble path in `scg`, where the oracle builds the
 >      remainder's frame; both run to 42 when nothing bubbles, and `apply(f, r)` in its place
->      did the same at HEAD. The fix is to scope a pattern's names in the walk.
+>      did the same at HEAD. The fix is to scope a pattern's names in the walk. Done so: the
+>      walk keeps the names a pattern or a nested arm's parameter list binds while it walks
+>      that arm's body (a `let` cannot rebind a name in scope, so it needs nothing), and a name
+>      found there is a local. Over a body that performs twice (the seed's `ask2`; the example
+>      as filed performs once and never bubbles), `scg` now replays the register's example as
+>      the oracle does (96; it aborted), and it gets the oracle's bytes where it captured an
+>      `i64` a pattern rebinds. Pinned by a codegen seed; each of three mutations is caught.
 >
 >      **D176 — DONE (2026-10-27, `f84bf1f`, [ADR
 >      0071](decisions/0071-shared-ownership-and-mutex.md) D2 amendment A6). An enum constructor's
@@ -3516,6 +3554,28 @@ reference as you work through the milestones.
 >      its oracle-IR run, and IR tests in inkwell and the oracle. Moves emitted IR, so at least a
 >      minor version (ADR 0076 D2). D120's binding half landed after it (2026-10-28, ADR 0077
 >      A2).
+>
+>      **D177 — `scg` replays a remainder whose `k(v)` sits in a class `init`'s argument, which
+>      the shared verdict refuses.** Found 2026-10-28 by the D102 and D103 investigation;
+>      pre-existing. The shared verdict's substitution leaves a `k(v)` inside a `ClassInit`'s
+>      arguments in place, so `expr_suspends` finds it in the remainder and the arm is class
+>      (A); `scg`'s resumer placeholder replaces every call to `k` by name, so it reifies the
+>      arm. `Io.read(k) => idc(C::init(k(1))) + 10` over two reads aborts at its bubble under
+>      inkwell and the oracle and answers 22, D3's answer, under `scg`, whose IR differs. Seen
+>      for a class `init`'s argument; a method call's, a qualified call's and an enum
+>      constructor's arguments are the same by reading, not measured. No corpus program has the
+>      shape. Fix: substitute there in the shared verdict, or refuse there in `scg`.
+>
+>      **D178 — a `perform` in a handler arm's `k(...)` argument fails in every back end, and
+>      `snc build` panics on it.** Found 2026-10-28 by the D102 and D103 investigation;
+>      pre-existing. In `handle (handle three() with { Io.read(k) => k(perform Lg.log()) * 10 })
+>      with { Lg.log(k) => k(5) }` the arm's argument performs an operation the OUTER `handle`
+>      handles. `snc build` panics in inkwell ("expected the IntValue variant": the argument's
+>      continuation pointer is taken for the resumed value), a panic on user input; `snc llvm`
+>      emits IR that `cc` rejects (`'%v7' defined with type 'ptr' but expected 'i64'`); `scg`'s
+>      IR fails the same way. ADR 0075 A3 does not reach it: the arm is class (A) there, and
+>      the failure is in lowering the argument, before any bubble. No corpus program has the
+>      shape. A program that type-checks should get a diagnostic, not a panic or invalid IR.
 >
 >      **D78 — stale corpus fixture counts in `llvm.rs` and `README.md`, at six sites, stale
 >      before this change.** Found by D74's reviews. `crates/sentinel-driver/tests/llvm.rs`
@@ -3786,6 +3846,14 @@ reference as you work through the milestones.
 >      D160's closure `scg` refuses some of these, an `if` and a block with a `perform` among
 >      its statements among them; D160's entry gives the rule.) The rest of A1 is still not
 >      applied by either.
+>      Found 2026-10-29 by the review of ADR 0075 A3, another instance: the oracle's
+>      embedded-shape walk (`collect_performs`) enters a `handle`'s arms, so a `perform` written
+>      in a handler arm of a `handle` that is an effecting fn's tail is hoisted and run once,
+>      before the body: `fn g() -> i64 ! { B } { handle body() with { A.get(k) => { print(55);
+>      let y: i64 = perform B.ask(); k(y * 2) } } }`, with `body()` printing 11 before it
+>      performs and `B.ask`'s arm printing 22, prints 22 11 55 where D3 prints 11 55 22, and with
+>      two `A.get`s `B.ask` is performed once where D3 performs it twice. inkwell and `scg`
+>      refuse the program. A wrong answer with no diagnostic in the oracle only.
 >
 >      **D68 — `snc build` PANICS on user input in three effect / spawn corners; (a) is CLOSED
 >      (2026-09-12).** Found by

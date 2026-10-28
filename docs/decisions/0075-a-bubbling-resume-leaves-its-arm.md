@@ -1,7 +1,7 @@
 # ADR 0075: A bubbling resume leaves the arm's entry, and must drain it
 
-Status: **ACCEPTED** (D1–D5 2026-09-21, D6 2026-09-22), **amended by A1** (2026-09-23) and
-**A2** (2026-09-25).
+Status: **ACCEPTED** (D1–D5 2026-09-21, D6 2026-09-22), **amended by A1** (2026-09-23),
+**A2** (2026-09-25) and **A3** (2026-10-29, which narrows when D6 replays a remainder).
 Addresses register item **D87**, whose leak half slice 1 closes.
 Amends [ADR 0074](0074-handler-arm-owns-its-continuation.md) D2, whose bubble bullet
 settles what the bubble does with the arm's *continuation* and is silent on the arm's
@@ -245,7 +245,8 @@ frames that survive a bubble onto the next one's tail, so the remainder replays 
 computation under it drains. That is ADR 0020 D3's re-wrap in the worked example below, and not
 in general: a replayed remainder runs inside a LATER entry's `k(v)` — the one that runs the
 chain to completion — before that entry's own code after it, so remainders run in the reverse
-of D3's order, and one whose chain no later `k(v)` completes never runs (register D102).
+of D3's order, and one whose chain no later `k(v)` completes never runs (register D102). A3
+replays only where its argument says that cannot show, and aborts elsewhere.
 
 Worked over `handle two() with { Io.read(k) => k(1) + 10 }`:
 
@@ -375,12 +376,15 @@ shape not matched is (R), and a (R) the gates refuse is (A):
   `Match` all of whose paths do). Lowered as today. Sound because the re-entered activation
   runs the same arm and takes the same `return` first, so under D3 the outer remainder is
   unreachable as well: `return k(21)` answers 42 and `return k(1) + 10` answers 12, both
-  D3's answers, measured. `c74_arm_return_leaves_the_arm`'s `after` is here.
+  D3's answers, measured. `c74_arm_return_leaves_the_arm`'s `after` is here. ⚠ That holds for
+  a lone arm only; beside another op arm, in a nested `handle` or in one whose body holds a
+  `handle`, A3 makes it (A).
 - **(R) observable remainder** — anything else. The bubble pushes a resumer for the
   remainder, which is the arm body with the `k(v)` node replaced by a fresh `i64` binding,
   and whose captures are the free variables it reads from the enclosing frame.
-- **(A) refused** — an (R) whose captures or remainder the gates below reject. The bubble
-  path aborts with a clean runtime diagnostic instead of branching.
+- **(A) refused** — an (R) whose captures or remainder the gates below reject (or, since A3,
+  an (R) or (X) arm for which A3's argument does not cover the replay or the branch). The
+  bubble path aborts with a clean runtime diagnostic instead of branching.
 
 #### The gates on (R)
 
@@ -419,10 +423,14 @@ Three, all fail-closed:
 `sentinel_kont_panic_remainder()`, aborting the way `sentinel_kont_panic_resumed` does,
 called on the bubble path with `unreachable` after it. It is an `abi-v1` **addition** — no
 existing symbol, signature or layout moves — and it is reached only where the program's
-answer is wrong today, so nothing that works now regresses: `after`'s `handle` body is a
-bare `perform`, whose kont carries no frames, so its bubble path is emitted and never
-taken. Reusing an existing abort was rejected: both `sentinel_kont_panic_resumed` and
-`sentinel_panic_oob` would print a diagnostic naming the wrong fault.
+answer was wrong at the time, so nothing that worked then regressed: `after`'s `handle` body
+is a bare `perform`, whose kont carries no frames, so its bubble path is emitted and never
+taken. (Since A3 it is reached wherever the replay or the branch is outside the shapes A3's
+argument covers, which includes programs that answered D3's value by luck of their shape.
+That is what its message's "not proven" means: the shapes the argument covers are argued and
+checked, not proven either.) Reusing an existing
+abort was rejected: both `sentinel_kont_panic_resumed` and `sentinel_panic_oob` would print
+a diagnostic naming the wrong fault.
 
 Unlike `sentinel_kont_panic_resumed`, which is runtime-internal, this one is
 codegen-declared, so it has the full set of sites a declared symbol has: the runtime's
@@ -549,6 +557,169 @@ sets do not change, so the emitted IR does not move and `scg` (which records mov
 rejects, ADR 0043) needs no mirror. It refuses programs that compiled before, so it is at
 least a minor version (ADR 0076 D2); no program that was already in the corpus is among them.
 
+### A3 (2026-10-29). A remainder is replayed only in shapes argued to give D3's answer.
+
+Registers D102, D103 and D104. D6 replays a bubbling arm's remainder from a frame pushed onto
+the bubbled kont, and claimed that was ADR 0020 D3's re-wrap. It is not, in general, and the
+difference is a wrong answer with no diagnostic in all three back ends, whose IR agrees byte
+for byte, so no differential could see it:
+
+- **Order and loss (D102).** A pushed remainder runs inside a LATER entry's `k(v)`, the one
+  whose resume drains the chain: oldest first, before that entry's own code after its `k(v)`,
+  and before the `return` arm, where D3 runs the `return` arm first and then the remainders,
+  innermost first. A chain that no later `k(v)` drains, because an arm answered without
+  resuming, is released with its remainders unrun. Over a `two()` that reads and then writes,
+  `Io.read(k) => k(1) * 10, Io.write(k) => k(2) + 5` answered 35 where D3 answers 80, and with
+  `Io.write(k) => 7` it answered 7 for 70. One arm is enough when its entries' remainders differ
+  or the `return` arm does something: `k(0) * 10 + n` over `emit(1)`, `emit(2)`, `emit(3)`
+  answered 123 for 321, and `k(1) * 10` with `return v => v + 5` over two reads 250 for 700.
+- **Copies (D103).** A remainder reads the outer bindings it uses from copies taken at the
+  bubble, so what it writes is lost and what is written after the bubble is not seen:
+  `{ let r: i64 = k(1); base = base + 1; r }` over three reads left `base` at 101 where D3
+  leaves 103, and `Io.read(k) => k(1) + base` beside `Io.write(k) => { base = 100; k(2) }`
+  answered 3 for 103. A `mut` parameter, a binding the remainder writes through `&mut`, and a
+  `let mut` the remainder only reads but an enclosing `handle`'s arm writes do the same.
+- **Class (X) is the same defect.** D6 called a `k(v)` after which the arm always `return`s
+  sound because the re-entered activation runs the same arm and takes the same `return`
+  first. That holds for a lone arm only. Beside another op arm the entry D3 returns from is
+  the one that bubbled first, and branching away leaves it: `Io.read(k) => return k(1) + 10,
+  Io.write(k) => k(2)`, in a fn that returns `x + 1000`, answered 1003 where D3 answers 13.
+
+No memory-safety or `secret`-flow consequence: a capture is an `i64` or a `secret i64`
+value, and only which remainders run, in what order and on what copies changes.
+
+**Decision: narrow the replay, fail-closed.** Of the two fixes the register recorded, this is
+the first; the second (keep each activation's pending remainders and apply them innermost
+first when it finishes) is deferred, see below. A bubbling `k(v)` in an arm now:
+
+- **branches away**, as before, when the arm's value is the resume's (T), or when the arm
+  always `return`s after it (X) **and the `handle` has exactly one op arm, is not nested in
+  another `handle`, and its body holds no `handle`**;
+- **replays its remainder** (R) when D6's verdict accepts it **and**:
+  - the `handle` is not nested in another `handle` and its body holds no `handle`;
+  - the arm binds no `let mut` before its `k(v)` (a narrowing of D6's prefix gate);
+  - every other op arm of the `handle` resumes its own continuation exactly once, on every
+    path, as its value (it is (T) and unconditional);
+  - the `return` arm is absent or returns its value (`return v => v`, read through the
+    widenings the typer inserts);
+  - nothing the remainder captures is a `let mut`, a `mut` parameter (of a fn, a class `init`
+    or method, or an impl method) or any handler arm's parameter;
+  - and the remainder holds no `scope`, `spawn` or `await` (D104);
+- **aborts** (A) otherwise, with `sentinel_kont_panic_remainder`.
+
+**Why the replay is then D3's answer.** Take one activation of the `handle`. Its (R) arm resumes
+on every path (D6's gate), and every other arm resumes exactly once as its value, so every entry
+reaches its `k(v)` and the last resume drains every remainder pushed before it: none is lost,
+unless another arm leaves the function or a loop before its `k(v)`, which abandons the pending
+remainders under D3 as well. Every remainder replayed in the activation is the same computation,
+the arm's body after the `k(v)` over the same captures: a capture is bound outside the arm, is
+not mutable and is not an arm's parameter, so it holds one value for the whole activation. The
+replay runs the arm again from the top with the `k(v)` replaced by its value, so it re-runs what
+comes before the `k(v)`, which is nothing but literals and names (D6's gate), and skips the
+`k(v)`'s argument; since nothing bound before the `k(v)` is mutable, the argument cannot have
+changed anything the replay reads. The other arms' remainders are the identity. So the replayed
+remainders compose to the same function in either order, and anything they print they print in
+the same sequence; a sibling's own code runs before its tail `k(v)` in both, and none runs after
+it. The `return` arm is the identity, so applying it after the remainders rather than before
+cannot show. A `handle` nested in another one, or whose body holds one, is outside this argument
+and is refused. The argument is checked rather than proven: by the probes and sweeps below, and
+by three adversarial reviews that looked for a counterexample to it in a single, un-nested
+`handle`. The first, in the investigation, found none. The second, of this change, found one, a
+`let mut` bound before the `k(v)` and written by its argument (`{ let mut m: i64 = 0; let r: i64
+= k({ m = 7; 1 }); r + m }` over three reads answered 10 where D3 answers 24, before this
+amendment as well), and the narrowed prefix gate refuses it. The third, over the fixed tree,
+found none in about sixty constructed programs and about 4,000 generated ones, each run through
+all three back ends against a model of D3.
+
+**What it costs.** A program that answered D3's value by luck of its shape now aborts when it
+bubbles, among them the accumulator idiom `Em.emit(n, k) => k(0) + n` (6; `scg` aborted
+compiling it, register D101), two arms each with a remainder that happen to commute (18),
+`return v => v * 3`, `return v => { v }`, and every nested `handle` with an (R) or (X) arm. The
+abort is at run time, at the first bubble, with a fixed message that says neither which arm
+nor why (both back ends compute the reason and drop it), although what has to change may be
+another arm or the `handle` around it. No tracked program is among them, measured below.
+
+**Where it lives.** `arm_bubble_plan` in `sentinel-codegen` decides all three outcomes, and
+inkwell and the oracle both call it with the `handle`'s arms, its `return` arm and whether it
+is nested (`handle_is_nested`, also shared), so the classification is one implementation; each
+back end supplies its own `handle` depth and the types of the names in scope. The set of
+bindings no remainder may capture is computed once per module in both
+(`replay_unstable_bindings`; a `VarId` is unique program-wide). `scg` mirrors the plan
+in `cg_ar_classify`. It cannot ask a question of an arm it has not reached, and it judges each
+arm before lowering it, so `dump_te_handle` first walks the `handle`'s arms (`cg_h_scan`)
+counting them and those that are not a single unconditional tail resume, records whether the
+`return` arm is `return v => v` and whether the `handle` is nested or its body holds a
+`handle` (every `handle` walked counts itself, and the count moves across the body's walk
+exactly when the body holds one), and saves and restores the four around a `handle` written
+inside an arm. The unstable
+`VarId`s are recorded as they are bound (`cg_unst`): a `let mut`, a `mut` parameter, a
+handler arm's parameters, and a `let mut` bound by an effecting fn's chained or let shape (the
+last defensively: a let shape's frame cannot hold a bubbling `handle`). `scg` also stopped
+taking an arm with two `k(v)`s that always `return`s for class (X): like the shared verdict it
+now takes it for Observable, whose verdict refuses it, where it had answered.
+
+The abort message now says the rest of the arm "is not proven to replay correctly (ADR 0075
+D6, A3)", and lost the run of spaces a line continuation had left in it. No symbol, signature
+or layout moves.
+
+**What stays open.** Replaying what this refuses needs the second fix: a pending list per
+activation of the `handle`, applied innermost first where it finishes, with the remainders'
+captures read by address. A prototype that rewrote the oracle's IR and supplied the runtime
+half in C gave D3's answer on the D102 and D103 probes it was run on, at a cost within noise
+on one 2,000,000-call loop, but it needs three or four new `abi-v1` symbols, has never been
+built in inkwell or `scg`, and its handling of a nested `handle` is not settled; it is
+deferred to an ADR of its own. Also open: register D101
+(its first and third bullets; an arm-parameter capture is (A) now, so the second cannot
+arise), D105 (the oracle still cannot lower a `spawn` in a handler arm), D106 (`scg` still
+lacks four of the shared verdict's refusals), D177, D178 and D81.
+
+Pinned by:
+
+- `tests/pass/c75_replay_is_d3_or_refused`: seventeen refused shapes, in free fns, an impl
+  method, a class `init` and a class method, each over a body that performs once, so each emits
+  the abort and never takes it, and seven kept shapes over bodies that bubble, each answering D3's
+  value (exit 42 under inkwell and under the oracle's IR; the corpus differential holds `scg`
+  to the oracle byte for byte, so its emission of each refused arm is pinned too);
+- `every_back_end_aborts_a_replay_not_proven_d3` in `selfhost_codegen.rs`: seventeen programs,
+  at least one per gate, each bubbling through a refused arm, built by inkwell, from the
+  oracle's IR and from `scg`'s, each aborting with the A3 diagnostic (the `spawn` program and
+  the one whose body holds a `handle` by inkwell and `scg` only: the oracle refuses both);
+- two codegen seeds: `handle`s in three frames of a chained effecting fn, whose remainders
+  capture the fn's `mut` parameter, a `let mut` the chain binds, and an immutable `let`; and a
+  `return v => v` the typer widens to a `secret i64`, which is kept (it cannot sit in
+  `tests/pass`: the two typers still place that widening differently, registers D7 and D151).
+
+Forty-two mutations were each caught by one or more of those, the seed differential or the
+corpus differential: each of the shared plan's gates turned off (the nesting, the other arms,
+the `return` arm, the unstable captures, (X) beside another arm, the concurrency refusal, the
+`let mut` before the `k(v)`); each kind of binding left out of `replay_unstable_bindings` (a
+handler arm's parameters, a `let mut`, a `mut` parameter, the class methods, the class `init`s,
+the impl methods); any `return` arm taken for the identity, or one under a widening not; another
+arm taken for a single tail resume without being unconditional, or without being in tail
+position; the nesting test reduced to the `handle` depth, or to the depth and a body that is
+itself a `handle`; the nesting dropped in inkwell's call or the oracle's, or reduced to the
+depth there; and in `scg` each gate of `cg_ar_classify`, the `let mut` in the prefix, the
+two-`k(v)` guard, four of the five recording sites (the let shape's is reached by no program a
+back end lowers), the arm scan answering always or never, the nesting flag, the body's `handle`
+count, the `return`-arm check, and each of the two restores around a nested `handle`.
+
+Sweeps. Over 1,574 distinct programs (the investigation's 493 probes and the reviews' probes),
+through all three back ends before and after: no answer became a different answer and no abort
+became an answer, and every result that changed became the A3 abort: under the oracle 354 (337
+answers and 17 runs that trapped), under inkwell 368 (363 answers and 5 programs with a `spawn` in
+an arm it failed to build), under `scg` 393 (343 answers, 29 runs that crashed and 21 programs it
+failed to compile or emitted IR `cc` rejects for); the back ends differ by the programs one of
+them does not build or lower. Two programs `scg` failed to compile now answer as the oracle does,
+and four it aborted compiling now get IR `cc` rejects, as the oracle refuses them or does too. 32
+programs gained the oracle's bytes in `scg` (among them `scg`'s two-`k(v)` (X) and every
+arm-parameter capture, D101's second bullet) and none lost them. `snc llvm` over the 529 tracked
+`.sentinel` files moves none (316 lowered). Of the 118 programs written whole as one string
+literal in `selfhost_codegen.rs` at HEAD, the oracle's IR of one moves, the codegen seed whose arm
+has `return v => v + 5` (now (A)), in step with `scg`'s.
+
+It changes answers (to aborts) and moves the oracle's IR wherever an arm's class flips, so it
+is at least a minor version (ADR 0076 D2), batched into 0.3.0.
+
 ## Slices
 
 D1–D5 and D6 are independent changes to the same site and land separately. D1 is first: it
@@ -582,7 +753,8 @@ is the memory leak, it reaches the idiom every tracked program uses, and D6 depe
   diagnostic in all three back ends: replayed remainders run in the reverse of D3's order and
   can be lost (register D102), and a replayed remainder works on copies of the outer variables
   it reads, taken at the bubble, so its writes are lost and later writes go unseen (register
-  D103).
+  D103). A3 closes both fail-closed: the replay is kept only where its argument says neither
+  can show, and the bubble aborts elsewhere.
 - Slice 1 is the `break` / `continue` drain with a different floor, and slice 2 is
   C3.5(c)/(d)/(e)'s resumer machinery at a new site: both inherit mechanisms already pinned
   in all three back ends rather than adding one.
@@ -594,8 +766,9 @@ is the memory leak, it reaches the idiom every tracked program uses, and D6 depe
 - A `k(v)` in class (R) costs a resumer function, a capture struct and a
   `sentinel_kont_push` per bubble. No tracked program is in (R), so this is new cost on new
   code only.
-- Class (A) is a runtime abort for a shape the type checker accepts. It is reached only on
-  executions that are wrong today, but it is reached late.
+- Class (A) is a runtime abort for a shape the type checker accepts, and it is reached late.
+  Since A3 it is also reached by executions whose answer was right only by luck of their
+  shape.
 - `abi-v1` gains one symbol (slice 2).
 
 ### Neutral

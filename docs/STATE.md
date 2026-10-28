@@ -14,9 +14,50 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
-**Latest (2026-10-28, second slice) — a `secret`-qualified value drops as its inner type does, in
-all three back ends (register D158; [ADR 0019](decisions/0019-phase-c3-kickoff-and-effects-plan.md)
-D5 amendment A3).**
+**Latest (2026-10-29) — a handler arm's remainder is replayed only in the shapes argued to give ADR
+0020 D3's answer, and the bubble aborts everywhere else (registers D102, D103, D104; [ADR
+0075](decisions/0075-a-bubbling-resume-leaves-its-arm.md) amendment A3).**
+ADR 0075 D6 replays the rest of an arm after a bubbling `k(v)` from a frame pushed onto the bubbled
+continuation, and that is not D3's deep handler in general: a pushed remainder runs inside a later
+entry's `k(v)`, oldest first and before the `return` arm (D3 runs the `return` arm first, then the
+remainders innermost first), and is lost if no later `k(v)` drains it (D102); it reads the outer
+bindings it uses from copies taken at the bubble (D103); and the class (X) shortcut, branching away
+from an arm that returns after its `k(v)`, is D3's answer for a lone arm only. Each gave a wrong
+answer with no diagnostic in all three back ends (two arms `k(1) * 10` and `k(2) + 5` over a read
+then a write answered 35 for 80; a remainder that writes a `let mut` lost the write). The maintainer
+chose the fail-closed fix (2026-10-28): an arm's remainder is now replayed only where every other op
+arm resumes exactly once, unconditionally, in tail position, the `return` arm is absent or returns
+its value, the arm binds no `let mut` before its `k(v)`, nothing the remainder captures is a `let
+mut`, a `mut` parameter or a handler arm's parameter, the remainder holds no `scope`, `spawn` or
+`await` (D104), and the `handle` is neither nested nor holds one in its body; (X) is kept for a
+lone, un-nested arm. That these shapes give D3's answer is argued and checked, not proven.
+Everything else aborts at its bubble with `sentinel_kont_panic_remainder`, whose message now says
+the rest of the arm "is not proven to replay correctly". So the change only turns answers into
+aborts, never one answer into another; programs that were right by luck of their shape abort too
+(the accumulator idiom `k(0) + n`, two commuting arms with remainders, nested `handle`s with
+remainder arms). One shared function (`arm_bubble_plan`) decides for inkwell and the oracle; `scg`
+mirrors it, and stopped taking an arm with two `k(v)`s for class (X). Replaying what this refuses,
+by keeping pending remainders per activation, is deferred to an ADR of its own. Landed before it,
+`scg`-only: register D175 (`de64ccb`), a `match` pattern in a remainder that rebinds a name from
+around the arm is a local, not a capture. Pinned by `tests/pass/c75_replay_is_d3_or_refused`
+(seventeen refused shapes that never bubble, seven kept ones that do, exit 42 under all three back
+ends), a test that bubbles seventeen refused programs through the back ends (fifteen through all
+three, two the oracle refuses through inkwell and `scg`) and expects the A3 abort, and two codegen
+seeds; forty-two mutations are each caught. Over 1,574 probe programs before and after, no answer
+became a different answer and no abort an answer, and no program lost the oracle's bytes in `scg`
+(32 gained them); no tracked `.sentinel` file's oracle IR moves. Two adversarial reviews: the first
+found a `let mut` bound before the `k(v)` and written by its argument, which the gates first kept
+(10 for 24, pre-existing), now refused, along with a block-wrapped nested body, an oracle cost
+quadratic in the definitions holding a `handle`, test gaps and text over-claims, all fixed; the
+second, over the fixed tree with about 4,000 fuzzed programs, found no wrong answer. It changes
+answers to aborts and moves the oracle's IR where an arm's class flips, so at least a minor version
+(ADR 0076 D2), batched into 0.3.0. Four-check on macOS: **2,179 passed, none failing**, doctests and
+clippy clean, every `selfhost_*` differential green including both bootstrap fixed points. Next, in
+the agreed order: D36's option A with D146, then the bump to 0.3.0.
+
+**Previously (2026-10-28, second slice) — a `secret`-qualified value drops as its inner type does,
+in all three back ends (register D158; [ADR
+0019](decisions/0019-phase-c3-kickoff-and-effects-plan.md) D5 amendment A3).**
 Since C3.1 inkwell has stripped the `secret` qualifier before it picks a drop, so a `secret T` is
 freed or released as a `T` is. The text back ends did not: the oracle's `needs_drop` answered
 `false` for every `secret T` and its `emit_drop_for_binding` had no arm for one, and `scg`'s
