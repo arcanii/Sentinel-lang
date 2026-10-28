@@ -5426,10 +5426,6 @@ fn type_has_typeparam(ty: Type, program: &TypedProgram) -> bool {
     }
 }
 
-/// 8d-drops-2: does a value of type `ty` own heap that scope-exit must `sentinel_free`?
-/// An array / `Vec` always does; a struct does iff some field does (recursive — so a
-/// struct of only scalars drops nothing). The Bar-B shapes (nullable / enum / generic /
-/// secret) don't appear in the emitting subset, so a plain `false` suffices.
 /// Bar B / effects — `true` iff `expr` lowers to a kont* (so a `handle` body uses it
 /// directly as the initial kont, and an effecting-fn tail returns it as-is). c35a: a
 /// direct `perform`. c35b: also a call to an effecting fn, or a block whose tail does
@@ -6275,6 +6271,8 @@ fn holds_handle_inner(ty: Type, program: &TypedProgram, seen: &mut Vec<Type>) ->
     }
 }
 
+/// 8d-drops-2: does a value of type `ty` own something a drop must free or release? Each
+/// arm says when; a `secret T` does iff its inner `T` does (ADR 0019 D5, register D158).
 fn needs_drop(ty: Type, program: &TypedProgram) -> bool {
     match ty {
         Type::Array(_) | Type::Vec(_) => true,

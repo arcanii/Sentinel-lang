@@ -305,14 +305,14 @@ const SEEDS: &[&str] = &[
     "struct P { x: i64 }\nfn eat(p: P) -> i64 { p.x }\nfn f(n: i64) -> i64 { let mut p: P = P { x: n }; let r: i64 = eat(p); p = P { x: 2 }; r }\nfn main() -> i64 { f(42) }\n",
     "enum U { A, B }\nfn eat(u: U) -> i64 { 1 }\nfn f(n: i64) -> i64 { let mut u: U = U::A; let r: i64 = if n > 0 { eat(u) } else { 0 }; u = U::B; r + 41 }\nfn main() -> i64 { f(1) }\n",
     // A `secret`-qualified struct binding assigned: in every back end the old value is dropped
-    // at the assignment and the new one at the exit, as a `secret T` drops as its inner type
-    // (ADR 0019 D5, register D158; before it the text back ends dropped neither).
+    // at the assignment and the new one at the exit, since a `secret T` drops as its inner
+    // type does (ADR 0019 D5, register D158; before it the text back ends dropped neither).
     "struct H { s: Shared<i64>, a: [i64] }\nfn f(n: i64) -> i64 { let mut h: secret H = H { s: shared_new(n), a: [n] }; h = H { s: shared_new(2), a: [2] }; 42 }\nfn main() -> i64 { f(1) }\n",
     // ADR 0019 D5 (register D158): a `secret T` drops as its inner type does, in both back ends.
     // `cg_emit_drop` strips the qualifier: top-level `secret` bindings and parameters of each
     // droppable kind -- an array, a string, a `Vec`, a struct, an enum and a class.
     "struct H { s: Shared<i64>, a: [i64] }\nenum E { P([i64]), Q }\nclass C { let s: Shared<i64>; pub init(s: Shared<i64>) { self.s = s; 0 } }\nfn g(a: secret [i64], h: secret H) -> i64 { 0 }\nfn f(n: i64) -> i64 { let a: secret [i64] = [n, 1]; let s: secret [u8] = \"ab\"; let v: Vec<i64> = vec_new(); let sv: secret Vec<i64> = v; let h: secret H = H { s: shared_new(n), a: [n] }; let e: secret E = E::P([n]); let k: secret C = C::init(shared_new(n)); 42 }\nfn main() -> i64 { f(1) + g([1], H { s: shared_new(1), a: [1] }) }\n",
-    // `cg_needs_drop` strips it: a struct's walk and a generic instance's drop a `secret` field.
+    // `cg_needs_drop` strips it: a struct's and a generic instance's walks drop a `secret` field.
     "struct H { s: Shared<i64>, a: [i64] }\nstruct G { a: secret [i64], n: i64, h: secret H }\nstruct Bx<T> { v: T, n: i64 }\nfn f(n: i64) -> i64 { let g: G = G { a: [n, 1], n: n, h: H { s: shared_new(n), a: [n] } }; let b: Bx<secret [i64]> = Bx { v: [n], n: n }; g.n + b.n + 40 }\nfn main() -> i64 { f(1) }\n",
     // ... and a `secret` binding or parameter moved on one path gets a moved flag (ADR 0077).
     "fn eat(v: secret [i64]) -> i64 { 1 }\nfn f(n: i64, p: secret [i64]) -> i64 { let a: secret [i64] = [n, 1]; if n > 0 { eat(a) + eat(p) } else { 0 } }\nfn main() -> i64 { f(1, [1]) + f(0, [2]) + 40 }\n",

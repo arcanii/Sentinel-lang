@@ -2056,8 +2056,8 @@ fn llvm_an_assignment_into_a_framed_binding_drops_the_old_value() {
 /// instance's) skipped a `secret`-qualified field; inkwell strips the qualifier first. Each
 /// row's comment gives the base's counts where they differ. A drop dispatch that does not
 /// strip gives the base's counts on every row; a `needs_drop` that answers `false` again
-/// gives a moved `secret` binding no flag, so its drop is elided, and walks past the field
-/// (`fields`, `boxed`, `one_path`, `field_path`, `declass` and `generic` fail). A moved
+/// gives a moved `secret` binding no flag, so its drop is elided, and makes a struct's walk skip
+/// the field (`fields`, `boxed`, `one_path`, `field_path`, `declass` and `generic` fail). A moved
 /// binding's drop must sit behind its flag: on the path that moved it, it would free the
 /// value twice. A leak is memory, not an exit code, so this reads the IR; the codegen
 /// differential holds `scg` to it.
@@ -2139,7 +2139,7 @@ fn llvm_a_secret_qualified_value_drops_as_its_inner_type() {
         ("field_path", 3, 1, 1),        // was 1/0/0: a `secret` field moved on one path
         ("assign", 2, 0, 0),            // was 0/0/0: at the assignment (ADR 0077 A2) and exit
         ("declass", 2, 0, 1),           // was 1/0/0: `declassify` moved `a`: behind its flag
-        ("widened", 2, 0, 1),           // was 1/0/1: the binding widened into
+        ("widened", 2, 0, 1),           // was 1/0/1: only `p`'s flagged drop, not `a`'s
         ("generic", 1, 0, 1),           // was 0/0/0: moved into `take`, behind its flag
         ("take__sec_arr_i64", 1, 0, 0), // was 0/0/0: the instance drops its parameter
         ("in_loop", 2, 0, 0),           // was 0/0/0: at the `break` and at the body's end
