@@ -628,6 +628,10 @@ struct TyCtx {
                       //   the classification runs, so `sc_lookup` answers -1 and it is a
                       //   local, not a capture — which is what the oracle's `ty_of`
                       //   returning `None` means there.
+    arsh: Vec<u8>,    // (register D175) the names a remainder binds itself through a `match`
+    arshe: Vec<i64>,  //   pattern or a nested arm's parameters, concatenated, and where each
+                      //   ends: while their arm is walked, `cg_ar_caps` takes such a name
+                      //   for a local even when a binding around the arm has it too.
     cg_h_btok: i64,   // (ADR 0075 D6) the arm BODY's first token, for the disposable
                       //   classification copy a bubbling `k(v)` is judged on.
     cg_h_kont: i64,   // (ADR 0075 D6) the arm's own continuation VID. A `handle` inside an

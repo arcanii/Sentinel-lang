@@ -305,6 +305,8 @@ fn new_tyctx(mode: i64) -> TyCtx {
         cg_arm_phs: 0 - 1,
         cg_arm_phe: 0 - 1,
         arcaps: vec_new(),
+        arsh: vec_new(),
+        arshe: vec_new(),
         cg_h_btok: 0,
         cg_h_kont: 0,
         cg_h_floor: 0,

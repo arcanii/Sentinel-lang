@@ -805,11 +805,15 @@ fn cg_ar_count_harms(h: HArms, kn: &[u8]) -> i64 {
 //
 // A name the remainder binds ITSELF is not yet in scope when this runs (the arm body has
 // not been lowered), so `sc_lookup` answers -1 and it is a local rather than a capture —
-// which is exactly what the oracle's `ty_of` answering `None` means there.
+// which is exactly what the oracle's `ty_of` answering `None` means there. That holds for
+// a `let`, which the resolver refuses to bind over a name already in scope, but not for a
+// `match` pattern or a nested arm's parameter, which may rebind one: `sc_lookup` would
+// answer the OUTER binding, so those names are kept in `arsh` while their arm is walked
+// and a name found there is a local (register D175).
 fn cg_ar_caps(c: &mut TyCtx, e: Expr, kn: &[u8]) -> i64 {
     match e {
         Expr::Var(vv) => {
-            let vid: i64 = sc_lookup(c, &vv);
+            let vid: i64 = if cg_arsh_has(c, &vv) { 0 - 1 } else { sc_lookup(c, &vv) };
             let _v: [u8] = vv;
             if vid >= 0 {
                 if cg_arcaps_has(c, vid) { 0 } else { push(&mut (*c).arcaps, vid); 0 }
@@ -821,7 +825,7 @@ fn cg_ar_caps(c: &mut TyCtx, e: Expr, kn: &[u8]) -> i64 {
             // (ADR 0070 D14) a `Fn` value called directly is read before the arguments, as
             // the oracle's `apply` call reads it as its first argument. It never fits a frame
             // word, so an arm whose remainder reads one gets the oracle's panicking bubble path.
-            let fvid: i64 = sc_lookup(c, &cn);
+            let fvid: i64 = if cg_arsh_has(c, &cn) { 0 - 1 } else { sc_lookup(c, &cn) };
             let hit: bool = name_eq_lit(kn, cn);
             if hit {
                 let _a: Args = ca;
@@ -923,8 +927,19 @@ fn cg_ar_caps_arms(c: &mut TyCtx, m: Arms, kn: &[u8]) -> i64 {
     match m {
         Arms::ArmEnd => 0,
         Arms::ArmCell(mp, me, mr) => {
-            let _p: Pattern = mp;
-            cg_ar_caps(c, me, kn) + cg_ar_caps_arms(c, mr, kn)
+            // (register D175) the pattern's names are the arm body's locals.
+            let mark: i64 = len((*c).arshe);
+            match mp {
+                Pattern::PatWild => 0,
+                Pattern::PatVariant(pe, pv, pb) => {
+                    let _e: [u8] = pe;
+                    let _v: [u8] = pv;
+                    cg_arsh_binds(c, pb)
+                },
+            };
+            let one: i64 = cg_ar_caps(c, me, kn);
+            cg_arsh_truncate(c, mark);
+            one + cg_ar_caps_arms(c, mr, kn)
         },
     }
 }
@@ -936,10 +951,68 @@ fn cg_ar_caps_harms(c: &mut TyCtx, h: HArms, kn: &[u8]) -> i64 {
             let _e: [u8] = hef;
             let _o: [u8] = hop;
             let _t: i64 = hbt;
-            let _p: Binds = hp;
-            cg_ar_caps(c, hb, kn) + cg_ar_caps_harms(c, hr, kn)
+            // (register D175) a nested arm's parameters are its body's locals.
+            let mark: i64 = len((*c).arshe);
+            cg_arsh_binds(c, hp);
+            let one: i64 = cg_ar_caps(c, hb, kn);
+            cg_arsh_truncate(c, mark);
+            one + cg_ar_caps_harms(c, hr, kn)
         },
     }
+}
+
+// (register D175) push each name of a binding list onto `arsh`, the names the remainder
+// binds itself and so may not take for a capture.
+fn cg_arsh_binds(c: &mut TyCtx, b: Binds) -> i64 {
+    match b {
+        Binds::BindEnd => 0,
+        Binds::BindCell(nm, rest) => {
+            let n: i64 = len(nm);
+            let mut i: i64 = 0;
+            while i < n {
+                push(&mut (*c).arsh, nm[i]);
+                i = i + 1;
+            }
+            push(&mut (*c).arshe, len((*c).arsh));
+            cg_arsh_binds(c, rest)
+        },
+    }
+}
+
+// (register D175) is `q` one of the names on `arsh`?
+fn cg_arsh_has(c: &mut TyCtx, q: &[u8]) -> bool {
+    let n: i64 = len((*c).arshe);
+    let qn: i64 = len(*q);
+    let mut i: i64 = 0;
+    let mut found: bool = false;
+    while i < n {
+        let s: i64 = if i == 0 { 0 } else { (*c).arshe[i - 1] };
+        let e: i64 = (*c).arshe[i];
+        if e - s == qn {
+            let mut j: i64 = 0;
+            let mut same: bool = true;
+            while j < qn {
+                if (*c).arsh[s + j] != (*q)[j] { same = false; 0 } else { 0 };
+                j = j + 1;
+            }
+            if same { found = true; 0 } else { 0 };
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    found
+}
+
+// (register D175) drop the names pushed since `arshe` held `mark` entries.
+fn cg_arsh_truncate(c: &mut TyCtx, mark: i64) -> i64 {
+    let keep: i64 = if mark == 0 { 0 } else { (*c).arshe[mark - 1] };
+    while len((*c).arsh) > keep {
+        let _b: u8 = pop(&mut (*c).arsh);
+        0
+    }
+    truncate_i64(&mut (*c).arshe, mark)
 }
 
 fn cg_ar_caps_stmts(c: &mut TyCtx, st: Stmts, kn: &[u8]) -> i64 {
