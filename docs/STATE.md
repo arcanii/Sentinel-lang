@@ -14,7 +14,40 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
-**Latest (2026-10-29) — a handler arm's remainder is replayed only in the shapes argued to give ADR
+**Latest (2026-11-08) — `scg`'s code generator makes its ported type checks and runs the
+constant-time verifier before it generates code, and its typer ports the oracle's checks that a
+value fits where it flows ([ADR 0041](decisions/0041-self-host-port-types.md) amendment A16, [ADR
+0026](decisions/0026-hir-mir-pipeline-and-constant-time-secret-codegen.md) A3; registers D20, D142
+and D143 DONE, D149's code-generator half and D152's refusal half closed, the checking halves of
+D7, D118, D132, D136, D147 and D151 closed, D179 and D180 filed).** `snc build` type-checks a
+program, verifies every body's MIR for constant time, and only then generates code. `scg`'s code
+generator did neither: its typer made only A14's refusals, and it verified nothing. Now
+`codegen.sentinel` calls `check_program` first, which runs the typer in a new mode 5 — the ported
+checks, then the MIR lowering and the verifier over the free fns, each class's `init` and methods
+and each impl's methods — and refuses on a type error those checks find, or on a leak, with the
+code and message of the check that finds it (D179 registers some programs the oracle refuses with
+another); only then does the code generator run. In every mode but the code generator's, the typer
+ports the oracle's checks that a value fits the place it flows to (`coerce_to_expected`, then
+compare), the `if` / `while` condition check (`secret_branch`), and its arity, type-argument,
+impl-signature, index, field-access, callee, undefined-fn and unknown-type checks: twenty-five
+codes join `PORTED_REFUSALS` (thirty-three). Those modes also type some places as the oracle does
+(a `handle` by its `return` arm, a `resume` by its `handle`, a payload, a `perform`'s and a
+`resume`'s argument and an array element with the type expected there, a coerced `[secret S]`, a
+`Vec<T>` from a generic call by the oracle's substitution, some generic-call arguments,
+`unwrap_or`'s `T`); the code generator's own walk is unchanged, so no accepted program's emitted IR
+moves. `u128`, which `scg` does not model, is refused as an unknown type. Pinned by seventeen new
+`tests/ui` fixtures (each ported code now has one, and every self-hosted driver is held to its
+refusal), 248 typer shapes (58 before), 34 code-generator shapes, the build-gate test over the
+fourteen `secret_leak` fixtures, and eight new typer and MIR seeds. Of ninety-seven mutations of
+the new code, ninety-five are caught by a test, judged by what that test reads; the other two each
+disable a backstop that a later check makes unreachable (the coerced case of a call argument's
+unification, and the refusal of a generic call's untyped `null`), and each is caught together with
+that check. Four-check on Windows: **2,181 passed with exactly the 18 known Windows failures**, 6
+ignored, doctests and clippy clean, every `selfhost_*` differential green including both bootstrap
+fixed points. `scg`-only: the oracle and inkwell move no byte, so a patch by ADR 0076 D2, as A14
+was.
+
+**Previously (2026-10-29) — a handler arm's remainder is replayed only in the shapes argued to give ADR
 0020 D3's answer, and the bubble aborts everywhere else (registers D102, D103, D104; [ADR
 0075](decisions/0075-a-bubbling-resume-leaves-its-arm.md) amendment A3).**
 ADR 0075 D6 replays the rest of an arm after a bubbling `k(v)` from a frame pushed onto the bubbled

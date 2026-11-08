@@ -317,6 +317,16 @@ the escape hatch (D3) bounds the downside.
   `crates/sentinel-driver/tests/modules.rs` (the merged and `--separate` gates) and
   `export.rs` (`--lib`). It refuses programs that compiled before, so it is at least a
   minor version (ADR 0076 D2).
+- **A3 (2026-11-08, ADR 0041 A16, register D149) — the self-hosted code generator runs the
+  gate.** `scg`'s code generator emitted code with no constant-time check. It now types the
+  program with the self-hosted typer's checks and runs the self-hosted verifier over every
+  body A2's gate verifies, the free fns and each class's `init` and methods and each impl's
+  methods, before it generates code, and refuses on a leak with this gate's code and
+  message, one line per leak. The self-hosted `ctverify` mirror still lists the free fns
+  only, as `snc ctverify` does. The verdict rests on the self-hosted typer's types, as this
+  gate's rests on the oracle's (`docs/ct-model.md`). Pinned by
+  `sentinel_codegen_refuses_what_the_build_gate_refuses`, which requires it to refuse every
+  `tests/ui` fixture whose snapshot is this gate's `secret_leak`, with the same messages.
 
 ## Reasoning
 

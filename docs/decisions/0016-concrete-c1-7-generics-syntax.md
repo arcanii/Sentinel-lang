@@ -999,8 +999,9 @@ pass unnoticed while producing invalid IR. The Rust side gets this for free: bot
   `i64` handle and the tag never gets a chance. That is the pre-existing ADR 0069
   deferral already carried by three `DEFERRED_PROGRAMS` entries; folding it in
   would mean re-diagnosing those inside a mangling slice.
-- **`u128` in `scg`.** `scg` models no `u128` at all, so `Pair<i64, u128>` resolves
-  its argument to the `i64` handle and collapses with `Pair<i64, i64>`. Both sides
+- **`u128` in `scg`.** `scg` models no `u128` at all, so `Pair<i64, u128>` resolved
+  its argument to the `i64` handle and collapsed with `Pair<i64, i64>` (since ADR 0041
+  A16 `scg` refuses `u128` as an unknown type). Both sides
   emit *valid* IR — they simply disagree — which makes it the quiet member of the
   family.
 - **Non-`i64` container VALUES in `scg`.** Making the annotation element-generic
@@ -1022,9 +1023,9 @@ the only one that reaches `task_` and `guard_`. `abi_v1_mangling_is_stable` pins
 tag strings themselves.
 
 **Three tags have NO differential fixture**, stated rather than left to be
-discovered: `u128` (the oracle emits a phantom `u128` tag but `scg` models no `u128`
-at all and resolves the argument to `i64`, so a fixture would pin a divergence, not a
-tag — register item D20), and `kont_` / `Self_`, both verified unreachable.
+discovered: `u128` (the oracle emits a phantom `u128` tag but `scg` models no `u128` at all; it
+resolved the argument to `i64`, and since ADR 0041 A16 refuses it as an unknown type, so no
+differential fixture can carry it — register item D20), and `kont_` / `Self_`, both verified unreachable.
 `abi_v1_mangling_is_stable` pins those three as unit tests, which anchors the STRING
 but not the three-way agreement.
 

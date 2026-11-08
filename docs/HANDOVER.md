@@ -124,7 +124,11 @@ reference as you work through the milestones.
 > confirming nothing pre-existing is newly refused; oracle-vs-scg byte-equality on the new
 > fixture at types, mir and llvm; and the secret-taint check in both directions.
 
-### ▶ RESUME HERE (2026-10-29 — start here. `origin/main` was `d779a2e` when this was written; the previous slice's `5df2d1f` and `e3e0577` and this slice's commits sit on top of it, unpushed; read `git reflog show refs/remotes/origin/main` and `git log --oneline origin/main..HEAD` at the START and AGAIN before writing either down. **Registers D102, D103 and D104 CLOSED, fail-closed** (`753c667` fix, then this docs commit), by [ADR 0075](decisions/0075-a-bubbling-resume-leaves-its-arm.md) amendment A3, the maintainer's choice of the register's first option (2026-10-28), and **D175 DONE** before it (`de64ccb`, `scg`-only). A handler arm's remainder is replayed after a bubbling `k(v)` only where every other op arm resumes exactly once, unconditionally, in tail position, the `return` arm is absent or `return v => v`, the arm binds no `let mut` before its `k(v)`, nothing the remainder captures is a `let mut`, a `mut` parameter or a handler arm's parameter, the remainder holds no `scope` / `spawn` / `await`, and the `handle` is neither nested nor holds one in its body; class (X) is kept for a lone, un-nested arm; everything else aborts at its bubble. One shared function, `arm_bubble_plan` in `sentinel-codegen` (with `handle_is_nested` and `replay_unstable_bindings`), decides for inkwell and the oracle; `scg` mirrors it (`cg_ar_classify`, with `dump_te_handle` recording what it needs about the `handle` and `cg_unst` the unstable VarIds). The investigation that preceded it (workflow `wf_ad2cb1c3-16d`) is where the (X) and one-arm shapes, D177 and D178 come from; the review of the change (`wf_b08331ec-8b6`, three lenses, each finding verified by constructing it) found the `let mut`-before-`k(v)` hole (pre-existing, the gates first kept it), the block-wrapped nested body, an oracle cost quadratic in the definitions holding a `handle`, four test gaps and the text over-claims, all fixed, and a further oracle-only hoist filed under D69; a second round over the fixed tree (`wf_8249eb22-cfb`) found no wrong answer in about 4,000 generated programs and sixteen text corrections, all made (among them the order of a replayed remainder and the `return` arm, which the first texts had backwards). Pins, mutations, sweeps: see A3 and STATE's Latest. Four-check on macOS **2,179 passed, none failing**, doctests and clippy clean, every `selfhost_*` differential green including both bootstrap fixed points. Filed D177 and D178. Moves the oracle's IR where an arm's class flips (no tracked `.sentinel` file's; one codegen seed's), and turns answers into aborts: a minor version, batched into 0.3.0.)
+### ▶ RESUME HERE (2026-11-08 — start here. `origin/main` was `3863fde` when this was written, and this slice's two commits sit on top of it, unpushed; read `git reflog show refs/remotes/origin/main` and `git log --oneline origin/main..HEAD` at the START and AGAIN before writing either down. **`scg`'s code generator makes its ported type checks and runs the constant-time verifier before it generates code** (`27ce9b3` fix, then this docs commit), by [ADR 0041](decisions/0041-self-host-port-types.md) amendment **A16** and [ADR 0026](decisions/0026-hir-mir-pipeline-and-constant-time-secret-codegen.md) **A3**: `codegen.sentinel` calls `check_program` (`types/tcheck.sentinel`), which runs the typer in a new mode 5 — the ported type checks, then the MIR lowering and the constant-time verifier over every body `snc build` verifies — and refuses on a type error those checks find, or on a leak, with the code and message of the check that finds it (D179 registers some programs the oracle refuses with another), before mode 4 runs. In every mode but 4 the typer ports the oracle's checks that a value fits the place it flows to, its `if` / `while` condition check, and its arity, type-argument, impl-signature (receiver kind, parameters, return type, effect row), index, field-access, callee, undefined-fn and unknown-type checks: twenty-five codes join `PORTED_REFUSALS` (thirty-three). So that the checks read the oracle's types, those modes also type a `handle` by its `return` arm and a `resume` by its `handle`, a payload, a `perform`'s and a `resume`'s argument and an array element with the type expected there, a `Vec<T>` from a generic call by the oracle's substitution, a `let` annotation with no type parameter in scope, and `unwrap_or`'s `T` from the type expected of the call where the oracle passes one; the code generator's own walk is unchanged, and no accepted program's emitted IR moves. **Registers D20, D142, D143 DONE**; D149's code-generator half, D152's refusal half and the checking halves of D7, D118, D132, D136, D147 and D151 closed; D145's fourth and fifth orders gone; **D179** (codes and messages that differ) and **D180** (calls `scg` accepts because it seeds a generic call from a type the oracle does not pass) filed. `u128`, which `scg` does not model, is refused as an unknown type. Two review rounds (round 1 `wf_c8bd7218-4d1` on the first commit's scope; round 2 `wf_c15d8091-069`, four lenses, each finding verified by constructing it): round 2 confirmed 19 findings. Those in this change's code are fixed: the `return` arm's first typing left continuations behind, so a call through an `i64` reached the code generator as a resume; `unwrap_or` did not take `T` from the type expected of it; the impl signature check compared no receiver kind or effect row; a value coerced into `[secret S]` kept its type, so joins, handler arms and nested array literals refused programs the oracle accepts; a generic call refused a `null` argument before the one that binds `T`, and a `[secret T]` parameter; a type argument count was checked after the arguments, and too few aborted the walk; and comments. A field access on a scalar, an array, a `Vec`, an enum or a nullable is now refused too. The code and message differences left are registered (D179, D180); the other findings, none a regression this change makes, went to the maintainer first. A third round over the final texts (`wf_04dc54f5-e82`, three lenses, a verifier for each) confirmed 22 findings, every one in a comment or the docs — the headline claimed every check `snc build` makes and is narrowed to the ported checks and the verifier; a citation named D179 for D180; register entries claimed pins they lack; comments described the old typing — and all are fixed. Pins: seventeen new `tests/ui` fixtures, one for each ported code no other fixture carried (40 carry a ported code, each held by every self-hosted driver); 248 typer shapes (58 before); 34 code-generator shapes; the build-gate test over the 14 `secret_leak` fixtures (among them the new `c52_secret_fn_then_method`); eight new typer and MIR seeds whose dumps now match the oracle's. Of ninety-seven mutations of the new code, ninety-five are caught by a test, judged by what that test reads; the other two each disable a backstop that a later check makes unreachable (the coerced case of a call argument's unification, and the refusal of a generic call's untyped `null`), and each is caught together with that check. Sweep, HEAD against the change, over the 549 `.sentinel` files: the code generator's output moves only to refusals (59, each a file the oracle refuses: 45 by `snc llvm`, 14 by `snc build`'s gate), and the other drivers' only to refusals of inputs the oracle refuses and to two dumps that move toward the oracle's. Four-check on Windows: **2,181 passed with exactly the 18 known Windows failures**, 6 ignored, doctests and clippy clean, every `selfhost_*` differential green including both bootstrap fixed points. `scg`-only: the oracle and inkwell move no byte, so a patch by ADR 0076 D2, as A14 was; the bump to 0.3.0 the earlier slices need is still owed.)
+
+> **NEXT:** first the follow-ups the maintainer was told of; then, in the order agreed on 2026-10-05, D36's option A with D146 and the bump to 0.3.0 (ADR 0076 D2). D167 is the maintainer's call. Open: D172, D173, D174, D177, D178, D179, D180, D120's field half, and the rest of D154.
+
+### ▶ RESUME HERE (2026-10-29 — superseded by the block above. `origin/main` was `d779a2e` when this was written; the previous slice's `5df2d1f` and `e3e0577` and this slice's commits sit on top of it, unpushed; read `git reflog show refs/remotes/origin/main` and `git log --oneline origin/main..HEAD` at the START and AGAIN before writing either down. **Registers D102, D103 and D104 CLOSED, fail-closed** (`753c667` fix, then this docs commit), by [ADR 0075](decisions/0075-a-bubbling-resume-leaves-its-arm.md) amendment A3, the maintainer's choice of the register's first option (2026-10-28), and **D175 DONE** before it (`de64ccb`, `scg`-only). A handler arm's remainder is replayed after a bubbling `k(v)` only where every other op arm resumes exactly once, unconditionally, in tail position, the `return` arm is absent or `return v => v`, the arm binds no `let mut` before its `k(v)`, nothing the remainder captures is a `let mut`, a `mut` parameter or a handler arm's parameter, the remainder holds no `scope` / `spawn` / `await`, and the `handle` is neither nested nor holds one in its body; class (X) is kept for a lone, un-nested arm; everything else aborts at its bubble. One shared function, `arm_bubble_plan` in `sentinel-codegen` (with `handle_is_nested` and `replay_unstable_bindings`), decides for inkwell and the oracle; `scg` mirrors it (`cg_ar_classify`, with `dump_te_handle` recording what it needs about the `handle` and `cg_unst` the unstable VarIds). The investigation that preceded it (workflow `wf_ad2cb1c3-16d`) is where the (X) and one-arm shapes, D177 and D178 come from; the review of the change (`wf_b08331ec-8b6`, three lenses, each finding verified by constructing it) found the `let mut`-before-`k(v)` hole (pre-existing, the gates first kept it), the block-wrapped nested body, an oracle cost quadratic in the definitions holding a `handle`, four test gaps and the text over-claims, all fixed, and a further oracle-only hoist filed under D69; a second round over the fixed tree (`wf_8249eb22-cfb`) found no wrong answer in about 4,000 generated programs and sixteen text corrections, all made (among them the order of a replayed remainder and the `return` arm, which the first texts had backwards). Pins, mutations, sweeps: see A3 and STATE's Latest. Four-check on macOS **2,179 passed, none failing**, doctests and clippy clean, every `selfhost_*` differential green including both bootstrap fixed points. Filed D177 and D178. Moves the oracle's IR where an arm's class flips (no tracked `.sentinel` file's; one codegen seed's), and turns answers into aborts: a minor version, batched into 0.3.0.)
 
 > **NEXT:** in the order agreed on 2026-10-05, D102 and D103 now done: D36's option A with D146; then the bump to 0.3.0 (ADR 0076 D2). D167 is the maintainer's call. Open: D172, D173, D174, D177, D178, D120's field half (an assignment into a field, through a reference or into an element), and the rest of D154 (a counted temporary passed directly; a handle a struct argument brought in, or a class passed by value, that the method or `init` only reads; and a handle assigned into a method's or an init's `mut` parameter). Replaying what ADR 0075 A3 refuses (pending remainders per activation of a `handle`) is deferred to an ADR of its own, when wanted. Seen during the investigation and not filed, as an unported refusal (ADR 0041 A14): `scg` compiles a `let` that redeclares a name in scope, which the resolver refuses.
 
@@ -921,16 +925,20 @@ reference as you work through the milestones.
 >      so the whole class "scg accepts what snc rejects" is untested BY CONSTRUCTION.** A
 >      `tests/ui` guard asserting the self-hosted stage also fails would close the class.
 >
->      **D7 — `resume-kont` is typed from the op's DECLARED result** rather than from the handled
->      computation, so a `secret i64`-returning effecting fn gives `:i64` where the oracle gives
->      `:secret i64`. Fix site: the resume-kont branch of `dump_te_call`,
->      `selfhost/types/borrow_arms.sentinel` ~997-1002. No effects fixture has a
->      `secret`-returning effecting fn, which is why nothing saw it. Since D148 (2026-09-30)
->      lowers an arm's body, the difference reaches the MIR dump as well: with
->      `effect Q { ask() -> bool; }`, the arm `Q.ask(k) => { let t: bool = 1 < 2; k(t) }`
->      under a `handle` of an `i64` computation types `k(t)` `:i64` in the oracle and `:bool`
->      in `scg`, and with a `secret` operation result under a public `handle`, `scg`'s verifier
->      reports a branch on the resumed value that the oracle's does not.
+>      **D7 — CLOSED in the checking modes (2026-11-08, ADR 0041 A16). `resume-kont` is typed
+>      from the op's DECLARED result** rather than from the handled computation, so a `secret
+>      i64`-returning effecting fn gives `:i64` where the oracle gives `:secret i64`. Fix site:
+>      the resume-kont branch of `dump_te_call`, `selfhost/types/borrow_arms.sentinel`
+>      ~997-1002. No effects fixture has a `secret`-returning effecting fn, which is why
+>      nothing saw it. Since D148 (2026-09-30) lowers an arm's body, the difference reaches the
+>      MIR dump as well: with `effect Q { ask() -> bool; }`, the arm `Q.ask(k) => { let t: bool
+>      = 1 < 2; k(t) }` under a `handle` of an `i64` computation types `k(t)` `:i64` in the
+>      oracle and `:bool` in `scg`, and with a `secret` operation result under a public
+>      `handle`, `scg`'s verifier reports a branch on the resumed value that the oracle's does
+>      not. Since A16 every mode but the code generator's (4) types a resume as the `handle`
+>      whose arm binds the continuation, and gives its argument the operation's result type as
+>      its expectation, as the oracle does; the code generator's checking pass types it so, and
+>      its own walk types it as before. Pinned by `sentinel_codegen_checks_as_the_typer_does`.
 >
 >      **D9 — DONE (`4ac7bdc`, ADR 0023 A5).** The two Rust back ends disagreed about
 >      whether `impl as Trait for <struct>` was compilable: inkwell compiled and ran it,
@@ -2267,6 +2275,12 @@ reference as you work through the milestones.
 >      `?T` or `secret` type, and it binds the `null` first, so the differentials are green;
 >      the typer, MIR and codegen differentials each diverge on a fixture that passes the
 >      payload unbound.
+>      **The checking modes' half CLOSED (2026-11-08, ADR 0041 A16):** every mode but the code
+>      generator's gives a payload its declared type as the expectation, as the oracle does, so
+>      the typed dumps and the MIR of `H::A(null)` and `G::A(40)` now match the oracle's (both
+>      are typer and MIR seeds), and a `secret` value in a payload of a public type is refused.
+>      The code generator's own walk does not, so its IR for them is unchanged, and `llvm-as`
+>      still rejects it.
 >
 >      **D119 — DONE (2026-10-03, `d25d196`, register D153). inkwell dropped a method's
 >      by-value parameters only at a `return`, and a class init's never.** It drops them on
@@ -2559,6 +2573,10 @@ reference as you work through the milestones.
 >      the operation's parameter types recorded where `scan_effect_ops` reads the effect.
 >      Since D150 they are recorded (`efpt`, read by `op_param_ty`), so what remains is typing
 >      each argument against them, which is also what D152 waits on.
+>      **The checking modes' half CLOSED (2026-11-08, ADR 0041 A16):** every mode but the code
+>      generator's types each argument with the operation's parameter type as its expectation,
+>      so `perform Io.write(40)`'s typed dump and MIR now match the oracle's (a typer and MIR
+>      seed). The code generator's own walk does not, so D152 still waits on this half.
 >
 >      **D133 — DONE (2026-10-05). `scg` emitted invalid IR for an effecting fn whose body
 >      `let`s a plain value and then ends in a `perform`.** Found 2026-09-25 by the review of
@@ -2623,6 +2641,12 @@ reference as you work through the milestones.
 >      which `llc` rejects ("invalid indices for insertvalue"), and its typed dump and MIR
 >      differ too. It fails loud. `dump_array_elems` walks every element with no expectation;
 >      ADR 0051 A5 records the same missing thread for a `secret` array element.
+>      **The checking modes' half CLOSED (2026-11-08, ADR 0041 A16):** every mode but the code
+>      generator's gives an array literal's first element the expected element type and each
+>      later one the first's type, as the oracle does, so the typed dump and the MIR of `let a:
+>      [Box<i64>] = [Box { v: 40 }];` now match the oracle's (a typer and MIR seed). The code
+>      generator's own walk does not, so its IR for it is unchanged, and `llc` still rejects
+>      it.
 >
 >      **D137 — a class instance's heap fields are never freed (a leak).** Found 2026-09-23 by
 >      the D93 investigation; re-verified 2026-09-26. ADR 0022 D9 says a class-valued binding's
@@ -2709,29 +2733,38 @@ reference as you work through the milestones.
 >      missing and stays `None`. (`Q { a: 1, a: 2 }` is refused, as D96's duplicate.) The fix
 >      is to refuse a repeated field name in the declaration, with a `tests/ui` fixture.
 >
->      **D142 — `scg`'s code generator checks a generic fn's body for D97's refusals only at
->      its instances.** Found 2026-09-26 by D97's review. In codegen mode `scg` types a generic
->      fn's body per monomorphised instance, after every non-generic fn, and never abstractly,
->      so: a refused construct in a generic fn that is never instantiated is not checked (the
->      driver exits 0; no code is emitted for the fn); `vec_to_array` over an abstract
->      `Vec<T>`, which the oracle refuses outright (ADR 0034 C1), is checked at each instance's
->      element instead, so `fn g<T>(v: Vec<T>) -> [T] { vec_to_array(v) }` called at
->      `Vec<i64>` compiles (an instance at a non-plain element is refused); and a generic
->      body's refusal is named after a later non-generic fn's. The types, borrow, MIR and
->      ct-verify drivers type the body itself and refuse as the oracle does. The fix is to type
->      each generic body once, abstractly, in codegen mode too.
+>      **D142 — DONE (2026-11-08, ADR 0041 A16). `scg`'s code generator checked a generic fn's
+>      body for D97's refusals only at its instances.** Found 2026-09-26 by D97's review. In
+>      codegen mode `scg` types a generic fn's body per monomorphised instance, after every
+>      non-generic fn, and never abstractly, so: a refused construct in a generic fn that is
+>      never instantiated is not checked (the driver exits 0; no code is emitted for the fn);
+>      `vec_to_array` over an abstract `Vec<T>`, which the oracle refuses outright (ADR 0034
+>      C1), is checked at each instance's element instead, so `fn g<T>(v: Vec<T>) -> [T] {
+>      vec_to_array(v) }` called at `Vec<i64>` compiles (an instance at a non-plain element is
+>      refused); and a generic body's refusal is named after a later non-generic fn's. The
+>      types, borrow, MIR and ct-verify drivers type the body itself and refuse as the oracle
+>      does. The fix is to type each generic body once, abstractly, in codegen mode too.
+>      Since A16 the code generator's checking pass (`check_program`) types each generic body
+>      as written, as the other four drivers do, before it generates code, so a refused
+>      construct in a generic fn that is never instantiated is refused (`P { a: 1, a: 2 }` in
+>      one), and so is `vec_to_array` over an abstract `Vec<T>`. Its own walk still types a
+>      generic body per instance.
 >
->      **D143 — `scg`'s code generator aborts on some programs the oracle refuses for an unknown
->      field, instead of printing the refusal.** Found 2026-09-26 by D97's review; it predates
->      D97 (the drivers before it abort the same way). `p.zzz.get()`, `let x = p.zzz;
->      x.foo()` and a method `self.zzz.get()`, never called: the walk records `unknown_field`
->      and runs on, the method dispatch then indexes with the field's type, -1, and the driver
->      aborts ("index out of bounds: idx=-1"), so the build fails without the message. The
->      other four drivers print the refusal. Separately, D49's non-convergent layout, used by
->      value, still overflows the code generator's stack whether or not the program also holds
->      a refused construct. The fix is to stop lowering once a refusal is recorded, or to give
->      an unknown field a type that no lookup indexes with. (Note, 2026-10-05: since D161 the
->      walk before `scg` refuses an effecting body with statements reaches this abort too.)
+>      **D143 — DONE (2026-11-08, ADR 0041 A16). `scg`'s code generator aborted on some
+>      programs the oracle refuses for an unknown field, instead of printing the refusal.**
+>      Found 2026-09-26 by D97's review; it predates D97 (the drivers before it abort the same
+>      way). `p.zzz.get()`, `let x = p.zzz; x.foo()` and a method `self.zzz.get()`, never
+>      called: the walk records `unknown_field` and runs on, the method dispatch then indexes
+>      with the field's type, -1, and the driver aborts ("index out of bounds: idx=-1"), so the
+>      build fails without the message. The other four drivers print the refusal. Separately,
+>      D49's non-convergent layout, used by value, still overflows the code generator's stack
+>      whether or not the program also holds a refused construct. The fix is to stop lowering
+>      once a refusal is recorded, or to give an unknown field a type that no lookup indexes
+>      with. (Note, 2026-10-05: since D161 the walk before `scg` refuses an effecting body with
+>      statements reaches this abort too.)
+>      Since A16 the code generator's checking pass refuses these programs before its walk
+>      runs: `p.zzz.get()` and `let x = p.zzz; x.foo()` now print the oracle's `unknown_field`
+>      refusal.
 >
 >      **D144 — `scg` does not parse an empty struct literal, `P {}`.** Found 2026-09-26 by
 >      D97's review; the misparse is pre-existing, and one refusal of it below is D97's. The oracle parses it and refuses it with `missing_field`;
@@ -2772,6 +2805,10 @@ reference as you work through the milestones.
 >      later() -> i64 { let q: P = P { a: 1 }; q.zz }` after `fn w() -> i64 ! { Io } { perform
 >      Io.write(1); 42 }` is refused for `zz` by the oracle and for `w`'s body by `scg`, which
 >      named `zz` before D161.
+>      Since A16 (2026-11-08) the fourth and the fifth are gone: the code generator makes the
+>      ported checks over the whole program before its walk, so both examples are refused for
+>      `zz`, as by the oracle. The first three remain, in the checking pass as in the other
+>      drivers.
 >
 >      **D146 — `vec_to_array` over a generic instance whose field is `secret T`: the oracle
 >      refuses, `scg` accepts.** Found 2026-09-26 by D97's review. `struct Box<T> { s: secret
@@ -2799,6 +2836,14 @@ reference as you work through the milestones.
 >      miscompiled. The fix is the oracle's rule in one helper for the `Vec`, array and
 >      nullable arms (`subst_type`'s array and nullable arms rebuild unconditionally too, a
 >      divergence older than D97), with the code generator's interning order checked.
+>      **The checking modes' half CLOSED (2026-11-08, ADR 0041 A16):** in every mode but the
+>      code generator's, `subst_type` substitutes inside a `Vec` by the oracle's rule: the
+>      element is rebuilt only when what it becomes can be a `Vec` element (`tc_vec_elem`),
+>      else `Vec<T>` is kept. So the typer accepts `vec_to_array(pass(v))` and
+>      `vec_to_array(s.items)`, and their typed dumps and MIR match the oracle's (typer and MIR
+>      seeds, with a seed whose enum, `f64` and `?i64` elements keep `Vec<T>`). The code
+>      generator's own walk keeps `Vec<T>`, and with it its interning order, so it still
+>      refuses both; `subst_type`'s array and nullable arms are unchanged.
 >
 >      **D148 — DONE (2026-09-30, `cc477f1`, ADR 0026 A1/A2, ADR 0050 A7). Three kinds of
 >      code did not reach the MIR passes.** A `handle`'s operation arms and its `return` arm
@@ -2820,14 +2865,19 @@ reference as you work through the milestones.
 >      twin without the leak that builds; sixteen mutations caught, each baseline surviving. It
 >      refuses programs that compiled before, so it is at least a minor version (ADR 0076 D2).
 >
->      **D149 — `scg`'s constant-time verifier does not check method bodies.** Filed
->      2026-09-30 with D148. Every `snc build` gate checks class `init`s, class methods and
->      impl methods (ADR 0026 A2), but the `snc mir` and `snc ctverify` dumps list the free fns
->      only, and `scg`'s MIR and verifier ports mirror those dumps, so they lower no method
->      body. `scg`'s code generator runs no constant-time check before it emits (a program the
->      verifier reports still compiles there), so this is a gap in the verification port, not
->      in a shipped gate. The fix is to put the method bodies in both dumps, with `scg`
->      mirroring them.
+>      **D149 — `scg`'s constant-time verifier does not check method bodies. The code
+>      generator's half CLOSED (2026-11-08, ADR 0041 A16).** Filed 2026-09-30 with D148. Every
+>      `snc build` gate checks class `init`s, class methods and impl methods (ADR 0026 A2), but
+>      the `snc mir` and `snc ctverify` dumps list the free fns only, and `scg`'s MIR and
+>      verifier ports mirror those dumps, so they lower no method body. `scg`'s code generator
+>      ran no constant-time check before it emitted (a program the verifier reported still
+>      compiled there), so this was a gap in the verification port, not in a shipped gate. The
+>      fix is to put the method bodies in both dumps, with `scg` mirroring them. Since A16 the
+>      code generator runs the verifier before it emits, over every body `snc build` verifies:
+>      its checking pass lowers each class `init`, class method and impl method as the oracle's
+>      `lower_method` does and refuses on any leak, with `snc build`'s message. The dumps' half
+>      is open: mode 3, the mirror of `snc ctverify`, still lowers the free fns only, as the
+>      oracle's dumps do.
 >
 >      **D150 — DONE (2026-10-01, `2563d0b`, ADR 0041 A15). `scg` typed a handler arm's
 >      parameters as `i64` whatever the operation declared.** `scg` now records each
@@ -2860,6 +2910,12 @@ reference as you work through the milestones.
 >      :i64) :?i64)`). Their typed and MIR dumps differed before D148 and still do. The fix
 >      site is `dump_te_handle`'s `close_ty(out, bty, c)`, which closes the handle with the
 >      body's type.
+>      **The checking modes' half CLOSED (2026-11-08, ADR 0041 A16):** every mode but the code
+>      generator's types the `handle` by its `return` arm, as the oracle does, so its typed
+>      dump and MIR now match the oracle's (a typer and MIR seed). The code generator's own
+>      walk still types the handle by its body, so its IR for this program differs from `snc
+>      llvm`'s, which widens inside the arm and stores the `{ i1, i64 }` through an `i64` slot
+>      (`store i64 %v10`), which `llvm-as` rejects; `scg`'s module assembles.
 >
 >      **D152 — `scg`'s code generator binds a handler arm's parameters as `i64`, where the
 >      text oracle loads each at its declared type.** Filed 2026-10-01 by D150's review; the
@@ -2884,6 +2940,10 @@ reference as you work through the milestones.
 >      arm reads a parameter wider than the slot past it too; in the review's probes its
 >      module assembled only when the operation was never performed, so that read never ran
 >      (D68(c)).
+>      **The refusal half CLOSED (2026-11-08, ADR 0041 A16):** the code generator's checking
+>      pass binds an arm's parameters at their declared types, as the other four drivers do,
+>      so it makes their refusals: an unknown field of a struct parameter is refused before
+>      code is generated. The IR half, the binding in the code generator's own walk, is open.
 >
 >      **D153 — DONE (2026-10-03, `d25d196`, [ADR
 >      0071](decisions/0071-shared-ownership-and-mutex.md) D2 amendment A2). inkwell
@@ -3577,6 +3637,45 @@ reference as you work through the milestones.
 >      the failure is in lowering the argument, before any bubble. No corpus program has the
 >      shape. A program that type-checks should get a diagnostic, not a panic or invalid IR.
 >
+>      **D179 — `scg` refuses some programs the oracle refuses with another code or message.**
+>      Found 2026-11-08 while building ADR 0041 A16; the verdict is the same, a refusal in
+>      both. Among them, each constructed: a generic call whose type argument `scg` binds first
+>      from the type it expects of the call (D180), where the oracle binds it from the
+>      arguments and then compares the result, so `take(gid(s))` with `take(a: i64)`,
+>      `gid<T>(x: T) -> T` and `s: secret i64` is `type_arg_inference_conflict` in `scg` and
+>      `call_arg_mismatch` in the oracle, and the same call as a fn's tail is a conflict in
+>      `scg` and `return_type_mismatch` in the oracle; the reverse for `vec_to_array`, whose
+>      element the oracle binds first from the expected type, so `let a: [i64] =
+>      vec_to_array(pass(sv))` over a `Vec<secret i64>` is a conflict in the oracle and a
+>      `mismatch` in `scg` (and `pop` into a `?i64` likewise); a type the message numbers by
+>      when it was first met (`<ref#N>`, `<gi#N>`), which `scg` numbers in its own interner, so
+>      an index into a reference reads `<ref#0>` where the oracle reads `<ref#1>`, and a
+>      `secret` type over other than the four word scalars can take another `<secret#N>`, so
+>      `fn g(x: secret [i64]) -> bool { x }` before `struct P { a: secret [u8] }` reads
+>      `<secret#4>` where the oracle reads `<secret#5>` (agreed when A16 was planned); `P<i64>`
+>      for a struct that takes no type argument, `type_arg_count_mismatch` in `scg` and
+>      `type_args_on_non_generic` in the oracle; and a generic struct literal with no expected
+>      type, `let o: ?B<i64> = B { v: 3 };`, which the oracle refuses as ambiguous and `scg` as
+>      a mismatch over its field, and `let f: Fn<B<i64>, i64> = h;` for a `fn h(b: B<i64>) ->
+>      i64`, which the oracle refuses as `fn_type_args_not_supported` and `scg` as a mismatch
+>      over `h`. Matching needs, among other things, the oracle's binding order in `scg`'s
+>      inference, the oracle's interning order for references and instances, and the oracle's
+>      codes for those forms.
+>
+>      **D180 — `scg` seeds a generic call's type argument from the type it expects there, also
+>      where the oracle has none, so it accepts some calls the oracle refuses.** Found
+>      2026-11-08 while acting on A16's second review; pre-existing. The oracle binds a type
+>      argument from the expected type only where it hands the call one (a `let` annotation, an
+>      assignment, or a place that coerces), and types a `null` argument it cannot type yet
+>      after the others; `scg` types each argument in order and seeds wherever its walk has an
+>      expectation, such as a fn's tail of any type. So `fn f(x: i64) -> i64 { pick(x, 1) }`
+>      with `pick<T>(x: ?T, d: T) -> T` is accepted by `scg`, which binds `T` to `i64` and
+>      widens `x`, and refused by the oracle (`mismatch`: `x` is not a `?T`). A seed only adds
+>      the widenings the oracle makes (into `?T`, `secret T` or `[secret T]`), never one out of
+>      `secret`. Seeding only where the oracle does refused `put(null, 8)` in the same place,
+>      which the oracle accepts, so the fix needs the oracle's deferral of a `null` argument
+>      first.
+>
 >      **D78 — stale corpus fixture counts in `llvm.rs` and `README.md`, at six sites, stale
 >      before this change.** Found by D74's reviews. `crates/sentinel-driver/tests/llvm.rs`
 >      carries them three times: a comment at line 1214 saying a `tests/pass` substring filter
@@ -4070,17 +4169,27 @@ reference as you work through the milestones.
 >      ("class / generic-instance args + trait/class-method dedup") is exactly the
 >      widening to ask about first.
 >
->      **D20 — `scg` has no unknown-type diagnostic: an unrecognised type name in type
->      position silently resolves to handle 0 (`i64`).** Verified with `Bogus`, `Task<i64>`,
->      `Process`, `Guard<i64>`, bare `Vec`. Normally masked because the oracle refuses first
->      and the differential skips whatever the oracle rejects — the D6 blind spot, in a new
->      place. It is LIVE for the two spellings the oracle ACCEPTS: `Pair<i64, u128>` and
->      `Pair<i64, SealedChannel<secret i64>>` both collapse onto a genuine `Pair<i64, i64>`
->      instance, so `scg` emits ONE declaration where the oracle emits two. Both sides emit
->      VALID IR — they simply disagree — which makes this the quiet member of the D5 family
->      and the one no `llvm-as` gate can catch. `u128` needs `scg` to model `u128` at all
->      (`scalar_code` has no arm); `SealedChannel` needs a `type_of_typeexpr` arm and is the
->      pre-existing ADR 0069 deferral behind three `DEFERRED_PROGRAMS` entries.
+>      **D20 — DONE (2026-11-08, ADR 0041 A16). `scg` had no unknown-type diagnostic: an
+>      unrecognised type name in type position silently resolved to handle 0 (`i64`).**
+>      Verified with `Bogus`, `Task<i64>`, `Process`, `Guard<i64>`, bare `Vec`. Normally masked
+>      because the oracle refuses first and the differential skips whatever the oracle rejects
+>      — the D6 blind spot, in a new place. It is LIVE for the two spellings the oracle
+>      ACCEPTS: `Pair<i64, u128>` and `Pair<i64, SealedChannel<secret i64>>` both collapse onto
+>      a genuine `Pair<i64, i64>` instance, so `scg` emits ONE declaration where the oracle
+>      emits two. Both sides emit VALID IR — they simply disagree — which makes this the quiet
+>      member of the D5 family and the one no `llvm-as` gate can catch. `u128` needs `scg` to
+>      model `u128` at all (`scalar_code` has no arm); `SealedChannel` needs a
+>      `type_of_typeexpr` arm and is the pre-existing ADR 0069 deferral behind three
+>      `DEFERRED_PROGRAMS` entries. Since A16 every mode but the code generator's refuses a
+>      name nothing declares with the oracle's `sentinel::types::unknown_type` and its message
+>      (`Bogus`, `Task<i64>`, `Process`, `Guard<i64>` and a bare `Vec` among them), and the
+>      code generator's checking pass refuses it before it generates code. `u128`, which `scg`
+>      does not model, is refused the same way, so `Pair<i64, u128>` is refused where `snc
+>      types` accepts it (`snc llvm` refuses a `u128` program too: "type not yet ported");
+>      `Pair<i64, SealedChannel<secret i64>>` was already typed as the oracle types it. The
+>      refusal of a name nothing declares is pinned by the `selfhost_types.rs` shapes whose
+>      `let` annotation names a type parameter with none in scope, and a `?` over a `secret
+>      bool` by `tests/ui/c15_nullable_over_secret`; no test pins `u128`'s refusal.
 >
 >      **D21 — `__spawn_wrapper_<FnId>` embeds a source-ORDER-dependent id in an
 >      unqualified symbol.** Verified: adding one unrelated `fn` before the spawn target

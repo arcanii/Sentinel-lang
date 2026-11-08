@@ -128,12 +128,13 @@ reader of a verdict computed elsewhere.
 
 ## Known gaps (stated honestly)
 
-- **The dumps and the self-hosted verifier cover free fns only.** `snc build`
-  checks every body ([`lower_all_bodies`]), but `snc mir` and `snc ctverify`
-  print the free fns ([`lower_to_mir`]), and the self-hosted `scg` verifier
-  mirrors those dumps, so it checks no class `init`, class method or impl
-  method (register D149). `scg`'s code generator runs no constant-time check
-  before it emits.
+- **The dumps cover free fns only.** `snc build` checks every body
+  ([`lower_all_bodies`]), but `snc mir` and `snc ctverify` print the free fns
+  ([`lower_to_mir`]), and the self-hosted `scg` verifier's `ctverify` mirror
+  prints the same (register D149). `scg`'s code generator runs its verifier over
+  every body `snc build` checks before it emits (ADR 0041 A16, ADR 0026 A3); its
+  verdict reads `scg`'s own typer, a port of the oracle's (ADR 0041), and rests
+  on that port as the gate's rests on the type checker (next item).
 - **The type checker is the single point of trust.** Per the boundary above, a
   secret-propagation bug in the type checker would false-negative this pass. The
   conformance suite is the mitigation; an independent secret-dataflow oracle is
