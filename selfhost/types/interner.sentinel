@@ -1452,6 +1452,10 @@ fn type_of_typeexpr(c: &mut TyCtx, t: TypeE, gb: &mut Vec<u8>) -> i64 {
         },
         TypeE::TSecret(inner) => {
             let ih: i64 = type_of_typeexpr(c, inner, gb);
+            // (`types/tcheck.sentinel`) a `secret` over a type that cannot be one, and, for the
+            // code generator, one over a type parameter.
+            tc_secret_of(c, ih);
+            tc_secret_over_tparam(c, ih);
             mk_secret(c, ih)
         },
         TypeE::TGeneric(gn, ga) => {

@@ -12,12 +12,40 @@ module types;
 // verifies (mode 3, the `snc ctverify` mirror, verifies free fns only, as that dump prints
 // them, register D149), and answers what that run refuses. A reported leak becomes the oracle's
 // `sentinel::mir::secret_leak` refusal, with one line per leak in the verifier's order, as
-// `snc build` reports each one. 0 when the program passes, 1 when it is refused, and then
-// `result` holds the refusal.
-pub fn check_program(src: [u8], result: &mut Vec<u8>) -> i64 {
+// `snc build` reports each one. Since A17, when neither refuses, a `secret` written over a type
+// parameter is refused (`tc_secret_over_tparam`), as `snc build` reaches its back end last. 0
+// when the program
+// passes, 1 when it is refused, and then `result` holds the refusal. `src` is the merged text,
+// which writes an `export "C"` fn as a plain one, so `xn` names the program's exports
+// (`merge::merge_exports`).
+pub fn check_program(src: [u8], result: &mut Vec<u8>, xn: &Vec<u8>) -> i64 {
     let mut vres: Vec<u8> = vec_new();
-    let rc: i64 = run(src, 5, &mut vres);
-    let n: i64 = len(vres);
+    let rc: i64 = run_x(src, 5, &mut vres, xn);
+    // The verifier's output ends where the code generator's own refusal, if any, follows a `!`.
+    let mut n: i64 = len(vres);
+    let mut bang: i64 = 0 - 1;
+    let mut bi: i64 = 0;
+    while bi < n {
+        if bang < 0 {
+            if vres[bi] == '!' {
+                bang = bi;
+                0
+            } else {
+                0
+            };
+            0
+        } else {
+            0
+        };
+        bi = bi + 1;
+    }
+    let total: i64 = n;
+    if bang >= 0 {
+        n = bang;
+        0
+    } else {
+        0
+    };
     if rc != 0 {
         let mut ri: i64 = 0;
         while ri < n {
@@ -60,11 +88,158 @@ pub fn check_program(src: [u8], result: &mut Vec<u8>) -> i64 {
             };
             i = i + 1;
         }
-        let _w: [u8] = vec_to_array(vres);
         if leaks > 0 {
+            let _w: [u8] = vec_to_array(vres);
+            1
+        } else if bang >= 0 {
+            let mut li: i64 = bang + 1;
+            while li < total {
+                push(result, vres[li]);
+                li = li + 1;
+            }
+            let _w2: [u8] = vec_to_array(vres);
             1
         } else {
+            let _w3: [u8] = vec_to_array(vres);
             0
+        }
+    }
+}
+
+// A written `secret X` whose `X` holds a type parameter, in the code generator's checking pass
+// (mode 5). The oracle's typer leaves such a `secret` unsubstituted at every instance, and the
+// back ends do not lower the types made from it where they lay them out (`snc llvm` refuses one
+// as not yet ported, and `snc build` stops on it with an internal error); the code generator's
+// own walk substitutes inside the `secret`, so it would read such a program otherwise than the
+// checks do. So it is recorded, the first one met, as `sentinel::codegen::secret_over_type_param`,
+// and refused once nothing else is (`check_program`). It is refused wherever it is written, in a
+// generic fn's signature, a generic struct's field or a type argument, including where the
+// oracle lowers it: in a generic nothing instantiates, and as a phantom type argument (register
+// D182).
+fn tc_secret_over_tparam(c: &mut TyCtx, x: i64) -> i64 {
+    if (*c).mode == 5 {
+        if len((*c).tc_lowr) > 0 {
+            0
+        } else if tc_secret_tparam(c, x, true) {
+            let m: [u8] = "sentinel::codegen::secret_over_type_param\nscg: a `secret` over a type parameter is not supported by the code generator\n";
+            let mn: i64 = len(m);
+            let mut k: i64 = 0;
+            while k < mn {
+                push(&mut (*c).tc_lowr, m[k]);
+                k = k + 1;
+            }
+            0
+        } else {
+            0
+        }
+    } else {
+        0
+    }
+}
+
+// A call of generic user fn `fid` whose type arguments, after its arguments, are `subst` (-1
+// for one nothing bound): the oracle refuses a type parameter nothing bound as
+// `ambiguous_type_arg`. Ported for the callees whose signature holds a `secret` over a type
+// parameter, which binds nothing in the checking modes (a `secret` parameter type only fits an
+// argument of that very type); for other callees it is not (a `fn z<T>() -> i64` called `z()`
+// is still accepted).
+fn tc_ambiguous(c: &mut TyCtx, fid: i64, subst: &Vec<i64>) -> i64 {
+    if tc_on(c) {
+        let mut fam: bool = tc_secret_tparam(c, (*c).ufret[fid - 42], false);
+        let ps: i64 = (*c).ufps[fid - 42];
+        let pe: i64 = (*c).ufpe[fid - 42];
+        let mut i: i64 = ps;
+        while i < pe {
+            if tc_secret_tparam(c, (*c).ufpp[i], false) {
+                fam = true;
+                0
+            } else {
+                0
+            };
+            i = i + 1;
+        }
+        let n: i64 = len((*subst));
+        let mut first: i64 = 0 - 1;
+        let mut ti: i64 = 0;
+        while ti < n {
+            if first < 0 {
+                if (*subst)[ti] < 0 {
+                    first = ti;
+                    0
+                } else {
+                    0
+                };
+                0
+            } else {
+                0
+            };
+            ti = ti + 1;
+        }
+        if fam && first >= 0 {
+            let mut m: Vec<u8> = vec_new();
+            append_str(&mut m, "ambiguous type argument for `");
+            let j: i64 = (*c).uftp0[fid - 42] + first;
+            let mut bi: i64 = (*c).uftpns[j];
+            while bi < (*c).uftpne[j] {
+                push(&mut m, (*c).uftpb[bi]);
+                bi = bi + 1;
+            }
+            append_str(&mut m, "` in call to `");
+            let nm: Vec<u8> = tc_fn_name(c, fid);
+            let nn: i64 = len(nm);
+            let mut q: i64 = 0;
+            while q < nn {
+                push(&mut m, nm[q]);
+                q = q + 1;
+            }
+            let _nm: [u8] = vec_to_array(nm);
+            push(&mut m, '`');
+            refuse(c, "sentinel::types::ambiguous_type_arg", vec_to_array(m))
+        } else {
+            0
+        }
+    } else {
+        0
+    }
+}
+
+// Whether type `h` holds a type parameter under a `secret` (`under`: a `secret` encloses `h`).
+fn tc_secret_tparam(c: &mut TyCtx, h: i64, under: bool) -> bool {
+    if h < tbase() {
+        false
+    } else {
+        let k: i64 = (*c).tk[h - tbase()];
+        let a: i64 = (*c).ta[h - tbase()];
+        let b: i64 = (*c).tb[h - tbase()];
+        if k == 9 {
+            under
+        } else if k == 3 {
+            tc_secret_tparam(c, a, true)
+        } else if k == 1 || k == 4 || k == 11 || k == 12 || k == 13 || k == 17 || k == 18 || k == 19 {
+            tc_secret_tparam(c, a, under)
+        } else if k == 2 {
+            tc_secret_tparam(c, b, under)
+        } else if k == 16 {
+            let pa: bool = tc_secret_tparam(c, a, under);
+            let pb: bool = tc_secret_tparam(c, b, under);
+            pa || pb
+        } else if k == 10 {
+            let gs: i64 = (*c).girs[b];
+            let ge: i64 = (*c).gire[b];
+            let mut any: bool = false;
+            let mut gi: i64 = gs;
+            while gi < ge {
+                if tc_secret_tparam(c, (*c).gia[gi], under) {
+                    any = true;
+                    0
+                } else {
+                    0
+                };
+                gi = gi + 1;
+            }
+            any
+        } else {
+            false
         }
     }
 }
@@ -77,8 +252,14 @@ pub fn check_program(src: [u8], result: &mut Vec<u8>) -> i64 {
 // an arity (a call's, a `Fn` value's, a method's, an `init`'s, an enum payload's or pattern's,
 // a `perform`'s or a handler arm's, a continuation's), a type-argument count (before the
 // arguments, as the oracle checks it) or inference, an impl method's signature, an index, a
-// field access's target, a callee, an undefined fn and an unknown type (their codes are among
-// `PORTED_REFUSALS` in the driver tests). They run in every mode but the code generator's: that
+// field access's target, a callee, an undefined fn and an unknown type; and since A17 its
+// type-level `secret` rules (a `secret f64`, written or made by a cast; a `secret` `Shared` or
+// `Mutex` handle; a deref of a `secret` reference; a `match` whose scrutinee is not an enum,
+// a `secret` one among them; the FFI fence over an `extern "C"` declaration's and an `export
+// "C"` fn's types) and the checks beside them (a cast's operand and target, a deref's operand,
+// a variant a pattern or a construction names, a `match` that names every variant or has a `_`
+// arm) (their codes are among `PORTED_REFUSALS` in the driver tests). They run in every mode
+// but the code generator's: that
 // mode binds a handler arm's parameters as `i64` (ADR 0041 A15), so a check there would refuse
 // a program the oracle accepts, and the code generator runs `check_program` first instead. So
 // that the checks read the types the oracle reads, those modes also type some places as the
@@ -89,7 +270,12 @@ pub fn check_program(src: [u8], result: &mut Vec<u8>) -> i64 {
 // `Vec<T>` a generic call returns, substituted by the oracle's rule (D147); a generic call's
 // argument with a `[secret T]` parameter pushed down, a `secret T` one with none, and a `null`
 // one bound after the rest; `unwrap_or`'s `T` from the type expected of it, where the oracle
-// has one; and a `let`'s annotation, with no type parameter in scope.
+// has one; a `let`'s annotation, with no type parameter in scope; and (A17) a `secret` type
+// left unsubstituted in a generic call's result or a generic instance's field, as the oracle
+// leaves one, and a `secret` parameter type that binds no type parameter in unification, as
+// in the oracle's, with the oracle's refusal of a type parameter that is then left unbound
+// (`tc_ambiguous`). Since the code generator's walk does both otherwise, its checking pass
+// refuses any `secret` written over a type parameter (`tc_secret_over_tparam`).
 fn tc_on(c: &mut TyCtx) -> bool {
     (*c).mode != 4
 }
@@ -547,10 +733,13 @@ fn tc_is_int(h: i64) -> bool {
 }
 
 // A unary operator's operand of type `it`, as the oracle checks it: `-` takes an integer or
-// a float, `!` a `bool` (either under one `secret`), `sqrt` an `f64` and `is_null` a `ptr`.
+// a float, `!` a `bool` (either under one `secret`), `sqrt` an `f64` and `is_null` a `ptr`;
+// `*` a reference or a `?Guard`, and a `secret` reference is `secret_in_ref_deref`.
 fn tc_unary(c: &mut TyCtx, uop: i64, it: i64) -> i64 {
     let st: i64 = strip_secret(c, it);
-    if uop == 1 {
+    if uop == 3 {
+        tc_deref(c, it)
+    } else if uop == 1 {
         if tc_is_int(st) {
             0
         } else if st == 4 {
@@ -578,6 +767,218 @@ fn tc_unary(c: &mut TyCtx, uop: i64, it: i64) -> i64 {
         }
     } else {
         0
+    }
+}
+
+// `*` over an operand of type `it`, as the oracle checks it: a reference, or the `?Guard` a
+// `lock` binds. A `secret` reference is `secret_in_ref_deref` (the address read would depend
+// on the secret), and any other type `deref_of_non_ref`.
+fn tc_deref(c: &mut TyCtx, it: i64) -> i64 {
+    if tc_on(c) {
+        let k: i64 = if it >= tbase() {
+            (*c).tk[it - tbase()]
+        } else {
+            0 - 1
+        };
+        // `ta` is read only for a `secret` (3) and a nullable (4), the two arms below that
+        // need it; for a struct, an enum, a class or a generic instance it holds an id,
+        // which is no type handle.
+        let a: i64 = if k == 3 || k == 4 {
+            (*c).ta[it - tbase()]
+        } else {
+            0 - 1
+        };
+        let ak: i64 = if a >= tbase() {
+            (*c).tk[a - tbase()]
+        } else {
+            0 - 1
+        };
+        if k == 2 {
+            0
+        } else if k == 4 && ak == 19 {
+            0
+        } else if k == 3 && ak == 2 {
+            refuse(c, "sentinel::types::secret_in_ref_deref", "dereferencing a secret reference leaks via the memory side channel")
+        } else {
+            let mut m: Vec<u8> = vec_new();
+            append_str(&mut m, "dereference of non-reference type `");
+            tc_put_ty(&mut m, it, c);
+            push(&mut m, '`');
+            refuse(c, "sentinel::types::deref_of_non_ref", vec_to_array(m))
+        }
+    } else {
+        0
+    }
+}
+
+// A written `secret X`, as the oracle resolves one: `X` may not be `f64` (ADR 0058: floats
+// are a public-only domain), `secret_float`, or a `Shared` / `Mutex` handle (ADR 0071 D2
+// amendment A1: the secret belongs inside the container), `secret_handle`.
+fn tc_secret_of(c: &mut TyCtx, x: i64) -> i64 {
+    if tc_on(c) {
+        let k: i64 = if x >= tbase() {
+            (*c).tk[x - tbase()]
+        } else {
+            0 - 1
+        };
+        if x == 4 {
+            refuse(c, "sentinel::types::secret_float", "`secret f64` is not allowed — float operations are not constant-time")
+        } else if k == 17 || k == 18 {
+            refuse(c, "sentinel::types::secret_handle", "a `secret` `Shared` / `Mutex` handle is not allowed")
+        } else {
+            0
+        }
+    } else {
+        0
+    }
+}
+
+// `x as NAME`, `x` of type `it` and `base` NAME's scalar code (-1 for none), as the oracle
+// checks it: the operand an integer or a float (either under one `secret`), the target
+// `i64`, `i32`, `u8`, `u128` or `f64`, else `non_integer_cast`; and a `secret` operand cast to
+// `f64` is `secret_float`, since the result would be the `secret f64` that cannot be written.
+// `u128`, which this typer does not model, is refused as an unknown type (register D20).
+fn tc_cast(c: &mut TyCtx, it: i64, nm: &[u8], base: i64) -> i64 {
+    if tc_on(c) {
+        let st: i64 = strip_secret(c, it);
+        let num: bool = tc_is_int(st) || st == 4;
+        if !num {
+            tc_non_int_cast(c)
+        } else if base == 4 {
+            if is_secret(c, it) {
+                refuse(c, "sentinel::types::secret_float", "`secret f64` is not allowed — float operations are not constant-time")
+            } else {
+                0
+            }
+        } else if tc_is_int(base) {
+            0
+        } else if name_eq_lit(nm, "u128") {
+            tc_unknown_type(c, nm)
+        } else {
+            tc_non_int_cast(c)
+        }
+    } else {
+        0
+    }
+}
+
+fn tc_non_int_cast(c: &mut TyCtx) -> i64 {
+    refuse(c, "sentinel::types::non_integer_cast", "`as` cast requires integer operand and target (i64 / i32 / u8)")
+}
+
+// A `match` scrutinee of type `st`: the oracle takes only an enum, not a `secret`, nullable
+// or referenced one.
+fn tc_match_scrutinee(c: &mut TyCtx, st: i64) -> i64 {
+    if tc_on(c) {
+        if enum_of_handle(c, st) >= 0 {
+            0
+        } else {
+            let mut m: Vec<u8> = vec_new();
+            append_str(&mut m, "`match` requires an enum scrutinee (got `");
+            tc_put_ty(&mut m, st, c);
+            append_str(&mut m, "`)");
+            refuse(c, "sentinel::types::match_scrutinee_not_enum", vec_to_array(m))
+        }
+    } else {
+        0
+    }
+}
+
+// Whether `x` may cross the FFI boundary in the value ABI, by the oracle's `is_ffi_safe`: a
+// public `i64`, `f64` or `ptr`.
+fn tc_ffi_safe(x: i64) -> bool {
+    x == 0 || x == 4 || x == 5
+}
+
+// A type an `extern "C"` declaration names, or an `export "C"` fn's parameter or return type,
+// that the FFI fence does not let through (`ok`, which the caller computes, is false):
+// `extern_ffi_type`.
+fn tc_ffi_refuse(c: &mut TyCtx, ok: bool) -> i64 {
+    if tc_on(c) {
+        if ok {
+            0
+        } else {
+            refuse(c, "sentinel::types::extern_ffi_type", "`extern` fn types must be public FFI-safe scalars (`i64` or `f64`)")
+        }
+    } else {
+        0
+    }
+}
+
+// `export "C"` fn number `fi`'s signature, as the oracle checks it after every `extern`
+// declaration's: each parameter is a value-ABI scalar or a `&[u8]` / `&mut [u8]`, and the
+// return a value-ABI scalar or an owned public `[u8]` (ADR 0059).
+fn tc_export_sig(c: &mut TyCtx, fi: i64) -> i64 {
+    let ps: i64 = (*c).ufps[fi];
+    let pe: i64 = (*c).ufpe[fi];
+    let mut i: i64 = ps;
+    while i < pe {
+        let p: i64 = (*c).ufpp[i];
+        let pk: i64 = if p >= tbase() {
+            (*c).tk[p - tbase()]
+        } else {
+            0 - 1
+        };
+        let pin: i64 = if pk == 2 {
+            (*c).tb[p - tbase()]
+        } else {
+            0 - 1
+        };
+        let bytes: bool = tc_u8_array(c, pin);
+        tc_ffi_refuse(c, tc_ffi_safe(p) || bytes);
+        i = i + 1;
+    }
+    let r: i64 = (*c).ufret[fi];
+    let rb: bool = tc_u8_array(c, r);
+    tc_ffi_refuse(c, tc_ffi_safe(r) || rb)
+}
+
+// Whether `src[ns..ne]` is one of the names in `xn`, a line each.
+fn tc_named(xn: &Vec<u8>, src: &[u8], ns: i64, ne: i64) -> bool {
+    let n: i64 = len((*xn));
+    let w: i64 = ne - ns;
+    let mut found: bool = false;
+    let mut a: i64 = 0;
+    while a < n {
+        let mut b: i64 = a;
+        while b < n && (*xn)[b] != i64_to_u8(10) {
+            b = b + 1;
+        }
+        if b - a == w {
+            let mut same: bool = true;
+            let mut j: i64 = 0;
+            while j < w {
+                if (*xn)[a + j] != (*src)[ns + j] {
+                    same = false;
+                    0
+                } else {
+                    0
+                };
+                j = j + 1;
+            }
+            if same {
+                found = true;
+                0
+            } else {
+                0
+            };
+            0
+        } else {
+            0
+        };
+        a = b + 1;
+    }
+    found
+}
+
+// Whether type handle `h` is `[u8]`, a public byte array.
+fn tc_u8_array(c: &mut TyCtx, h: i64) -> bool {
+    if h < tbase() {
+        false
+    } else if (*c).tk[h - tbase()] == 1 {
+        (*c).ta[h - tbase()] == 3
+    } else {
+        false
     }
 }
 
@@ -1031,6 +1432,94 @@ fn tc_payload_arity(c: &mut TyCtx, eid: i64, vflat: i64, exp: i64, got: i64) -> 
         append_str(&mut m, " payload(s), got ");
         append_int(&mut m, got);
         refuse(c, "sentinel::types::variant_payload_arity_mismatch", vec_to_array(m))
+    } else {
+        0
+    }
+}
+
+// A `match` pattern naming variant `vn` (index `vidx`, -1 for none) of enum `eid` (-1 for
+// none), under a scrutinee of enum `meid`: the oracle refuses it as `unknown_variant` unless
+// it names the scrutinee's enum and a variant of it. (A scrutinee that is not an enum, -1,
+// was refused before its arms.) A variant constructed, `E::V(..)`, passes its enum as both.
+fn tc_variant(c: &mut TyCtx, meid: i64, eid: i64, vidx: i64, vn: &[u8]) -> i64 {
+    if tc_on(c) {
+        if meid < 0 {
+            0
+        } else if eid == meid && vidx >= 0 {
+            0
+        } else {
+            let mut m: Vec<u8> = vec_new();
+            append_str(&mut m, "enum `");
+            let es: i64 = (*c).ets[meid];
+            let ee: i64 = (*c).ete[meid];
+            tc_snb(c, &mut m, es, ee);
+            append_str(&mut m, "` has no variant `");
+            rf_put(&mut m, vn);
+            push(&mut m, '`');
+            refuse(c, "sentinel::types::unknown_variant", vec_to_array(m))
+        }
+    } else {
+        0
+    }
+}
+
+// A `match` over enum `meid` (-1 for none) whose arms named the variants at `tc_mcov[mark..]`:
+// with no `_` arm, the oracle refuses it as `non_exhaustive_match` unless every variant is
+// named, listing those that are not in declaration order.
+fn tc_exhaustive(c: &mut TyCtx, meid: i64, mark: i64) -> i64 {
+    if tc_on(c) {
+        if meid < 0 {
+            0
+        } else if (*c).tc_mwild {
+            0
+        } else {
+            let mut m: Vec<u8> = vec_new();
+            append_str(&mut m, "non-exhaustive `match` on `");
+            let es: i64 = (*c).ets[meid];
+            let ee: i64 = (*c).ete[meid];
+            tc_snb(c, &mut m, es, ee);
+            append_str(&mut m, "`: missing ");
+            let n: i64 = len((*c).tc_mcov);
+            let mut missing: i64 = 0;
+            let mut vi: i64 = 0;
+            let mut j: i64 = variant_flat(c, meid, vi);
+            while j >= 0 {
+                let mut seen: bool = false;
+                let mut q: i64 = mark;
+                while q < n {
+                    if (*c).tc_mcov[q] == vi {
+                        seen = true;
+                        0
+                    } else {
+                        0
+                    };
+                    q = q + 1;
+                }
+                if seen {
+                    0
+                } else {
+                    if missing > 0 {
+                        append_str(&mut m, ", ");
+                        0
+                    } else {
+                        0
+                    };
+                    let vs: i64 = (*c).varns[j];
+                    let ve: i64 = (*c).varne[j];
+                    tc_snb(c, &mut m, vs, ve);
+                    missing = missing + 1;
+                    0
+                };
+                vi = vi + 1;
+                j = variant_flat(c, meid, vi);
+            }
+            if missing > 0 {
+                refuse(c, "sentinel::types::non_exhaustive_match", vec_to_array(m))
+            } else {
+                let _m: [u8] = vec_to_array(m);
+                0
+            }
+        }
     } else {
         0
     }
@@ -1927,8 +2416,13 @@ fn tc_gcallarg(c: &mut TyCtx, src: &[u8], gfid: i64, pi: i64, pty: i64, got: i64
         0
     } else if psecret_t {
         // A `secret T` parameter: the oracle pushes it down unsubstituted, and no argument is
-        // coerced to it.
-        tc_mismatch(c, pty, got)
+        // coerced to it; only an argument of that very type fits it (since A17, the
+        // unsubstituted `secret T` another generic call returns).
+        if got == pty {
+            0
+        } else {
+            tc_mismatch(c, pty, got)
+        }
     } else {
         let r: i64 = tc_gunify(c, pty, got, bi, bt);
         if r == 2 {

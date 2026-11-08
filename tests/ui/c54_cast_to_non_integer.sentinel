@@ -1,0 +1,9 @@
+// ADR 0049 / ADR 0058: the target of `as` is an integer width or `f64`, and nothing else. A
+// `bool` is not one, so `x as bool` is refused (write `x != 0` instead). Surfaces
+// NonIntegerCast at the target type.
+
+fn main() -> i64 {
+    let x: i64 = 3;
+    let b = x as bool;
+    0
+}

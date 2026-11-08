@@ -580,6 +580,91 @@ pub fn merge_source() -> [u8] {
     vec_to_array(merged)
 }
 
+// (ADR 0041 A17) The `export "C"` fns of the program `merge_source` merges. Its text writes
+// each as a plain `fn`, as the oracle's `snc merge` does, so the checks `scg`'s code
+// generator makes before it generates code cannot see which fns are exports. For a single
+// file (no `use` and no `part`), whose names the merge keeps, each export's name is appended
+// to `names`, a line each, and the answer is 0. For a program of more than one file (a `use`,
+// or a module split into `part` files) the answer is 1 when any of them declares an export:
+// the merge qualifies its name (`input$f` where the oracle keeps `f`, its C symbol), so the
+// code generator refuses it.
+pub fn merge_exports(names: &mut Vec<u8>) -> i64 {
+    let mut c: MergeCtx = MergeCtx {
+        qpath: vec_new(),
+        qps: vec_new(),
+        qpe: vec_new(),
+        qpfx: vec_new(),
+        qxs: vec_new(),
+        qxe: vec_new(),
+        rnsrc: vec_new(),
+        rss: vec_new(),
+        rse: vec_new(),
+        rnq: vec_new(),
+        rqs: vec_new(),
+        rqe: vec_new(),
+    };
+    enqueue_entry(&mut c, "input.sentinel", "input");
+    let mut merge_mode: bool = false;
+    let mut scan: i64 = 0;
+    while scan < mc_count(&c) {
+        let mpath: [u8] = mc_module_path(&c, scan);
+        let mpath2: [u8] = mc_module_path(&c, scan);
+        let root_src: [u8] = read_file(mpath);
+        let msrc: [u8] = append_module_parts(root_src, mpath2);
+        let mn: i64 = len(msrc);
+        let mut k: Vec<i64> = vec_new();
+        let mut s: Vec<i64> = vec_new();
+        let mut e: Vec<i64> = vec_new();
+        tokenize(&msrc, mn, &mut k, &mut s, &mut e);
+        if scan == 0 {
+            merge_mode = has_use(&k);
+            0
+        } else {
+            0
+        };
+        mc_reset_rename(&mut c);
+        if merge_mode {
+            build_rename(&mut c, scan, &k, &s, &e, &msrc);
+            enqueue_uses(&mut c, &k, &s, &e, &msrc);
+            0
+        } else {
+            0
+        };
+        export_names(names, &k, &s, &e, &msrc);
+        scan = scan + 1;
+    }
+    if merge_mode && len((*names)) > 0 {
+        1
+    } else {
+        0
+    }
+}
+
+// Append the name of each `export "C" fn` item in a module's tokens to `names`, a line each.
+fn export_names(names: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8]) -> i64 {
+    let ntok: i64 = len((*k));
+    let mut depth: i64 = 0;
+    let mut i: i64 = 0;
+    while i < ntok {
+        let t: i64 = (*k)[i];
+        if t == 6 {
+            depth = depth + 1;
+            0
+        } else if t == 7 {
+            depth = depth - 1;
+            0
+        } else if depth == 0 && t == 2 && i + 3 < ntok && (*k)[i + 1] == 63 && (*k)[i + 2] == 3 && is_export_kw(src, (*s)[i], (*e)[i]) {
+            append_slice(names, src, (*s)[i + 3], (*e)[i + 3]);
+            push(names, i64_to_u8(10));
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    0
+}
+
 fn main() -> i64 {
     let arr: [u8] = merge_source();
     print_bytes(arr);

@@ -267,6 +267,28 @@ ui_snapshot!(c5d1_variant_payload_arity_mismatch, "c5d1_variant_payload_arity_mi
 ui_snapshot!(c5d3_vec_type_arg_count_mismatch, "c5d3_vec_type_arg_count_mismatch.sentinel");
 ui_snapshot!(c70_apply_target_not_fn, "c70_apply_target_not_fn.sentinel");
 
+// ---- ADR 0041 A17: the type-level `secret` rules, and the checks around them ----
+// The same hold as A16's: every self-hosted driver must refuse each fixture as the oracle does.
+// With the fixtures that already carried an A17 code (`c21_extern_ref_param`,
+// `c71_secret_handle`, `c71_secret_mutex_handle`, `c5d1_non_exhaustive_match`), each code A17
+// ports has at least one, and some have one for each place the walk makes it; and
+// `c58_secret_float_through_generic`, an A16 code, holds the rule that leaves `secret T`
+// unsubstituted.
+ui_snapshot!(c58_secret_float_param, "c58_secret_float_param.sentinel");
+ui_snapshot!(c58_secret_float_cast, "c58_secret_float_cast.sentinel");
+ui_snapshot!(c54_non_integer_cast, "c54_non_integer_cast.sentinel");
+ui_snapshot!(c54_cast_to_non_integer, "c54_cast_to_non_integer.sentinel");
+ui_snapshot!(c58_secret_float_through_generic, "c58_secret_float_through_generic.sentinel");
+ui_snapshot!(c31_deref_secret_ref, "c31_deref_secret_ref.sentinel");
+ui_snapshot!(c21_deref_of_non_ref, "c21_deref_of_non_ref.sentinel");
+ui_snapshot!(c5d1_match_secret_scrutinee, "c5d1_match_secret_scrutinee.sentinel");
+ui_snapshot!(c5d1_match_unknown_variant, "c5d1_match_unknown_variant.sentinel");
+ui_snapshot!(c5d1_construct_unknown_variant, "c5d1_construct_unknown_variant.sentinel");
+ui_snapshot!(c57_extern_secret_param, "c57_extern_secret_param.sentinel");
+ui_snapshot!(c57_extern_secret_return, "c57_extern_secret_return.sentinel");
+ui_snapshot!(c59_export_secret_param, "c59_export_secret_param.sentinel");
+ui_snapshot!(c59_export_secret_return, "c59_export_secret_return.sentinel");
+
 // ---- C5.2 constant-time verification rejection (the MIR D5 pass) ----
 ui_snapshot!(c52_secret_leak, "c52_secret_leak.sentinel");
 

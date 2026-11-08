@@ -273,7 +273,13 @@ fn subst_type(c: &mut TyCtx, h: i64, args: &Vec<i64>) -> i64 {
             let inn4: i64 = (*c).ta[idx];
             let s4: i64 = subst_type(c, inn4, args);
             mk_nullable(c, s4)
-        } else if k == 3 {
+        } else if k == 3 && !tc_on(c) {
+            // In the checking modes (ADR 0041 A17) a `secret` type passes through unchanged,
+            // as the oracle's `Type::substitute` passes one: `secret T` stays `secret T` in a
+            // generic call's result or a generic instance's field, so a `secret f64` or a
+            // `secret` handle cannot be made by instantiating one, and the checks refuse what
+            // the oracle refuses there. The code generator's walk substitutes inside it, as
+            // before.
             let inn3: i64 = (*c).ta[idx];
             let s3: i64 = subst_type(c, inn3, args);
             mk_secret(c, s3)
@@ -389,9 +395,19 @@ fn unify_one(c: &mut TyCtx, pt: i64, at: i64, bi: &mut Vec<i64>, bt: &mut Vec<i6
             let ain4: i64 = nullable_inner_of(c, at);
             unify_one(c, pin4, ain4, bi, bt)
         } else if k == 3 {
-            let pin3: i64 = (*c).ta[idx];
-            let ain3: i64 = strip_secret(c, at);
-            unify_one(c, pin3, ain3, bi, bt)
+            if tc_on(c) {
+                // (ADR 0041 A17) In the checking modes a `secret` parameter type binds
+                // nothing, as in the oracle's `unify_one`, which has no arm for `secret` and
+                // only compares it with the argument's type. So neither a `secret T` result
+                // seeded from the type expected of the call nor a `secret T` parameter binds
+                // `T` (the counterpart of `subst_type` leaving a `secret` type
+                // unsubstituted). The code generator's walk recurses into it, as before.
+                0
+            } else {
+                let pin3: i64 = (*c).ta[idx];
+                let ain3: i64 = strip_secret(c, at);
+                unify_one(c, pin3, ain3, bi, bt)
+            }
         } else if k == 2 {
             // (register D37) A REFERENCE param (`fn takes<T>(x: &T)`) unifies against a
             // reference ARGUMENT. Without this arm `T` was never bound at all, and the
@@ -727,6 +743,9 @@ fn dump_generic_call(out: &mut Vec<u8>, fid: i64, ca: Args, exp: i64, src: &[u8]
         push(&mut subst, bd);
         ti = ti + 1;
     }
+    // (`types/tcheck.sentinel`) a type parameter nothing bound, for the callees where a
+    // `secret` over one leaves it so.
+    tc_ambiguous(c, fid, &subst);
     // (Bar B / generics-b) codegen: record this monomorphic instance (for later mono
     // emission) + stash the inferred type-args so the following `cg_emit_call` mangles
     // the callee (`id__i64`).

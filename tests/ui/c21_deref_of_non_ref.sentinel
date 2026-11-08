@@ -1,0 +1,10 @@
+// `*` takes a reference (or the guard a `lock` binds); an integer is not one. Surfaces
+// DerefOfNonRef at the operand.
+
+fn read(x: i64) -> i64 {
+    *x
+}
+
+fn main() -> i64 {
+    0
+}

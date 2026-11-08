@@ -1,0 +1,14 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c54_cast_to_non_integer.sentinel\")"
+---
+sentinel::types::non_integer_cast
+
+  × `as` cast requires integer operand and target (i64 / i32 / u8)
+   ╭─[tests/ui/c54_cast_to_non_integer.sentinel:7:18]
+ 6 │     let x: i64 = 3;
+ 7 │     let b = x as bool;
+   ·                  ──┬─
+   ·                    ╰── 
+ 8 │     0
+   ╰────

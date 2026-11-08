@@ -722,6 +722,26 @@ struct TyCtx {
     tc_tres: Vec<i64>,
     tc_tree: Vec<i64>,
     tc_trep: Vec<i64>,
+    // An `extern "C"` declaration's signature is being scanned (`tc_ffi`): each type it
+    // names must be one the FFI fence lets through.
+    tc_ffi: bool,
+    // The enum of the `match` scrutinee whose arms are being walked (`tc_meid`, -1 for none),
+    // which each arm's pattern must name.
+    tc_meid: i64,
+    // The variants the arms of the `match` being walked name (`tc_mcov`, its own from a mark
+    // the `match` keeps) and whether one is `_` (`tc_mwild`), for the exhaustiveness check.
+    tc_mcov: Vec<i64>,
+    tc_mwild: bool,
+    // (the code generator's checking pass) the refusal of the first `secret` written over a type
+    // parameter the walk met (`tc_lowr`, empty for none), answered only when nothing else is
+    // refused (`check_program`).
+    tc_lowr: Vec<u8>,
+    // Each fn's type-parameter names, for the ambiguity check's message: fn `i`'s are the
+    // slices `uftpb[uftpns[j]..uftpne[j]]` for `j` from `uftp0[i]`, `uftp[i]` of them.
+    uftp0: Vec<i64>,
+    uftpns: Vec<i64>,
+    uftpne: Vec<i64>,
+    uftpb: Vec<u8>,
     // (ADR 0041 A14, register D60's refusal) the walk is inside a class `init`'s body: a
     // `return` there is refused, as the oracle's `in_init` refuses it.
     rf_init: bool,
@@ -979,6 +999,13 @@ fn extern_dup(c: &mut TyCtx, src: &[u8], ns: i64, ne: i64) -> bool {
 // 0 → write the `snc types` dump to `result`; mode 1 → write the `snc borrow`
 // moved-sources dump (reused by `selfhost/borrow.sentinel`). `src` is consumed.
 pub fn run(src: [u8], mode: i64, result: &mut Vec<u8>) -> i64 {
+    let xn: Vec<u8> = vec_new();
+    run_x(src, mode, result, &xn)
+}
+
+// `run`, where `xn` names, a line each, fns that are `export "C"` fns though `src` writes
+// them as plain ones (`merge_exports`; the code generator's checking pass).
+pub fn run_x(src: [u8], mode: i64, result: &mut Vec<u8>, xn: &Vec<u8>) -> i64 {
     let n: i64 = len(src);
     let mut kinds: Vec<i64> = vec_new();
     let mut starts: Vec<i64> = vec_new();
@@ -1200,8 +1227,19 @@ pub fn run(src: [u8], mode: i64, result: &mut Vec<u8>) -> i64 {
     let mut cl2: i64 = 0;
     let mut tr2: i64 = 0;
     let mut ef2: i64 = 0;
+    // (`types/tcheck.sentinel`) the fn numbers of the `export "C"` fns, whose signatures the
+    // FFI fence checks after every `extern` declaration's, as the oracle does.
+    let mut xfns: Vec<i64> = vec_new();
     while q < ni {
         if itemkind[q] == 3 {
+            let xp: i64 = itempos[q];
+            let xw: bool = xp >= 2 && kinds[xp - 1] == 63 && kinds[xp - 2] == 2 && src_eq_lit(&src, starts[xp - 2], ends[xp - 2], "export");
+            if xw || tc_named(xn, &src, starts[xp + 1], ends[xp + 1]) {
+                push(&mut xfns, len(ctx.ufret));
+                0
+            } else {
+                0
+            };
             scan_fn_sig(&kinds, &starts, &ends, &src, itempos[q], &mut ctx, &mut garbage);
             0
         } else if itemkind[q] == 100 {
@@ -1209,8 +1247,11 @@ pub fn run(src: [u8], mode: i64, result: &mut Vec<u8>) -> i64 {
             // walk: same `fn name(params) -> ty` token shape, and `scan_fn_sig` stops
             // at the terminator without reading a body. It lands `uftp` = 0 (no `<…>`)
             // and `ufeff` = 0 (the token after the return type is `;`, not `!`), which
-            // is what the FFI boundary means anyway — no generics, no effect row.
+            // is what the FFI boundary means anyway — no generics, no effect row. Each type
+            // it names is checked against the FFI fence as it is resolved (`tc_ffi`).
+            ctx.tc_ffi = true;
             scan_fn_sig(&kinds, &starts, &ends, &src, itempos[q], &mut ctx, &mut garbage);
+            ctx.tc_ffi = false;
             0
         } else if itemkind[q] == 52 {
             scan_struct_fields(&kinds, &starts, &ends, &src, itempos[q], sc2, &mut ctx, &mut garbage);
@@ -1239,6 +1280,12 @@ pub fn run(src: [u8], mode: i64, result: &mut Vec<u8>) -> i64 {
             0
         };
         q = q + 1;
+    }
+    let nxf: i64 = len(xfns);
+    let mut xq: i64 = 0;
+    while xq < nxf {
+        tc_export_sig(&mut ctx, xfns[xq]);
+        xq = xq + 1;
     }
 
     // The param types of class inits, class methods and trait methods are interned here,
@@ -2031,6 +2078,27 @@ pub fn run(src: [u8], mode: i64, result: &mut Vec<u8>) -> i64 {
     // (ADR 0041 A14, register D97) a refusal replaces the output (`types/refuse.sentinel`),
     // and the answer is 1, which each driver returns as its exit code. Copied byte by byte,
     // as above: moving a `Vec` field out of the context and then dropping it double-frees.
+    // (`types/tcheck.sentinel`) the code generator's checking pass: its refusal of a `secret`
+    // written over a type parameter, after a `!`, behind the verifier's output, which
+    // `check_program` answers only when there is nothing else to refuse, as `snc build`
+    // reaches its back end last.
+    if ctx.mode == 5 {
+        let ln: i64 = len(ctx.tc_lowr);
+        if ln > 0 {
+            push(result, '!');
+            let mut li: i64 = 0;
+            while li < ln {
+                push(result, ctx.tc_lowr[li]);
+                li = li + 1;
+            }
+            0
+        } else {
+            0
+        };
+        0
+    } else {
+        0
+    };
     if ctx.rfd {
         clear_u8(result);
         let rn: i64 = len(ctx.rfm);

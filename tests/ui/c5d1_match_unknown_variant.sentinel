@@ -1,0 +1,16 @@
+// Phase D.1 / ADR 0032: a pattern must name a variant of the scrutinee's own enum. Another
+// enum's variant, even one of the same name, is refused. Surfaces UnknownVariant at the variant.
+
+enum F { A, B(i64) }
+enum G { A, B(i64) }
+
+fn pick(e: F) -> i64 {
+    match e {
+        G::A => 0,
+        F::B(v) => v,
+    }
+}
+
+fn main() -> i64 {
+    0
+}

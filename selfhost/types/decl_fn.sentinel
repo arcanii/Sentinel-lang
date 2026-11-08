@@ -352,6 +352,20 @@ fn scan_fn_sig(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], p1: i64, c:
     cur = cur + 1;                 // skip name
     tp_setup(c, k, s, e, src, &mut cur);   // parse `<…>` type-params (advances past `>`)
     let ntp: i64 = len((*c).tpns);
+    // (`types/tcheck.sentinel`) the type parameters' names, for the ambiguity check.
+    push(&mut (*c).uftp0, len((*c).uftpns));
+    let mut tpi: i64 = 0;
+    while tpi < ntp {
+        let tbs: i64 = len((*c).uftpb);
+        let mut tbi: i64 = (*c).tpns[tpi];
+        while tbi < (*c).tpne[tpi] {
+            push(&mut (*c).uftpb, (*c).tpb[tbi]);
+            tbi = tbi + 1;
+        }
+        push(&mut (*c).uftpns, tbs);
+        push(&mut (*c).uftpne, len((*c).uftpb));
+        tpi = tpi + 1;
+    }
     cur = cur + 1;                 // skip `(`
     let ps: i64 = len((*c).ufpp);
     scan_paramtypes(k, s, e, src, &mut cur, c, gb);
@@ -359,6 +373,13 @@ fn scan_fn_sig(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], p1: i64, c:
     cur = cur + 1;                 // skip `->`
     let rte: TypeE = parse_type(k, s, e, src, &mut cur);
     let rty: i64 = type_of_typeexpr(c, rte, gb);
+    // (`types/tcheck.sentinel`) an `extern "C"` declaration's types, each as it is resolved.
+    if (*c).tc_ffi {
+        tc_ffi_refuse(c, tc_ffi_safe(rty));
+        0
+    } else {
+        0
+    };
     push(&mut (*c).ufret, rty);
     push(&mut (*c).uftp, ntp);
     // (Bar B / effects c35b) record whether this fn is effecting (a non-Async effect
@@ -398,6 +419,12 @@ fn scan_paramtypes(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &m
         *cur = *cur + 1;           // skip `:`
         let pte: TypeE = parse_type(k, s, e, src, cur);
         let pty: i64 = type_of_typeexpr(c, pte, gb);
+        if (*c).tc_ffi {
+            tc_ffi_refuse(c, tc_ffi_safe(pty));
+            0
+        } else {
+            0
+        };
         push(&mut (*c).ufpp, pty);
         scan_paramtypes(k, s, e, src, cur, c, gb)
     }

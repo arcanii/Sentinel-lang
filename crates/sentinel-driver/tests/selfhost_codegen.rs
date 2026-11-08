@@ -2475,7 +2475,10 @@ fn assert_refuses_what_the_build_gate_refuses(driver: &Path, work: &Path) -> usi
 /// generator does not refuse (its output defines `main`). Among the accepted, a `handle` typed by its `return` arm and resumes typed
 /// by their `handle` (registers D151 and D7), which the checks refused when they read the
 /// types the code generator's own walk gives; among the refused, a `secret` value flowing into
-/// a public place, a branch on one through `!`, and an arity.
+/// a public place, a branch on one through `!`, and an arity. Since A17, `export "C"` fns the
+/// FFI fence lets through, accepted beside a plain fn whose signature it would not (the exports
+/// are named from the source, since the merged text writes them as plain fns), and a `secret`
+/// export parameter and arithmetic on a generic's unsubstituted `secret T` result, refused.
 const CHECKED_SHAPES: &[&str] = &[
     "effect Q { ask(x: i64) -> i64; }\nfn w() -> i64 ! { Q } { perform Q.ask(3) }\nfn main() -> i64 { if handle w() with { Q.ask(x, k) => k(x), return v => v > 2 } { 42 } else { 0 } }",
     "effect Q { ask(x: i64) -> secret i64; }\nfn w() -> i64 ! { Q } { let v: secret i64 = perform Q.ask(2); declassify(v) }\nfn main() -> i64 { handle w() with { Q.ask(x, k) => { let s: secret i64 = x; if k(s) > 1 { 42 } else { 0 } } } }",
@@ -2514,6 +2517,16 @@ const CHECKED_SHAPES: &[&str] = &[
     "fn f(s: secret bool) -> i64 { let o: ?secret bool = s; if o == null { 1 } else { 0 } }\nfn main() -> i64 { f(true) }",
     "struct B<T> { v: T }\nenum E { A(B<i64>) }\nfn main() -> i64 { let e = E::A(B { v: 3 }); 0 }",
     "struct B<T> { v: T }\nenum E { A(B<i64>) }\nfn main() -> i64 { let s: secret i64 = 5; let e = E::A(B { v: s }); 0 }",
+    // (A17) An `export "C"` fn the FFI fence lets through, beside a fn it would not, both
+    // accepted; the byte-buffer export ABI, accepted; an `extern` over `ptr` and `f64`, accepted;
+    // a `secret` export parameter, refused; arithmetic on the `secret T` a generic returns at
+    // `f64`, refused, since that `secret T` stays unsubstituted.
+    "export \"C\" fn mix(x: i64) -> i64 { if keep(true) { x } else { 0 } }\nfn keep(b: bool) -> bool { b }\nfn main() -> i64 { mix(1) }",
+    "export \"C\" fn keeper(x: i64) -> i64 { if keep(true) { x } else { 0 } }\nfn keep(b: bool) -> bool { b }\nfn main() -> i64 { keeper(1) }",
+    "export \"C\" fn dup(b: &[u8]) -> [u8] { let v: [u8] = \"ab\"; v }\nfn main() -> i64 { 0 }",
+    "extern \"C\" { fn g(x: ptr) -> f64; }\nfn main() -> i64 { 0 }",
+    "fn keep(b: bool) -> bool { b }\nexport \"C\" fn mix(x: secret i64) -> i64 { 0 }\nfn main() -> i64 { 0 }",
+    "fn g<T>(x: T) -> secret T { x }\nfn main() -> i64 { let y = g(1.5); let z = y * y; 0 }",
 ];
 
 #[test]
@@ -2600,6 +2613,151 @@ fn sentinel_codegen_checks_an_arm_parameter_at_its_declared_type() {
         "the code generator did not refuse an arm branching on a `secret` parameter"
     );
     assert!(!out.status.success());
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// ADR 0041 A17: the merge writes an `export "C"` fn as a plain `fn` (as `snc merge` does), so
+/// the code generator reads the exports' names from the source before it checks the program
+/// (`merge::merge_exports`). A program of more than one file (here a `use`) that declares one is
+/// refused, `sentinel::codegen::merged_export_not_supported`, since the merge qualifies the
+/// export's name where the oracle keeps its C symbol; the same program without the `export` is
+/// lowered.
+#[test]
+fn sentinel_codegen_refuses_an_export_the_merge_would_rename() {
+    let tmp = std::env::temp_dir()
+        .join(format!("snc_selfhost_codegen_merged_export_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).expect("create temp dir");
+    let driver = build_sentinel_codegen(&tmp);
+    let work = tmp.join("work");
+    std::fs::create_dir_all(&work).expect("create work dir");
+    std::fs::write(work.join("helper.sentinel"), "module helper;\n\npub fn twice(x: i64) -> i64 { x + x }\n")
+        .expect("stage the helper module");
+    let program = "use helper::twice;\n\nexport \"C\" fn mix(x: i64) -> i64 { twice(x) }\n\nfn main() -> i64 { mix(1) }\n";
+    std::fs::write(work.join("input.sentinel"), program).expect("stage program");
+    let out = Command::new(&driver).current_dir(&work).output().expect("run the code generator");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "sentinel::codegen::merged_export_not_supported\nscg: an `export` fn in a program of more than one file is not supported: the merge does not keep its C name\n",
+        "the code generator did not refuse an export in a merged program"
+    );
+    assert!(!out.status.success());
+    std::fs::write(work.join("input.sentinel"), program.replace("export \"C\" ", ""))
+        .expect("stage program");
+    let out = Command::new(&driver).current_dir(&work).output().expect("run the code generator");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success() && text.contains("define i32 @main("),
+        "the code generator did not lower the merged program without the export: exit {:?}\n{text}",
+        out.status.code()
+    );
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// ADR 0041 A17: the oracle's typer leaves a `secret` over a type parameter unsubstituted at every
+/// instance (`fn g<T>(x: T) -> secret T` returns `secret T`, a `B<i64>`'s `v: secret T` field is
+/// `secret T`) and accepts the program, and `snc llvm` refuses each program here as not yet
+/// ported. The code generator's own walk substitutes inside the `secret`, so it would read such a
+/// program otherwise than its checks do; its checking pass refuses any `secret` written over a
+/// type parameter, once neither a type error nor a leak is to be reported (both come first, as
+/// in `snc build`). A generic fn with such a signature that is never called is refused too,
+/// which `snc llvm` lowers (register D182). A generic with no `secret` over a type parameter is
+/// lowered.
+#[test]
+fn sentinel_codegen_refuses_a_secret_over_a_type_parameter() {
+    let tmp = std::env::temp_dir()
+        .join(format!("snc_selfhost_codegen_secret_tparam_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).expect("create temp dir");
+    let driver = build_sentinel_codegen(&tmp);
+    let work = tmp.join("work");
+    std::fs::create_dir_all(&work).expect("create work dir");
+    let input = work.join("input.sentinel");
+    let refusal = "sentinel::codegen::secret_over_type_param\nscg: a `secret` over a type parameter is not supported by the code generator\n".to_string();
+    let g = "fn g<T>(x: T) -> secret T { x }\n";
+    let b = "struct B<T> { v: secret T, w: i64 }\nfn mk<T>(x: T, w: i64) -> B<T> { B { v: x, w: w } }\n";
+    let cases: Vec<(String, String)> = vec![
+        (format!("{g}fn main() -> i64 {{ let y = g(1); 0 }}\n"), refusal.clone()),
+        (format!("{g}fn main() -> i64 {{ let s: Shared<i64> = shared_new(1); let y = g(s); 0 }}\n"), refusal.clone()),
+        (
+            "fn w<T>(p: &mut T, v: T, r: T) -> secret T { *p = v; r }\nfn main() -> i64 { let mut b = true; let mut a = 1; let c = w(&mut a, 5, 6) == w(&mut b, true, false); 0 }\n".to_string(),
+            refusal.clone(),
+        ),
+        (
+            "fn k<T>(x: T, y: secret T) -> i64 { 0 }\nfn h<T>(x: T) -> secret T { x }\nfn main() -> i64 { k(true, h(2)) }\n".to_string(),
+            refusal.clone(),
+        ),
+        (format!("{b}fn main() -> i64 {{ let b = mk(true, 7); let c = mk(9, 8); let mut x = b.v; x = c.v; 0 }}\n"), refusal.clone()),
+        (
+            format!("{b}fn pick<A, U>(a: A, b: B<U>) -> A {{ declassify(b.v) }}\nfn main() -> i64 {{ let big: [i64] = [1, 2, 3, 4]; let small: [u8] = [1 as u8, 2 as u8, 3 as u8, 4 as u8]; let r: [i64] = pick(big, mk(small, 1)); r[3] }}\n"),
+            refusal.clone(),
+        ),
+        (format!("{b}fn main() -> i64 {{ let b = mk(true, 7); let c = mk(9, 8); c.w + b.w }}\n"), refusal.clone()),
+        (
+            format!("{g}fn main() -> i64 {{ let y = g(1); let z: bool = 5; 0 }}\n"),
+            "sentinel::types::mismatch\nscg: type mismatch: expected bool, found i64\n".to_string(),
+        ),
+        (
+            format!("{g}fn leaky(a: secret bool, b: secret bool) -> secret bool {{ a && b }}\nfn main() -> i64 {{ let y = g(1); 0 }}\n"),
+            "sentinel::mir::secret_leak\nscg: a `secret` value reaches a conditional branch, which would leak it via timing\n".to_string(),
+        ),
+    ];
+    for (prog, want) in &cases {
+        std::fs::write(&input, prog).expect("stage program");
+        let llvm = Command::new(env!("CARGO_BIN_EXE_snc")).arg("llvm").arg(&input).output().expect("run snc llvm");
+        assert!(!llvm.status.success(), "snc llvm lowered {prog:?}");
+        let out = Command::new(&driver).current_dir(&work).output().expect("run the code generator");
+        assert_eq!(&String::from_utf8_lossy(&out.stdout), want, "the code generator's answer to {prog:?}");
+        assert!(!out.status.success());
+    }
+    // The over-refusal D182 records: a generic fn with such a signature that nothing calls.
+    std::fs::write(&input, format!("{g}fn main() -> i64 {{ 0 }}\n")).expect("stage program");
+    let llvm = Command::new(env!("CARGO_BIN_EXE_snc")).arg("llvm").arg(&input).output().expect("run snc llvm");
+    assert!(llvm.status.success(), "snc llvm no longer lowers a generic nothing calls");
+    let out = Command::new(&driver).current_dir(&work).output().expect("run the code generator");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), refusal, "the code generator's answer to an uncalled generic");
+    std::fs::write(&input, "fn id<T>(x: T) -> T { x }\nfn main() -> i64 { id(1) }\n").expect("stage program");
+    let out = Command::new(&driver).current_dir(&work).output().expect("run the code generator");
+    assert!(
+        out.status.success() && String::from_utf8_lossy(&out.stdout).contains("define i32 @main("),
+        "the code generator did not lower a generic with no `secret` over a type parameter"
+    );
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// Register D20, ADR 0041 A17: `scg` does not model `u128`, so the code generator refuses `u128`
+/// as an unknown type, written as a type and as a cast's target, before it generates code;
+/// `snc llvm` refuses both programs here as not yet ported.
+#[test]
+fn sentinel_codegen_refuses_u128() {
+    let tmp = std::env::temp_dir().join(format!("snc_selfhost_codegen_u128_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).expect("create temp dir");
+    let driver = build_sentinel_codegen(&tmp);
+    let work = tmp.join("work");
+    std::fs::create_dir_all(&work).expect("create work dir");
+    for prog in [
+        "fn f(x: u128) -> i64 { 0 }\nfn main() -> i64 { 0 }\n",
+        "fn main() -> i64 { let x: i64 = 3; let w = x as u128; 0 }\n",
+    ] {
+        std::fs::write(work.join("input.sentinel"), prog).expect("stage program");
+        let llvm = Command::new(env!("CARGO_BIN_EXE_snc"))
+            .arg("llvm")
+            .arg(work.join("input.sentinel"))
+            .output()
+            .expect("run snc llvm");
+        assert!(
+            !llvm.status.success() && String::from_utf8_lossy(&llvm.stderr).contains("not yet ported (8a scalars only): U128"),
+            "snc llvm did not refuse {prog:?} as an unported `u128`"
+        );
+        let out = Command::new(&driver).current_dir(&work).output().expect("run the code generator");
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            "sentinel::types::unknown_type\nscg: unknown type `u128`\n",
+            "the code generator did not refuse {prog:?}"
+        );
+        assert!(!out.status.success());
+    }
     let _ = std::fs::remove_dir_all(&tmp);
 }
 

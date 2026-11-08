@@ -749,6 +749,42 @@ fn sentinel_typer_refuses_what_the_oracle_refuses() {
     assert!(checked >= 10, "expected at least ten pinned refusals, got {checked}");
 }
 
+/// ADR 0041 A17: the deref check reads a type handle out of a type's interner entry only for a
+/// `secret` or a nullable; a struct's entry holds the struct's id, which is no handle. So a
+/// deref of a value of the 120th struct is refused with the oracle's message rather than
+/// read past the interner.
+#[test]
+fn sentinel_typer_refuses_a_deref_of_a_late_declared_struct() {
+    let tmp = std::env::temp_dir()
+        .join(format!("snc_selfhost_typer_late_struct_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).expect("create temp dir");
+    let typer = build_sentinel_typer(&tmp);
+    let work = tmp.join("work");
+    std::fs::create_dir_all(&work).expect("create work dir");
+    let mut prog: String = (0..120).map(|i| format!("struct S{i} {{ a: i64 }}\n")).collect();
+    prog.push_str("fn f(p: S119) -> i64 { *p }\nfn main() -> i64 { 0 }\n");
+    let input = work.join("input.sentinel");
+    std::fs::write(&input, &prog).expect("stage program");
+    let want = "dereference of non-reference type `<struct#119>`";
+    let oracle = Command::new(env!("CARGO_BIN_EXE_snc"))
+        .arg("types")
+        .arg(&input)
+        .output()
+        .expect("run snc types");
+    assert!(
+        String::from_utf8_lossy(&oracle.stderr).lines().any(|l| l.strip_prefix("snc: ") == Some(want)),
+        "the oracle no longer refuses the program with {want:?}"
+    );
+    let out = Command::new(&typer).current_dir(&work).output().expect("run the Sentinel typer");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        format!("sentinel::types::deref_of_non_ref\nscg: {want}\n"),
+        "the typer did not refuse the deref"
+    );
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
 /// ADR 0041 A14 (register D97): the self-hosted typer's refusals agree with the oracle's,
 /// program by program, on the shapes each ported rule turns on: every `init`
 /// definite-assignment case of the oracle's own unit tests (`sentinel-types`, ADR 0022 A3),
@@ -1071,6 +1107,83 @@ fn sentinel_typer_refusals_match_the_oracle_on_shapes() {
         "fn f() -> i64 { unwrap_or(null, 1) }\nfn main() -> i64 { f() }",
         "fn main() -> i64 { let y: secret i64 = unwrap_or(null, true); 0 }",
         "fn sum(a: [i64]) -> i64 { 0 }\nfn main() -> i64 { sum([true]) }",
+        // (A17) `secret f64` wherever a type is written, and cast to; a cast of other than an
+        // integer or a float, or to other than one; a `secret` handle; a deref of a `secret`
+        // reference, of a non-reference, and of a reference to a `secret` (accepted).
+        "struct P { a: secret f64 }\nfn main() -> i64 { 0 }",
+        "enum E { A(secret f64) }\nfn main() -> i64 { 0 }",
+        "fn f() -> secret f64 { 1.5 }\nfn main() -> i64 { 0 }",
+        "fn main() -> i64 { let v: Vec<secret f64> = vec_new(); 0 }",
+        "fn main() -> i64 { let x: ?secret f64 = null; 0 }",
+        "class K { let x: secret f64; pub init() { self.x = 1.5; 0 } }\nfn main() -> i64 { 0 }",
+        "trait T1 { fn m(self: &Self, x: secret f64) -> i64; }\nfn main() -> i64 { 0 }",
+        "effect Q { q(x: secret f64) -> i64; }\nfn main() -> i64 { 0 }",
+        "fn main() -> i64 { let s: secret u8 = 3 as u8; let f = s as f64; 0 }",
+        "fn main() -> i64 { let s: secret i64 = 3; let t = s as i32; let f = declassify(s) as f64; 0 }",
+        "fn main() -> i64 { let s: secret bool = true; let f = s as f64; 0 }",
+        "fn main() -> i64 { let x: i64 = 3; let f = x as bool; 0 }",
+        "struct P { a: i64 }\nfn main() -> i64 { let p = P { a: 1 }; let f = p as i64; 0 }",
+        "fn g<T>(x: T) -> i64 { x as i64 }\nfn main() -> i64 { 0 }",
+        "fn main() -> i64 { let x: f64 = 1.5; let n = x as i64; let u = n as u8; let w = u as i32; 0 }",
+        "fn f(m: secret Mutex<i64>) -> i64 { 0 }\nfn main() -> i64 { 0 }",
+        "fn f() -> secret Shared<i64> { shared_new(1) }\nfn main() -> i64 { 0 }",
+        "fn f(r: secret &mut i64) -> i64 { *r = 5; 0 }\nfn main() -> i64 { 0 }",
+        "fn f(x: secret i64) -> i64 { *x }\nfn main() -> i64 { 0 }",
+        "fn f(a: [i64]) -> i64 { *a }\nfn main() -> i64 { 0 }",
+        "fn f(r: & secret i64) -> secret i64 { *r }\nfn main() -> i64 { 0 }",
+        // (A17) a `match` over other than an enum, an unknown variant in a pattern (nested too)
+        // and in a construction, and a `match` over a plain enum (accepted).
+        "enum E { A, B(i64) }\nfn f(e: [i64]) -> i64 { match e { E::A => 0, E::B(v) => v } }\nfn main() -> i64 { 0 }",
+        "fn f(e: i64) -> i64 { match e { _ => 0 } }\nfn main() -> i64 { 0 }",
+        "fn f(e: i64) -> i64 { match e { E::A => 0 } }\nfn main() -> i64 { 0 }",
+        "enum F { A }\nfn f(e: F) -> i64 { match e { F::B => 0 } }\nfn main() -> i64 { 0 }",
+        "enum F { A, B(i64) }\nfn f(e: F) -> i64 { match e { F::A => match e { F::Q => 1, _ => 2 }, _ => 0 } }\nfn main() -> i64 { 0 }",
+        "enum F { A, B(i64) }\nfn main() -> i64 { let x: F = F::Z; 0 }",
+        "enum F { A, B(i64) }\nfn f(e: F) -> i64 { match e { F::A => 0, F::B(v) => v } }\nfn main() -> i64 { f(F::B(4)) }",
+        "enum F { A, B }\nenum G { X, Y }\nfn f(e: F, g: G) -> i64 { match e { F::A => match g { G::X => 1, G::Y => 2 }, F::B => 0 } }\nfn main() -> i64 { 0 }",
+        // (A17) a `match` that names every variant or has a `_` arm, each `match` counted on its
+        // own when one is nested in another's arm.
+        "enum E { A, B(i64), C }\nfn f(e: E) -> i64 { match e { E::B(v) => v } }\nfn main() -> i64 { 0 }",
+        "enum E { A, B(i64) }\nfn f(e: E) -> i64 { match e { E::A => 0, _ => 1 } }\nfn main() -> i64 { 0 }",
+        "enum E { A, B(i64) }\nenum G { X, Y }\nfn f(e: E, g: G) -> i64 { match e { E::A => match g { G::X => 1, G::Y => 2 } } }\nfn main() -> i64 { 0 }",
+        "enum E { A, B(i64) }\nenum G { X, Y }\nfn f(e: E, g: G) -> i64 { match e { E::A => match g { _ => 1 } } }\nfn main() -> i64 { 0 }",
+        "enum E { A, B(i64) }\nenum G { X, Y }\nfn f(e: E, g: G) -> i64 { match e { _ => match g { G::X => 1 } } }\nfn main() -> i64 { 0 }",
+        // (A17) the FFI fence at an `extern` declaration and an `export` fn; what it lets through.
+        "struct P { a: i64 }\nextern \"C\" { fn g(x: P) -> i64; }\nfn main() -> i64 { 0 }",
+        "extern \"C\" { fn g(x: i32) -> i64; }\nfn main() -> i64 { 0 }",
+        "extern \"C\" { fn g(x: [u8]) -> i64; }\nfn main() -> i64 { 0 }",
+        "extern \"C\" { fn g(x: ptr) -> f64; }\nfn main() -> i64 { 0 }",
+        "export \"C\" fn f(x: i32) -> i64 { 0 }\nfn main() -> i64 { 0 }",
+        "export \"C\" fn f(x: &[secret u8]) -> i64 { 0 }\nfn main() -> i64 { 0 }",
+        "export \"C\" fn f(x: &mut [u8]) -> [u8] { let v: [u8] = \"ab\"; v }\nfn main() -> i64 { 0 }",
+        "export \"C\" fn f(x: i64) -> i64 { if keep(true) { x } else { 0 } }\nfn keep(b: bool) -> bool { b }\nfn main() -> i64 { 0 }",
+        // (A17) `secret T` passes through substitution unchanged, as the oracle's does: no
+        // `secret f64` or `secret` handle is made by instantiating a generic.
+        "struct B<T> { v: secret T }\nfn main() -> i64 { let b: B<f64> = B { v: 1.5 }; 0 }",
+        "fn g<T>(x: T) -> secret T { x }\nfn main() -> i64 { let y = g(1.5); let z = y * y; 0 }",
+        "fn g<T>(x: T) -> secret T { x }\nfn main() -> i64 { let a: i64 = 4; let r = g(&a); let v = *r; 0 }",
+        "enum E { A, B(i64) }\nfn g<T>(x: T) -> secret T { x }\nfn main() -> i64 { let e = g(E::B(3)); match e { E::A => 0, E::B(v) => v } }",
+        "fn g<T>(x: T) -> secret T { x }\nfn main() -> i64 { let s: Shared<i64> = shared_new(1); let y = g(s); shared_get(y) }",
+        // (A17) The same rule refuses `vec_to_array` over an instance whose field is `secret T`,
+        // as the oracle does (register D146).
+        "struct Box<T> { s: secret T }\nfn main() -> i64 { let mut v: Vec<Box<i32>> = vec_new(); let a: [Box<i32>] = vec_to_array(v); 0 }",
+        // (A17) Nor does a `secret T` bind `T` in unification (the oracle's `unify_one` has no arm
+        // for it), so two calls of such a generic in one comparison, array or assignment are
+        // accepted, as `snc types` accepts them (a join of two, accepted before A17 too); an
+        // argument of that very `secret T` fits a `secret T` parameter, and a type parameter
+        // nothing else binds is then ambiguous, as in the oracle. (The code generator refuses every
+        // `secret` written over a type parameter, register D182.)
+        "fn g<T>(x: T) -> secret T { x }\nfn main() -> i64 { let b = g(1) != g(2); 0 }",
+        "fn g<T>(x: T) -> secret T { x }\nfn main() -> i64 { let a = [g(1), g(2)]; 0 }",
+        "fn g<T>(x: T) -> secret T { x }\nfn main() -> i64 { let mut y = g(1); y = g(2); 0 }",
+        "fn g<T>(x: T) -> secret T { x }\nfn main() -> i64 { let b = g(1) == g(1); if declassify(b) { 1 } else { 0 } }",
+        "fn g<T>(x: T) -> secret T { x }\nfn f(c: bool) -> i64 { let y = if c { g(1) } else { g(2) }; 0 }\nfn main() -> i64 { 0 }",
+        "fn h<T>(x: T) -> secret T { x }\nfn k<T>(x: T, y: secret T) -> i64 { 0 }\nfn main() -> i64 { k(1, h(2)) }",
+        "fn k<T>(y: secret T) -> i64 { 0 }\nfn h<T>(x: T) -> secret T { x }\nfn main() -> i64 { k(h(2)) }",
+        "fn r<T>(x: &secret T) -> i64 { 0 }\nfn h<T>(x: T) -> secret T { x }\nfn main() -> i64 { let s = h(3); r(&s) }",
+        "fn r<T>(x: [secret T]) -> i64 { 0 }\nfn h<T>(x: T) -> secret T { x }\nfn main() -> i64 { let s = h(3); r([s]) }",
+        "fn r<T>(x: &secret T, y: T) -> i64 { 0 }\nfn h<T>(x: T) -> secret T { x }\nfn main() -> i64 { let s = h(3); r(&s, 1) }",
+        "struct B<T> { v: secret T, w: i64 }\nfn mk<T>(x: T, w: i64) -> B<T> { B { v: x, w: w } }\nfn main() -> i64 { let b = mk(true, 7); let c = mk(9, 8); let mut x = b.v; x = c.v; 0 }",
     ];
     let mut sources: Vec<String> = DA_BODIES.iter().map(|b| DA_CLASS.replace('@', b)).collect();
     sources.extend(OTHER.iter().map(|s| s.to_string()));

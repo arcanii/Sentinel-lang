@@ -985,6 +985,8 @@ fn dump_texpr_arm(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyC
             let qrt: i64 = if qeid >= 0 {
                 let _qix: [u8] = vec_to_array(cg_qi);
                 let vidx: i64 = variant_index(c, qeid, &qm);
+                // (`types/tcheck.sentinel`) a variant the enum does not declare.
+                tc_variant(c, qeid, qeid, vidx, &qm);
                 let ety: i64 = mk_enum(c, qeid);
                 append_str(out, "(enum-construct #");
                 append_int(out, qeid);
@@ -1143,6 +1145,8 @@ fn dump_texpr_arm(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyC
             let svc: bool = (*c).consuming;
             (*c).consuming = false;
             let scrty: i64 = dump_texpr(out, mscr, 0 - 1, src, c, gb);
+            // (`types/tcheck.sentinel`) a scrutinee that is not an enum.
+            tc_match_scrutinee(c, scrty);
             // (ADR 0032 A5, register D92) a scrutinee that is not a place is a temporary nothing
             // else owns (ADR 0034 C1): an arm for a payload-carrying variant frees its box once
             // the bindings have copied it out, and a `_` arm frees whatever reached it.
@@ -1229,7 +1233,19 @@ fn dump_texpr_arm(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyC
             (*c).smlive = 0 - 1;
             let mt_svta: bool = (*c).tc_arms;
             (*c).tc_arms = mt_tcs;
+            let mt_meid: i64 = (*c).tc_meid;
+            let mt_mark: i64 = len((*c).tc_mcov);
+            let mt_wild: bool = (*c).tc_mwild;
+            (*c).tc_meid = meid;
+            (*c).tc_mwild = false;
             let mfirst: i64 = dump_tarms(out, marms, exp, mt_own, src, c, gb);
+            // (`types/tcheck.sentinel`) every variant covered, or a `_`.
+            tc_exhaustive(c, meid, mt_mark);
+            while len((*c).tc_mcov) > mt_mark {
+                let _mc: i64 = pop(&mut (*c).tc_mcov);
+            }
+            (*c).tc_mwild = mt_wild;
+            (*c).tc_meid = mt_meid;
             (*c).tc_arms = mt_svta;
             let alldiv: bool = (*c).sdiva;
             let mlive: i64 = (*c).smlive;
@@ -1654,6 +1670,8 @@ fn dump_texpr_arm(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyC
                 0
             };
             let base: i64 = scalar_code(&cnm);
+            // (`types/tcheck.sentinel`) the oracle's checks of a cast's operand and target.
+            tc_cast(c, it, &cnm, base);
             let rt: i64 = if is_secret(c, it) {
                 mk_secret(c, base)
             } else {

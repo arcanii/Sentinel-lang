@@ -22,26 +22,40 @@
 use types::run;
 use types::check_program;
 use merge::merge_source;
+use merge::merge_exports;
 
 fn main() -> i64 {
     // Before it generates code, the ported type checks and then the constant-time verifier
     // over every body `snc build` verifies (`types/tcheck.sentinel`). A refusal there is the
-    // answer, and no code is generated.
-    let chk: [u8] = merge_source();
-    let mut cres: Vec<u8> = vec_new();
-    let crc: i64 = check_program(chk, &mut cres);
-    if crc != 0 {
-        let carr: [u8] = vec_to_array(cres);
-        print_bytes(carr);
-        crc
+    // answer, and no code is generated. The merged text writes an `export "C"` fn as a plain
+    // one, so the exports' names are read from the source first; a program of more than one
+    // file (a `use` or a `part`) that declares one is refused, since the merge qualifies the
+    // export's name there and so does not keep its C name.
+    let mut xn: Vec<u8> = vec_new();
+    let xm: i64 = merge_exports(&mut xn);
+    if xm != 0 {
+        let _x: [u8] = vec_to_array(xn);
+        let xmsg: [u8] = "sentinel::codegen::merged_export_not_supported\nscg: an `export` fn in a program of more than one file is not supported: the merge does not keep its C name\n";
+        print_bytes(xmsg);
+        1
     } else {
-        let _c: [u8] = vec_to_array(cres);
-        let inp: [u8] = merge_source();
-        let mut result: Vec<u8> = vec_new();
-        // (ADR 0041 A14, register D97) 1 when the typer refused the program.
-        let rc: i64 = run(inp, 4, &mut result);
-        let arr: [u8] = vec_to_array(result);
-        print_bytes(arr);
-        rc
+        let chk: [u8] = merge_source();
+        let mut cres: Vec<u8> = vec_new();
+        let crc: i64 = check_program(chk, &mut cres, &xn);
+        let _n: [u8] = vec_to_array(xn);
+        if crc != 0 {
+            let carr: [u8] = vec_to_array(cres);
+            print_bytes(carr);
+            crc
+        } else {
+            let _c: [u8] = vec_to_array(cres);
+            let inp: [u8] = merge_source();
+            let mut result: Vec<u8> = vec_new();
+            // (ADR 0041 A14, register D97) 1 when the typer refused the program.
+            let rc: i64 = run(inp, 4, &mut result);
+            let arr: [u8] = vec_to_array(result);
+            print_bytes(arr);
+            rc
+        }
     }
 }

@@ -1,0 +1,9 @@
+// ADR 0049 / ADR 0058: `as` converts between the integer widths and to and from `f64`, and
+// nothing else. A `bool` is not an integer, so `b as i64` is refused (write the `if` instead).
+// Surfaces NonIntegerCast at the operand.
+
+fn main() -> i64 {
+    let b: bool = true;
+    let n = b as i64;
+    n
+}

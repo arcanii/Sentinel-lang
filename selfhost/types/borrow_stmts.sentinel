@@ -95,6 +95,7 @@ fn dump_tpat(out: &mut Vec<u8>, p: Pattern, c: &mut TyCtx, gb: &mut Vec<u8>) -> 
     match p {
         Pattern::PatWild => {
             append_str(out, "(pat _)");
+            (*c).tc_mwild = true;
             // (8e-2) cg: a wildcard arm has no tag check — signal the epilogue (-1).
             // (As the LAST arm it is the final else, which `c5d1_match_frees_a_temporary`
             // pins; one written before a variant arm emits invalid IR, register D126.)
@@ -117,8 +118,22 @@ fn dump_tpat(out: &mut Vec<u8>, p: Pattern, c: &mut TyCtx, gb: &mut Vec<u8>) -> 
             let eid: i64 = enum_lookup(c, &en);
             sink_name(gb, en);
             let vidx: i64 = variant_index(c, eid, &vn);
+            // (`types/tcheck.sentinel`) the oracle's check that the pattern names a variant of
+            // the scrutinee's enum. A pattern that names none reads no payload type.
+            let pmeid: i64 = (*c).tc_meid;
+            tc_variant(c, pmeid, eid, vidx, &vn);
+            if eid == pmeid && vidx >= 0 {
+                push(&mut (*c).tc_mcov, vidx);
+                0
+            } else {
+                0
+            };
             let j: i64 = variant_flat(c, eid, vidx);
-            let pbase: i64 = (*c).varps[j];
+            let pbase: i64 = if j >= 0 {
+                (*c).varps[j]
+            } else {
+                len((*c).varpay)
+            };
             // (8e-2) cg: the arm's tag check — `icmp eq tag, vidx`; branch to the arm
             // block (open it) or the next check. `cg_m_pj` carries `j` to the bind.
             if cg_on(c) {
@@ -153,7 +168,11 @@ fn dump_tpat(out: &mut Vec<u8>, p: Pattern, c: &mut TyCtx, gb: &mut Vec<u8>) -> 
             // (`types/tcheck.sentinel`) the oracle's arity check of the pattern's bindings.
             let mut pbn: i64 = 0;
             let bs2: Binds = tc_binds_count(bs, &mut pbn);
-            let pnpay: i64 = (*c).varpe[j] - (*c).varps[j];
+            let pnpay: i64 = if j >= 0 {
+                (*c).varpe[j] - (*c).varps[j]
+            } else {
+                pbn
+            };
             if pbn != pnpay {
                 tc_payload_arity(c, eid, j, pnpay, pbn)
             } else {

@@ -1,0 +1,14 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c5d1_match_unknown_variant.sentinel\")"
+---
+sentinel::types::unknown_variant
+
+  × enum `F` has no variant `A`
+    ╭─[tests/ui/c5d1_match_unknown_variant.sentinel:9:12]
+  8 │     match e {
+  9 │         G::A => 0,
+    ·            ┬
+    ·            ╰── 
+ 10 │         F::B(v) => v,
+    ╰────

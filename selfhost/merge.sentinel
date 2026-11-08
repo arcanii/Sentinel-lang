@@ -45,6 +45,7 @@ use parser::skip_effect_row;
 use parser::append_int;
 use parser::append_str;
 use parser::append_slice;
+use parser::is_export_kw;
 
 // The merge context: the BFS discovery queue + the current module's rename map. All are
 // flat parallel pools (the resolve/types idiom; no `Vec<Program>` / no HashMap).

@@ -13,8 +13,10 @@ module types;
 // declare. A16 adds the checks `types/tcheck.sentinel` lists: that a value fits the place it
 // flows to, as the oracle coerces it and compares, the `if` and `while` condition check (a
 // `secret bool` condition is `secret_branch`), and the arity, type-argument, impl-signature,
-// index, field-access, callee and unknown-type checks there. Every other type error is still
-// out of scope.
+// index, field-access, callee and unknown-type checks there. A17 adds the type-level `secret`
+// rules listed there (`secret f64`, a `secret` handle, a deref of a `secret` reference, a
+// `match` over other than an enum, the FFI fence) and the cast, deref, variant and
+// exhaustiveness checks beside them. Every other type error is still out of scope.
 //
 // The walk records the first refusal it meets and runs on; `run` then answers the refusal
 // in place of its output, and 1, which each driver returns as its exit code. The text is
@@ -23,10 +25,13 @@ module types;
 //
 // The limits, each registered. A program with more than one refused construct can be
 // refused for a different one of them (D145): the walk types a class's methods in source
-// order where the oracle types the `init` first, and it checks a struct literal's field set
+// order where the oracle types the `init` first, it checks a struct literal's field set
 // before typing its values, in declaration order, where the oracle checks each name and
-// types its value before the next. Since A16 the code generator makes these refusals in a
-// checking pass before it generates code (`check_program`), which types the program as the
+// types its value before the next, and (since A17) it resolves a class's fields and a class's
+// or trait's method return types before it checks an `extern` declaration or an `export "C"`
+// fn against the FFI fence, where the oracle checks the fence first. Since A16 the code
+// generator makes these refusals in a checking pass before it generates code
+// (`check_program`), which types the program as the
 // verifier driver does: a generic fn's body as written, and a handler arm's parameters at
 // their declared types, where its own walk types a generic fn's body only at its instances
 // (D142) and binds an arm's parameters as `i64` (A15). So a construct in a generic fn that is
@@ -34,15 +39,26 @@ module types;
 // subject is an arm parameter (D152) are refused there as by the other four drivers, and a
 // method called on the value of an unknown field, which aborted the code generator's walk on an
 // out-of-range index (D143, which predates A14), is refused before that walk runs. And
-// three verdicts differ from the oracle's: the code generator refuses `vec_to_array` over a
+// two verdicts differ from the oracle's: the code generator refuses `vec_to_array` over a
 // `Vec<T>` reached through a generic call's result or a generic instance's field even when `T`
 // is plain, because its walk's `subst_type` does not substitute inside a `Vec` (D147; the other
-// modes substitute there by the oracle's rule); an empty struct literal
+// modes substitute there by the oracle's rule); and an empty struct literal
 // nested in another, `P { u: U { }, n: 2 }`, is misparsed, and the misparse is refused with
-// "no field `{`" (D144); and `vec_to_array` over a generic instance whose field is `secret T`
-// is accepted where the oracle refuses (D146).
+// "no field `{`" (D144). Since A17 three more: a cast to `u128` is refused as an unknown type,
+// as `u128` written as a type is (D20), where `snc types` accepts it; and the code generator
+// refuses an `export "C"` fn in a program of more than one file (D181) and a `secret` written
+// over a type parameter where the oracle lowers it, in a generic nothing instantiates or as a
+// phantom type argument (D182), both below.
+// `vec_to_array` over a generic instance whose field is `secret T`,
+// which was accepted where the oracle refuses (D146), is refused since A17: the checking modes
+// leave a `secret` type unsubstituted, as the oracle does.
 //
-// The code generator makes one refusal of its own,
+// The code generator makes three refusals of its own. Since A17, `sentinel::codegen::
+// merged_export_not_supported`, before anything is checked, for an `export "C"` fn in a program
+// of more than one file, whose name the merge qualifies where the oracle keeps its C symbol
+// (D181); and `sentinel::codegen::secret_over_type_param`, once the checks and the verifier
+// refuse nothing, for a `secret` written over a type parameter, which its own walk types
+// otherwise than the checks do (D182). And
 // `sentinel::codegen::effecting_fn_body_not_direct`, for two causes. Since ADR 0071 A4, a
 // parameter a continuation would capture that is not `i64` or `secret i64` (D159, and D67's
 // note). Its message is not the oracle's: the oracle adds the parameter's type in its embedded

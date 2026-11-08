@@ -1,5 +1,5 @@
-//! Shared by the self-hosted driver tests: the refusals `scg` ports (ADR 0041 A14 and
-//! A16, register D97).
+//! Shared by the self-hosted driver tests: the refusals `scg` ports (ADR 0041 A14, A16 and
+//! A17, register D97).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -7,7 +7,10 @@ use std::process::Command;
 /// The oracle's refusals the self-hosted typer ports, by diagnostic code: A14's, and since A16
 /// its checks that a value fits the place it flows to, the `if` / `while` condition check,
 /// and its arity, type-argument, impl-signature, index, field-access, callee, undefined-fn
-/// and unknown-type checks (`selfhost/types/tcheck.sentinel`). Every
+/// and unknown-type checks; since A17 its type-level `secret` rules (`secret f64`, a `secret`
+/// handle, a deref of a `secret` reference, a `match` over other than an enum, the FFI fence)
+/// and the cast, deref, variant and exhaustiveness checks beside them
+/// (`selfhost/types/tcheck.sentinel`). Every
 /// other error is still out of scope (ADR 0041 D7), so a driver typing such a program need not
 /// refuse it.
 const PORTED_REFUSALS: &[&str] = &[
@@ -42,6 +45,15 @@ const PORTED_REFUSALS: &[&str] = &[
     "sentinel::types::callee_not_callable",
     "sentinel::types::apply_target_not_fn",
     "sentinel::types::unknown_type",
+    "sentinel::types::secret_float",
+    "sentinel::types::non_integer_cast",
+    "sentinel::types::secret_handle",
+    "sentinel::types::secret_in_ref_deref",
+    "sentinel::types::deref_of_non_ref",
+    "sentinel::types::match_scrutinee_not_enum",
+    "sentinel::types::unknown_variant",
+    "sentinel::types::non_exhaustive_match",
+    "sentinel::types::extern_ffi_type",
     "sentinel::resolve::arity_mismatch",
     "sentinel::resolve::undefined_function",
 ];

@@ -1,0 +1,9 @@
+// Phase D.1 / ADR 0032: constructing a variant the enum does not declare. Surfaces
+// UnknownVariant at the variant.
+
+enum F { A, B(i64) }
+
+fn main() -> i64 {
+    let x: F = F::C(1);
+    0
+}

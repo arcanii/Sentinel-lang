@@ -1,0 +1,14 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c21_deref_of_non_ref.sentinel\")"
+---
+sentinel::types::deref_of_non_ref
+
+  × dereference of non-reference type `i64`
+   ╭─[tests/ui/c21_deref_of_non_ref.sentinel:5:6]
+ 4 │ fn read(x: i64) -> i64 {
+ 5 │     *x
+   ·      ┬
+   ·      ╰── 
+ 6 │ }
+   ╰────
