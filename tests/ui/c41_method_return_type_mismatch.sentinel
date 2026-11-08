@@ -1,0 +1,16 @@
+// Refusal parity (ADR 0041 A16): the oracle refuses a method whose body's type is not its declared return type with `sentinel::types::return_type_mismatch`, and every
+// self-hosted driver makes the same refusal with the same message.
+class K {
+    let n: i64;
+    pub init() {
+        self.n = 1;
+        0
+    }
+    pub fn get(self: &Self) -> bool {
+        self.n
+    }
+}
+
+fn main() -> i64 {
+    0
+}

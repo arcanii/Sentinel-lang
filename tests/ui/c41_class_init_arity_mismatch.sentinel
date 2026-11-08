@@ -1,0 +1,14 @@
+// Refusal parity (ADR 0041 A16): the oracle refuses a class `init` called with too few arguments with `sentinel::types::class_init_arity_mismatch`, and every
+// self-hosted driver makes the same refusal with the same message.
+class K {
+    let n: i64;
+    pub init(a: i64) {
+        self.n = a;
+        0
+    }
+}
+
+fn main() -> i64 {
+    let k = K::init();
+    0
+}

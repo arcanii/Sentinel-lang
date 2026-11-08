@@ -13,7 +13,12 @@ fn dump_tbinds(out: &mut Vec<u8>, b: Binds, pbase: i64, payidx: i64, c: &mut TyC
         Binds::BindCell(nm, rest) => {
             let bvid: i64 = (*c).nextvid;
             (*c).nextvid = (*c).nextvid + 1;
-            let pty: i64 = (*c).varpay[pbase + payidx];
+            // A binding past the payload, refused above, reads no payload type.
+            let pty: i64 = if pbase + payidx < len((*c).varpay) {
+                (*c).varpay[pbase + payidx]
+            } else {
+                0
+            };
             let nst: i64 = len((*c).nb);
             bind_name(c, nm, bvid, pty);
             // (register D171) a `_` slot keeps its VarId, its slot and its name in the dump,
@@ -145,7 +150,16 @@ fn dump_tpat(out: &mut Vec<u8>, p: Pattern, c: &mut TyCtx, gb: &mut Vec<u8>) -> 
             append_int(out, vidx);
             push(out, ' ');
             append_str(out, vn);
-            let pnb: i64 = dump_tbinds(out, bs, pbase, 0, c, gb);
+            // (`types/tcheck.sentinel`) the oracle's arity check of the pattern's bindings.
+            let mut pbn: i64 = 0;
+            let bs2: Binds = tc_binds_count(bs, &mut pbn);
+            let pnpay: i64 = (*c).varpe[j] - (*c).varps[j];
+            if pbn != pnpay {
+                tc_payload_arity(c, eid, j, pnpay, pbn)
+            } else {
+                0
+            };
+            let pnb: i64 = dump_tbinds(out, bs2, pbase, 0, c, gb);
             // (ADR 0032 A5) a temporary scrutinee's box, freed once the bindings have copied
             // the payload out.
             if cg_on(c) {
@@ -196,6 +210,7 @@ fn dump_tarms(out: &mut Vec<u8>, a: Arms, exp: i64, own: bool, src: &[u8], c: &m
             // (ADR 0043 A3).
             let arm_svc: bool = (*c).consuming;
             (*c).consuming = true;
+            (*c).tc_st = (*c).tc_arms;
             let bt: i64 = dump_texpr(out, abody, exp, src, c, gb);
             (*c).consuming = arm_svc;
             // (registers D59 / D66) as the oracle does, a divergent arm stores, in its dead block,
@@ -223,7 +238,13 @@ fn dump_tarms(out: &mut Vec<u8>, a: Arms, exp: i64, own: bool, src: &[u8], c: &m
                     (*c).smlive = bt;
                     0
                 } else {
-                    0
+                    // The oracle's join: each arm that does not diverge has the first one's type.
+                    let ml: i64 = (*c).smlive;
+                    if bt != ml {
+                        tc_arm_mismatch(c, ml, bt)
+                    } else {
+                        0
+                    }
                 };
                 0
             };
@@ -390,6 +411,8 @@ fn dump_tharms(out: &mut Vec<u8>, a: HArms, src: &[u8], c: &mut TyCtx, gb: &mut 
             push(out, ' ');
             append_int(out, hoidx);
             push(out, ' ');
+            let hnm1: Vec<u8> = tc_arm_name(&hef, &hop);
+            let hnm2: Vec<u8> = tc_arm_name(&hef, &hop);
             append_str(out, hef);
             push(out, ' ');
             append_str(out, hop);
@@ -398,6 +421,25 @@ fn dump_tharms(out: &mut Vec<u8>, a: HArms, src: &[u8], c: &mut TyCtx, gb: &mut 
             let cg_pv0: i64 = (*c).nextvid;
             dump_thparams(out, hparams, c, true, heid, hoidx, 0);
             let cg_pvn: i64 = (*c).nextvid;
+            // The oracle's check of the arm's binders (the operation's parameters and the
+            // continuation), and what its continuation returns and is resumed with.
+            let hrow: i64 = tc_op_row(c, heid, hoidx);
+            let hexp: i64 = if hrow >= 0 {
+                (*c).efpn[hrow] + 1
+            } else {
+                cg_pvn - cg_pv0
+            };
+            if cg_pvn - cg_pv0 != hexp {
+                tc_harm_arity(c, hnm1, hexp, cg_pvn - cg_pv0)
+            } else {
+                let _hn1: [u8] = vec_to_array(hnm1);
+                0
+            };
+            push(&mut (*c).tc_kv, cg_pvn - 1);
+            let hkt: i64 = (*c).tc_hk;
+            push(&mut (*c).tc_kt, hkt);
+            let hka: i64 = op_ret(c, heid, hoidx);
+            push(&mut (*c).tc_ka, hka);
             append_str(out, ") ");
             // (cg) bind the arm's op-param (kont.arg @8) + continuation (a slot holding ck).
             if cg_on(c) {
@@ -435,7 +477,16 @@ fn dump_tharms(out: &mut Vec<u8>, a: HArms, src: &[u8], c: &mut TyCtx, gb: &mut 
             } else {
                 0
             };
-            dump_texpr(out, hbody, 0 - 1, src, c, gb);
+            let abt: i64 = dump_texpr(out, hbody, 0 - 1, src, c, gb);
+            // The oracle's check that the arm's value has the `handle`'s type; it makes no
+            // exception for an arm that diverges.
+            let hkt2: i64 = (*c).tc_hk;
+            if abt != hkt2 {
+                tc_harm_mismatch(c, hnm2, hkt2, abt)
+            } else {
+                let _hn2: [u8] = vec_to_array(hnm2);
+                0
+            };
             (*c).cg_h_floor = sv_hfloor;
             (*c).cg_h_btok = sv_hbtok;
             (*c).cg_h_kont = sv_hkont;
@@ -479,7 +530,7 @@ fn dump_tharms(out: &mut Vec<u8>, a: HArms, src: &[u8], c: &mut TyCtx, gb: &mut 
 // (4g) the optional `return v => body` arm → `(return #vid <body>)`: `v` binds a
 // VarId typed as the handle BODY's type `bty` (it names the body's value), scoped to
 // the arm.
-fn dump_tret(out: &mut Vec<u8>, r: Ret, bty: i64, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
+fn dump_tret(out: &mut Vec<u8>, r: Ret, bty: i64, exp: i64, strict: bool, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
     match r {
         Ret::NoRet => 0,
         Ret::YesRet(rnm, rbody, rnt, rt0) => {
@@ -495,7 +546,7 @@ fn dump_tret(out: &mut Vec<u8>, r: Ret, bty: i64, src: &[u8], c: &mut TyCtx, gb:
                 cg_walk_ex(c, rbody, false, &mut scratch, gb);
                 0
             } else {
-                // modes 0-3: the type S-expr `(return #vid <body>)` — `v` binds a VarId
+                // every mode but 4: the type S-expr `(return #vid <body>)` — `v` binds a VarId
                 // typed as the handle body's type `bty`, scoped to the arm.
                 let mark: i64 = len((*c).scs);
                 let rvid: i64 = (*c).nextvid;
@@ -504,7 +555,9 @@ fn dump_tret(out: &mut Vec<u8>, r: Ret, bty: i64, src: &[u8], c: &mut TyCtx, gb:
                 append_str(out, " (return #");
                 append_int(out, rvid);
                 push(out, ' ');
-                dump_texpr(out, rbody, 0 - 1, src, c, gb);
+                // The oracle hands the `handle`'s expectation, and its mark, on to the arm.
+                (*c).tc_st = strict;
+                dump_texpr(out, rbody, exp, src, c, gb);
                 truncate_scope(c, mark);
                 push(out, ')');
                 0
@@ -546,7 +599,12 @@ fn dump_tstmt(out: &mut Vec<u8>, s: Stmt, src: &[u8], c: &mut TyCtx, gb: &mut Ve
             // the let's VarId. The let's type is the annotation if present, else the
             // value's inferred type. Format: `(let #vid [mut] <type> <value>)`.
             let mut vbuf: Vec<u8> = vec_new();
+            // The oracle resolves the annotation with no type parameter in scope
+            // (`resolve_type_expr`), so in a generic fn a `T` there is an unknown type.
+            let lnotp: bool = (*c).tc_notp;
+            (*c).tc_notp = tc_on(c);
             let letexp: i64 = tyopt_exp(c, lty, gb);
+            (*c).tc_notp = lnotp;
             // (6/N) a `let`'s RHS is CONSUMING (a bare-Var RHS moves the binding).
             let lsvc: bool = (*c).consuming;
             (*c).consuming = true;
@@ -554,7 +612,11 @@ fn dump_tstmt(out: &mut Vec<u8>, s: Stmt, src: &[u8], c: &mut TyCtx, gb: &mut Ve
             // so a `Shared` / `Mutex` read out of a place (`let y = x`, `let y = h.s`,
             // `let y = { x }`) is cloned as it is read; an rvalue RHS transfers its unit.
             (*c).cg_own = true;
+            // The oracle coerces the value to the annotation, then compares the two (a value
+            // that diverges as well).
+            (*c).tc_st = letexp >= 0;
             let valty: i64 = dump_texpr(&mut vbuf, lval, letexp, src, c, gb);
+            tc_fit(c, letexp, valty);
             stmt_div(c);
             (*c).consuming = lsvc;
             let lvid: i64 = (*c).nextvid;
@@ -663,7 +725,10 @@ fn dump_tstmt(out: &mut Vec<u8>, s: Stmt, src: &[u8], c: &mut TyCtx, gb: &mut Ve
             // (ADR 0071 D2 amendment A1) the place is a new owner of the value — a field of a
             // class instance too, since amendment A4.
             (*c).cg_own = true;
-            dump_texpr(out, aval, ttgt, src, c, gb);
+            // The oracle coerces the value to the place's type, then compares the two.
+            (*c).tc_st = true;
+            let avt: i64 = dump_texpr(out, aval, ttgt, src, c, gb);
+            tc_fit(c, ttgt, avt);
             stmt_div(c);
             // (7c) MIR: a plain-Var target rebinds var_defs to the RHS; a field/`*`-deref
             // store (no precise IR) funnels the value through Opaque (a store sink, typed
@@ -740,7 +805,9 @@ fn dump_tstmt(out: &mut Vec<u8>, s: Stmt, src: &[u8], c: &mut TyCtx, gb: &mut Ve
             } else {
                 0
             };
-            dump_texpr(out, wcond, 0 - 1, src, c, gb);
+            let wct: i64 = dump_texpr(out, wcond, 0 - 1, src, c, gb);
+            // The condition is `bool`, never `secret bool` (the oracle's `check_stmt`).
+            tc_cond(c, wct, "while");
             // (8b) cg: branch cond → body/after, open the body, register loop targets.
             if cg_on(c) {
                 let cwk: i64 = (*c).cglk;

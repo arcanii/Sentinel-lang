@@ -140,6 +140,11 @@ fn widen_possible(c: &mut TyCtx, exp: i64) -> bool {
 }
 
 fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
+    // (`types/tcheck.sentinel`) whether `exp` is an expectation the oracle coerces this node
+    // to; the node reads it as `tc_in` to hand it on to a child it hands `exp` to.
+    let tcs: bool = (*c).tc_st;
+    (*c).tc_st = false;
+    (*c).tc_in = tcs;
     if widen_possible(c, exp) {
         // The wrapper must PRECEDE the node and the node's type is known only after
         // it synthesizes, so build into a temp and splice — the same shape
@@ -171,10 +176,36 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
         } else {
             mir_widen(c, ww, exp);
             cg_widen(c, ww, exp);
+            tc_coerce(c, tcs, exp, wrt);
             widen_splice(out, wtmp, exp, wrt, c)
         }
     } else {
-        dump_texpr_node(out, ex, exp, src, c, gb)
+        let nt: i64 = dump_texpr_node(out, ex, exp, src, c, gb);
+        // As the oracle's `check_expr`, a node that diverges is not coerced.
+        let ndiv: bool = (*c).sdiv;
+        if ndiv {
+            0
+        } else {
+            tc_coerce(c, tcs, exp, nt)
+        };
+        // (`types/tcheck.sentinel`) the one coercion this path makes, `[S]` into `[secret S]`,
+        // gives the value the expected type, as the oracle's does (the widenings into `?T` and
+        // `secret T` take the path above).
+        if !tcs {
+            nt
+        } else if ndiv {
+            nt
+        } else if !tc_on(c) {
+            nt
+        } else if exp < 0 {
+            nt
+        } else if exp == nt {
+            nt
+        } else if tc_fits(c, exp, nt) {
+            exp
+        } else {
+            nt
+        }
     }
 }
 
@@ -191,6 +222,8 @@ fn dump_texpr_node(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut Ty
     let t: i64 = dump_texpr_arm(out, ex, exp, src, c, gb);
     (*c).sdiv = (*c).sdivn;
     (*c).sdivn = false;
+    (*c).tc_lastnull = (*c).tc_nulln;
+    (*c).tc_nulln = false;
     (*c).cg_place = (*c).cg_placen;
     (*c).cg_placen = false;
     // A `Shared` / `Mutex` read out of a place into a new owner is cloned right after it
@@ -279,6 +312,7 @@ fn dump_texpr_arm(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyC
         // (4c-3) `null` carries no syntactic type; its type IS the expectation `exp`
         // (a `?T`), threaded from the let annotation / field / cmp-operand / branch.
         Expr::Null => {
+            (*c).tc_nulln = true;
             append_str(out, "(null");
             close_ty(out, exp, c);
             // (7c) MIR: `null` is a public constant -> Opaque (no operands), type `exp`.
@@ -514,6 +548,7 @@ fn dump_texpr_arm(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyC
         Expr::Block(stmts, tail) => {
             // (ADR 0071 D2 amendment A1) this block's owning context, for its tail only.
             let bk_own: bool = (*c).cg_tailown;
+            let bk_tcs: bool = (*c).tc_in;
             append_str(out, "(block");
             // (8d-drops) a block opens a scope frame; its un-moved heap locals are
             // freed at its exit (after the tail value, before it's used by the parent).
@@ -537,6 +572,7 @@ fn dump_texpr_arm(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyC
             (*c).cg_own = bk_own;
             let bk_svc: bool = (*c).consuming;
             (*c).consuming = true;
+            (*c).tc_st = bk_tcs;
             let tt: i64 = dump_texpr(out, tail, exp, src, c, gb);
             (*c).consuming = bk_svc;
             let tldiv: bool = (*c).sdiv;
@@ -750,7 +786,21 @@ fn dump_texpr_arm(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyC
             } else {
                 0
             };
+            // (`types/tcheck.sentinel`) the element type the elements are expected to have: the
+            // oracle has one only where it hands the array an expected type (the strict mark).
+            (*c).tc_aee = if !(*c).tc_in {
+                0 - 1
+            } else if exp >= tbase() {
+                if (*c).tk[exp - tbase()] == 1 {
+                    (*c).ta[exp - tbase()]
+                } else {
+                    0 - 1
+                }
+            } else {
+                0 - 1
+            };
             let ety_raw: i64 = dump_array_elems(out, elems, src, c, gb);
+            (*c).tc_aee = 0 - 1;
             // (ADR 0068) an EMPTY literal `[]` can't infer its element from the
             // elements — take it from the expected/annotation array type (`exp`),
             // exactly as the Rust oracle uses the node's stored `elem_ty`. Non-empty
@@ -801,6 +851,7 @@ fn dump_texpr_arm(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyC
                 0
             };
             let tty: i64 = dump_texpr(out, it, 0 - 1, src, c, gb);
+            tc_index_target(c, tty);
             // (ADR 0071 D2 amendment A1) an element path reads out of a place iff its target
             // does; captured before the index walk overwrites it.
             let ix_tpl: bool = (*c).cg_place;
@@ -833,7 +884,9 @@ fn dump_texpr_arm(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyC
             } else {
                 0
             };
-            dump_texpr(out, ii, 0 - 1, src, c, gb);
+            let ixt: i64 = dump_texpr(out, ii, 0 - 1, src, c, gb);
+            // The oracle's check of the index, a store's included: `i64`, not `secret`.
+            tc_index(c, ixt);
             if ix_mplace {
                 (*c).mir_place = true;
                 (*c).mir_suppress = ix_msup;
@@ -957,7 +1010,30 @@ fn dump_texpr_arm(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyC
                 // (ADR 0071 D2 amendment A6) the payload is a new owner of each argument, so a
                 // `Shared` / `Mutex` read out of a place is counted: owning args.
                 (*c).cg_ownargs = true;
-                dump_cargs(out, qa, 0 - 1, 0 - 1, 0, src, c, gb);
+                // (`types/tcheck.sentinel`) each payload is checked against its declared type,
+                // and their number against the variant's.
+                let qvf: i64 = variant_flat(c, qeid, vidx);
+                let qvps: i64 = if qvf >= 0 {
+                    (*c).varps[qvf]
+                } else {
+                    0 - 1
+                };
+                let qvpe: i64 = if qvf >= 0 {
+                    (*c).varpe[qvf]
+                } else {
+                    0 - 1
+                };
+                (*c).tc_pool = 1;
+                let qna: i64 = dump_cargs(out, qa, qvps, qvpe, 0, src, c, gb);
+                if qvf >= 0 {
+                    if qna != qvpe - qvps {
+                        tc_payload_arity(c, qeid, qvf, qvpe - qvps, qna)
+                    } else {
+                        0
+                    }
+                } else {
+                    0
+                };
                 if cg_on(c) {
                     (*c).cg_collecting = cg_ec_col;
                     cg_emit_enum_construct(c, qeid, vidx, cg_ec_snap);
@@ -988,6 +1064,7 @@ fn dump_texpr_arm(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyC
                 } else {
                     0 - 1
                 };
+                let qmn: Vec<u8> = cg_copy_name(&qm);
                 append_str(out, "(qcall-impl #");
                 append_int(out, iid);
                 push(out, ' ');
@@ -1013,7 +1090,21 @@ fn dump_texpr_arm(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyC
                 };
                 // (ADR 0071 D2 amendment A1) the callee drops its parameters: owning args.
                 (*c).cg_ownargs = true;
-                dump_cargs(out, qa, qps, qpe, 0 - 1, src, c, gb);
+                (*c).tc_qiid = iid;
+                let qna2: i64 = dump_cargs(out, qa, qps, qpe, 0 - 1, src, c, gb);
+                // (`types/tcheck.sentinel`) the oracle's arity check, the receiver counted.
+                if qrow >= 0 {
+                    if qna2 != 1 + qpe - qps {
+                        let qtn: Vec<u8> = tc_impl_type_name(c, iid);
+                        tc_method_arity(c, qtn, vec_to_array(qmn), 1 + qpe - qps, qna2)
+                    } else {
+                        let _qm1: [u8] = vec_to_array(qmn);
+                        0
+                    }
+                } else {
+                    let _qm2: [u8] = vec_to_array(qmn);
+                    0
+                };
                 close_ty(out, qmret, c);
                 if cg_on(c) {
                     (*c).cg_collecting = cg_q_col;
@@ -1043,6 +1134,7 @@ fn dump_texpr_arm(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyC
         Expr::Match(mscr, marms) => {
             // (ADR 0071 D2 amendment A1) the `match`'s owning context, for its arms' values.
             let mt_own: bool = (*c).cg_tailown;
+            let mt_tcs: bool = (*c).tc_in;
             append_str(out, "(match ");
             // (6/N) a `match` scrutinee that names a binding is NOT a move (the oracle does
             // not record it — it's read/inspected); a computed one's own tails still move,
@@ -1135,7 +1227,10 @@ fn dump_texpr_arm(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyC
             let smlive_up: i64 = (*c).smlive;
             (*c).sdiva = true;
             (*c).smlive = 0 - 1;
+            let mt_svta: bool = (*c).tc_arms;
+            (*c).tc_arms = mt_tcs;
             let mfirst: i64 = dump_tarms(out, marms, exp, mt_own, src, c, gb);
+            (*c).tc_arms = mt_svta;
             let alldiv: bool = (*c).sdiva;
             let mlive: i64 = (*c).smlive;
             (*c).sdiva = sdiva_up;
@@ -1249,7 +1344,18 @@ fn dump_texpr_arm(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyC
             } else {
                 0 - 1
             };
-            dump_cargs(out, ca, cips, cipe, 0, src, c, gb);
+            let cina: i64 = dump_cargs(out, ca, cips, cipe, 0, src, c, gb);
+            // (`types/tcheck.sentinel`) the oracle's arity check; a class with no `init` takes none.
+            let cinp: i64 = if cirow >= 0 {
+                cipe - cips
+            } else {
+                0
+            };
+            if cina != cinp {
+                tc_init_arity(c, cid, cinp, cina)
+            } else {
+                0
+            };
             close_ty(out, cty, c);
             if mir_on(c) {
                 (*c).mir_collecting = ci_col;
@@ -1294,6 +1400,8 @@ fn dump_texpr_arm(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyC
             } else {
                 0
             };
+            let pe2: [u8] = vec_to_array(cg_copy_name(&pe));
+            let po2: [u8] = vec_to_array(cg_copy_name(&po));
             append_str(out, "(perform #");
             append_int(out, peid);
             push(out, ' ');
@@ -1315,7 +1423,34 @@ fn dump_texpr_arm(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyC
             } else {
                 0
             };
-            dump_cargs(out, pa, 0 - 1, 0 - 1, 0, src, c, gb);
+            // (`types/tcheck.sentinel`) each argument is checked against the operation's
+            // parameter type, and their number against the operation's.
+            let prow: i64 = tc_op_row(c, peid, poidx);
+            let pps: i64 = if prow >= 0 {
+                (*c).efp0[prow]
+            } else {
+                0 - 1
+            };
+            let ppe: i64 = if prow >= 0 {
+                pps + (*c).efpn[prow]
+            } else {
+                0 - 1
+            };
+            (*c).tc_pool = 2;
+            let pna: i64 = dump_cargs(out, pa, pps, ppe, 0, src, c, gb);
+            if prow >= 0 {
+                if pna != ppe - pps {
+                    tc_op_arity(c, pe2, po2, ppe - pps, pna)
+                } else {
+                    let _pe3: [u8] = pe2;
+                    let _po3: [u8] = po2;
+                    0
+                }
+            } else {
+                let _pe4: [u8] = pe2;
+                let _po4: [u8] = po2;
+                0
+            };
             close_ty(out, pret, c);
             if mir_on(c) {
                 (*c).mir_collecting = pf_col;
@@ -1346,8 +1481,10 @@ fn dump_texpr_arm(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyC
         },
         // (4g) `handle body with { Eff.op(ps) => arm, … return v => arm }` →
         // `(handle <body :T> (arm #eid idx Eff op (#pvids) <arm-body>)… (return #vid
-        // <body>)? :T)` — the handle's type is the body's type. Handler-arm params +
-        // the return var bind VarIds in the enclosing fn region (scoped per-arm).
+        // <body>)? :T)` — the handle's type is its `return` arm's, or its body's when it has
+        // none (the code generator's walk always takes the body's: register D151).
+        // Handler-arm params + the return var bind VarIds in the enclosing fn region (scoped
+        // per-arm).
         Expr::Handle(hb, ha, hr) => dump_te_handle(out, hb, ha, hr, exp, src, c, gb),
         // (4d) `declassify(e)` strips one secret layer: `secret T → T` (ADR 0019 D6).
         // The inner is synthesized with no expectation; the node's type is its stripped
@@ -1413,7 +1550,12 @@ fn dump_texpr_arm(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyC
             // block `:i64` where the oracle says `:?i64`.
             // (ADR 0071 D2 amendment A1) the caller is a new owner of the value.
             (*c).cg_own = true;
+            // The oracle coerces a `return`'s value to the fn's return type only where it pushes
+            // that type down, and then compares the two (a `Mismatch`).
+            let rfr: i64 = (*c).fnret;
+            (*c).tc_st = tc_body_pushdown(c, rfr);
             let it: i64 = dump_texpr(out, ri, (*c).fnret, src, c, gb);
+            tc_fit(c, rfr, it);
             (*c).consuming = svc;
             close_ty(out, it, c);
             if mir_on(c) {
@@ -1681,6 +1823,7 @@ fn dump_texpr_arm(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyC
         Expr::Scope(sbody) => {
             // (ADR 0071 D2 amendment A1) the scope's owning context, for its body's tail.
             let sc_own: bool = (*c).cg_tailown;
+            let sc_tcs: bool = (*c).tc_in;
             append_str(out, "(scope ");
             // (concurrency) cg: enter a scope ctx (so `spawn`s inside register with it),
             // lower the body, exit the scope (joins/awaits unawaited tasks). The body's
@@ -1696,6 +1839,7 @@ fn dump_texpr_arm(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyC
                 0 - 1
             };
             (*c).cg_own = sc_own;
+            (*c).tc_st = sc_tcs;
             let sct: i64 = dump_texpr(out, sbody, exp, src, c, gb);
             if cg_on(c) {
                 (*c).cg_scope = sv_scope;
@@ -1748,7 +1892,7 @@ fn dump_texpr_arm(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyC
                     },
                 }
             } else {
-                // modes 0-3: the type dump + MIR (`spawn e` → Opaque([e]) typed Task<U>).
+                // every mode but 4: the type dump + MIR (`spawn e` → Opaque([e]) typed Task<U>).
                 let spt: i64 = dump_texpr(out, scall, 0 - 1, src, c, gb);
                 let spv: i64 = if mir_on(c) {
                     (*c).lastval

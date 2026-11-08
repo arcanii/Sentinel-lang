@@ -40,6 +40,7 @@ part cg_chained;
 part mir_emit;
 part mir;
 part refuse;
+part tcheck;
 
 use parser::Expr;
 use parser::Stmts;
@@ -312,7 +313,9 @@ struct TyCtx {
     //     side-effect of the pass-2 walk; PER-FN (reset in `type_fn`). Everything is
     //     a flat append-only parallel-Vec pool tagged by block (so out-of-order block
     //     construction still groups per block in the dump) — NO Vec index-assign. ---
-    mode: i64,        // run mode: 0 = type dump, 1 = borrow moves, 2 = MIR
+    mode: i64,        // run mode: 0 = type dump, 1 = borrow moves, 2 = MIR, 3 = the
+                      //   verifier over free fns, 4 = codegen, 5 = the verifier over every
+                      //   body (`types/tcheck.sentinel`)
     lastval: i64,     // the MirValue most-recently produced (threaded to parents)
     mir_cur: i64,     // the current block id (insts/params append here)
     mir_nblk: i64,    // block count (= next block id)
@@ -419,8 +422,8 @@ struct TyCtx {
     cg_suppress: bool,   // true while walking an assign target (the Var arm records, no load)
     // (c36a) the program's tokens, COPIED for re-parsing handle `return` arm bodies at
     // each pure-drain site (the return arm lowers inline, but move semantics bar reusing
-    // the parsed Expr). Populated once in `run` ONLY when mode 4 + a `return` token is
-    // present (the selfhost compiler has no handlers → these stay empty there).
+    // the parsed Expr). Populated once in `run` when a `return` token is present, in every
+    // mode (the selfhost compiler has no handlers → these stay empty there).
     cgtk: Vec<i64>,
     cgts: Vec<i64>,
     cgte: Vec<i64>,
@@ -658,6 +661,67 @@ struct TyCtx {
     // place of its output.
     rfd: bool,
     rfm: Vec<u8>,
+    // (`types/tcheck.sentinel`) the expectation the next `dump_texpr` is given is one the
+    // oracle coerces to (`tc_st`), and the one the node being walked was given is (`tc_in`).
+    // `tc_arms` is the `match` being walked's, for its arms. `tc_imp` says the method being
+    // walked is an impl's, whose trait's and target type's names are at `tc_its`..`tc_ite`
+    // and `tc_iys`..`tc_iye` of the source.
+    tc_st: bool,
+    tc_in: bool,
+    tc_arms: bool,
+    tc_imp: bool,
+    // The trait of the impl whose methods are being walked (with `tc_imp`), and the impl a
+    // qualified call names, for its receiver's check (`tc_qiid`, -1 when none).
+    tc_itid: i64,
+    tc_qiid: i64,
+    tc_its: i64,
+    tc_ite: i64,
+    tc_iys: i64,
+    tc_iye: i64,
+    // `tc_unify`'s innermost failing pair, the parameter's type and the argument's.
+    tc_ue: i64,
+    tc_ug: i64,
+    // `tc_gunify`'s earlier binding of a type parameter that meets another type.
+    tc_cf: i64,
+    // The pool the next `dump_cargs` reads its parameter types from (`tc_pool_ty`).
+    tc_pool: i64,
+    // The first argument's type of each builtin call being walked, innermost last (`send`'s
+    // value is checked against its channel's element).
+    tc_firsts: Vec<i64>,
+    // The node being walked is the `null` literal (`tc_nulln`, set by its arm), and the node
+    // just walked was (`tc_lastnull`, published by `dump_texpr_node`, as `sdiv` is).
+    tc_nulln: bool,
+    tc_lastnull: bool,
+    // The next direct call through a `Fn` value (`tc_fnv`), for `dump_apply_call`; the second
+    // argument's type of the generic builtin call just walked (`tc_a1`, -1 when none); the
+    // element type an array literal's later elements are coerced to, innermost last
+    // (`tc_arrs`); and the element type of the array the next literal is expected to be
+    // (`tc_aee`, -1 when none).
+    tc_fnv: bool,
+    tc_a1: i64,
+    tc_arrs: Vec<i64>,
+    tc_aee: i64,
+    // (registers D151 and D7) the type of the `handle` whose arms are being walked
+    // (`tc_hk`), and for each continuation an arm binds (`tc_kv`) the type it returns, that
+    // `handle`'s (`tc_kt`), and the type it is resumed with, its operation's (`tc_ka`).
+    tc_hk: i64,
+    tc_kv: Vec<i64>,
+    tc_kt: Vec<i64>,
+    tc_ka: Vec<i64>,
+    // A `let`'s annotation is being resolved, which the oracle does with no type
+    // parameter in scope (`tc_notp`): a `T` there is an unknown type.
+    tc_notp: bool,
+    // The expectation `dump_args_capture_first` gives its first argument, consumed there
+    // (`tc_x0`, -1 for none): a `resume`'s, the operation's result type, and `unwrap_or`'s,
+    // `?T` for the `T` it takes from the type expected of it.
+    tc_x0: i64,
+    // (`types/tcheck.sentinel`) each trait method's receiver kind (`tc_trx`: 1 for `&mut
+    // Self`) and effect row, its sorted EffectIds at `tc_trep[tc_tres..tc_tree]`, aligned
+    // with `trmr`, for the impl method signature check.
+    tc_trx: Vec<i64>,
+    tc_tres: Vec<i64>,
+    tc_tree: Vec<i64>,
+    tc_trep: Vec<i64>,
     // (ADR 0041 A14, register D60's refusal) the walk is inside a class `init`'s body: a
     // `return` there is refused, as the oracle's `in_init` refuses it.
     rf_init: bool,
@@ -932,10 +996,12 @@ pub fn run(src: [u8], mode: i64, result: &mut Vec<u8>) -> i64 {
     let mut out: Vec<u8> = vec_new();
 
     // (c36a) copy the tokens into the ctx for re-parsing handle `return` arm bodies —
-    // ONLY when mode 4 (codegen) AND a `return` token (43) is present. The selfhost
-    // compiler has no handlers (no `return` token), so this is skipped there → the
-    // fixed-point pays nothing; only the c36a/c37 fixtures trigger the copy.
-    if mode == 4 {
+    // only when a `return` token (43) is present. Mode 4 re-parses an arm at each
+    // pure-drain site; the other modes (`types/tcheck.sentinel`) type a `return` arm once
+    // before a `handle`'s operation arms, from a copy re-parsed from its tokens. The
+    // selfhost compiler has no handlers (no `return` token), so this is skipped there → the
+    // fixed-point pays nothing.
+    if mode >= 0 {
         let mut cg_has_ret: bool = false;
         let mut cg_ri: i64 = 0;
         while cg_ri < ntok {
@@ -1240,7 +1306,7 @@ pub fn run(src: [u8], mode: i64, result: &mut Vec<u8>) -> i64 {
         if kda == 3 {
             // (Bar B / generics-b) in mode 4 a GENERIC fn is not emitted raw — record its
             // `fn`-token position for the per-instance mono re-walk (after this loop). In
-            // modes 0–3 it's dumped normally.
+            // every other mode it's dumped normally.
             let cg_skip_gen: bool = ctx.mode == 4 && ctx.uftp[fnct] > 0;
             if cg_skip_gen {
                 push(&mut ctx.cggfn_id, 42 + fnct);
@@ -2130,10 +2196,14 @@ fn clear_u8(v: &mut Vec<u8>) -> i64 {
 
 // (7d) the MIR pools are built for mode 2 (dump the MIR) AND mode 3 (build, then run
 // the const-time verifier over it). The per-fn dump-vs-verify differs (in `type_fn`).
+// Mode 5 is mode 3 over every body `snc build` verifies, class and impl bodies too
+// (ADR 0026 A2): the code generator's checking pass (`types/tcheck.sentinel`).
 fn mir_on(c: &mut TyCtx) -> bool {
     if (*c).mode == 2 {
         true
     } else if (*c).mode == 3 {
+        true
+    } else if (*c).mode == 5 {
         true
     } else {
         false
@@ -2141,7 +2211,7 @@ fn mir_on(c: &mut TyCtx) -> bool {
 }
 
 // (8/N) ADR 0045: the codegen .ll side-build is mode 4 (separate from the MIR side-build,
-// so the two never co-fire — `mir_on` is now mode 2/3 only).
+// so the two never co-fire — `mir_on` is modes 2, 3 and 5 only).
 fn cg_on(c: &mut TyCtx) -> bool {
     (*c).mode == 4
 }

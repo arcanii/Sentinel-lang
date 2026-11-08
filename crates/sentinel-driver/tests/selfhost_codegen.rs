@@ -1713,10 +1713,18 @@ fn sentinel_codegen_matches_oracle_on_corpus() {
 
     let fixtures = collect_fixtures();
     assert!(fixtures.len() > 100, "expected a substantial corpus, got {}", fixtures.len());
+    // `snc llvm` is the text oracle's dump, which no constant-time gate stops: it emits IR
+    // for a program `snc build` refuses. The code generator refuses those programs, as
+    // `snc build` does, and `sentinel_codegen_refuses_what_the_build_gate_refuses` pins it.
+    let gated: Vec<String> = build_gate_fixtures().into_iter().map(|(f, _)| f).collect();
 
     let mut emitted = 0usize;
     let mut mismatches: Vec<String> = Vec::new();
     for fixture in &fixtures {
+        let name = fixture.file_name().unwrap().to_string_lossy().to_string();
+        if gated.contains(&name) {
+            continue;
+        }
         let bytes = std::fs::read(fixture).expect("read fixture");
         std::fs::write(&input, &bytes).expect("stage input");
         let oracle = Command::new(env!("CARGO_BIN_EXE_snc"))
@@ -2371,4 +2379,243 @@ fn sentinel_codegen_refuses_what_the_oracle_refuses() {
     let driver = build_sentinel_codegen(&tmp);
     let checked = common::assert_refuses_what_the_oracle_refuses(&driver, &tmp.join("refusals"));
     assert!(checked >= 10, "expected at least ten pinned refusals, got {checked}");
+}
+
+/// The `tests/ui` fixtures `snc build`'s constant-time gate refuses: each fixture whose pinned
+/// diagnostic (its `ui.rs` snapshot) is `sentinel::mir::secret_leak`, with the message of
+/// each leak the snapshot reports, in its order.
+fn build_gate_fixtures() -> Vec<(String, Vec<String>)> {
+    const CODE: &str = "sentinel::mir::secret_leak";
+    const KEY: &str = "a `secret` value reaches ";
+    let snaps = workspace_root().join("crates/sentinel-driver/tests/snapshots");
+    let mut pinned: Vec<(String, Vec<String>)> = Vec::new();
+    for entry in std::fs::read_dir(&snaps).expect("read snapshots") {
+        let path = entry.expect("dir entry").path();
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if !name.starts_with("ui__") || !name.ends_with(".snap") {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).expect("read snapshot");
+        let fixture = text
+            .lines()
+            .find_map(|l| l.strip_prefix("expression: \"reject_stderr(\\\""))
+            .and_then(|rest| rest.split("\\\"").next())
+            .map(str::to_string);
+        let Some(body) = text.splitn(3, "---").nth(2) else { continue };
+        if body.lines().map(str::trim).find(|l| !l.is_empty()) != Some(CODE) {
+            continue;
+        }
+        // The report wraps its message over lines (`  × ...` then `  │ ...`): join the
+        // lines, then read each message from its `a `secret` value reaches` to its end.
+        let flat: String = body
+            .lines()
+            .map(|l| l.trim().trim_start_matches(['×', '│']).trim())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let mut leaks = Vec::new();
+        let mut rest = flat.as_str();
+        while let Some(i) = rest.find(KEY) {
+            let tail = &rest[i..];
+            let end = tail.find(", which would leak it via timing").expect("leak message end");
+            leaks.push(format!("{}, which would leak it via timing", &tail[..end]));
+            rest = &tail[end..];
+        }
+        if let Some(fixture) = fixture {
+            pinned.push((fixture, leaks));
+        }
+    }
+    pinned.sort();
+    pinned
+}
+
+/// Before it generates code the code generator makes the ported type checks and runs the
+/// constant-time verifier over every body `snc build` verifies
+/// (`selfhost/types/tcheck.sentinel`). So every fixture in [`build_gate_fixtures`] must be refused by the self-hosted
+/// code generator `driver`: a non-zero exit, `sentinel::mir::secret_leak` on the first
+/// line, then one line per leak the snapshot reports, `scg: ` and the oracle's message, in
+/// the snapshot's order. Answers how many fixtures it checked.
+fn assert_refuses_what_the_build_gate_refuses(driver: &Path, work: &Path) -> usize {
+    const CODE: &str = "sentinel::mir::secret_leak";
+    let root = workspace_root();
+    let pinned = build_gate_fixtures();
+    std::fs::create_dir_all(work).expect("create work dir");
+    let input = work.join("input.sentinel");
+    let mut failures: Vec<String> = Vec::new();
+    for (fixture, leaks) in &pinned {
+        std::fs::copy(root.join("tests/ui").join(fixture), &input).expect("stage fixture");
+        let out = Command::new(driver)
+            .current_dir(work)
+            .output()
+            .expect("run the self-hosted code generator");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let mut lines = stdout.lines();
+        let got_code = lines.next().unwrap_or("");
+        let got: Vec<String> = lines
+            .map(|l| l.strip_prefix("scg: ").unwrap_or(l).to_string())
+            .collect();
+        if out.status.success() || got_code != CODE || &got != leaks || leaks.is_empty() {
+            failures.push(format!(
+                "  {fixture}: oracle {leaks:?}; driver exit {:?}, `{got_code}` {got:?}",
+                out.status.code()
+            ));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "the self-hosted code generator did not refuse {}/{} fixture(s) the build gate refuses:\n{}",
+        failures.len(),
+        pinned.len(),
+        failures.join("\n")
+    );
+    pinned.len()
+}
+
+/// (ADR 0041 A16) programs the code generator's checking pass decides: each one `snc types`
+/// refuses, the code generator refuses with the oracle's message; each one it accepts, the code
+/// generator does not refuse (its output defines `main`). Among the accepted, a `handle` typed by its `return` arm and resumes typed
+/// by their `handle` (registers D151 and D7), which the checks refused when they read the
+/// types the code generator's own walk gives; among the refused, a `secret` value flowing into
+/// a public place, a branch on one through `!`, and an arity.
+const CHECKED_SHAPES: &[&str] = &[
+    "effect Q { ask(x: i64) -> i64; }\nfn w() -> i64 ! { Q } { perform Q.ask(3) }\nfn main() -> i64 { if handle w() with { Q.ask(x, k) => k(x), return v => v > 2 } { 42 } else { 0 } }",
+    "effect Q { ask(x: i64) -> secret i64; }\nfn w() -> i64 ! { Q } { let v: secret i64 = perform Q.ask(2); declassify(v) }\nfn main() -> i64 { handle w() with { Q.ask(x, k) => { let s: secret i64 = x; if k(s) > 1 { 42 } else { 0 } } } }",
+    "effect Q { ask(x: i64) -> i64; }\nfn w() -> secret i64 ! { Q } { let v: i64 = perform Q.ask(2); v }\nfn main() -> i64 { if handle w() with { Q.ask(x, k) => k(x), return v => declassify(v) } > 1 { 42 } else { 0 } }",
+    "effect Q { ask(x: i64) -> secret i64; }\nfn w() -> i64 ! { Q } { let v: secret i64 = perform Q.ask(2); declassify(v) }\nfn main() -> i64 { handle w() with { Q.ask(x, k) => { let s: secret i64 = x; let r: i64 = k(s); if r > 1 { 42 } else { 0 } } } }",
+    "fn br(x: i64) -> i64 { if x > 20 { 1 } else { 2 } }\nfn main() -> i64 { let s: secret i64 = 5; declassify(s) }",
+    "fn main() -> i64 { let p: ?i64 = 5; if is_some(p) { 42 } else { 0 } }",
+    "effect Q { ask(x: i64) -> i64; }\nfn w() -> secret i64 ! { Q } { let v: i64 = perform Q.ask(2); v }\nfn main() -> i64 { let r: secret i64 = handle w() with { Q.ask(x, k) => if k(x) > 1 { 42 } else { 0 } }; declassify(r) }",
+    "effect Q { ask(x: i64) -> i64; }\nfn w() -> i64 ! { Q } { let v: i64 = perform Q.ask(2); v }\nfn main() -> i64 {\n  let r: secret i64 = handle w() with {\n    Q.ask(x, k) => if k(x) > 1 { 42 } else { 0 },\n    return v => { let s: secret i64 = v; s }\n  };\n  declassify(r)\n}",
+    "fn f(s: secret bool) -> i64 { if !s { 1 } else { 0 } }\nfn main() -> i64 { 0 }",
+    "fn f(s: secret i64) -> i64 { let mut n: i64 = 0; while !(s > n) { n = n + 1; } n }\nfn main() -> i64 { 0 }",
+    "class K { let n: i64; pub init() { self.n = 1; 0 }\n  pub fn m(self: &Self, a: secret bool) -> i64 { if !a { 1 } else { 2 } } }\nfn main() -> i64 { 0 }",
+    "fn br(x: i64) -> i64 { if x > 20 { 1 } else { 2 } }\nfn sec() -> secret i64 { 42 }\nfn main() -> i64 { let s: secret i64 = sec(); br(s) }",
+    "fn br(x: i64) -> i64 { if x > 20 { 1 } else { 2 } }\nfn sec() -> secret i64 { 42 }\nfn main() -> i64 { let s: secret i64 = sec(); let p: i64 = s; br(p) }",
+    "fn br(x: i64) -> i64 { if x > 20 { 1 } else { 2 } }\nfn sec() -> secret i64 { 42 }\nfn main() -> i64 { let s: secret i64 = sec(); let mut p: i64 = 0; p = s; br(p) }",
+    "fn br(x: i64) -> i64 { if x > 20 { 1 } else { 2 } }\nfn sec() -> secret i64 { 42 }\nfn leak(s: secret i64) -> i64 { s }\nfn main() -> i64 { br(leak(sec())) }",
+    "fn br(x: i64) -> i64 { if x > 20 { 1 } else { 2 } }\nfn sec() -> secret i64 { 42 }\neffect Ask { q() -> i64; }\nfn ask1() -> i64 ! { Ask } { perform Ask.q() }\nfn main() -> i64 { let s: secret i64 = sec(); let r: i64 = handle ask1() with { Ask.q(k) => k(s) }; br(r) }",
+    "fn br(x: i64) -> i64 { if x > 20 { 1 } else { 2 } }\nfn sec() -> secret i64 { 42 }\neffect Log { put(x: i64) -> i64; }\nfn w(s: secret i64) -> i64 ! { Log } { perform Log.put(s) }\nfn main() -> i64 { handle w(sec()) with { Log.put(x, k) => k(br(x)) } }",
+    "fn br(x: i64) -> i64 { if x > 20 { 1 } else { 2 } }\nfn sec() -> secret i64 { 42 }\nclass C { let n: i64; pub init(n: i64) { self.n = n; 0 } pub fn get(self: &Self, x: i64) -> i64 { br(x) } }\nfn main() -> i64 { let c: C = C::init(1); c.get(sec()) }",
+    "fn br(x: i64) -> i64 { if x > 20 { 1 } else { 2 } }\nfn sec() -> secret i64 { 42 }\nenum E { A(i64), B }\nfn main() -> i64 { let e: E = E::A(sec()); match e { E::A(v) => br(v), E::B => 0 } }",
+    "fn main() -> i64 { let s: secret i64 = 1; let mut v: Vec<i64> = vec_new(); push(&mut v, s); 0 }",
+    "fn f(x: i64) -> i64 { x }\nfn main() -> i64 { f(1, 2) }",
+    "fn br(x: i64) -> i64 { if x > 20 { 1 } else { 2 } }\nfn sec() -> secret i64 { 42 }\nfn main() -> i64 { let s: secret i64 = sec(); let f: Fn<i64, i64> = br; apply(f, s) }",
+    "fn br(x: i64) -> i64 { if x > 20 { 1 } else { 2 } }\nfn sec() -> secret i64 { 42 }\nfn main() -> i64 { let s: secret i64 = sec(); let f: Fn<i64, i64> = br; f(s) }",
+    "fn br(x: i64) -> i64 { if x > 20 { 1 } else { 2 } }\nfn sec() -> secret i64 { 42 }\nfn main() -> i64 { let s: secret i64 = sec(); let a: [i64] = [s, 1]; br(a[0]) }",
+    "fn br(x: i64) -> i64 { if x > 20 { 1 } else { 2 } }\nfn sec() -> secret i64 { 42 }\nfn id<T>(x: T) -> T { x }\nfn main() -> i64 { let p: i64 = id(sec()); br(p) }",
+    "fn main() -> i64 { let b: [u8] = tcp_read(0, 4); len(b) }",
+    "fn main() -> i64 { let a: [secret i32] = [1 as i32, 2 as i32]; len(a) }",
+    "fn main() -> i64 { let b: i64 = tcp_read(0, 4); b }",
+    // A `secret` `Vec` a generic call returns, into a public one; a struct `Vec` through it,
+    // accepted; a type parameter in a `let`'s annotation; a `?` over a `secret`; a generic
+    // struct literal as an enum payload, accepted, and holding a `secret` there, refused.
+    "fn pass<T>(v: Vec<T>) -> Vec<T> { v }\nfn main() -> i64 { let sv: Vec<secret i64> = vec_new(); let p: Vec<i64> = pass(sv); 0 }",
+    "struct Q { a: i64 }\nfn pass<T>(v: Vec<T>) -> Vec<T> { v }\nfn w(v: Vec<Q>) -> Vec<Q> { pass(v) }\nfn main() -> i64 { 0 }",
+    "fn g<T>(x: T) -> i64 { let y: T = x; 0 }\nfn main() -> i64 { g(1) }",
+    "fn f(s: secret bool) -> i64 { let o: ?secret bool = s; if o == null { 1 } else { 0 } }\nfn main() -> i64 { f(true) }",
+    "struct B<T> { v: T }\nenum E { A(B<i64>) }\nfn main() -> i64 { let e = E::A(B { v: 3 }); 0 }",
+    "struct B<T> { v: T }\nenum E { A(B<i64>) }\nfn main() -> i64 { let s: secret i64 = 5; let e = E::A(B { v: s }); 0 }",
+];
+
+#[test]
+fn sentinel_codegen_checks_as_the_typer_does() {
+    let tmp = std::env::temp_dir()
+        .join(format!("snc_selfhost_codegen_shapes_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).expect("create temp dir");
+    let driver = build_sentinel_codegen(&tmp);
+    let work = tmp.join("work");
+    std::fs::create_dir_all(&work).expect("create work dir");
+    let input = work.join("input.sentinel");
+    let mut refused = 0usize;
+    let mut failures: Vec<String> = Vec::new();
+    for src in CHECKED_SHAPES {
+        std::fs::write(&input, src).expect("stage program");
+        let oracle = Command::new(env!("CARGO_BIN_EXE_snc"))
+            .arg("types")
+            .arg(&input)
+            .output()
+            .expect("run snc types");
+        let want = if oracle.status.success() {
+            None
+        } else {
+            let err = String::from_utf8_lossy(&oracle.stderr);
+            Some(err.lines().find_map(|l| l.strip_prefix("snc: ")).unwrap_or("").to_string())
+        };
+        let out = Command::new(&driver).current_dir(&work).output().expect("run the code generator");
+        let text = String::from_utf8_lossy(&out.stdout);
+        let ok = match &want {
+            None => out.status.success() && text.contains("define i32 @main("),
+            Some(msg) => {
+                refused += 1;
+                !out.status.success()
+                    && text.lines().count() == 2
+                    && text.lines().next().is_some_and(|l| l.starts_with("sentinel::"))
+                    && text.lines().nth(1).and_then(|l| l.strip_prefix("scg: ")) == Some(msg.as_str())
+            }
+        };
+        if !ok {
+            let head: String = text.lines().take(2).collect::<Vec<_>>().join(" / ");
+            failures.push(format!("  {src:?}:\n    oracle {want:?}\n    driver exit {:?}: {head}", out.status.code()));
+        }
+    }
+    assert!(refused >= 15, "expected at least fifteen refused shapes, got {refused}");
+    assert!(
+        failures.is_empty(),
+        "the code generator's checks differ from the oracle's on {}/{} shape(s):\n{}",
+        failures.len(),
+        CHECKED_SHAPES.len(),
+        failures.join("\n")
+    );
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// The code generator's checks run before it generates code, in a mode that binds a handler
+/// arm's parameters at their declared types (`selfhost/types/tcheck.sentinel`), not in its
+/// own, which binds them as `i64` (ADR 0041 A15). So an arm that branches on a `bool`
+/// parameter is lowered, and one that branches on a `secret i64` parameter is refused.
+#[test]
+fn sentinel_codegen_checks_an_arm_parameter_at_its_declared_type() {
+    let tmp = std::env::temp_dir()
+        .join(format!("snc_selfhost_codegen_arm_check_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).expect("create temp dir");
+    let driver = build_sentinel_codegen(&tmp);
+    let work = tmp.join("work");
+    std::fs::create_dir_all(&work).expect("create work dir");
+    let lowered = "effect Q { q(b: bool) -> i64; }\nfn a() -> i64 ! { Q } { perform Q.q(true) }\nfn main() -> i64 { handle a() with { Q.q(b, k) => if b { k(1) } else { k(2) } } }\n";
+    std::fs::write(work.join("input.sentinel"), lowered).expect("stage program");
+    let out = Command::new(&driver).current_dir(&work).output().expect("run the code generator");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success() && text.contains("define i32 @main("),
+        "the code generator did not lower an arm branching on a `bool` parameter: exit {:?}\n{text}",
+        out.status.code()
+    );
+    let refused = "effect Q { q(s: secret i64) -> i64; }\nfn a() -> i64 ! { Q } { perform Q.q(7) }\nfn main() -> i64 { handle a() with { Q.q(s, k) => if s > 5 { k(1) } else { k(2) } } }\n";
+    std::fs::write(work.join("input.sentinel"), refused).expect("stage program");
+    let out = Command::new(&driver).current_dir(&work).output().expect("run the code generator");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "sentinel::types::secret_branch\nscg: `if` on a `secret bool` condition would leak via timing\n",
+        "the code generator did not refuse an arm branching on a `secret` parameter"
+    );
+    assert!(!out.status.success());
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// ADR 0026 A2: `snc build` verifies every body before it generates code, and so does the
+/// self-hosted code generator (`selfhost/types/tcheck.sentinel`): it refuses each
+/// `tests/ui` fixture the build gate refuses with `sentinel::mir::secret_leak`, with the
+/// oracle's leak messages in its order (`assert_refuses_what_the_build_gate_refuses`),
+/// a class method's, `init`'s and impl method's body among them.
+#[test]
+fn sentinel_codegen_refuses_what_the_build_gate_refuses() {
+    let tmp = std::env::temp_dir()
+        .join(format!("snc_selfhost_codegen_gate_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).expect("create temp dir");
+    let driver = build_sentinel_codegen(&tmp);
+    let checked = assert_refuses_what_the_build_gate_refuses(&driver, &tmp.join("gate"));
+    assert!(checked >= 13, "expected at least thirteen pinned leak refusals, got {checked}");
+    let _ = std::fs::remove_dir_all(&tmp);
 }

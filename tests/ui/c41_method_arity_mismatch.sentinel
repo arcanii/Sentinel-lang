@@ -1,0 +1,17 @@
+// Refusal parity (ADR 0041 A16): the oracle refuses a method called with an argument it does not take with `sentinel::types::method_arity_mismatch`, and every
+// self-hosted driver makes the same refusal with the same message.
+class K {
+    let n: i64;
+    pub init() {
+        self.n = 1;
+        0
+    }
+    pub fn get(self: &Self) -> i64 {
+        self.n
+    }
+}
+
+fn main() -> i64 {
+    let k = K::init();
+    k.get(1)
+}

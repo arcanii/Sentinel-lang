@@ -1,0 +1,14 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c5d3_vec_type_arg_count_mismatch.sentinel\")"
+---
+sentinel::types::type_arg_count_mismatch
+
+  × `Vec` takes 1 type argument(s), got 2
+   ╭─[tests/ui/c5d3_vec_type_arg_count_mismatch.sentinel:4:12]
+ 3 │ fn main() -> i64 {
+ 4 │     let v: Vec<i64, i64> = vec_new();
+   ·            ──────┬──────
+   ·                  ╰── 
+ 5 │     0
+   ╰────

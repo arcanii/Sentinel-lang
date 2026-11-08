@@ -205,6 +205,19 @@ const SEEDS: &[&str] = &[
     // (4i) a `delegate` field declared BEFORE a regular `let` field: the oracle orders
     // regular fields first (tag=0), delegate fields last (inner=1) regardless of source.
     "trait W { fn w(self: &Self) -> i64; }\nclass Inner { let v: i64; pub init() { self.v = 0; 0 } }\nimpl as W for Inner { fn w(self: &Self) -> i64 { self.v } }\nclass Outer { delegate inner: Inner to W; let tag: i64; pub init(i: Inner) { self.inner = i; self.tag = 7; 0 } pub fn t(self: &Self) -> i64 { self.tag } }\nfn main() -> i64 { 0 }\n",
+    // (ADR 0041 A16) places the typer now types as the oracle does: an enum payload, a
+    // `perform`'s argument and an array element with the type expected there (registers D118,
+    // D132, D136), a `Vec<T>` a generic call or a generic instance's field gives, substituted
+    // by the oracle's rule (D147; an enum, `f64` or `?i64` element keeps `Vec<T>`), and a
+    // `handle` by its `return` arm (D151).
+    "struct S1 { a: i64 }\nenum H { A(?S1), B }\nfn main() -> i64 { let h = H::A(null); 0 }\n",
+    "enum G { A(?i64), B }\nfn main() -> i64 { let g = G::A(40); 0 }\n",
+    "effect Io { write(x: secret i64) -> i64; }\nfn w() -> i64 ! { Io } { perform Io.write(40) }\nfn main() -> i64 { handle w() with { Io.write(x, k) => k(1) } }\n",
+    "struct Box<T> { v: T }\nfn main() -> i64 { let a: [Box<i64>] = [Box { v: 40 }]; a[0].v + 2 }\n",
+    "fn pass<T>(v: Vec<T>) -> Vec<T> { v }\nfn main() -> i64 { let mut v: Vec<i64> = vec_new(); push(&mut v, 4); let a: [i64] = vec_to_array(pass(v)); a[0] }\n",
+    "struct Stack<T> { items: Vec<T> }\nfn main() -> i64 { let mut v: Vec<i64> = vec_new(); push(&mut v, 3); let s: Stack<i64> = Stack { items: v }; let a: [i64] = vec_to_array(s.items); a[0] }\n",
+    "fn main() -> i64 { let x: ?i64 = handle 5 with { return v => v }; 0 }\n",
+    "enum E { A, B }\nstruct Q { a: i64 }\nstruct B<T> { v: T }\nfn mk<T>(x: T) -> Vec<T> { vec_new() }\nfn pass<T>(v: Vec<T>) -> Vec<T> { v }\nfn main() -> i64 {\n    let a = mk(E::A);\n    let b = mk(1.5);\n    let c = mk(Q { a: 1 });\n    let s: secret i64 = 2;\n    let d = mk(s);\n    let n: ?i64 = null;\n    let e = mk(n);\n    let h = pass(c);\n    let u: secret u8 = 7 as u8;\n    let i = mk(u);\n    0\n}\n",
 ];
 
 #[test]
@@ -808,11 +821,256 @@ fn sentinel_typer_refusals_match_the_oracle_on_shapes() {
         "struct H { e: [i64] }\nstruct H2 { n: i64, h: H }\nfn main() -> i64 { let v: Vec<H2> = vec_new(); let a = vec_to_array(v); 0 }",
         "struct Q { a: i64, b: ?i64, c: secret i64 }\nfn main() -> i64 { let v: Vec<Q> = vec_new(); let a = vec_to_array(v); 0 }",
         "fn first<T>(v: Vec<T>) -> i64 { let a = vec_to_array(v); 0 }\nfn main() -> i64 { 0 }",
-        // A `Vec<T>` reached through a generic call's result keeps an abstract element, and
-        // both refuse: the oracle when `T` is not a `Vec` element (its substitution then keeps
-        // `Vec<T>`), `scg` always, which over-refuses a plain `T` (register D147).
+        // `vec_to_array` over a `Vec<T>` a generic call returns: both substitute `T` where it
+        // can be a `Vec` element and refuse an element that is not plain (a struct holding an
+        // array), and keep `Vec<T>` (refused) where it cannot be (an enum).
         "struct E2 { e: [i64] }\nfn pass<T>(v: Vec<T>) -> Vec<T> { v }\nfn main() -> i64 { let v: Vec<E2> = vec_new(); let a = vec_to_array(pass(v)); len(a) }",
         "enum E { A, B }\nfn mk<T>(x: T) -> Vec<T> { vec_new() }\nfn main() -> i64 { let a = vec_to_array(mk(E::A)); len(a) }",
+        // An `if` or `while` condition is a `bool`: a `secret bool` is `secret_branch`, in any
+        // body, a method's and a handler arm's among them, and any other type a mismatch.
+        "fn main() -> i64 { if 1 { 1 } else { 0 } }",
+        "fn main() -> i64 { let mut n: i64 = 0; while n { n = n + 1; } n }",
+        "fn main() -> i64 { let s: secret i64 = 5; if s { 1 } else { 0 } }",
+        "fn main() -> i64 { let c: ?bool = null; if c { 1 } else { 0 } }",
+        "fn main() -> i64 { let s: secret i64 = 5; let mut n: i64 = 0; while s > n { n = n + 1; } n }",
+        "class K { let n: i64;\n pub init() { self.n = 1; 0 }\n pub fn pick(self: &Self, s: secret i64) -> i64 { if s > 5 { 1 } else { 2 } } }\nfn main() -> i64 { 0 }",
+        "effect Q { q(s: secret i64) -> i64; }\nfn a() -> i64 ! { Q } { perform Q.q(7) }\nfn main() -> i64 { handle a() with { Q.q(s, k) => if s > 5 { k(1) } else { k(2) } } }",
+        "effect Q { q(b: bool) -> i64; }\nfn a() -> i64 ! { Q } { perform Q.q(true) }\nfn main() -> i64 { handle a() with { Q.q(b, k) => if b { k(1) } else { k(2) } } }",
+        "fn main() -> i64 { let s: secret i64 = 5; if declassify(s > 2) { 1 } else { 0 } }",
+        // (ADR 0041 A16) a value that does not fit the place it flows to, at each kind of
+        // place: a `let`, an assignment (to a variable, a field, an element, through a
+        // reference), a `return` and a body's value, a struct field, an array element, a call's,
+        // `apply`'s, a `Fn` value's, a method's, an `init`'s, an enum payload's, a `perform`'s and
+        // a resume's argument, a builtin's, a generic fn's and a generic builtin's; an operand; an
+        // `if`'s join; the arity of a call, a pattern and a construct; a call through a variable
+        // that cannot be called; and a `handle` typed by its `return` arm and a resume by its
+        // `handle` (registers D151 and D7), which several of these accepted shapes hold.
+        "fn main() -> i64 { let b: bool = 5; if b { 1 } else { 0 } }",
+        "fn f(x: i64) -> i64 { x }\nfn main() -> i64 { f(true) }",
+        "fn f() -> i64 { true }\nfn main() -> i64 { f() }",
+        "fn main() -> i64 { if 1 { 1 } else { 0 } }",
+        "fn main() -> i64 { let mut n: i64 = 0; while 1 { n = n + 1; } n }",
+        "fn main() -> i64 { 1 + true }",
+        "fn main() -> i64 { let mut x: i64 = 0; x = true; x }",
+        "fn f(x: i64) -> i64 { x }\nfn main() -> i64 { f(1, 2) }",
+        "fn main() -> i64 { let b: u8 = 'a'; let x: i64 = b; x }",
+        "struct P { v: i64 }\nfn main() -> i64 { let q: P = P { v: true }; q.v }",
+        "fn br(x: i64) -> i64 { if x > 20 { 1 } else { 2 } }\nfn main() -> i64 { let s: secret i64 = 5; declassify(s) }",
+        "fn main() -> i64 { let p: ?i64 = 5; if is_some(p) { 42 } else { 0 } }",
+        "fn br(x: i64) -> i64 { if x > 20 { 1 } else { 2 } }\nfn sec() -> secret i64 { 42 }\nfn main() -> i64 { let s: secret i64 = sec(); br(s) }",
+        "fn br(x: i64) -> i64 { if x > 20 { 1 } else { 2 } }\nfn sec() -> secret i64 { 42 }\nfn main() -> i64 { let s: secret i64 = sec(); let f: Fn<i64, i64> = br; apply(f, s) }",
+        "fn br(x: i64) -> i64 { if x > 20 { 1 } else { 2 } }\nfn sec() -> secret i64 { 42 }\nfn main() -> i64 { let s: secret i64 = sec(); let f: Fn<i64, i64> = br; f(s) }",
+        "fn br(x: i64) -> i64 { if x > 20 { 1 } else { 2 } }\nfn sec() -> secret i64 { 42 }\nfn main() -> i64 { let s: secret i64 = sec(); let p: i64 = s; br(p) }",
+        "fn br(x: i64) -> i64 { if x > 20 { 1 } else { 2 } }\nfn sec() -> secret i64 { 42 }\nfn main() -> i64 { let s: secret i64 = sec(); let mut p: i64 = 0; p = s; br(p) }",
+        "fn br(x: i64) -> i64 { if x > 20 { 1 } else { 2 } }\nfn sec() -> secret i64 { 42 }\nfn leak(s: secret i64) -> i64 { s }\nfn main() -> i64 { br(leak(sec())) }",
+        "fn br(x: i64) -> i64 { if x > 20 { 1 } else { 2 } }\nfn sec() -> secret i64 { 42 }\nfn leak(s: secret i64) -> i64 { if true { return s } else { 0 } }\nfn main() -> i64 { br(leak(sec())) }",
+        "fn br(x: i64) -> i64 { if x > 20 { 1 } else { 2 } }\nfn sec() -> secret i64 { 42 }\nstruct P { v: i64 }\nfn main() -> i64 { let s: secret i64 = sec(); let q: P = P { v: s }; br(q.v) }",
+        "fn br(x: i64) -> i64 { if x > 20 { 1 } else { 2 } }\nfn sec() -> secret i64 { 42 }\nfn main() -> i64 { let s: secret i64 = sec(); let a: [i64] = [s, 1]; br(a[0]) }",
+        "fn br(x: i64) -> i64 { if x > 20 { 1 } else { 2 } }\nfn sec() -> secret i64 { 42 }\neffect Ask { q() -> i64; }\nfn ask1() -> i64 ! { Ask } { perform Ask.q() }\nfn main() -> i64 { let s: secret i64 = sec(); let r: i64 = handle ask1() with { Ask.q(k) => k(s) }; br(r) }",
+        "fn br(x: i64) -> i64 { if x > 20 { 1 } else { 2 } }\nfn sec() -> secret i64 { 42 }\neffect Log { put(x: i64) -> i64; }\nfn w(s: secret i64) -> i64 ! { Log } { perform Log.put(s) }\nfn main() -> i64 { handle w(sec()) with { Log.put(x, k) => k(br(x)) } }",
+        "fn br(x: i64) -> i64 { if x > 20 { 1 } else { 2 } }\nfn sec() -> secret i64 { 42 }\nstruct P { v: i64 }\nfn main() -> i64 { let s: secret i64 = sec(); let mut q: P = P { v: 0 }; q.v = s; br(q.v) }",
+        "fn br(x: i64) -> i64 { if x > 20 { 1 } else { 2 } }\nfn sec() -> secret i64 { 42 }\nfn main() -> i64 { let s: secret i64 = sec(); let mut a: [i64] = [0, 1]; a[0] = s; br(a[0]) }",
+        "fn br(x: i64) -> i64 { if x > 20 { 1 } else { 2 } }\nfn sec() -> secret i64 { 42 }\nfn put(p: &mut i64, s: secret i64) -> i64 { *p = s; 0 }\nfn main() -> i64 { let mut x: i64 = 0; put(&mut x, sec()); br(x) }",
+        "fn br(x: i64) -> i64 { if x > 20 { 1 } else { 2 } }\nfn sec() -> secret i64 { 42 }\nfn main() -> i64 { let s: secret i64 = sec(); let p: i64 = if true { s } else { 1 }; br(p) }",
+        "fn br(x: i64) -> i64 { if x > 20 { 1 } else { 2 } }\nfn sec() -> secret i64 { 42 }\nclass C { let n: i64; pub init(n: i64) { self.n = n; 0 } pub fn get(self: &Self, x: i64) -> i64 { br(x) } }\nfn main() -> i64 { let c: C = C::init(1); c.get(sec()) }",
+        "fn br(x: i64) -> i64 { if x > 20 { 1 } else { 2 } }\nfn sec() -> secret i64 { 42 }\nclass C { let n: i64; pub init(n: i64) { self.n = n; 0 } pub fn get(self: &Self, x: i64) -> i64 { br(x) } }\nfn main() -> i64 { let c: C = C::init(sec()); c.get(1) }",
+        "fn br(x: i64) -> i64 { if x > 20 { 1 } else { 2 } }\nfn sec() -> secret i64 { 42 }\nenum E { A(i64), B }\nfn main() -> i64 { let e: E = E::A(sec()); match e { E::A(v) => br(v), E::B => 0 } }",
+        "fn br(x: i64) -> i64 { if x > 20 { 1 } else { 2 } }\nfn sec() -> secret i64 { 42 }\nfn id<T>(x: T) -> T { x }\nfn main() -> i64 { let p: i64 = id(sec()); br(p) }",
+        "fn br(x: i64) -> i64 { if x > 20 { 1 } else { 2 } }\nfn sec() -> secret i64 { 42 }\nfn main() -> i64 { let s: secret i64 = sec(); let p: ?i64 = s; if is_some(p) { 1 } else { 0 } }",
+        "fn main() -> i64 { let o: ?i64 = 5; unwrap_or(o, true) }",
+        "fn main() -> i64 { let mut v: Vec<i64> = vec_new(); push(&mut v, true); 0 }",
+        "fn main() -> i64 { len(5) }",
+        "fn main() -> i64 { let x: i64 = 5; push(x, 1); 0 }",
+        "fn main() -> i64 { let n: i64 = 5; n(1) }",
+        "fn main() -> i64 { apply(5, 1) }",
+        "fn main() -> i64 { let s: secret i64 = 1; let mut v: Vec<i64> = vec_new(); push(&mut v, s); 0 }",
+        "fn main() -> i64 { is_some(5) }",
+        "enum E { A(i64), B }\nfn main() -> i64 { let e: E = E::A(1, 2); 0 }",
+        "enum E { A(i64), B }\nfn main() -> i64 { let e: E = E::A(1); match e { E::A(x, y) => x, E::B => 0 } }",
+        "enum E { A(i64, i64), B }\nfn main() -> i64 { let e: E = E::A(1, 2); match e { E::A(x) => x, E::B => 0 } }",
+        "enum E { B, A(i64) }\nfn main() -> i64 { let e: E = E::A(1); match e { E::B => 0, E::A(x, y) => x } }",
+        "effect Q { ask(x: i64) -> i64; }\nfn w() -> i64 ! { Q } { perform Q.ask(3) }\nfn main() -> i64 { if handle w() with { Q.ask(x, k) => k(x), return v => v > 2 } { 42 } else { 0 } }",
+        "effect Q { ask(x: i64) -> secret i64; }\nfn w() -> i64 ! { Q } { let v: secret i64 = perform Q.ask(2); declassify(v) }\nfn main() -> i64 { handle w() with { Q.ask(x, k) => { let s: secret i64 = x; if k(s) > 1 { 42 } else { 0 } } } }",
+        "effect Q { ask(x: i64) -> i64; }\nfn w() -> secret i64 ! { Q } { let v: i64 = perform Q.ask(2); v }\nfn main() -> i64 { if handle w() with { Q.ask(x, k) => k(x), return v => declassify(v) } > 1 { 42 } else { 0 } }",
+        "effect Q { ask(x: i64) -> secret i64; }\nfn w() -> i64 ! { Q } { let v: secret i64 = perform Q.ask(2); declassify(v) }\nfn main() -> i64 { handle w() with { Q.ask(x, k) => { let s: secret i64 = x; let r: i64 = k(s); if r > 1 { 42 } else { 0 } } } }",
+        "effect Q { ask(x: i64) -> i64; }\nfn w() -> secret i64 ! { Q } { let v: i64 = perform Q.ask(2); v }\nfn main() -> i64 { let r: secret i64 = handle w() with { Q.ask(x, k) => if k(x) > 1 { 42 } else { 0 } }; declassify(r) }",
+        "effect Q { ask(x: i64) -> i64; }\nfn w() -> i64 ! { Q } { let v: i64 = perform Q.ask(2); v }\nfn main() -> i64 {\n  let r: secret i64 = handle w() with {\n    Q.ask(x, k) => if k(x) > 1 { 42 } else { 0 },\n    return v => { let s: secret i64 = v; s }\n  };\n  declassify(r)\n}",
+        "fn f(s: secret bool) -> i64 { if !s { 1 } else { 0 } }\nfn main() -> i64 { 0 }",
+        "fn f(s: secret i64) -> i64 { let mut n: i64 = 0; while !(s > n) { n = n + 1; } n }\nfn main() -> i64 { 0 }",
+        "class K { let n: i64; pub init() { self.n = 1; 0 }\n  pub fn m(self: &Self, a: secret bool) -> i64 { if !a { 1 } else { 2 } } }\nfn main() -> i64 { 0 }",
+        "fn f(a: secret bool, b: secret bool) -> secret bool { !a && b }\nfn main() -> i64 { 0 }",
+        // A TCP socket builtin is typed as the oracle types it (ADR 0056), and a public byte
+        // array widens to a secret one where the element widens (ADR 0051).
+        "fn main() -> i64 { let b: [u8] = tcp_read(0, 4); len(b) }",
+        "fn main() -> i64 { let a: [secret i32] = [1 as i32, 2 as i32]; len(a) }",
+        "fn main() -> i64 { let b: i64 = tcp_read(0, 4); b }",
+        // A `Vec<T>` returned by a generic call is substituted by the oracle's rule (register
+        // D147's checking half): a `secret` element reaching a public `Vec` is refused, and a
+        // struct element is accepted.
+        "fn pass<T>(v: Vec<T>) -> Vec<T> { v }\nfn main() -> i64 { let sv: Vec<secret i64> = vec_new(); let p: Vec<i64> = pass(sv); 0 }",
+        "fn pass<T>(v: Vec<T>) -> Vec<T> { v }\nfn w(sv: Vec<secret u8>) -> Vec<u8> { pass(sv) }\nfn main() -> i64 { 0 }",
+        "fn pass<T>(v: Vec<T>) -> Vec<T> { v }\nfn main() -> i64 { let sv: Vec<secret i64> = vec_new(); let mut p: Vec<i64> = vec_new(); p = pass(sv); 0 }",
+        "struct Q { a: i64 }\nfn pass<T>(v: Vec<T>) -> Vec<T> { v }\nfn w(v: Vec<Q>) -> Vec<Q> { pass(v) }\nfn main() -> i64 { 0 }",
+        "fn pass<T>(v: Vec<T>) -> Vec<T> { v }\nfn main() -> i64 { let sv: Vec<secret i64> = vec_new(); let p: Vec<secret i64> = pass(sv); 0 }",
+        // A `let`'s annotation has no type parameter in scope, as in the oracle: a `T` there is
+        // an unknown type, unless a type of that name is declared (and `String` is the alias).
+        "fn g<T>(x: T) -> i64 { let y: T = x; 0 }\nfn main() -> i64 { g(1) }",
+        "fn g<T>(x: T) -> i64 { let v: Vec<T> = vec_new(); 0 }\nfn main() -> i64 { g(1) }",
+        "struct B<T> { v: T }\nfn g<T>(x: T) -> i64 { let y: ?B<T> = null; 0 }\nfn main() -> i64 { g(1) }",
+        "struct T { a: i64 }\nfn g<T>(x: T) -> i64 { let y: T = T { a: 1 }; 0 }\nfn main() -> i64 { 0 }",
+        "fn g<String>(x: String) -> i64 { let y: String = vec_new(); 0 }\nfn main() -> i64 { 0 }",
+        // A written `?X` over a type no nullable holds is `unknown type ?(nullable)`, wherever
+        // it is written; a reference, a generic instance, `f64`, a channel and `?T` are held.
+        "enum E { A, B }\nstruct Box<T> { v: T }\nclass K { let n: i64; pub init() { self.n = 1; 0 } }\nfn f(x: ?secret bool) -> i64 { 0 }\nfn main() -> i64 { 0 }",
+        "enum E { A, B }\nstruct Box<T> { v: T }\nclass K { let n: i64; pub init() { self.n = 1; 0 } }\nfn f(x: ?[i64]) -> i64 { 0 }\nfn main() -> i64 { 0 }",
+        "enum E { A, B }\nstruct Box<T> { v: T }\nclass K { let n: i64; pub init() { self.n = 1; 0 } }\nfn f(x: ?E) -> i64 { 0 }\nfn main() -> i64 { 0 }",
+        "enum E { A, B }\nstruct Box<T> { v: T }\nclass K { let n: i64; pub init() { self.n = 1; 0 } }\nfn f(x: ?Vec<i64>) -> i64 { 0 }\nfn main() -> i64 { 0 }",
+        "enum E { A, B }\nstruct Box<T> { v: T }\nclass K { let n: i64; pub init() { self.n = 1; 0 } }\nfn f(x: ?K) -> i64 { 0 }\nfn main() -> i64 { 0 }",
+        "enum E { A, B }\nstruct Box<T> { v: T }\nclass K { let n: i64; pub init() { self.n = 1; 0 } }\nfn f(x: ?Fn<i64, i64>) -> i64 { 0 }\nfn main() -> i64 { 0 }",
+        "enum E { A, B }\nstruct Box<T> { v: T }\nclass K { let n: i64; pub init() { self.n = 1; 0 } }\nfn f(x: ?Shared<i64>) -> i64 { 0 }\nfn main() -> i64 { 0 }",
+        "enum E { A, B }\nstruct Box<T> { v: T }\nclass K { let n: i64; pub init() { self.n = 1; 0 } }\nfn f(x: ?String) -> i64 { 0 }\nfn main() -> i64 { 0 }",
+        "enum E { A, B }\nstruct Box<T> { v: T }\nclass K { let n: i64; pub init() { self.n = 1; 0 } }\nfn f(x: ?&i64) -> i64 { 0 }\nfn main() -> i64 { 0 }",
+        "enum E { A, B }\nstruct Box<T> { v: T }\nclass K { let n: i64; pub init() { self.n = 1; 0 } }\nfn f(x: ?Box<i64>) -> i64 { 0 }\nfn main() -> i64 { 0 }",
+        "enum E { A, B }\nstruct Box<T> { v: T }\nclass K { let n: i64; pub init() { self.n = 1; 0 } }\nfn f(x: ?f64) -> i64 { 0 }\nfn main() -> i64 { 0 }",
+        "enum E { A, B }\nstruct Box<T> { v: T }\nclass K { let n: i64; pub init() { self.n = 1; 0 } }\nfn f(x: ?Channel<i64>) -> i64 { 0 }\nfn main() -> i64 { 0 }",
+        "fn f(s: secret bool) -> i64 { let o: ?secret bool = s; if o == null { 1 } else { 0 } }\nfn main() -> i64 { f(true) }",
+        "fn f(a: [?secret i64]) -> i64 { 0 }\nfn main() -> i64 { 0 }",
+        "enum E { A(?secret i64) }\nfn main() -> i64 { 0 }",
+        "fn f<T>(x: ?T) -> i64 { 0 }\nfn main() -> i64 { 0 }",
+        // An enum payload, a `perform`'s argument, a `resume`'s and an array literal's elements
+        // are typed with the type expected there, as the oracle types them: a generic struct
+        // literal takes its type arguments from it, and a `secret` field in it is refused.
+        "struct B<T> { v: T }\nfn main() -> i64 { let a: [B<i64>] = [B { v: 3 }, B { v: 4 }]; 0 }",
+        "struct B<T> { v: T }\nenum E { A(B<i64>) }\nfn main() -> i64 { let e = E::A(B { v: 3 }); 0 }",
+        "struct B<T> { v: T }\neffect Q { q(b: B<i64>) -> i64; }\nfn a() -> i64 ! { Q } { perform Q.q(B { v: 3 }) }\nfn main() -> i64 { handle a() with { Q.q(b, k) => k(b.v) } }",
+        "struct B<T> { v: T }\neffect Q { q(x: i64) -> B<i64>; }\nfn a() -> i64 ! { Q } { let b: B<i64> = perform Q.q(1); b.v }\nfn main() -> i64 { handle a() with { Q.q(x, k) => k(B { v: x }) } }",
+        "struct B<T> { v: T }\nenum E { A(B<i64>) }\nfn main() -> i64 { let s: secret i64 = 5; let e = E::A(B { v: s }); 0 }",
+        "struct B<T> { v: T }\neffect Q { q(b: B<i64>) -> i64; }\nfn a(s: secret i64) -> i64 ! { Q } { perform Q.q(B { v: s }) }\nfn main() -> i64 { 0 }",
+        "struct B<T> { v: T }\nfn main() -> i64 { let s: secret i64 = 5; let a: [B<i64>] = [B { v: s }]; 0 }",
+        "enum E { A(u8) }\nfn main() -> i64 { let e = E::A(5); 0 }",
+        // A method's or an impl method's body, against its return type; an `if` or `match` with no
+        // expected type, whose arms must agree; a `match` arm, a block, a `return` and a call's
+        // argument coerced to the type expected there, so a mismatch inside them is reported where
+        // the oracle reports it.
+        "class K { let n: i64;\n pub init() { self.n = 1; 0 }\n pub fn get(self: &Self) -> bool { self.n } }\nfn main() -> i64 { 0 }",
+        "class K { let n: i64;\n pub init() { self.n = 1; 0 }\n pub fn get(self: &Self, s: secret i64) -> i64 { s } }\nfn main() -> i64 { 0 }",
+        "struct P { n: i64 }\ntrait T { fn eat(self: &Self, x: i64) -> i64; }\nimpl Direct as T for P { fn eat(self: &Self, x: i64) -> i64 { true } }\nfn main() -> i64 { 0 }",
+        "fn main() -> i64 { let c: bool = true; let x = if c { 1 } else { true }; 0 }",
+        "fn main() -> i64 { let c: bool = true; let s: secret i64 = 1; let x = if c { 1 } else { s }; 0 }",
+        "enum E { A, B }\nfn main() -> i64 { let e = E::A; let x = match e { E::A => 1, E::B => true }; 0 }",
+        "enum E { A, B }\nfn main() -> i64 { let e = E::A; let s: secret i64 = 1; let x: i64 = match e { E::A => s, E::B => 2 }; x }",
+        "fn main() -> i64 { let c: bool = true; let x: secret i64 = { if c { true } else { 1 } }; 0 }",
+        "fn main() -> i64 { let c: bool = true; let x: ?i64 = { if c { true } else { 1 } }; 0 }",
+        "fn f(c: bool) -> secret i64 { if c { return if c { true } else { 1 } } else { 0 } }\nfn main() -> i64 { 0 }",
+        "fn f(c: bool) -> ?i64 { if c { return if c { true } else { 1 } } else { null } }\nfn main() -> i64 { 0 }",
+        "fn f(x: ?i64) -> i64 { 0 }\nfn main() -> i64 { f(true) }",
+        "fn f(x: secret i64) -> i64 { 0 }\nfn main() -> i64 { f(true) }",
+        // A value that diverges is not coerced, and is still compared where the oracle compares it: at
+        // a `let`, an assignment, a field, a method's argument, a payload, a `resume`'s argument and
+        // a later array element; a first array element that diverges is compared as the array.
+        "fn f(s: secret i64) -> secret i64 { let x: i64 = return s; x }\nfn main() -> i64 { 0 }",
+        "fn f(s: secret i64) -> secret i64 { let mut x: i64 = 0; x = return s; x }\nfn main() -> i64 { 0 }",
+        "struct H { a: i64 }\nfn f(s: secret i64) -> secret i64 { let h = H { a: return s }; 0 }\nfn main() -> i64 { 0 }",
+        "fn f(s: secret i64) -> secret i64 { let a: [i64] = [return s]; 0 }\nfn main() -> i64 { 0 }",
+        "fn f(s: secret i64) -> secret i64 { let a: [i64] = [1, return s]; 0 }\nfn main() -> i64 { 0 }",
+        "class K { let n: i64;\n pub init() { self.n = 1; 0 }\n pub fn t(self: &Self, a: i64) -> i64 { a } }\nfn f(s: secret i64) -> secret i64 { let k = K::init(); k.t(return s) }\nfn main() -> i64 { 0 }",
+        "enum E { A(i64) }\nfn f(s: secret i64) -> secret i64 { let e = E::A(return s); 0 }\nfn main() -> i64 { 0 }",
+        "effect Q { q(x: i64) -> i64; }\nfn w() -> i64 ! { Q } { perform Q.q(3) }\nfn f(s: secret i64) -> secret i64 { handle w() with { Q.q(x, k) => k(return s) } }\nfn main() -> i64 { 0 }",
+        "fn f(s: secret i64) -> i64 { let a: [secret i64] = [return 5, s]; 0 }\nfn main() -> i64 { 0 }",
+        // An arity: a `perform`'s, an `init`'s, a method's, a qualified call's, a builtin's, a
+        // continuation's and a handler arm's; an undefined fn.
+        "effect Q { q(x: i64) -> i64; }\nfn w() -> i64 ! { Q } { perform Q.q(1, 2) }\nfn main() -> i64 { handle w() with { Q.q(x, k) => k(x) } }",
+        "class K { let n: i64; pub init(a: i64) { self.n = a; 0 } }\nfn main() -> i64 { let k = K::init(); 0 }",
+        "class K { let n: i64;\n pub init() { self.n = 1; 0 }\n pub fn get(self: &Self) -> i64 { self.n } }\nfn main() -> i64 { let k = K::init(); k.get(1) }",
+        "struct P { n: i64 }\ntrait T { fn eat(self: &Self, x: i64) -> i64; }\nimpl Direct as T for P { fn eat(self: &Self, x: i64) -> i64 { x + self.n } }\nfn main() -> i64 { let p = P { n: 1 }; Direct::eat(&p) }",
+        "struct P { n: i64 }\ntrait T { fn eat(self: &Self, x: i64) -> i64; }\nimpl Direct as T for P { fn eat(self: &Self, x: i64) -> i64 { x + self.n } }\nfn main() -> i64 { let p = P { n: 1 }; Direct::eat(&p, 1, 2) }",
+        "fn main() -> i64 { let a: [i64] = [1]; len(a, a) }",
+        "fn main() -> i64 { let mut v: Vec<i64> = vec_new(); push(&mut v); 0 }",
+        "fn main() -> i64 { nope(1) }",
+        "effect Q { q(x: i64) -> i64; }\nfn w() -> i64 ! { Q } { perform Q.q(3) }\nfn main() -> i64 { handle w() with { Q.q(x, k) => k(x, 1) } }",
+        "effect Q { q(x: i64) -> i64; }\nfn w() -> i64 ! { Q } { perform Q.q(3) }\nfn main() -> i64 { handle w() with { Q.q(x, k) => k() } }",
+        "effect Q { q(x: i64) -> i64; }\nfn w() -> i64 ! { Q } { perform Q.q(3) }\nfn main() -> i64 { handle w() with { Q.q(k) => k(1) } }",
+        "effect Q { q(x: i64) -> i64; }\nfn w() -> i64 ! { Q } { perform Q.q(3) }\nfn main() -> i64 { handle w() with { Q.q(x, y, k) => k(1) } }",
+        // A handler arm's body against the `handle`'s type, and a `return` arm's typed with the type
+        // expected of the `handle`.
+        "effect Q { q(x: i64) -> i64; }\nfn w() -> i64 ! { Q } { perform Q.q(3) }\nfn main() -> i64 { handle w() with { Q.q(x, k) => true } }",
+        "struct B<T> { v: T }\neffect Q { q(x: i64) -> i64; }\nfn w() -> i64 ! { Q } { perform Q.q(3) }\nfn main() -> i64 { let b: B<i64> = handle w() with { Q.q(x, k) => k(1), return r => B { v: r } }; b.v }",
+        // An operator's operands: `!` and `-`, and `&&` / `||` over a `secret` and a public `bool`,
+        // which do not join; an index into a non-array; a `send`'s value and a `recv`'s channel;
+        // a type-argument count; an impl method called on a receiver it does not apply to.
+        "fn main() -> i64 { let x: bool = !5; 0 }",
+        "fn main() -> i64 { let x: i64 = -true; 0 }",
+        "fn main() -> i64 { let x: i64 = 5; x[0] }",
+        "fn main() -> i64 { let b: bool = true; b[0] }",
+        "fn f(a: secret bool, b: bool) -> secret bool { a && b }\nfn main() -> i64 { 0 }",
+        "fn f(a: bool, b: secret bool) -> secret bool { a || b }\nfn main() -> i64 { 0 }",
+        "fn main() -> i64 { let x: bool = 1 && true; 0 }",
+        "fn main() -> i64 { let ch: Channel<i64> = channel_new(); send(ch, true); 0 }",
+        "fn main() -> i64 { let ch: Channel<i64> = channel_new(); let s: secret i64 = 1; send(ch, s); 0 }",
+        "fn main() -> i64 { let x: ?i64 = recv(5); 0 }",
+        "fn main() -> i64 { let v: Vec<i64, i64> = vec_new(); 0 }",
+        "struct B<T> { v: T }\nfn f(b: B<i64, i64>) -> i64 { 0 }\nfn main() -> i64 { 0 }",
+        "fn f(c: Channel<i64, i64>) -> i64 { 0 }\nfn main() -> i64 { 0 }",
+        "struct P { n: i64 }\ntrait T { fn eat(self: &Self, x: i64) -> i64; }\nimpl Direct as T for P { fn eat(self: &Self, x: i64) -> i64 { x + self.n } }\nfn main() -> i64 { Direct::eat(5, 1) }",
+        "struct P { n: i64 }\ntrait T { fn eat(self: &Self, x: i64) -> i64; }\nimpl Direct as T for P { fn eat(self: &Self, x: i64) -> i64 { x + self.n } }\nstruct R { m: i64 }\nfn main() -> i64 { let r = R { m: 1 }; Direct::eat(r, 1) }",
+        // A public array into a `secret` one where the element widens (ADR 0051): at a `let` and at a
+        // call's argument, whose parameter the oracle unifies with the coerced argument.
+        "fn f(a: [u8]) -> i64 { let b: [secret u8] = a; len(b) }\nfn main() -> i64 { 0 }",
+        "fn g(b: [secret i64]) -> i64 { len(b) }\nfn f(a: [i64]) -> i64 { g(a) }\nfn main() -> i64 { 0 }",
+        "fn f(x: [secret u8]) -> i64 { len(x) }\nfn main() -> i64 { let b: [u8] = [1 as u8]; f(b) }",
+        // A `handle` whose `return` arm holds a `handle` of its own, with a call through an `i64`
+        // in an operation arm: the `return` arm's first typing leaves no continuation behind.
+        "effect Q { ask(x: i64) -> i64; }\neffect R { op(y: i64) -> i64; }\nfn w() -> i64 ! { Q } { perform Q.ask(3) }\nfn w2() -> i64 ! { R } { perform R.op(4) }\nfn main() -> i64 {\n  handle w() with {\n    Q.ask(x, k) => { let z: i64 = 5; z(1) },\n    return v => handle w2() with { R.op(y, k2) => k2(y) }\n  }\n}",
+        // An impl method's receiver kind and effect row against its trait's, both ways, the row
+        // compared sorted and once each.
+        "struct P { n: i64 }\ntrait T { fn eat(self: &Self, x: i64) -> i64; }\nimpl Direct as T for P { fn eat(self: &mut Self, x: i64) -> i64 { x } }\nfn main() -> i64 { let mut p: P = P { n: 1 }; Direct::eat(&mut p, 1) }",
+        "struct P { n: i64 }\ntrait T { fn eat(self: &mut Self, x: i64) -> i64; }\nimpl Direct as T for P { fn eat(self: &Self, x: i64) -> i64 { x } }\nfn main() -> i64 { let p: P = P { n: 1 }; Direct::eat(&p, 1) }",
+        "effect Q { ask(x: i64) -> i64; }\nstruct P { n: i64 }\ntrait T { fn eat(self: &Self, x: i64) -> i64; }\nimpl Direct as T for P { fn eat(self: &Self, x: i64) -> i64 ! { Q } { perform Q.ask(x) } }\nfn main() -> i64 { 0 }",
+        "effect Q { ask(x: i64) -> i64; }\nstruct P { n: i64 }\ntrait T { fn eat(self: &Self, x: i64) -> i64 ! { Q }; }\nimpl Direct as T for P { fn eat(self: &Self, x: i64) -> i64 { x } }\nfn main() -> i64 { 0 }",
+        "effect Q { ask(x: i64) -> i64; }\nstruct P { n: i64 }\ntrait T { fn eat(self: &Self, x: i64) -> i64 ! { Q }; }\nimpl Direct as T for P { fn eat(self: &Self, x: i64) -> i64 ! { Q } { perform Q.ask(x) } }\nfn main() -> i64 { let p: P = P { n: 1 }; Direct::eat(&p, 1) }",
+        "effect A { a() -> i64; }\neffect B { b() -> i64; }\nstruct P { n: i64 }\ntrait T { fn eat(self: &Self) -> i64 ! { A, B }; }\nimpl Direct as T for P { fn eat(self: &Self) -> i64 ! { B, A } { perform A.a() + perform B.b() } }\nfn main() -> i64 { 0 }",
+        "effect A { a() -> i64; }\neffect B { b() -> i64; }\nstruct P { n: i64 }\ntrait T { fn eat(self: &Self) -> i64 ! { A }; }\nimpl Direct as T for P { fn eat(self: &Self) -> i64 ! { A, A } { perform A.a() } }\nfn main() -> i64 { 0 }",
+        "effect A { a() -> i64; }\neffect B { b() -> i64; }\nstruct P { n: i64 }\ntrait T { fn eat(self: &Self) -> i64 ! { A, B }; }\nimpl Direct as T for P { fn eat(self: &Self) -> i64 ! { A } { perform A.a() } }\nfn main() -> i64 { 0 }",
+        // `unwrap_or` takes `T` from the expected type only where the oracle hands the call one (a
+        // `let` annotation, an assignment), and then widens its first argument to `?T`; a `null`
+        // first argument takes its type from the second. A generic fn under a `let` annotation.
+        "fn main() -> i64 { let x: i64 = 3; let y: i64 = unwrap_or(x, 1); y }",
+        "fn main() -> i64 { let x: i64 = 4; let mut y: i64 = 0; y = unwrap_or(x, 1); y }",
+        "fn main() -> i64 { let x: ?i64 = 4; let y: secret i64 = unwrap_or(x, 1); 0 }",
+        "fn main() -> i64 { let y: i64 = unwrap_or(null, 1); y }",
+        "fn pick<T>(x: ?T, d: T) -> T { d }\nfn main() -> i64 { let x: i64 = 3; let y: i64 = pick(x, 1); y }",
+        // A value coerced from `[S]` into `[secret S]` takes the expected type, as the oracle's
+        // coercion gives it, at a join, in a nested array literal and through a generic fn's
+        // `T` or `[T]` parameter.
+        "fn main() -> i64 {\n    let c: bool = true;\n    let pubs: [i64] = [1, 2];\n    let sec: [secret i64] = [5];\n    let x: [secret i64] = if c { sec } else { pubs };\n    declassify(x[0])\n}",
+        "fn f(c: bool) -> [secret u8] {\n    let fallback: [secret u8] = \"zz\";\n    if c { \"ab\" } else { fallback }\n}\nfn main() -> i64 { len(f(true)) }",
+        "fn main() -> i64 {\n    let c: bool = true;\n    let s: [secret u8] = if c { \"ab\" } else { \"cd\" };\n    let t: [secret u8] = if c { s } else { \"cd\" };\n    0\n}",
+        "fn main() -> i64 {\n    let a: [[secret u8]] = [\"ab\", \"cd\"];\n    declassify(a[0][0]) == 'a';\n    0\n}",
+        "fn id<T>(x: T) -> T { x }\nfn main() -> i64 {\n    let a: [secret u8] = id(\"abc\");\n    declassify(a[0]) == 'a';\n    0\n}",
+        "fn id<T>(x: T) -> T { x }\nfn main() -> i64 { let a: [secret i64] = id([1, 2]); declassify(a[0]) }",
+        "fn put<T>(x: T, a: [T]) -> T { x }\nfn main() -> i64 { let s: secret i64 = 3; declassify(put(s, [1, 2])) }",
+        "struct B<T> { v: T }\nfn wrap<T>(x: T) -> B<T> { B { v: x } }\nfn main() -> i64 {\n    let pubs: [i64] = [1, 2];\n    let b: B<[secret i64]> = wrap(pubs);\n    let c: B<secret i64> = wrap(5);\n    let d: B<?i64> = wrap(6);\n    declassify(b.v[0])\n}",
+        // A generic call's `null` argument before the one that binds `T`, which the oracle types
+        // after it; a `secret T` parameter, which no argument meets; a `?T` the oracle cannot form.
+        "fn takes<T>(x: ?T, d: T) -> i64 {\n    if is_some(x) { 0 } else { 40 }\n}\nfn main() -> i64 {\n    takes(null, true) + 2\n}",
+        "fn put<T>(x: ?T, y: T) -> T { y }\nfn main() -> i64 { put(null, 8) + 1 }",
+        "struct B<T> { v: T }\nfn takes<T>(x: ?B<T>, d: T) -> i64 { 1 }\nfn main() -> i64 { takes(null, 3) }",
+        "fn put<T>(x: T, a: secret T) -> T { x }\nfn main() -> i64 { put(4, 5) }",
+        "fn pick<T>(x: ?T, d: T) -> T { d }\nfn main() -> i64 { let x: ?i64 = 4; let y: secret i64 = pick(x, 1); 0 }",
+        // A type argument count is checked before the arguments (too few, too many with an unknown
+        // one), and a field access on a type that is not a struct, an instance or a class.
+        "struct P<A, B> { a: A, b: B }\nfn main() -> i64 { let p: P<i64> = P { a: 1, b: 2 }; 0 }",
+        "fn main() -> i64 { let v: Vec<Bogus, i64> = vec_new(); 0 }",
+        "struct P<A, B> { a: A, b: B }\nfn f(p: P<Bogus>) -> i64 { 0 }\nfn main() -> i64 { 0 }",
+        "struct P { x: i64 }\nfn put<T>(t: &mut T, s: secret i64) -> i64 {\n    (*t).x = s;\n    0\n}\nfn main() -> i64 {\n    let mut p: P = P { x: 0 };\n    let s: secret i64 = 42;\n    put(&mut p, s);\n    if p.x > 3 { 1 } else { 0 }\n}",
+        "struct P {\n    x: i64,\n}\n\nfn main() -> i64 {\n    let n: i64 = 5;\n    n.x\n}",
+        // Two effect rows of one length that name different effects; `unwrap_or` over a `null` with
+        // no expected type, and with a `secret` one its default must widen to; an array literal
+        // passed to a plain `[i64]` parameter, which the oracle gives no expected type.
+        "effect A { a() -> i64; }\neffect B { b() -> i64; }\nstruct P { n: i64 }\ntrait T { fn eat(self: &Self) -> i64 ! { A }; }\nimpl Direct as T for P { fn eat(self: &Self) -> i64 ! { B } { perform B.b() } }\nfn main() -> i64 { 0 }",
+        "fn f() -> i64 { unwrap_or(null, 1) }\nfn main() -> i64 { f() }",
+        "fn main() -> i64 { let y: secret i64 = unwrap_or(null, true); 0 }",
+        "fn sum(a: [i64]) -> i64 { 0 }\nfn main() -> i64 { sum([true]) }",
     ];
     let mut sources: Vec<String> = DA_BODIES.iter().map(|b| DA_CLASS.replace('@', b)).collect();
     sources.extend(OTHER.iter().map(|s| s.to_string()));

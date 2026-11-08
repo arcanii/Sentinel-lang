@@ -1,0 +1,14 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c41_method_arity_mismatch.sentinel\")"
+---
+sentinel::types::method_arity_mismatch
+
+  × method `K.get` expected 0 argument(s), got 1
+    ╭─[tests/ui/c41_method_arity_mismatch.sentinel:16:7]
+ 15 │     let k = K::init();
+ 16 │     k.get(1)
+    ·       ─┬─
+    ·        ╰── 
+ 17 │ }
+    ╰────

@@ -1,11 +1,14 @@
-//! Shared by the self-hosted driver tests: the refusals `scg` ports (ADR 0041 A14,
-//! register D97).
+//! Shared by the self-hosted driver tests: the refusals `scg` ports (ADR 0041 A14 and
+//! A16, register D97).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// The oracle's refusals the self-hosted typer ports, by diagnostic code. Every other type
-/// error is still out of scope (ADR 0041 D7), so a driver typing such a program need not
+/// The oracle's refusals the self-hosted typer ports, by diagnostic code: A14's, and since A16
+/// its checks that a value fits the place it flows to, the `if` / `while` condition check,
+/// and its arity, type-argument, impl-signature, index, field-access, callee, undefined-fn
+/// and unknown-type checks (`selfhost/types/tcheck.sentinel`). Every
+/// other error is still out of scope (ADR 0041 D7), so a driver typing such a program need not
 /// refuse it.
 const PORTED_REFUSALS: &[&str] = &[
     "sentinel::types::unknown_field",
@@ -16,6 +19,31 @@ const PORTED_REFUSALS: &[&str] = &[
     "sentinel::types::init_field_read_before_assign",
     "sentinel::types::init_self_used_before_assigned",
     "sentinel::types::return_in_init",
+    "sentinel::types::secret_branch",
+    "sentinel::types::mismatch",
+    "sentinel::types::return_type_mismatch",
+    "sentinel::types::call_arg_mismatch",
+    "sentinel::types::fn_value_arg_mismatch",
+    "sentinel::types::fn_value_arity_mismatch",
+    "sentinel::types::match_arm_type_mismatch",
+    "sentinel::types::handler_arm_type_mismatch",
+    "sentinel::types::operation_arity_mismatch",
+    "sentinel::types::kont_arity_mismatch",
+    "sentinel::types::class_init_arity_mismatch",
+    "sentinel::types::method_arity_mismatch",
+    "sentinel::types::variant_payload_arity_mismatch",
+    "sentinel::types::type_arg_inference_conflict",
+    "sentinel::types::type_arg_count_mismatch",
+    "sentinel::types::impl_method_signature_mismatch",
+    "sentinel::types::impl_method_receiver_mismatch",
+    "sentinel::types::index_not_int",
+    "sentinel::types::index_on_non_array",
+    "sentinel::types::field_access_on_non_struct",
+    "sentinel::types::callee_not_callable",
+    "sentinel::types::apply_target_not_fn",
+    "sentinel::types::unknown_type",
+    "sentinel::resolve::arity_mismatch",
+    "sentinel::resolve::undefined_function",
 ];
 
 /// Every `tests/ui` fixture whose pinned diagnostic (its `ui.rs` snapshot) carries one of

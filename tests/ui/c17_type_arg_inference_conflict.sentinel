@@ -1,0 +1,11 @@
+// Refusal parity (ADR 0041 A16): the oracle refuses a `Vec<secret i64>` passed through a generic fn into a `Vec<i64>` with `sentinel::types::type_arg_inference_conflict`, and every
+// self-hosted driver makes the same refusal with the same message.
+fn pass<T>(v: Vec<T>) -> Vec<T> {
+    v
+}
+
+fn main() -> i64 {
+    let sv: Vec<secret i64> = vec_new();
+    let p: Vec<i64> = pass(sv);
+    0
+}

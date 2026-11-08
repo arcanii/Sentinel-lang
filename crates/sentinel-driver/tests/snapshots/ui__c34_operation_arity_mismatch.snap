@@ -1,0 +1,14 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c34_operation_arity_mismatch.sentinel\")"
+---
+sentinel::types::operation_arity_mismatch
+
+  × handler arm `Q.q` has 1 parameter(s) but expected 2
+    ╭─[tests/ui/c34_operation_arity_mismatch.sentinel:13:9]
+ 12 │     handle w() with {
+ 13 │         Q.q(k) => k(1),
+    ·         ───────┬──────
+    ·                ╰── 
+ 14 │     }
+    ╰────

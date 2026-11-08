@@ -33,11 +33,10 @@
 // Three tags are deliberately ABSENT, and one of the absences is load-bearing:
 // `process` / `sealedchannel` are not writable in a phantom slot at all (they are
 // covered by `tests/pass/c16_mono_key_handle_tags.sentinel` instead), and `u128` is
-// omitted because `scg` models no `u128` — it would resolve the marker to the `i64`
-// handle and this program would stop being byte-identical, pinning a known divergence
-// (register D20) instead of the tag. Adding a `u128` marker is the correct way to
-// close D20 once `scg` has one; until then its absence is a decision, not an
-// oversight.
+// omitted because `scg` models no `u128` — it refuses the marker as an unknown type
+// (ADR 0041 A16, register D20), so this program would stop compiling under it. A `u128`
+// marker belongs here once `scg` models `u128`; until then its absence is a decision,
+// not an oversight.
 //
 // Trace: the phantoms carry no data, so the arithmetic is entirely in the `a` fields:
 // 6 + 7 + 8 + 9 + 12 = 42. Exit 42, no stdout.

@@ -1,0 +1,11 @@
+// Refusal parity (ADR 0041 A16): the oracle refuses a field access on a value that is not a
+// struct, a generic instance or a class with `sentinel::types::field_access_on_non_struct`,
+// and every self-hosted driver makes the same refusal with the same message.
+struct P {
+    x: i64,
+}
+
+fn main() -> i64 {
+    let n: i64 = 5;
+    n.x
+}

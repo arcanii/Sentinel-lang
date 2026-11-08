@@ -1,0 +1,14 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c41_class_init_arity_mismatch.sentinel\")"
+---
+sentinel::types::class_init_arity_mismatch
+
+  × class `K::init` expected 1 argument(s), got 0
+    ╭─[tests/ui/c41_class_init_arity_mismatch.sentinel:12:13]
+ 11 │ fn main() -> i64 {
+ 12 │     let k = K::init();
+    ·             ┬
+    ·             ╰── 
+ 13 │     0
+    ╰────

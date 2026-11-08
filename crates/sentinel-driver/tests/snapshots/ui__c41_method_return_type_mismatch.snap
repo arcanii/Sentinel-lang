@@ -1,0 +1,14 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c41_method_return_type_mismatch.sentinel\")"
+---
+sentinel::types::return_type_mismatch
+
+  × `K::get` returns bool but its body produces i64
+    ╭─[tests/ui/c41_method_return_type_mismatch.sentinel:10:9]
+  9 │     pub fn get(self: &Self) -> bool {
+ 10 │         self.n
+    ·         ───┬──
+    ·            ╰── 
+ 11 │     }
+    ╰────

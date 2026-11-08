@@ -1,0 +1,19 @@
+// Refusal parity (ADR 0041 A16): the oracle refuses a qualified call whose receiver the impl does not apply to with `sentinel::types::impl_method_receiver_mismatch`, and every
+// self-hosted driver makes the same refusal with the same message.
+struct P {
+    n: i64,
+}
+
+trait T {
+    fn eat(self: &Self, x: i64) -> i64;
+}
+
+impl Direct as T for P {
+    fn eat(self: &Self, x: i64) -> i64 {
+        x + self.n
+    }
+}
+
+fn main() -> i64 {
+    Direct::eat(5, 1)
+}

@@ -20,14 +20,28 @@
 // (8g) path (a): `scg` discovers + merges the multi-module program ITSELF (via the
 // self-hosted `merge_source`, no Rust pre-pass), then lowers the merged source.
 use types::run;
+use types::check_program;
 use merge::merge_source;
 
 fn main() -> i64 {
-    let inp: [u8] = merge_source();
-    let mut result: Vec<u8> = vec_new();
-    // (ADR 0041 A14, register D97) 1 when the typer refused the program.
-    let rc: i64 = run(inp, 4, &mut result);
-    let arr: [u8] = vec_to_array(result);
-    print_bytes(arr);
-    rc
+    // Before it generates code, the ported type checks and then the constant-time verifier
+    // over every body `snc build` verifies (`types/tcheck.sentinel`). A refusal there is the
+    // answer, and no code is generated.
+    let chk: [u8] = merge_source();
+    let mut cres: Vec<u8> = vec_new();
+    let crc: i64 = check_program(chk, &mut cres);
+    if crc != 0 {
+        let carr: [u8] = vec_to_array(cres);
+        print_bytes(carr);
+        crc
+    } else {
+        let _c: [u8] = vec_to_array(cres);
+        let inp: [u8] = merge_source();
+        let mut result: Vec<u8> = vec_new();
+        // (ADR 0041 A14, register D97) 1 when the typer refused the program.
+        let rc: i64 = run(inp, 4, &mut result);
+        let arr: [u8] = vec_to_array(result);
+        print_bytes(arr);
+        rc
+    }
 }

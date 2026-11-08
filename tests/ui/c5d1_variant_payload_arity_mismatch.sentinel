@@ -1,0 +1,11 @@
+// Refusal parity (ADR 0041 A16): the oracle refuses an enum variant built with more payloads than it declares with `sentinel::types::variant_payload_arity_mismatch`, and every
+// self-hosted driver makes the same refusal with the same message.
+enum E {
+    A(i64),
+    B,
+}
+
+fn main() -> i64 {
+    let e: E = E::A(1, 2);
+    0
+}

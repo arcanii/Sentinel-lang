@@ -1,0 +1,15 @@
+// Refusal parity (ADR 0041 A16): the oracle refuses a handler arm whose body's type is not the `handle`'s with `sentinel::types::handler_arm_type_mismatch`, and every
+// self-hosted driver makes the same refusal with the same message.
+effect Q {
+    q(x: i64) -> i64;
+}
+
+fn w() -> i64 ! { Q } {
+    perform Q.q(3)
+}
+
+fn main() -> i64 {
+    handle w() with {
+        Q.q(x, k) => true,
+    }
+}

@@ -1,0 +1,15 @@
+// Refusal parity (ADR 0041 A16): the oracle refuses `match` arms of different types, with no type expected of the `match` with `sentinel::types::match_arm_type_mismatch`, and every
+// self-hosted driver makes the same refusal with the same message.
+enum E {
+    A,
+    B,
+}
+
+fn main() -> i64 {
+    let e = E::A;
+    let x = match e {
+        E::A => 1,
+        E::B => true,
+    };
+    0
+}

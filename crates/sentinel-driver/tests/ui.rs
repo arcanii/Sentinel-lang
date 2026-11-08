@@ -246,6 +246,27 @@ ui_snapshot!(c70_callee_not_callable, "c70_callee_not_callable.sentinel");
 ui_snapshot!(c70_fn_value_arity_mismatch, "c70_fn_value_arity_mismatch.sentinel");
 ui_snapshot!(c70_fn_value_arg_mismatch, "c70_fn_value_arg_mismatch.sentinel");
 
+// ---- ADR 0041 A16: the self-hosted checks refuse what the oracle refuses ----
+// One fixture for each ported code no other fixture carries, so that every self-hosted
+// driver is held to the oracle's refusal of it (`common::assert_refuses_what_the_oracle_refuses`).
+ui_snapshot!(c05_call_arity_mismatch, "c05_call_arity_mismatch.sentinel");
+ui_snapshot!(c05_undefined_function, "c05_undefined_function.sentinel");
+ui_snapshot!(c14_field_access_on_non_struct, "c14_field_access_on_non_struct.sentinel");
+ui_snapshot!(c15_nullable_over_secret, "c15_nullable_over_secret.sentinel");
+ui_snapshot!(c16_index_on_non_array, "c16_index_on_non_array.sentinel");
+ui_snapshot!(c17_type_arg_inference_conflict, "c17_type_arg_inference_conflict.sentinel");
+ui_snapshot!(c34_handler_arm_type_mismatch, "c34_handler_arm_type_mismatch.sentinel");
+ui_snapshot!(c34_kont_arity_mismatch, "c34_kont_arity_mismatch.sentinel");
+ui_snapshot!(c34_operation_arity_mismatch, "c34_operation_arity_mismatch.sentinel");
+ui_snapshot!(c41_class_init_arity_mismatch, "c41_class_init_arity_mismatch.sentinel");
+ui_snapshot!(c41_method_arity_mismatch, "c41_method_arity_mismatch.sentinel");
+ui_snapshot!(c41_method_return_type_mismatch, "c41_method_return_type_mismatch.sentinel");
+ui_snapshot!(c42_impl_method_receiver_mismatch, "c42_impl_method_receiver_mismatch.sentinel");
+ui_snapshot!(c5d1_match_arm_type_mismatch, "c5d1_match_arm_type_mismatch.sentinel");
+ui_snapshot!(c5d1_variant_payload_arity_mismatch, "c5d1_variant_payload_arity_mismatch.sentinel");
+ui_snapshot!(c5d3_vec_type_arg_count_mismatch, "c5d3_vec_type_arg_count_mismatch.sentinel");
+ui_snapshot!(c70_apply_target_not_fn, "c70_apply_target_not_fn.sentinel");
+
 // ---- C5.2 constant-time verification rejection (the MIR D5 pass) ----
 ui_snapshot!(c52_secret_leak, "c52_secret_leak.sentinel");
 
@@ -296,6 +317,7 @@ ui_snapshot!(c52_secret_via_deref_place, "c52_secret_via_deref_place.sentinel");
 ui_snapshot!(c52_secret_via_method, "c52_secret_via_method.sentinel");
 ui_snapshot!(c52_secret_via_class_init, "c52_secret_via_class_init.sentinel");
 ui_snapshot!(c52_secret_via_impl_method, "c52_secret_via_impl_method.sentinel");
+ui_snapshot!(c52_secret_fn_then_method, "c52_secret_fn_then_method.sentinel");
 ui_snapshot!(c52_secret_via_field, "c52_secret_via_field.sentinel");
 ui_snapshot!(c52_secret_via_match, "c52_secret_via_match.sentinel");
 ui_snapshot!(c52_secret_or_leak, "c52_secret_or_leak.sentinel");

@@ -378,6 +378,18 @@ fn tclass_init(buf: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src:
     append_str(buf, " (init #");
     append_int(buf, selfvid);
     append_str(buf, " (");
+    // (ADR 0026 A2) mode 5 lowers and verifies this body, as `snc build` does
+    // (`lower_method`): a fresh function whose parameters are the init's, `self` left
+    // unbound so each use of it is an opaque public value. The MIR dump (mode 2) and the
+    // `snc ctverify` mirror (mode 3) cover free fns only, as the oracle's dumps do.
+    if (*c).mode == 5 {
+        mir_reset(c);
+        let ieb: i64 = mir_new_block(c);
+        (*c).mir_cur = ieb;
+        0
+    } else {
+        0
+    };
     emit_tparams(buf, k, s, e, src, cur, c, gb, true);
     append_str(buf, ") ");
     // (ADR 0041 A14 / ADR 0022 A3, registers D97 and D129) the body's first token, for the
@@ -406,6 +418,15 @@ fn tclass_init(buf: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src:
     (*c).rf_init = true;
     dump_texpr(buf, ibody, 0 - 1, src, c, gb);
     (*c).rf_init = false;
+    if (*c).mode == 5 {
+        let ibv: i64 = (*c).lastval;
+        let icb: i64 = (*c).mir_cur;
+        mir_term_return(c, icb, ibv);
+        mir_verify_fn(c);
+        0
+    } else {
+        0
+    };
     push(buf, ')');
     // (Bar B / classes) cg: the init DEFINE (`void @Class__init(ptr out, params)`; the
     // `0`-placeholder tail is NOT lowered). Appended to cgcls (after the fns).
@@ -497,11 +518,36 @@ fn tmethod(buf: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u
     push(buf, ' ');
     append_str(buf, skw);
     append_str(buf, " (");
+    // (ADR 0026 A2) mode 5 lowers and verifies this body (see `tclass_init`).
+    if (*c).mode == 5 {
+        mir_reset(c);
+        let meb: i64 = mir_new_block(c);
+        (*c).mir_cur = meb;
+        0
+    } else {
+        0
+    };
+    let tm_pv0: i64 = (*c).nextvid;
     emit_tparams(buf, k, s, e, src, cur, c, gb, true);
+    let tm_pvn: i64 = (*c).nextvid;
     append_str(buf, ") ");
     *cur = *cur + 1;             // skip `->`
     let mret: TypeE = parse_type(k, s, e, src, cur);
     let mrth: i64 = type_of_typeexpr(c, mret, gb);
+    // (`types/tcheck.sentinel`) an impl method's signature is its trait's: its receiver
+    // kind, parameters, return type and effect row.
+    let mut mrow: Vec<i64> = vec_new();
+    if (*k)[*cur] == 24 {
+        tc_read_row(k, s, e, src, *cur, c, &mut mrow);
+        0
+    } else {
+        0
+    };
+    if (*c).tc_imp {
+        tc_impl_sig(c, src, mn_s, mn_e, tm_pv0, tm_pvn, mrth, excl, &mrow)
+    } else {
+        0
+    };
     if (*k)[*cur] == 24 {
         skip_effect_row(k, cur)
     } else {
@@ -533,8 +579,50 @@ fn tmethod(buf: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u
     (*c).consuming = true;
     // (ADR 0071 D2 amendment A1) the caller is a new owner of the returned value.
     (*c).cg_own = true;
-    dump_texpr(buf, mbody, mrth, src, c, gb);
+    (*c).tc_st = tc_body_pushdown(c, mrth);
+    let mbt: i64 = dump_texpr(buf, mbody, mrth, src, c, gb);
+    // As a fn's (`decl_fn`), named `Class::method`, or `impl Trait for Type :: method`.
+    if (*c).sdiv {
+        0
+    } else if !tc_fits(c, mrth, mbt) {
+        let mut mnm: Vec<u8> = vec_new();
+        if (*c).tc_imp {
+            append_str(&mut mnm, "impl ");
+            let its: i64 = (*c).tc_its;
+            let ite: i64 = (*c).tc_ite;
+            append_slice(&mut mnm, src, its, ite);
+            append_str(&mut mnm, " for ");
+            let iys: i64 = (*c).tc_iys;
+            let iye: i64 = (*c).tc_iye;
+            append_slice(&mut mnm, src, iys, iye);
+            append_str(&mut mnm, " :: ");
+            0
+        } else {
+            let cs: i64 = (*c).clns[cid];
+            let ce: i64 = (*c).clne[cid];
+            let mut ci: i64 = cs;
+            while ci < ce {
+                push(&mut mnm, (*c).snb[ci]);
+                ci = ci + 1;
+            }
+            append_str(&mut mnm, "::");
+            0
+        };
+        append_slice(&mut mnm, src, mn_s, mn_e);
+        tc_ret_mismatch(c, mnm, mrth, mbt)
+    } else {
+        0
+    };
     (*c).fnret = svmfr;
+    if (*c).mode == 5 {
+        let mbv: i64 = (*c).lastval;
+        let mcb: i64 = (*c).mir_cur;
+        mir_term_return(c, mcb, mbv);
+        mir_verify_fn(c);
+        0
+    } else {
+        0
+    };
     push(buf, ')');
     // (Bar B / classes) cg: the method DEFINE (`<ret> @<sym>(ptr self, params)`) → cgcls.
     if cg_on(c) {
@@ -747,17 +835,30 @@ fn scan_trm_loop(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut
         let mn_e: i64 = (*e)[*cur];
         *cur = *cur + 1;         // skip name
         *cur = *cur + 1;         // skip `(`
-        let _tm_excl: bool = tparse_self_kind(k, cur);
+        let tm_excl: bool = tparse_self_kind(k, cur);
         push(&mut (*c).trmpc, *cur);
         skip_to_rparen(k, cur);
         *cur = *cur + 1;         // skip `->`
         let mret: TypeE = parse_type(k, s, e, src, cur);
         let mrth: i64 = type_of_typeexpr(c, mret, gb);
+        // (`types/tcheck.sentinel`) the receiver kind and the effect row, for the impl
+        // method signature check.
+        push(&mut (*c).tc_trx, if tm_excl { 1 } else { 0 });
+        push(&mut (*c).tc_tres, len((*c).tc_trep));
         if (*k)[*cur] == 24 {
+            let mut trow: Vec<i64> = vec_new();
+            tc_read_row(k, s, e, src, *cur, c, &mut trow);
+            let nrow: i64 = len(trow);
+            let mut ri: i64 = 0;
+            while ri < nrow {
+                push(&mut (*c).tc_trep, trow[ri]);
+                ri = ri + 1;
+            }
             skip_effect_row(k, cur)
         } else {
             0
         };
+        push(&mut (*c).tc_tree, len((*c).tc_trep));
         *cur = *cur + 1;         // skip `;`
         let bst: i64 = len((*c).snb);
         let mut bi: i64 = mn_s;
@@ -1006,7 +1107,14 @@ fn type_impl(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &
     } else {
         0
     };
+    (*c).tc_imp = true;
+    (*c).tc_itid = tid;
+    (*c).tc_its = tr_s;
+    (*c).tc_ite = tr_e;
+    (*c).tc_iys = ty_s;
+    (*c).tc_iye = ty_e;
     timpl_methods(out, k, s, e, src, cur, c, gb, cid, sid);
+    (*c).tc_imp = false;
     push(out, ')');
     0
 }

@@ -104,6 +104,7 @@ fn dump_te_binary(out: &mut Vec<u8>, bop: i64, l: Expr, r: Expr, exp: i64, src: 
             // operands' MIR/CG already emit into the streams during their `dump_texpr`.
             let mut lbuf: Vec<u8> = vec_new();
             let lt: i64 = dump_texpr(&mut lbuf, l, 0 - 1, src, c, gb);
+            let lnul: bool = (*c).tc_lastnull;
             let mut blv: i64 = if mir_on(c) {
                 (*c).lastval
             } else {
@@ -199,6 +200,9 @@ fn dump_te_binary(out: &mut Vec<u8>, bop: i64, l: Expr, r: Expr, exp: i64, src: 
             };
             let mut rbuf: Vec<u8> = vec_new();
             let rt: i64 = dump_texpr(&mut rbuf, r, rexp, src, c, gb);
+            // (`types/tcheck.sentinel`) the oracle's operand checks.
+            let rnul: bool = (*c).tc_lastnull;
+            tc_binary(c, bop, lt, rt, lnul, rnul);
             let mut brv: i64 = if mir_on(c) {
                 (*c).lastval
             } else {
@@ -546,6 +550,7 @@ fn dump_te_unary(out: &mut Vec<u8>, uop: i64, inner: Expr, exp: i64, src: &[u8],
                 0
             };
             let it: i64 = dump_texpr(out, inner, 0 - 1, src, c, gb);
+            tc_unary(c, uop, it);
             if un_mplace {
                 (*c).mir_place = true;
                 (*c).mir_suppress = un_msup;
@@ -598,7 +603,12 @@ fn dump_te_unary(out: &mut Vec<u8>, uop: i64, inner: Expr, exp: i64, src: &[u8],
             // `!` -> bool; `&`/`&mut` -> a ref type; `*` -> strip a ref (or the
             // guard's element); `-` -> operand.
             let rt: i64 = if uop == 2 {
-                2
+                // As the oracle types it, `!` on a `secret bool` is a `secret bool`.
+                if is_secret(c, it) {
+                    it
+                } else {
+                    2
+                }
             } else if uop == 4 {
                 mk_ref(c, 0, it)
             } else if uop == 5 {
@@ -776,14 +786,18 @@ fn dump_te_unary(out: &mut Vec<u8>, uop: i64, inner: Expr, exp: i64, src: &[u8],
 fn dump_te_if(out: &mut Vec<u8>, cnd: Expr, thn: Expr, els: Expr, exp: i64, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
             // (ADR 0071 D2 amendment A1) the `if`'s owning context, for its branches' tails.
             let if_own: bool = (*c).cg_tailown;
+            let if_tcs: bool = (*c).tc_in;
             append_str(out, "(if ");
             // (6/N) the condition is a read (non-consuming); the branches INHERIT the
             // if's consuming context (a returned/moved if moves its branch-tail Vars —
             // the conservative union: a Var moved in EITHER branch is recorded).
             let svc: bool = (*c).consuming;
             (*c).consuming = false;
-            dump_texpr(out, cnd, 0 - 1, src, c, gb);
+            let ict: i64 = dump_texpr(out, cnd, 0 - 1, src, c, gb);
             (*c).consuming = svc;
+            // The condition is `bool`, never `secret bool` (the oracle's `If` arm), checked
+            // before the branches are typed, as the oracle checks it.
+            tc_cond(c, ict, "if");
             // (8b) codegen: capture the cond operand, allocate the then/else/merge block
             // labels (+ the if-result slot, filled after the then walk), then branch on the
             // cond and open the then block. No phi — the arms store into the result slot.
@@ -843,6 +857,7 @@ fn dump_te_if(out: &mut Vec<u8>, cnd: Expr, thn: Expr, els: Expr, exp: i64, src:
             // Both branches inherit the `if`'s expectation, so a `?T`-returning `if`
             // widens each branch's tail (and the `if`'s type is that branch type).
             (*c).cg_own = if_own;
+            (*c).tc_st = if_tcs;
             let tt: i64 = dump_texpr(out, thn, exp, src, c, gb);
             let tdiv: bool = (*c).sdiv;
             // (8b) codegen: capture the then operand; reserve the if-result slot; store the
@@ -910,8 +925,17 @@ fn dump_te_if(out: &mut Vec<u8>, cnd: Expr, thn: Expr, els: Expr, exp: i64, src:
             };
             push(out, ' ');
             (*c).cg_own = if_own;
+            (*c).tc_st = if_tcs;
             let et: i64 = dump_texpr(out, els, exp, src, c, gb);
             let edv: bool = (*c).sdiv;
+            // The oracle's join: two branches that do not diverge must have one type.
+            if tdiv {
+                0
+            } else if edv {
+                0
+            } else {
+                tc_same(c, tt, et)
+            };
             // (register D59) the if's type is the JOIN — the oracle's `If` node type, which the
             // typer picks by DIVERGENCE: the else arm's type when only the then arm diverges,
             // the then arm's otherwise (both diverging included). `tdiv` / `edv` are that
@@ -1026,9 +1050,10 @@ fn dump_te_if(out: &mut Vec<u8>, cnd: Expr, thn: Expr, els: Expr, exp: i64, src:
 
 fn dump_te_call(out: &mut Vec<u8>, cn: [u8], ca: Args, exp: i64, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
             // (4g) a callee resolving to an in-scope VAR is a continuation-resume
-            // `k(arg)` (vars shadow fns) → `(resume-kont #vid <args> :T)`, T = the
-            // resume value's type, unless the var holds a `Fn` value (below); else a
-            // free-fn call.
+            // `k(arg)` (vars shadow fns) → `(resume-kont #vid <args> :T)`, T = the type of
+            // the `handle` whose arm binds the continuation (register D7; in the code
+            // generator's walk, the resume value's type), unless the var holds a `Fn` value
+            // (below); else a free-fn call.
             let kid: i64 = sc_lookup(c, &cn);
             // (ADR 0070 D14) a `Fn<T,R>` value called directly, `f(x)`, is the `apply`
             // builtin's call `apply(f, x)`, as the oracle types it: the variable becomes
@@ -1058,6 +1083,16 @@ fn dump_te_call(out: &mut Vec<u8>, cn: [u8], ca: Args, exp: i64, src: &[u8], c: 
             } else if kid >= 0 && !fnvar {
                 sink_name(gb, cn);
                 let kty: i64 = env_get(c, kid);
+                // (`types/tcheck.sentinel`) outside the code generator, a call through a
+                // variable that is neither a continuation nor a `Fn` value is the oracle's
+                // `callee_not_callable`.
+                if cg_on(c) {
+                    0
+                } else if tc_kont_ret(c, kid) < 0 {
+                    tc_not_callable(c, kty)
+                } else {
+                    0
+                };
                 // (Bar B / effects) cg: collect the resume arg FIRST, then load + clear the
                 // kont slot (ADR 0074 D1, the oracle's order), then emit kont_resume + the
                 // pure/bubble split.
@@ -1091,9 +1126,43 @@ fn dump_te_call(out: &mut Vec<u8>, cn: [u8], ca: Args, exp: i64, src: &[u8], c: 
                 } else {
                     0
                 };
-                let rkt: i64 = dump_args_capture_first(out, ca, false, src, c, gb);
+                // (`types/tcheck.sentinel`) a continuation takes exactly one argument.
+                let mut rkn: i64 = 0;
+                let rka: Args = tc_args_count(ca, &mut rkn);
+                if rkn != 1 {
+                    if tc_on(c) {
+                        let mut km: Vec<u8> = vec_new();
+                        append_str(&mut km, "continuation resume call expected 1 argument(s), got ");
+                        append_int(&mut km, rkn);
+                        refuse(c, "sentinel::types::kont_arity_mismatch", vec_to_array(km))
+                    } else {
+                        0
+                    }
+                } else {
+                    0
+                };
+                // (register D7) outside the code generator a resume returns the type of the
+                // `handle` whose arm binds the continuation, and its argument must fit the
+                // operation's result type: the oracle types it with that type as its
+                // expectation, coerces it to that type, then compares.
+                let kret: i64 = if cg_on(c) {
+                    0 - 1
+                } else {
+                    tc_kont_ret(c, kid)
+                };
+                let karg: i64 = if kret >= 0 {
+                    tc_kont_arg(c, kid)
+                } else {
+                    0 - 1
+                };
+                (*c).tc_x0 = karg;
+                let rkt: i64 = dump_args_capture_first(out, rka, false, src, c, gb);
+                (*c).tc_x0 = 0 - 1;
                 (*c).consuming = svk;
-                let krt: i64 = if rkt == 0 - 1 {
+                tc_fit(c, karg, rkt);
+                let krt: i64 = if kret >= 0 {
+                    kret
+                } else if rkt == 0 - 1 {
                     kty
                 } else {
                     rkt
@@ -1119,12 +1188,31 @@ fn dump_te_call(out: &mut Vec<u8>, cn: [u8], ca: Args, exp: i64, src: &[u8], c: 
                 krt
             } else {
                 let fid: i64 = if fnvar { 37 } else { fn_lookup(c, src, &cn) };
-                let cargs: Args = if fnvar {
+                // (`types/tcheck.sentinel`) a call to no fn this program or the language
+                // declares is the resolver's refusal.
+                if fid < 0 {
+                    if tc_on(c) {
+                        let mut ufm: Vec<u8> = vec_new();
+                        append_str(&mut ufm, "undefined function `");
+                        rf_put(&mut ufm, &cn);
+                        push(&mut ufm, '`');
+                        refuse(c, "sentinel::resolve::undefined_function", vec_to_array(ufm))
+                    } else {
+                        0
+                    }
+                } else {
+                    0
+                };
+                let cargs0: Args = if fnvar {
                     let fnm: [u8] = vec_to_array(cg_copy_name(&cn));
                     Args::Cell(Expr::Var(fnm), ca)
                 } else {
                     ca
                 };
+                // The arity check, before any argument is typed, as the resolver makes it.
+                let mut ncall: i64 = 0;
+                let cargs: Args = tc_args_count(cargs0, &mut ncall);
+                tc_call_arity(c, fid, ncall, fnvar);
                 sink_name(gb, cn);
                 append_str(out, "(call #");
                 append_int(out, fid);
@@ -1188,6 +1276,7 @@ fn dump_te_call(out: &mut Vec<u8>, cn: [u8], ca: Args, exp: i64, src: &[u8], c: 
                 } else if fid == 37 {
                     // (ADR 0070) apply: the return type depends on the concrete
                     // Fn<T,R> passed as the first arg, not a fixed per-FnId table.
+                    (*c).tc_fnv = fnvar;
                     dump_apply_call(out, cargs, src, c, gb)
                 } else if is_container_builtin(fid) {
                     // (ADR 0071 M1.4c) shared_new/shared_get/mutex_new/lock: the
@@ -1329,6 +1418,13 @@ fn dump_te_field(out: &mut Vec<u8>, ft: Expr, fdn: [u8], exp: i64, src: &[u8], c
                 struct_of_handle(c, bare)
             };
             let ccid: i64 = class_of_handle(c, bare);
+            // (`types/tcheck.sentinel`) the oracle refuses a field access whose target is not a
+            // struct, a generic instance or a class.
+            if sid < 0 && ccid < 0 {
+                tc_field_non_struct(c, tty)
+            } else {
+                0
+            };
             let fidx: i64 = if sid >= 0 {
                 field_index(c, sid, &fdn)
             } else {
@@ -1649,10 +1745,24 @@ fn dump_te_method(out: &mut Vec<u8>, mt: Expr, mn: [u8], ma: Args, exp: i64, src
                 push(out, ' ');
                 append_str(out, vec_to_array(tbuf));
                 push(out, ' ');
+                let mnm: Vec<u8> = cg_copy_name(&mn);
                 append_str(out, mn);
                 // (ADR 0071 D2 amendment A1) the method drops its parameters: owning args.
                 (*c).cg_ownargs = true;
-                dump_cargs(out, ma, mps, mpe, 0, src, c, gb);
+                let mna: i64 = dump_cargs(out, ma, mps, mpe, 0, src, c, gb);
+                // (`types/tcheck.sentinel`) the oracle's arity check.
+                if mrow >= 0 {
+                    if mna != mpe - mps {
+                        let mtn: Vec<u8> = tc_class_name(c, rcid);
+                        tc_method_arity(c, mtn, vec_to_array(mnm), mpe - mps, mna)
+                    } else {
+                        let _mm1: [u8] = vec_to_array(mnm);
+                        0
+                    }
+                } else {
+                    let _mm2: [u8] = vec_to_array(mnm);
+                    0
+                };
                 close_ty(out, mret, c);
                 if cg_on(c) {
                     (*c).cg_collecting = cg_m_col;
@@ -1686,10 +1796,24 @@ fn dump_te_method(out: &mut Vec<u8>, mt: Expr, mn: [u8], ma: Args, exp: i64, src
                 push(out, ' ');
                 append_str(out, vec_to_array(tbuf));
                 push(out, ' ');
+                let mnm2: Vec<u8> = cg_copy_name(&mn);
                 append_str(out, mn);
                 // (ADR 0071 D2 amendment A1) the method drops its parameters: owning args.
                 (*c).cg_ownargs = true;
-                dump_cargs(out, ma, tps, tpe, 0, src, c, gb);
+                let mna2: i64 = dump_cargs(out, ma, tps, tpe, 0, src, c, gb);
+                // (`types/tcheck.sentinel`) the oracle's arity check, named by the impl's type.
+                if trow >= 0 {
+                    if mna2 != tpe - tps {
+                        let itn: Vec<u8> = tc_impl_type_name(c, idef);
+                        tc_method_arity(c, itn, vec_to_array(mnm2), tpe - tps, mna2)
+                    } else {
+                        let _mm3: [u8] = vec_to_array(mnm2);
+                        0
+                    }
+                } else {
+                    let _mm4: [u8] = vec_to_array(mnm2);
+                    0
+                };
                 close_ty(out, mret2, c);
                 if cg_on(c) {
                     (*c).cg_collecting = cg_m_col;
@@ -1713,6 +1837,7 @@ fn dump_te_method(out: &mut Vec<u8>, mt: Expr, mn: [u8], ma: Args, exp: i64, src
 }
 
 fn dump_te_handle(out: &mut Vec<u8>, hb: Expr, ha: HArms, hr: Ret, exp: i64, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
+            let h_tcs: bool = (*c).tc_in;
             append_str(out, "(handle ");
             // (c36b) track dynamic nesting depth: this handle is NESTED (its result is a
             // Kont* the enclosing handle dispatches on) iff depth > 1 after entry. The
@@ -1810,7 +1935,7 @@ fn dump_te_handle(out: &mut Vec<u8>, hb: Expr, ha: HArms, hr: Ret, exp: i64, src
             };
             // (c36a) SAVE + set the return-arm cg state (for the k(v) sites in dump_tharms
             // + the dispatch pure block); `hr` is consumed to peek its token info, then
-            // reconstructed as `hr2` for dump_tret's type dump (modes 0-3) / disposal
+            // reconstructed as `hr2` for dump_tret's type dump (every mode but 4) / disposal
             // (mode 4). Save/restore mirrors the cg_h_* nesting discipline.
             let sv_ret_on: bool = (*c).cg_ret_on;
             let sv_ret_ntok: i64 = (*c).cg_ret_ntok;
@@ -1818,6 +1943,8 @@ fn dump_te_handle(out: &mut Vec<u8>, hb: Expr, ha: HArms, hr: Ret, exp: i64, src
             let sv_ret_mark: i64 = (*c).cg_ret_mark;
             // (ADR 0075 A3) whether the `return` arm is absent or `return v => v`.
             let mut ret_id: bool = true;
+            let mut h_rnt: i64 = 0 - 1;
+            let mut h_rt0: i64 = 0 - 1;
             let hr2: Ret = match hr {
                 Ret::NoRet => {
                     (*c).cg_ret_on = false;
@@ -1828,6 +1955,8 @@ fn dump_te_handle(out: &mut Vec<u8>, hb: Expr, ha: HArms, hr: Ret, exp: i64, src
                     (*c).cg_ret_ntok = rnt;
                     (*c).cg_ret_tok0 = rt0;
                     (*c).cg_ret_mark = ret_mark;
+                    h_rnt = rnt;
+                    h_rt0 = rt0;
                     let rb2: Expr = match rb {
                         Expr::Var(rv) => {
                             ret_id = cg_same_name(&rv, &rn);
@@ -1845,8 +1974,9 @@ fn dump_te_handle(out: &mut Vec<u8>, hb: Expr, ha: HArms, hr: Ret, exp: i64, src
             // in source order, then the `return` arm's wherever it is written; its value is
             // Opaque([body]). An arm's parameters, its continuation and the `return` value
             // are unbound here, so each use lowers to a fresh Opaque of the type this typer
-            // gave it, as the oracle's `lookup_var` does with the oracle's. The two typers
-            // still differ on a resume's type (D7) and a handle's type (D151).
+            // gave it, as the oracle's `lookup_var` does with the oracle's. Since ADR 0041 A16
+            // the two typers agree here on a resume's type (D7) and a handle's type (D151); only
+            // the code generator's own walk, which builds no MIR, types them as before.
             // (ADR 0075 A3) what `cg_ar_classify` needs to know about this `handle` before
             // it judges any one arm: how many op arms it has and how many of them are not a
             // single tail resume, whether its `return` arm returns its value, and whether it
@@ -1864,13 +1994,26 @@ fn dump_te_handle(out: &mut Vec<u8>, hb: Expr, ha: HArms, hr: Ret, exp: i64, src
             };
             (*c).cg_h_retid = ret_id;
             (*c).cg_h_nest = is_nested || hb_handle;
+            // (`types/tcheck.sentinel`, registers D151 and D7) outside the code generator the
+            // `handle`'s type is its `return` arm's, typed first, as the oracle types it, or else
+            // its body's; each operation arm's continuation returns it.
+            let hty: i64 = if cg_on(c) {
+                bty
+            } else if h_rnt >= 0 {
+                tc_ret_arm_ty(c, h_rnt, h_rt0, bty, exp, h_tcs, src, gb)
+            } else {
+                bty
+            };
+            let sv_hk: i64 = (*c).tc_hk;
+            (*c).tc_hk = hty;
             dump_tharms(out, ha2, src, c, gb, is_nested);
+            (*c).tc_hk = sv_hk;
             (*c).cg_h_narms = sv_narms;
             (*c).cg_h_nnon = sv_nnon;
             (*c).cg_h_retid = sv_retid;
             (*c).cg_h_nest = sv_nest;
-            dump_tret(out, hr2, bty, src, c, gb);
-            close_ty(out, bty, c);
+            dump_tret(out, hr2, bty, exp, h_tcs, src, c, gb);
+            close_ty(out, hty, c);
             // (cg) the PURE_RETURN check (the chain's tail) + the merge; restore state.
             if cg_on(c) {
                 let hopid: i64 = (*c).cg_h_opid;
@@ -1971,7 +2114,7 @@ fn dump_te_handle(out: &mut Vec<u8>, hb: Expr, ha: HArms, hr: Ret, exp: i64, src
             };
             if mir_on(c) {
                 let mc: i64 = (*c).mir_cur;
-                let d: i64 = mir_emit_opaque1(c, mc, hbv, bty);
+                let d: i64 = mir_emit_opaque1(c, mc, hbv, hty);
                 (*c).lastval = d;
                 0
             } else {
@@ -1981,5 +2124,5 @@ fn dump_te_handle(out: &mut Vec<u8>, hb: Expr, ha: HArms, hr: Ret, exp: i64, src
             // body-kont detection (cg_tailk) sees it; pop the nesting depth.
             (*c).cg_tailk = is_nested;
             (*c).cg_h_depth = (*c).cg_h_depth - 1;
-            bty
+            hty
 }

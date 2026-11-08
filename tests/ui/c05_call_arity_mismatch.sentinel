@@ -1,0 +1,9 @@
+// Refusal parity (ADR 0041 A16): the oracle refuses a call with more arguments than the fn takes with `sentinel::resolve::arity_mismatch`, and every
+// self-hosted driver makes the same refusal with the same message.
+fn f(a: i64) -> i64 {
+    a
+}
+
+fn main() -> i64 {
+    f(1, 2)
+}

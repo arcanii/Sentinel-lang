@@ -1,0 +1,14 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c14_field_access_on_non_struct.sentinel\")"
+---
+sentinel::types::field_access_on_non_struct
+
+  × field access on non-struct type `i64`
+    ╭─[tests/ui/c14_field_access_on_non_struct.sentinel:10:5]
+  9 │     let n: i64 = 5;
+ 10 │     n.x
+    ·     ┬
+    ·     ╰── 
+ 11 │ }
+    ╰────

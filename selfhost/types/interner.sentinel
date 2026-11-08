@@ -1351,8 +1351,14 @@ fn field_type(c: &mut TyCtx, sid: i64, q: &[u8]) -> i64 {
 fn type_of_typeexpr(c: &mut TyCtx, t: TypeE, gb: &mut Vec<u8>) -> i64 {
     match t {
         TypeE::TIdent(nm) => {
-            // (4h) an in-scope type-param shadows everything else → `<T#idx>`.
-            let tpidx: i64 = tp_lookup(c, &nm);
+            let tnm: [u8] = vec_to_array(cg_copy_name(&nm));
+            // (4h) an in-scope type-param shadows everything else → `<T#idx>`. (A `let`'s
+            // annotation has none in scope in the checking modes: `tc_notp`.)
+            let tpidx: i64 = if (*c).tc_notp {
+                0 - 1
+            } else {
+                tp_lookup(c, &nm)
+            };
             // (4i) `String` is a built-in alias for `Vec<u8>` (ADR 0034 — the oracle
             // desugars it, rendering `Vec<u8>`); a type-param named `String` shadows it.
             let is_string: bool = if tpidx >= 0 {
@@ -1415,11 +1421,21 @@ fn type_of_typeexpr(c: &mut TyCtx, t: TypeE, gb: &mut Vec<u8>) -> i64 {
             } else if cid >= 0 {
                 mk_class(c, cid)
             } else {
+                // (`types/tcheck.sentinel`) a name nothing declares.
+                tc_unknown_type(c, &tnm);
                 0
             }
         },
         TypeE::TNullable(inner) => {
             let ih: i64 = type_of_typeexpr(c, inner, gb);
+            // (`types/tcheck.sentinel`) a `?` over a type no nullable holds.
+            if !tc_null_inner(c, ih) {
+                let qnm: [u8] = "?(nullable)";
+                tc_unknown_type(c, &qnm);
+                0
+            } else {
+                0
+            };
             mk_nullable(c, ih)
         },
         TypeE::TArray(inner) => {
@@ -1439,6 +1455,7 @@ fn type_of_typeexpr(c: &mut TyCtx, t: TypeE, gb: &mut Vec<u8>) -> i64 {
             mk_secret(c, ih)
         },
         TypeE::TGeneric(gn, ga) => {
+            let gnm: [u8] = vec_to_array(cg_copy_name(&gn));
             // (4i) `Vec<T>` → the kind-11 Vec type (D.3 collections). (4h) else
             // `Name<args>` for a user struct → a GenericInstance (resolving each arg,
             // which may itself be a type-param). Any other generic (no such type)
@@ -1487,7 +1504,10 @@ fn type_of_typeexpr(c: &mut TyCtx, t: TypeE, gb: &mut Vec<u8>) -> i64 {
             sink_name(gb, gn);
             if is_vec {
                 let mut vav: Vec<i64> = vec_new();
+                let vav_rf: bool = (*c).rfd;
+                let vav_rl: i64 = len((*c).rfm);
                 collect_tyargs(c, ga, gb, &mut vav);
+                tc_targ_count_first(c, &gnm, 1, &mut vav, vav_rf, vav_rl);
                 let velem: i64 = if len(vav) > 0 {
                     vav[0]
                 } else {
@@ -1515,7 +1535,10 @@ fn type_of_typeexpr(c: &mut TyCtx, t: TypeE, gb: &mut Vec<u8>) -> i64 {
                 // oracle caps nesting at one level (`channel_chanid_for`) and scg
                 // interns any depth structurally.
                 let mut cav: Vec<i64> = vec_new();
+                let cav_rf: bool = (*c).rfd;
+                let cav_rl: i64 = len((*c).rfm);
                 collect_tyargs(c, ga, gb, &mut cav);
+                tc_targ_count_first(c, &gnm, 1, &mut cav, cav_rf, cav_rl);
                 let celem: i64 = if len(cav) > 0 {
                     cav[0]
                 } else {
@@ -1544,11 +1567,17 @@ fn type_of_typeexpr(c: &mut TyCtx, t: TypeE, gb: &mut Vec<u8>) -> i64 {
                 // (`SealedChannelElementNotSupported`) are both refused upstream before
                 // any program reaches here.
                 let mut scav: Vec<i64> = vec_new();
+                let scav_rf: bool = (*c).rfd;
+                let scav_rl: i64 = len((*c).rfm);
                 collect_tyargs(c, ga, gb, &mut scav);
+                tc_targ_count_first(c, &gnm, 1, &mut scav, scav_rf, scav_rl);
                 mk_sealed_channel(c)
             } else if is_fn {
                 let mut fav: Vec<i64> = vec_new();
+                let fav_rf: bool = (*c).rfd;
+                let fav_rl: i64 = len((*c).rfm);
                 collect_tyargs(c, ga, gb, &mut fav);
+                tc_targ_count_first(c, &gnm, 2, &mut fav, fav_rf, fav_rl);
                 let fparam: i64 = if len(fav) > 0 {
                     fav[0]
                 } else {
@@ -1595,7 +1624,10 @@ fn type_of_typeexpr(c: &mut TyCtx, t: TypeE, gb: &mut Vec<u8>) -> i64 {
                 // The constructor path (`shared_new`) was already element-generic
                 // (M1.4c-1b); only the annotation path lagged.
                 let mut sav: Vec<i64> = vec_new();
+                let sav_rf: bool = (*c).rfd;
+                let sav_rl: i64 = len((*c).rfm);
                 collect_tyargs(c, ga, gb, &mut sav);
+                tc_targ_count_first(c, &gnm, 1, &mut sav, sav_rf, sav_rl);
                 let selem: i64 = if len(sav) > 0 {
                     sav[0]
                 } else {
@@ -1605,7 +1637,10 @@ fn type_of_typeexpr(c: &mut TyCtx, t: TypeE, gb: &mut Vec<u8>) -> i64 {
             } else if is_mutex {
                 // (ADR 0016 A1) element-generic, exactly like `is_shared` above.
                 let mut mav: Vec<i64> = vec_new();
+                let mav_rf: bool = (*c).rfd;
+                let mav_rl: i64 = len((*c).rfm);
                 collect_tyargs(c, ga, gb, &mut mav);
+                tc_targ_count_first(c, &gnm, 1, &mut mav, mav_rf, mav_rl);
                 let melem: i64 = if len(mav) > 0 {
                     mav[0]
                 } else {
@@ -1614,10 +1649,15 @@ fn type_of_typeexpr(c: &mut TyCtx, t: TypeE, gb: &mut Vec<u8>) -> i64 {
                 mk_mutex(c, melem)
             } else if gsid >= 0 {
                 let mut gav: Vec<i64> = vec_new();
+                let gav_rf: bool = (*c).rfd;
+                let gav_rl: i64 = len((*c).rfm);
                 collect_tyargs(c, ga, gb, &mut gav);
+                let gnp: i64 = (*c).sttp[gsid];
+                tc_targ_count_first(c, &gnm, gnp, &mut gav, gav_rf, gav_rl);
                 mk_generic(c, gsid, &gav)
             } else {
                 dispose_tyargs(c, ga, gb);
+                tc_unknown_type(c, &gnm);
                 0
             }
         },
@@ -1757,6 +1797,9 @@ fn builtin_ret(c: &mut TyCtx, fid: i64) -> i64 {
         3
     } else if fid == 11 {
         mk_array(c, 3)
+    } else if fid == 18 {
+        // (ADR 0056) tcp_read(conn, max) -> [u8]; the other socket builtins answer `i64`.
+        mk_array(c, 3)
     } else if fid == 21 {
         mk_channel(c, 0)
     } else if fid == 23 {
@@ -1809,8 +1852,17 @@ fn builtin_ret(c: &mut TyCtx, fid: i64) -> i64 {
 // else -1.
 fn fn_lookup(c: &mut TyCtx, src: &[u8], q: &[u8]) -> i64 {
     let b: i64 = builtin_id(q);
+    // (`types/tcheck.sentinel`, ADR 0056) the TCP socket builtins are resolved here for the
+    // checks, which type their calls as the oracle does.
+    let sk: i64 = if cg_on(c) {
+        0 - 1
+    } else {
+        tc_socket_id(q)
+    };
     if b >= 0 {
         b
+    } else if sk >= 0 {
+        sk
     } else {
         let n: i64 = len((*c).ufs);
         let mut i: i64 = 0;

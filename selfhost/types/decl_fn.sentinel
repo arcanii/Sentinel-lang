@@ -172,14 +172,14 @@ fn type_fn(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u
     // `eff_route` answers (the let or chained shape, each a parent that pushes a captured frame
     // and its resumers; straight-line; or a refusal), and one without the embedded shape,
     // straight-line, or the refusal `eff_route` answers (register D160). A NON-effecting fn (or
-    // modes 0-3) walks here; `cg_emit_fn` below
+    // any mode but 4) walks here; `cg_emit_fn` below
     // assembles its single define.
     // The fn return type is the body's expectation — a `?T`-returning fn widens its
     // tail (`dump_texpr` on the body `Block` threads `rty` to the tail).
     let cg_eff_fn: bool = cg_on(c) && (*c).cg_eff;
     if cg_eff_fn {
         // (c35d) classify the tail from a re-parsed CLASSIFICATION COPY of the same
-        // tokens (mode-4 effecting fns only — modes 0-3 and pure fns never re-parse):
+        // tokens (mode-4 effecting fns only — no other mode and no pure fn re-parses a body):
         // move semantics bar inspect-then-reuse of `body`, so a disposable second
         // parse carries the embedded-perform detection + extraction.
         let mut cur2: i64 = body_tok0;
@@ -200,7 +200,19 @@ fn type_fn(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u
         // (ADR 0071 D2 amendment A1) the caller is a new owner of the returned value: the
         // body block hands the owning context on to its tail.
         (*c).cg_own = true;
-        dump_texpr(out, body, rty, src, c, gb);
+        // The oracle coerces the body's value to the return type only where it pushes that type
+        // down, then compares the two unless the body diverges.
+        (*c).tc_st = tc_body_pushdown(c, rty);
+        let bty: i64 = dump_texpr(out, body, rty, src, c, gb);
+        if (*c).sdiv {
+            0
+        } else if !tc_fits(c, rty, bty) {
+            let mut rnm: Vec<u8> = vec_new();
+            append_slice(&mut rnm, src, name_s, name_e);
+            tc_ret_mismatch(c, rnm, rty, bty)
+        } else {
+            0
+        };
         (*c).fnret = svfr;
         // (8d-drops) free the param frame (frame 0) — AFTER the body-block drops (emitted
         // inside the Block arm), BEFORE `curfn` is cleared (cg_is_moved keys on it).
@@ -219,8 +231,9 @@ fn type_fn(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u
         let bv: i64 = (*c).lastval;
         let cb: i64 = (*c).mir_cur;
         mir_term_return(c, cb, bv);
-        if (*c).mode == 3 {
-            // (7d) mode 3: verify this fn's MIR (leaks accumulate in `mirout`).
+        if (*c).mode == 3 || (*c).mode == 5 {
+            // (7d) mode 3: verify this fn's MIR (leaks accumulate in `mirout`); and mode 5,
+            // the code generator's checking pass (`types/tcheck.sentinel`).
             mir_verify_fn(c);
             0
         } else {

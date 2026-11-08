@@ -1,0 +1,14 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c5d1_match_arm_type_mismatch.sentinel\")"
+---
+sentinel::types::match_arm_type_mismatch
+
+  × `match` arms have incompatible types: expected i64, found bool
+    ╭─[tests/ui/c5d1_match_arm_type_mismatch.sentinel:12:17]
+ 11 │         E::A => 1,
+ 12 │         E::B => true,
+    ·                 ──┬─
+    ·                   ╰── 
+ 13 │     };
+    ╰────

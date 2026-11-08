@@ -1,0 +1,14 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c34_kont_arity_mismatch.sentinel\")"
+---
+sentinel::types::kont_arity_mismatch
+
+  × continuation resume call expected 1 argument(s), got 2
+    ╭─[tests/ui/c34_kont_arity_mismatch.sentinel:13:22]
+ 12 │     handle w() with {
+ 13 │         Q.q(x, k) => k(x, 1),
+    ·                      ┬
+    ·                      ╰── 
+ 14 │     }
+    ╰────

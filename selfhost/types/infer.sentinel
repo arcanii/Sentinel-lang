@@ -35,10 +35,16 @@ fn dump_cargs(out: &mut Vec<u8>, a: Args, ps: i64, pe: i64, pidx: i64, src: &[u8
     (*c).cg_ownargs = false;
     let svu: bool = (*c).cg_ufarg;
     (*c).cg_ufarg = own_args;
-    dump_mtargs(out, a, ps, pe, pidx, src, c, gb);
+    // (`types/tcheck.sentinel`) the pool the caller named for `ps`..`pe`, read before an
+    // argument's walk can name another.
+    let pool: i64 = (*c).tc_pool;
+    (*c).tc_pool = 0;
+    let qri: i64 = (*c).tc_qiid;
+    (*c).tc_qiid = 0 - 1;
+    let na: i64 = dump_mtargs(out, a, ps, pe, pidx, pool, qri, src, c, gb);
     (*c).cg_ufarg = svu;
     (*c).consuming = svc;
-    0
+    na
 }
 
 // `pfid` = the callee's user FnId when its declared param types should be pushed down
@@ -59,29 +65,102 @@ fn dump_targs(out: &mut Vec<u8>, a: Args, pfid: i64, pidx: i64, src: &[u8], c: &
             push(out, ' ');
             // (6/N) args INHERIT the caller's consuming context (the call arm sets it —
             // user-fn/construct args consume, builtin args do not).
-            let aexp: i64 = fn_param_ty(c, pfid, pidx);
+            // An array literal's later element (`pfid` -3) is expected, in the checking modes,
+            // to have the first's type, as the oracle types it (`tc_arrs`).
+            let narr: i64 = len((*c).tc_arrs);
+            let aexp: i64 = if pfid != 0 - 3 {
+                fn_param_ty(c, pfid, pidx)
+            } else if tc_on(c) && narr > 0 {
+                (*c).tc_arrs[narr - 1]
+            } else {
+                0 - 1
+            };
             // (ADR 0071 D2 and its amendment A1) an argument to a parameter the callee
             // drops (`cg_ufarg`) is walked in the owning context, so a `Shared` / `Mutex`
             // read out of a place is cloned as it is read, before it is collected.
             (*c).cg_own = (*c).cg_ufarg;
+            // (`types/tcheck.sentinel`) the oracle coerces an argument to a `?T`, `secret T`
+            // or `[secret T]` parameter, and unifies every argument with its parameter; it
+            // coerces a later array element to the first's type.
+            (*c).tc_st = if pfid == 0 - 3 {
+                aexp >= 0
+            } else {
+                tc_pushdown(c, aexp)
+            };
             let cg_argty: i64 = dump_texpr(out, x, aexp, src, c, gb);
+            tc_callarg(c, pfid, pidx, aexp, cg_argty);
+            // An array literal's later element (`dump_array_elems` passes -3).
+            if pfid == 0 - 3 {
+                let na: i64 = len((*c).tc_arrs);
+                let aet: i64 = if na > 0 {
+                    (*c).tc_arrs[na - 1]
+                } else {
+                    0 - 1
+                };
+                tc_fit(c, aet, cg_argty)
+            } else {
+                0
+            };
+            // A builtin's argument, checked as the oracle checks it (`tc_builtin_arg`).
+            let isb: bool = if pfid >= 0 {
+                pfid < 42
+            } else {
+                false
+            };
+            if isb {
+                let nf: i64 = len((*c).tc_firsts);
+                let first: i64 = if pidx == 0 {
+                    cg_argty
+                } else if nf > 0 {
+                    (*c).tc_firsts[nf - 1]
+                } else {
+                    0 - 1
+                };
+                tc_builtin_arg(c, pfid, pidx, cg_argty, first);
+                if pidx == 0 {
+                    push(&mut (*c).tc_firsts, cg_argty);
+                    0
+                } else {
+                    0
+                };
+                0
+            } else {
+                0
+            };
             mir_collect(c);
             cg_collect(c, cg_argty);
-            dump_targs(out, rest, pfid, pidx + 1, src, c, gb)
+            let nrest: i64 = dump_targs(out, rest, pfid, pidx + 1, src, c, gb);
+            if isb {
+                if pidx == 0 {
+                    let _fp: i64 = pop(&mut (*c).tc_firsts);
+                    0
+                } else {
+                    0
+                };
+                0
+            } else {
+                0
+            };
+            1 + nrest
         },
     }
 }
 
-// `dump_targs` with the expectation taken from `mpp[ps + pidx]` (see `dump_cargs`).
-fn dump_mtargs(out: &mut Vec<u8>, a: Args, ps: i64, pe: i64, pidx: i64, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
+// `dump_targs` with the expectation taken from `mpp[ps + pidx]` (see `dump_cargs`). `pool`
+// names where `ps`..`pe` points (`tc_pool_ty`): 0 `mpp`, whose types are the arguments'
+// expectations; 1 an enum variant's payload types and 2 an operation's parameter types,
+// which are expectations only in the checking modes, as in the oracle (the code generator's
+// walk does not take them: register D132 for a `perform`, and an enum construct's likewise).
+// Answers the number of arguments.
+fn dump_mtargs(out: &mut Vec<u8>, a: Args, ps: i64, pe: i64, pidx: i64, pool: i64, qri: i64, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
     match a {
         Args::End => 0,
         Args::Cell(x, rest) => {
             push(out, ' ');
-            let aexp: i64 = if ps >= 0 {
+            let pty: i64 = if ps >= 0 {
                 if pidx >= 0 {
                     if ps + pidx < pe {
-                        (*c).mpp[ps + pidx]
+                        tc_pool_ty(c, pool, ps + pidx)
                     } else {
                         0 - 1
                     }
@@ -91,11 +170,27 @@ fn dump_mtargs(out: &mut Vec<u8>, a: Args, ps: i64, pe: i64, pidx: i64, src: &[u
             } else {
                 0 - 1
             };
+            let aexp: i64 = if pool == 0 {
+                pty
+            } else if tc_on(c) {
+                pty
+            } else {
+                0 - 1
+            };
             (*c).cg_own = (*c).cg_ufarg;
+            // The oracle coerces each argument to its parameter's type, then compares them.
+            (*c).tc_st = aexp >= 0;
             let cg_argty: i64 = dump_texpr(out, x, aexp, src, c, gb);
+            tc_fit(c, pty, cg_argty);
+            // A qualified call's receiver (`pidx` -1) is checked against the impl's target.
+            if pidx < 0 {
+                tc_impl_recv(c, qri, cg_argty)
+            } else {
+                0
+            };
             mir_collect(c);
             cg_collect(c, cg_argty);
-            dump_mtargs(out, rest, ps, pe, pidx + 1, src, c, gb)
+            1 + dump_mtargs(out, rest, ps, pe, pidx + 1, pool, qri, src, c, gb)
         },
     }
 }
@@ -113,13 +208,43 @@ fn dump_array_elems(out: &mut Vec<u8>, a: Args, src: &[u8], c: &mut TyCtx, gb: &
         Args::End => 0 - 1,
         Args::Cell(x, rest) => {
             push(out, ' ');
+            // (`types/tcheck.sentinel`) the oracle coerces the first element to the expected
+            // array's element, and each later one to the first's type after that. The checking
+            // modes give the first element that expectation, as the oracle does; the code
+            // generator's walk gives it none.
+            let aee: i64 = (*c).tc_aee;
+            (*c).tc_aee = 0 - 1;
+            let a0x: i64 = if tc_on(c) {
+                aee
+            } else {
+                0 - 1
+            };
+            (*c).tc_st = a0x >= 0;
             // (6/N) the array arm sets consuming=true before this; elements inherit it.
-            let t0: i64 = dump_texpr(out, x, 0 - 1, src, c, gb);
+            let t0: i64 = dump_texpr(out, x, a0x, src, c, gb);
+            // The later elements take the first's type as the oracle has it after the
+            // coercion: the expected element when the first fits it, else its own type, and
+            // its own type when it diverges, which the oracle does not coerce (the array is
+            // then compared whole where it flows).
+            let t0div: bool = (*c).sdiv;
+            let et: i64 = if t0div {
+                t0
+            } else if aee >= 0 {
+                if tc_fits(c, aee, t0) {
+                    aee
+                } else {
+                    t0
+                }
+            } else {
+                t0
+            };
             mir_collect(c);
             // (8c-2) codegen: collect the FIRST element's operand (the rest collect
             // via `dump_targs`); the array arm emits the alloc+stores over them.
             cg_collect(c, t0);
-            dump_targs(out, rest, 0 - 1, 0, src, c, gb);
+            push(&mut (*c).tc_arrs, et);
+            dump_targs(out, rest, 0 - 3, 0, src, c, gb);
+            let _ae: i64 = pop(&mut (*c).tc_arrs);
             t0
         },
     }
@@ -175,6 +300,20 @@ fn subst_type(c: &mut TyCtx, h: i64, args: &Vec<i64>) -> i64 {
                 ggi = ggi + 1;
             }
             mk_generic(c, gdecl, &gnewargs)
+        } else if k == 11 && tc_on(c) {
+            // (ADR 0041 A16, register D147) a `Vec<T>` is substituted by the oracle's rule
+            // (`Type::substitute`'s `Vec` arm): the element is rebuilt only when what it
+            // becomes can be a `Vec` element, else the `Vec<T>` is kept. The checks read
+            // the result (a `Vec<T>` where the oracle has `Vec<i64>` is a type mismatch),
+            // so only the checking modes take it: the code generator's walk keeps `Vec<T>`
+            // as before, and with it the order it interns types in.
+            let inn11: i64 = (*c).ta[idx];
+            let s11: i64 = subst_type(c, inn11, args);
+            if tc_vec_elem(c, s11) {
+                mk_vec(c, s11)
+            } else {
+                h
+            }
         } else {
             h
         }
@@ -420,15 +559,43 @@ fn subst_fully(c: &mut TyCtx, h: i64, bi: &mut Vec<i64>, bt: &mut Vec<i64>) -> i
 // that are identical today; narrowing it re-opens D45. Do not restate it as "the
 // substituted type looks concrete enough".
 fn arg_expected(c: &mut TyCtx, pty: i64, bi: &mut Vec<i64>, bt: &mut Vec<i64>) -> i64 {
+    // (`types/tcheck.sentinel`) a `secret T` parameter: the oracle pushes it down unsubstituted,
+    // and nothing coerces to that, so the checking modes push nothing (`tc_gcallarg` refuses).
+    let psec_t: bool = if pty >= tbase() {
+        if (*c).tk[pty - tbase()] == 3 {
+            let pin: i64 = (*c).ta[pty - tbase()];
+            if pin >= tbase() {
+                (*c).tk[pin - tbase()] == 9
+            } else {
+                false
+            }
+        } else {
+            false
+        }
+    } else {
+        false
+    };
     if pty < 0 {
+        0 - 1
+    } else if psec_t && tc_on(c) {
         0 - 1
     } else {
         let sub: i64 = subst_fully(c, pty, bi, bt);
         if sub < 0 {
             0 - 1
         } else if cg_is_nullable(c, sub) {
-            sub
+            // (`types/tcheck.sentinel`) a `?X` the oracle cannot form (its `try_substitute`
+            // gives none, as for `?secret i64`) is pushed down nowhere in the checking modes.
+            if tc_on(c) && !tc_null_inner(c, (*c).ta[sub - tbase()]) {
+                0 - 1
+            } else {
+                sub
+            }
         } else if is_secret_ty(c, sub) {
+            sub
+        } else if tc_on(c) && tc_pushdown(c, sub) {
+            // (`types/tcheck.sentinel`) the oracle's list holds `[secret T]` too; the checking
+            // modes push it down, the code generator's walk does not (see above).
             sub
         } else {
             0 - 1
@@ -442,7 +609,7 @@ fn arg_expected(c: &mut TyCtx, pty: i64, bi: &mut Vec<i64>, bt: &mut Vec<i64>) -
 // Before this, every argument was dumped with no expectation and unification ran only
 // after the whole walk, so a `null` argument (whose type IS its expectation) was typed
 // from a default and, when it came first, that default then bound the type parameter.
-fn dump_args_capture_all(out: &mut Vec<u8>, a: Args, ps: i64, pi: i64, np: i64, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>, atys: &mut Vec<i64>, bi: &mut Vec<i64>, bt: &mut Vec<i64>) -> i64 {
+fn dump_args_capture_all(out: &mut Vec<u8>, a: Args, ps: i64, pi: i64, np: i64, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>, atys: &mut Vec<i64>, bi: &mut Vec<i64>, bt: &mut Vec<i64>, gfid: i64) -> i64 {
     match a {
         Args::End => 0,
         Args::Cell(x, rest) => {
@@ -463,6 +630,8 @@ fn dump_args_capture_all(out: &mut Vec<u8>, a: Args, ps: i64, pi: i64, np: i64, 
             // `dump_texpr_node` decides "read out of a place" from the node's own shape —
             // the oracle's test — not from a tracker a compound argument can leak.
             (*c).cg_own = (*c).cg_ufarg;
+            // (`types/tcheck.sentinel`) the oracle coerces an argument it pushes a type down to.
+            (*c).tc_st = aexp >= 0;
             let t0: i64 = dump_texpr(out, x, aexp, src, c, gb);
             mir_collect(c);
             // (Bar B / generics-b) codegen: collect the arg operand so cg_emit_call can
@@ -472,12 +641,27 @@ fn dump_args_capture_all(out: &mut Vec<u8>, a: Args, ps: i64, pi: i64, np: i64, 
             // (register D45) Unify HERE, not after the walk, so argument i+1's expectation
             // can see what argument i bound. `subst_bind` is first-binding-wins, matching
             // the oracle's `unify_one` into a shared subst.
+            // (`types/tcheck.sentinel`) a `null` the walk typed with no expectation binds nothing
+            // in the checking modes: the oracle types it after the arguments that bind it.
+            let tnull: bool = if t0 >= 0 {
+                false
+            } else if !tc_on(c) {
+                false
+            } else if pty >= tbase() {
+                (*c).tk[pty - tbase()] == 4
+            } else {
+                false
+            };
             if pty < 0 {
                 0
+            } else if tnull {
+                0
             } else {
+                // (`types/tcheck.sentinel`) the oracle's unifier, against what is bound so far.
+                tc_gcallarg(c, src, gfid, pi, pty, t0, bi, bt);
                 unify_one(c, pty, t0, bi, bt)
             };
-            dump_args_capture_all(out, rest, ps, pi + 1, np, src, c, gb, atys, bi, bt)
+            dump_args_capture_all(out, rest, ps, pi + 1, np, src, c, gb, atys, bi, bt, gfid)
         },
     }
 }
@@ -518,6 +702,13 @@ fn dump_generic_call(out: &mut Vec<u8>, fid: i64, ca: Args, exp: i64, src: &[u8]
     //
     // Best-effort, exactly as the oracle's `let _ = unify_one(…)` is: a mismatch here is
     // silent, because a real one resurfaces downstream.
+    //
+    // The oracle has an expected type only where it hands the call one (where the walk marks
+    // the call strict, `tc_in`), and a `null` argument it cannot type yet it types after the
+    // others. This walk types each argument in order and seeds wherever it has `exp`, which
+    // types such a `null` from the seed instead; so it also seeds where the oracle does not,
+    // and accepts a call the oracle refuses there (register D180). A seed only adds the
+    // widenings the oracle makes (into `?T`, `secret T` or `[secret T]`).
     if ntp > 0 {
         if exp < 0 {
             0
@@ -527,7 +718,7 @@ fn dump_generic_call(out: &mut Vec<u8>, fid: i64, ca: Args, exp: i64, src: &[u8]
     } else {
         0
     };
-    dump_args_capture_all(&mut abuf, ca, ps, 0, np, src, c, gb, &mut atys, &mut bi, &mut bt);
+    dump_args_capture_all(&mut abuf, ca, ps, 0, np, src, c, gb, &mut atys, &mut bi, &mut bt, fid);
     // Build the resolved subst list in type-param INDEX order (0..ntp).
     let mut subst: Vec<i64> = vec_new();
     let mut ti: i64 = 0;
@@ -686,9 +877,47 @@ fn targ_of_builtin(c: &mut TyCtx, fid: i64, firstty: i64, exp: i64) -> i64 {
 // `(targs T)` precedes the args in the output). Returns the call's result type.
 fn dump_gcall(out: &mut Vec<u8>, fid: i64, ca: Args, exp: i64, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
     let mut abuf: Vec<u8> = vec_new();
+    // (`types/tcheck.sentinel`) where the oracle hands an `unwrap_or` call an expected type
+    // (the strict mark), it binds `T` from it first and coerces the first argument to `?T`;
+    // the checking modes do the same (`useed`, -1 when there is none).
+    let useed: i64 = if fid != 1 {
+        0 - 1
+    } else if !tc_on(c) {
+        0 - 1
+    } else if (*c).tc_in {
+        exp
+    } else {
+        0 - 1
+    };
+    if useed >= 0 {
+        if tc_null_inner(c, useed) {
+            (*c).tc_x0 = mk_nullable(c, useed);
+            0
+        } else {
+            0
+        }
+    } else {
+        0
+    };
     // (ADR 0034 D8) `push` (fid 8) consumes its element (the arg after the first).
     let firstty: i64 = dump_args_capture_first(&mut abuf, ca, fid == 8, src, c, gb);
-    let targ: i64 = targ_of_builtin(c, fid, firstty, exp);
+    (*c).tc_x0 = 0 - 1;
+    let ga1: i64 = (*c).tc_a1;
+    tc_gbuiltin(c, fid, firstty, ga1, useed);
+    let targ0: i64 = targ_of_builtin(c, fid, firstty, exp);
+    // In the checking modes `unwrap_or`'s `T` is the seed, or, when the first argument is a
+    // `null` the walk typed with no expectation, the second argument's type.
+    let targ: i64 = if fid != 1 {
+        targ0
+    } else if !tc_on(c) {
+        targ0
+    } else if useed >= 0 {
+        useed
+    } else if firstty < 0 {
+        ga1
+    } else {
+        targ0
+    };
     // (ADR 0041 A14 / ADR 0034 C1, registers D97 and D125) `vec_to_array` copies the
     // elements and leaves the Vec holding them, so its element must own nothing.
     if fid == 10 {
@@ -737,6 +966,9 @@ fn dump_gcall(out: &mut Vec<u8>, fid: i64, ca: Args, exp: i64, src: &[u8], c: &m
 // stance — the oracle rejects that case too, so the differential never
 // compares scg's behavior for it).
 fn dump_apply_call(out: &mut Vec<u8>, ca: Args, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
+    // (`types/tcheck.sentinel`) whether this is `f(x)` through a `Fn` value, not `apply(f, x)`.
+    let direct: bool = (*c).tc_fnv;
+    (*c).tc_fnv = false;
     match ca {
         Args::End => 0,
         Args::Cell(f, rest) => {
@@ -750,6 +982,11 @@ fn dump_apply_call(out: &mut Vec<u8>, ca: Args, src: &[u8], c: &mut TyCtx, gb: &
             };
             push(out, ' ');
             let ft: i64 = dump_texpr(out, f, 0 - 1, src, c, gb);
+            if direct {
+                0
+            } else {
+                tc_apply_target(c, ft)
+            };
             mir_collect(c);
             cg_collect(c, ft);
             let param_ty: i64 = if ft < tbase() {
@@ -770,6 +1007,16 @@ fn dump_apply_call(out: &mut Vec<u8>, ca: Args, src: &[u8], c: &mut TyCtx, gb: &
                 Args::Cell(x, rest2) => {
                     push(out, ' ');
                     let xt: i64 = dump_texpr(out, x, param_ty, src, c, gb);
+                    let fk: i64 = if ft >= tbase() {
+                        (*c).tk[ft - tbase()]
+                    } else {
+                        0 - 1
+                    };
+                    if fk == 16 {
+                        tc_apply_arg(c, param_ty, xt, direct)
+                    } else {
+                        0
+                    };
                     mir_collect(c);
                     cg_collect(c, xt);
                     dump_targs(out, rest2, 0 - 1, 0, src, c, gb);
@@ -819,14 +1066,33 @@ fn dump_args_capture_first(out: &mut Vec<u8>, a: Args, consume_rest: bool, src: 
         Args::End => 0 - 1,
         Args::Cell(x, rest) => {
             push(out, ' ');
-            let t0: i64 = dump_texpr(out, x, 0 - 1, src, c, gb);
+            // The first argument's expectation, if the caller set one (`tc_x0`), which the
+            // oracle coerces it to.
+            let x0e: i64 = (*c).tc_x0;
+            (*c).tc_x0 = 0 - 1;
+            (*c).tc_st = x0e >= 0;
+            let t0: i64 = dump_texpr(out, x, x0e, src, c, gb);
             mir_collect(c);
             // (8c-2) codegen: collect the FIRST arg's operand (the rest collect via
             // `dump_targs`) so a generic builtin like `len` can read it back.
             cg_collect(c, t0);
             let svc: bool = (*c).consuming;
             if consume_rest { (*c).consuming = true; 0 } else { 0 };
-            dump_targs(out, rest, 0 - 1, 0, src, c, gb);
+            // The second argument is walked as `dump_targs` walks its first, and its type
+            // kept (`tc_a1`) for the generic builtins' checks.
+            let t1: i64 = match rest {
+                Args::End => 0 - 1,
+                Args::Cell(x1, rest1) => {
+                    push(out, ' ');
+                    (*c).cg_own = (*c).cg_ufarg;
+                    let ty1: i64 = dump_texpr(out, x1, 0 - 1, src, c, gb);
+                    mir_collect(c);
+                    cg_collect(c, ty1);
+                    dump_targs(out, rest1, 0 - 1, 1, src, c, gb);
+                    ty1
+                },
+            };
+            (*c).tc_a1 = t1;
             (*c).consuming = svc;
             t0
         },
@@ -874,6 +1140,11 @@ fn dump_container_call(out: &mut Vec<u8>, fid: i64, ca: Args, src: &[u8], c: &mu
     } else {
         let mut abuf: Vec<u8> = vec_new();
         let ht: i64 = dump_args_capture_first(&mut abuf, ca, false, src, c, gb);
+        if ht >= 0 {
+            tc_builtin_arg(c, fid, 0, ht, ht)
+        } else {
+            0
+        };
         let elem: i64 = if ht == 0 - 1 {
             0 - 1
         } else {
@@ -963,7 +1234,9 @@ fn is_process_channel_elem_h(h: i64) -> bool {
 // condition).
 fn dump_process_recv(out: &mut Vec<u8>, ca: Args, exp: i64, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
     let mut abuf: Vec<u8> = vec_new();
-    dump_targs(&mut abuf, ca, 0 - 1, 0, src, c, gb);
+    // FnId 30 names the builtin for its argument's check; a builtin's argument gets no
+    // expectation (`fn_param_ty`), so the walk is unchanged.
+    dump_targs(&mut abuf, ca, 30, 0, src, c, gb);
     let inner: i64 = if cg_is_nullable(c, exp) {
         nullable_inner_of(c, exp)
     } else {
@@ -989,6 +1262,11 @@ fn dump_process_recv(out: &mut Vec<u8>, ca: Args, exp: i64, src: &[u8], c: &mut 
 fn dump_channel_recv(out: &mut Vec<u8>, ca: Args, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
     let mut abuf: Vec<u8> = vec_new();
     let ht: i64 = dump_args_capture_first(&mut abuf, ca, false, src, c, gb);
+    if ht >= 0 {
+        tc_builtin_arg(c, 23, 0, ht, ht)
+    } else {
+        0
+    };
     let elem: i64 = if ht == 0 - 1 {
         0 - 1
     } else {
@@ -1136,7 +1414,10 @@ fn dump_sfields(out: &mut Vec<u8>, f: Fields, sid: i64, gen: bool, gargs: &Vec<i
             // (ADR 0071 D2 amendment A1) the struct owns its fields (its drop walks them),
             // so a field's value goes to a new owner.
             (*c).cg_own = true;
+            // The oracle coerces a field's value to the field's type, then compares the two.
+            (*c).tc_st = true;
             let sf_vty: i64 = dump_texpr(out, fval, ftype, src, c, gb);
+            tc_fit(c, ftype, sf_vty);
             mir_collect(c);
             // (8c-1) codegen: collect this field's operand + type onto the shared
             // arg stacks (gated by `cg_collecting`); the struct-lit arm emits the

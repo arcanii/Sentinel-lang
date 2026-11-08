@@ -1,0 +1,14 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c05_call_arity_mismatch.sentinel\")"
+---
+sentinel::resolve::arity_mismatch
+
+  × `f` takes 1 argument(s), got 2
+   ╭─[tests/ui/c05_call_arity_mismatch.sentinel:8:5]
+ 7 │ fn main() -> i64 {
+ 8 │     f(1, 2)
+   ·     ┬
+   ·     ╰── 
+ 9 │ }
+   ╰────

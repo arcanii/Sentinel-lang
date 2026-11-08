@@ -1,0 +1,14 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c70_apply_target_not_fn.sentinel\")"
+---
+sentinel::types::apply_target_not_fn
+
+  × `apply`'s first argument must be a function value (`Fn<T,R>`), got `i64`
+   ╭─[tests/ui/c70_apply_target_not_fn.sentinel:4:11]
+ 3 │ fn main() -> i64 {
+ 4 │     apply(5, 1)
+   ·           ┬
+   ·           ╰── 
+ 5 │ }
+   ╰────

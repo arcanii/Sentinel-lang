@@ -1,0 +1,15 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c17_type_arg_inference_conflict.sentinel\")"
+---
+sentinel::types::type_arg_inference_conflict
+
+  × conflicting inference for `T` in call to `pass`: bound to `i64` then to
+  │ `<secret#0>`
+    ╭─[tests/ui/c17_type_arg_inference_conflict.sentinel:9:28]
+  8 │     let sv: Vec<secret i64> = vec_new();
+  9 │     let p: Vec<i64> = pass(sv);
+    ·                            ─┬
+    ·                             ╰── 
+ 10 │     0
+    ╰────

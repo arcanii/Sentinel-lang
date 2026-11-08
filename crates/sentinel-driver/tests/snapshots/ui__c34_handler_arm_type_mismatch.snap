@@ -1,0 +1,15 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c34_handler_arm_type_mismatch.sentinel\")"
+---
+sentinel::types::handler_arm_type_mismatch
+
+  × handler arm `Q.q` body returns bool but the `handle` expression's type is
+  │ i64
+    ╭─[tests/ui/c34_handler_arm_type_mismatch.sentinel:13:22]
+ 12 │     handle w() with {
+ 13 │         Q.q(x, k) => true,
+    ·                      ──┬─
+    ·                        ╰── 
+ 14 │     }
+    ╰────

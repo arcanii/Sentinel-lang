@@ -1,0 +1,6 @@
+// Refusal parity (ADR 0041 A16): the oracle refuses a `Vec` written with two type arguments with `sentinel::types::type_arg_count_mismatch`, and every
+// self-hosted driver makes the same refusal with the same message.
+fn main() -> i64 {
+    let v: Vec<i64, i64> = vec_new();
+    0
+}

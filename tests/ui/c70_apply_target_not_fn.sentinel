@@ -1,0 +1,5 @@
+// Refusal parity (ADR 0041 A16): the oracle refuses `apply` over a value that is not a `Fn` with `sentinel::types::apply_target_not_fn`, and every
+// self-hosted driver makes the same refusal with the same message.
+fn main() -> i64 {
+    apply(5, 1)
+}

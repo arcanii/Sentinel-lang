@@ -1,0 +1,6 @@
+// Refusal parity (ADR 0041 A16): the oracle refuses an index into a value that is not an array with `sentinel::types::index_on_non_array`, and every
+// self-hosted driver makes the same refusal with the same message.
+fn main() -> i64 {
+    let x: i64 = 5;
+    x[0]
+}

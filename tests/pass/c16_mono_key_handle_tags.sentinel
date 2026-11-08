@@ -77,9 +77,8 @@ fn work() -> i64 ! { Async } {
 
 // `Process` cannot be written in an annotation, so this is the only route to its tag.
 // `SealedChannel<secret i64>` CAN be (the ADR 0069 / M2.4a `resolve_type_expr` arm),
-// but only in the oracle — `scg`'s `type_of_typeexpr` has no arm for it and silently
-// resolves the annotation to `i64` (register D20), so the mono key is the only route
-// on which the two back ends can be compared. The spawn is guarded by a runtime-false
+// and `scg`'s `type_of_typeexpr` types it as the oracle does (register D20, done); the
+// mono key is the route this fixture compares. The spawn is guarded by a runtime-false
 // probe in `main` (the `c66_process` idiom): a tag is a compile-time property, so the
 // IR — and both tags — emit without any child process ever running.
 fn subprocess_tags(argv: [[u8]]) -> i64 ! { Subprocess } {

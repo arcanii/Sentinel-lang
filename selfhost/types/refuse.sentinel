@@ -10,7 +10,11 @@ module types;
 // C1); a class `init` that does not assign every field on every path before its end, or
 // that reads a field or uses `self` before assigning it (ADR 0022 A3), or that holds a
 // `return` (register D60); and a field access naming a field its struct or class does not
-// declare. Every other type error is still out of scope.
+// declare. A16 adds the checks `types/tcheck.sentinel` lists: that a value fits the place it
+// flows to, as the oracle coerces it and compares, the `if` and `while` condition check (a
+// `secret bool` condition is `secret_branch`), and the arity, type-argument, impl-signature,
+// index, field-access, callee and unknown-type checks there. Every other type error is still
+// out of scope.
 //
 // The walk records the first refusal it meets and runs on; `run` then answers the refusal
 // in place of its output, and 1, which each driver returns as its exit code. The text is
@@ -21,17 +25,19 @@ module types;
 // refused for a different one of them (D145): the walk types a class's methods in source
 // order where the oracle types the `init` first, and it checks a struct literal's field set
 // before typing its values, in declaration order, where the oracle checks each name and
-// types its value before the next. The code generator types a generic fn's body only at its
-// instances, so it refuses there (D142): a construct in a generic fn that is never
-// instantiated is not checked, and no code is emitted for it, and `vec_to_array` over an
-// abstract `Vec<T>` is checked at each instance's element rather than refused outright.
-// Running on can stop the code generator before `run` answers: a method called on the value
-// of an unknown field aborts it on an out-of-range index (D143, which predates A14). The
-// code generator binds a handler arm's parameters as `i64` (A15), so it does not make a
-// refusal whose subject is an arm parameter, which the other four drivers make (D152). And
-// three verdicts differ from the oracle's: `vec_to_array` over a `Vec<T>` reached through a
-// generic call's result or a generic instance's field is refused even when `T` is plain,
-// because `subst_type` does not substitute inside a `Vec` (D147); an empty struct literal
+// types its value before the next. Since A16 the code generator makes these refusals in a
+// checking pass before it generates code (`check_program`), which types the program as the
+// verifier driver does: a generic fn's body as written, and a handler arm's parameters at
+// their declared types, where its own walk types a generic fn's body only at its instances
+// (D142) and binds an arm's parameters as `i64` (A15). So a construct in a generic fn that is
+// never instantiated, `vec_to_array` over an abstract `Vec<T>`, and a refused construct whose
+// subject is an arm parameter (D152) are refused there as by the other four drivers, and a
+// method called on the value of an unknown field, which aborted the code generator's walk on an
+// out-of-range index (D143, which predates A14), is refused before that walk runs. And
+// three verdicts differ from the oracle's: the code generator refuses `vec_to_array` over a
+// `Vec<T>` reached through a generic call's result or a generic instance's field even when `T`
+// is plain, because its walk's `subst_type` does not substitute inside a `Vec` (D147; the other
+// modes substitute there by the oracle's rule); an empty struct literal
 // nested in another, `P { u: U { }, n: 2 }`, is misparsed, and the misparse is refused with
 // "no field `{`" (D144); and `vec_to_array` over a generic instance whose field is `secret T`
 // is accepted where the oracle refuses (D146).
@@ -41,8 +47,8 @@ module types;
 // parameter a continuation would capture that is not `i64` or `secret i64` (D159, and D67's
 // note). Its message is not the oracle's: the oracle adds the parameter's type in its embedded
 // shape and a note that it would be read out of bounds in its let shape, and gives another
-// reason in its chained shape. It is recorded when the code generator reaches the effecting fn,
-// so before a ported type error inside its body, which the oracle reports instead. Since
+// reason in its chained shape. It is recorded when the code generator reaches the effecting fn.
+// Since
 // registers D133 and D161, an effecting body with statements that the oracle refuses
 // (`eff_route`), but two kinds of body the oracle does not lower, which `scg` lowers unless a
 // rule below refuses them: one in which the tail or a later `let`'s value reads a name the body
@@ -52,10 +58,9 @@ module types;
 // where it gives the general reason and the oracle names the type rule or a captured parameter,
 // or fails. It is recorded after the body is walked, when `eff_route` refuses the body, or
 // lowered, when a shape's emitter refuses a `let` it could type only by lowering it
-// (`eff_fit`), so a ported type error inside the body, which the oracle reports first, is
-// recorded first. Both causes are recorded before a ported type error in an item `scg` types
-// later (D145): a later fn, and wherever they are declared a generic fn's instances and a
-// class's or an impl's methods and `init`. The second also refuses bodies with statements that
+// (`eff_fit`). Since A16 neither cause is reached when the checking pass refuses the program,
+// so a ported type error anywhere in it is reported instead, as the oracle reports a type error
+// before it lowers anything. The second also refuses bodies with statements that
 // the oracle lowers: one that calls, anywhere in it, through a name the fn binds anywhere other
 // than only as a handler arm's continuation, wherever the binding's scope ends, which covers a
 // `Fn` value called directly, which the routing walk cannot tell from a continuation by its
@@ -69,9 +74,10 @@ module types;
 // typer kept a `while` body's `let` bound after the loop); and one whose tail calls a generic
 // effecting fn whose return type wraps its type parameter (`?T`, `[T]`), which `eff_route` takes
 // for widened. Some of these walks fail before the refusal, as they fail in any fn: in a `return`
-// arm's body some calls overflow the walk's stack, a call through an `i64` variable among them (a
-// type error the oracle reports); a direct call through a `Fn` value no longer does (ADR 0070 D14),
-// but for a handler arm's operation parameter (register D174).
+// arm's body some calls overflow the walk's stack. A call through an `i64` variable did, a type
+// error the oracle reports, which since A16 the checking pass refuses before the walk runs; a
+// direct call through a `Fn` value no longer does (ADR 0070 D14), but for a handler arm's
+// operation parameter (register D174).
 
 // Record the refusal `code` with the message `msg`, unless one is recorded already.
 fn refuse(c: &mut TyCtx, code: [u8], msg: [u8]) -> i64 {

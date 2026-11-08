@@ -1,0 +1,14 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c05_undefined_function.sentinel\")"
+---
+sentinel::resolve::undefined_function
+
+  × undefined function `nope`
+   ╭─[tests/ui/c05_undefined_function.sentinel:4:5]
+ 3 │ fn main() -> i64 {
+ 4 │     nope(1)
+   ·     ──┬─
+   ·       ╰── 
+ 5 │ }
+   ╰────

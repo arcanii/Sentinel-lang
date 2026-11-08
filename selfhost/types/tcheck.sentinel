@@ -1,0 +1,2223 @@
+module types;
+
+// ===== the code generator's checking pass =========================================
+//
+// `snc build` type-checks the whole program, then lowers every body to MIR and runs the
+// constant-time verifier over it (ADR 0026 D5 and its amendment A2), and only then
+// generates code; `snc llvm`, the text oracle's dump, runs no verifier. `scg`'s code
+// generator types the program in a mode of its own, which binds a handler arm's parameters
+// as `i64` (ADR 0041 A15) and builds no MIR, so it cannot make those checks itself.
+// `check_program` makes the ported ones first: it runs the typer in mode 5,
+// which makes the ported type checks and then lowers and verifies every body `snc build`
+// verifies (mode 3, the `snc ctverify` mirror, verifies free fns only, as that dump prints
+// them, register D149), and answers what that run refuses. A reported leak becomes the oracle's
+// `sentinel::mir::secret_leak` refusal, with one line per leak in the verifier's order, as
+// `snc build` reports each one. 0 when the program passes, 1 when it is refused, and then
+// `result` holds the refusal.
+pub fn check_program(src: [u8], result: &mut Vec<u8>) -> i64 {
+    let mut vres: Vec<u8> = vec_new();
+    let rc: i64 = run(src, 5, &mut vres);
+    let n: i64 = len(vres);
+    if rc != 0 {
+        let mut ri: i64 = 0;
+        while ri < n {
+            push(result, vres[ri]);
+            ri = ri + 1;
+        }
+        let _v: [u8] = vec_to_array(vres);
+        rc
+    } else {
+        // Each line of the verifier's output is `(leak <SinkKind>)`.
+        let mut leaks: i64 = 0;
+        let mut i: i64 = 0;
+        while i < n {
+            if vres[i] == '(' {
+                if leaks == 0 {
+                    append_str(result, "sentinel::mir::secret_leak\n");
+                    0
+                } else {
+                    0
+                };
+                leaks = leaks + 1;
+                append_str(result, "scg: a `secret` value reaches ");
+                // `(leak ` is 6 bytes; the sink's name follows.
+                let k: u8 = vres[i + 6];
+                if k == 'B' {
+                    append_str(result, "a conditional branch")
+                } else if k == 'D' {
+                    append_str(result, "a variable-latency division")
+                } else if k == 'S' {
+                    append_str(result, "a variable-latency shift")
+                } else if vres[i + 12] == 'I' {
+                    append_str(result, "a memory index")
+                } else {
+                    append_str(result, "a memory address")
+                };
+                append_str(result, ", which would leak it via timing\n");
+                0
+            } else {
+                0
+            };
+            i = i + 1;
+        }
+        let _w: [u8] = vec_to_array(vres);
+        if leaks > 0 {
+            1
+        } else {
+            0
+        }
+    }
+}
+
+
+// ===== the ported type checks =======================================================
+//
+// The oracle's checks that a value fits the place it flows to (it coerces the value to the
+// type expected there, then compares), its `if` / `while` condition check, and its checks of
+// an arity (a call's, a `Fn` value's, a method's, an `init`'s, an enum payload's or pattern's,
+// a `perform`'s or a handler arm's, a continuation's), a type-argument count (before the
+// arguments, as the oracle checks it) or inference, an impl method's signature, an index, a
+// field access's target, a callee, an undefined fn and an unknown type (their codes are among
+// `PORTED_REFUSALS` in the driver tests). They run in every mode but the code generator's: that
+// mode binds a handler arm's parameters as `i64` (ADR 0041 A15), so a check there would refuse
+// a program the oracle accepts, and the code generator runs `check_program` first instead. So
+// that the checks read the types the oracle reads, those modes also type some places as the
+// oracle does where the code generator's walk does not: a `handle` by its `return` arm and a
+// `resume` by its `handle` (registers D151 and D7); an enum payload, a `perform`'s and a
+// `resume`'s argument and an array literal's elements with the type expected there, where the
+// oracle has one (D118, D132, D136); a value coerced into `[secret S]` with that type; a
+// `Vec<T>` a generic call returns, substituted by the oracle's rule (D147); a generic call's
+// argument with a `[secret T]` parameter pushed down, a `secret T` one with none, and a `null`
+// one bound after the rest; `unwrap_or`'s `T` from the type expected of it, where the oracle
+// has one; and a `let`'s annotation, with no type parameter in scope.
+fn tc_on(c: &mut TyCtx) -> bool {
+    (*c).mode != 4
+}
+
+// Whether a written `?X` can hold `x`, by the oracle's `to_nullable_inner`: a scalar, a
+// struct, a type parameter, a generic instance, a reference, a `Guard` or a `Channel`.
+fn tc_null_inner(c: &mut TyCtx, x: i64) -> bool {
+    if x < tbase() {
+        x >= 0
+    } else {
+        let k: i64 = (*c).tk[x - tbase()];
+        k == 2 || k == 6 || k == 9 || k == 10 || k == 13 || k == 19
+    }
+}
+
+// Whether `e` can be a `Vec` element, by the oracle's `to_vec_elem_subst`: `i64`, `i32`,
+// `bool`, `u8`, a struct, a type parameter, a generic instance, or a `secret` one of the
+// four word scalars.
+fn tc_vec_elem(c: &mut TyCtx, e: i64) -> bool {
+    if e < tbase() {
+        e >= 0 && e <= 3
+    } else {
+        let k: i64 = (*c).tk[e - tbase()];
+        if k == 6 || k == 9 || k == 10 {
+            true
+        } else if k == 3 {
+            let a: i64 = (*c).ta[e - tbase()];
+            a >= 0 && a <= 3
+        } else {
+            false
+        }
+    }
+}
+
+// The number of interner entries of kind `k` before index `idx`.
+fn tc_ord(c: &mut TyCtx, k: i64, idx: i64) -> i64 {
+    let mut i: i64 = 0;
+    let mut n: i64 = 0;
+    while i < idx {
+        if (*c).tk[i] == k {
+            n = n + 1;
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    n
+}
+
+// The oracle's fixed id for a container's word-scalar element (i64, i32, u8, bool, f64,
+// ptr: 0 to 5) or `secret` word scalar (i64, i32, u8, bool: 6 to 9), or -1 for any other.
+fn tc_slot(c: &mut TyCtx, h: i64) -> i64 {
+    if h == 0 {
+        0
+    } else if h == 1 {
+        1
+    } else if h == 3 {
+        2
+    } else if h == 2 {
+        3
+    } else if h == 4 {
+        4
+    } else if h == 5 {
+        5
+    } else if is_secret(c, h) {
+        let si: i64 = tc_slot(c, strip_secret(c, h));
+        if si >= 0 {
+            if si < 4 {
+                6 + si
+            } else {
+                0 - 1
+            }
+        } else {
+            0 - 1
+        }
+    } else {
+        0 - 1
+    }
+}
+
+fn tc_put_id(out: &mut Vec<u8>, pre: [u8], n: i64) -> i64 {
+    append_str(out, pre);
+    append_int(out, n);
+    push(out, '>');
+    0
+}
+
+// Render `h` as the oracle's messages render a type (its table-free `Display`): the
+// scalars this typer has (it has no `u128`) and `Fn<P,R>` by name, `?T`, `[T]` and `Vec<T>`
+// around their inner type, and every other compound type by kind and number, `<secret#0>`
+// for a `secret i64`. Where the oracle's number is fixed by the type (a `secret` word scalar;
+// a channel's word-scalar element or channel-of-channel; `Shared`'s, `Mutex`'s or `Guard`'s
+// word-scalar or `secret` word-scalar element; a struct's, an enum's or a class's
+// declaration index) it is the oracle's. A reference, a generic
+// instance, a task, a nested array's element and any other `secret` type is numbered by
+// the order in which this typer first interned one of its kind, which can differ from the
+// oracle's.
+fn tc_put_ty(out: &mut Vec<u8>, h: i64, c: &mut TyCtx) -> i64 {
+    if h < tbase() {
+        render_scalar(out, h)
+    } else {
+        let idx: i64 = h - tbase();
+        let k: i64 = (*c).tk[idx];
+        let a: i64 = (*c).ta[idx];
+        let b: i64 = (*c).tb[idx];
+        if k == 1 {
+            let nested: bool = if a >= tbase() {
+                (*c).tk[a - tbase()] == 1
+            } else {
+                false
+            };
+            if nested {
+                let an: i64 = tc_ord(c, 1, a - tbase());
+                tc_put_id(out, "[<arr#", an);
+                push(out, ']');
+                0
+            } else {
+                push(out, '[');
+                tc_put_ty(out, a, c);
+                push(out, ']');
+                0
+            }
+        } else if k == 2 {
+            let rn: i64 = tc_ord(c, 2, idx);
+            tc_put_id(out, "<ref#", rn)
+        } else if k == 3 {
+            let ss: i64 = tc_slot(c, h);
+            if ss >= 6 {
+                tc_put_id(out, "<secret#", ss - 6)
+            } else {
+                // The four `secret` word scalars hold ids 0 to 3; any other `secret` type
+                // takes the next free id.
+                let mut i: i64 = 0;
+                let mut n: i64 = 4;
+                while i < idx {
+                    if (*c).tk[i] == 3 {
+                        if tc_slot(c, tbase() + i) < 6 {
+                            n = n + 1;
+                            0
+                        } else {
+                            0
+                        };
+                        0
+                    } else {
+                        0
+                    };
+                    i = i + 1;
+                }
+                tc_put_id(out, "<secret#", n)
+            }
+        } else if k == 4 {
+            push(out, '?');
+            tc_put_ty(out, a, c)
+        } else if k == 6 {
+            tc_put_id(out, "<struct#", a)
+        } else if k == 7 {
+            tc_put_id(out, "<enum#", a)
+        } else if k == 8 {
+            tc_put_id(out, "<class#", a)
+        } else if k == 9 {
+            tc_put_id(out, "<T#", a)
+        } else if k == 10 {
+            let gn: i64 = tc_ord(c, 10, idx);
+            tc_put_id(out, "<gi#", gn)
+        } else if k == 11 {
+            append_str(out, "Vec<");
+            tc_put_ty(out, a, c);
+            push(out, '>');
+            0
+        } else if k == 12 {
+            let tn: i64 = tc_ord(c, 12, idx);
+            tc_put_id(out, "<task#", tn)
+        } else if k == 13 {
+            tc_put_chan(out, a, idx, c)
+        } else if k == 14 {
+            append_str(out, "Process")
+        } else if k == 15 {
+            append_str(out, "SealedChannel")
+        } else if k == 16 {
+            append_str(out, "Fn<");
+            tc_put_ty(out, a, c);
+            push(out, ',');
+            tc_put_ty(out, b, c);
+            push(out, '>');
+            0
+        } else if k == 17 {
+            tc_put_cell(out, "<shared#", a, idx, 17, c)
+        } else if k == 18 {
+            tc_put_cell(out, "<mutex#", a, idx, 18, c)
+        } else if k == 19 {
+            tc_put_cell(out, "<guard#", a, idx, 19, c)
+        } else {
+            render_type(out, h, c)
+        }
+    }
+}
+
+// A channel: its element's fixed id, or 10 more than that for a channel of a channel.
+fn tc_put_chan(out: &mut Vec<u8>, elem: i64, idx: i64, c: &mut TyCtx) -> i64 {
+    let cs: i64 = tc_slot(c, elem);
+    let inner: i64 = if elem >= tbase() {
+        if (*c).tk[elem - tbase()] == 13 {
+            tc_slot(c, (*c).ta[elem - tbase()])
+        } else {
+            0 - 1
+        }
+    } else {
+        0 - 1
+    };
+    if cs >= 0 {
+        tc_put_id(out, "<channel#", cs)
+    } else if inner >= 0 {
+        if inner < 6 {
+            tc_put_id(out, "<channel#", 10 + inner)
+        } else {
+            let on: i64 = tc_ord(c, 13, idx);
+            tc_put_id(out, "<channel#", on)
+        }
+    } else {
+        let on2: i64 = tc_ord(c, 13, idx);
+        tc_put_id(out, "<channel#", on2)
+    }
+}
+
+fn tc_put_cell(out: &mut Vec<u8>, pre: [u8], elem: i64, idx: i64, k: i64, c: &mut TyCtx) -> i64 {
+    let sl: i64 = tc_slot(c, elem);
+    if sl >= 0 {
+        tc_put_id(out, pre, sl)
+    } else {
+        let on: i64 = tc_ord(c, k, idx);
+        tc_put_id(out, pre, on)
+    }
+}
+
+// Whether a value of type `got` fits a place of type `exp` as the oracle's
+// `coerce_to_expected` lets it: the same type, or `T` into `?T`, `T` into `secret T`, or
+// `[S]` into `[secret S]`.
+fn tc_fits(c: &mut TyCtx, exp: i64, got: i64) -> bool {
+    if got == exp {
+        true
+    } else if widen_kind(c, exp, got) != 0 {
+        true
+    } else if exp >= tbase() {
+        if got >= tbase() {
+            if (*c).tk[exp - tbase()] == 1 {
+                if (*c).tk[got - tbase()] == 1 {
+                    let ee: i64 = (*c).ta[exp - tbase()];
+                    let ge: i64 = (*c).ta[got - tbase()];
+                    if is_secret(c, ee) {
+                        strip_secret(c, ee) == ge
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        } else {
+            false
+        }
+    } else {
+        false
+    }
+}
+
+// `sentinel::types::mismatch`: "type mismatch: expected E, found G".
+fn tc_mismatch(c: &mut TyCtx, exp: i64, got: i64) -> i64 {
+    if tc_on(c) {
+        let mut m: Vec<u8> = vec_new();
+        append_str(&mut m, "type mismatch: expected ");
+        tc_put_ty(&mut m, exp, c);
+        append_str(&mut m, ", found ");
+        tc_put_ty(&mut m, got, c);
+        refuse(c, "sentinel::types::mismatch", vec_to_array(m))
+    } else {
+        0
+    }
+}
+
+// An `if` or `while` condition of type `ct`: a `secret bool` is `secret_branch`, any
+// other type but `bool` a mismatch.
+fn tc_cond(c: &mut TyCtx, ct: i64, kw: [u8]) -> i64 {
+    if tc_on(c) {
+        if is_secret(c, ct) {
+            if strip_secret(c, ct) == 2 {
+                let mut m: Vec<u8> = vec_new();
+                push(&mut m, '`');
+                append_str(&mut m, kw);
+                append_str(&mut m, "` on a `secret bool` condition would leak via timing");
+                refuse(c, "sentinel::types::secret_branch", vec_to_array(m))
+            } else {
+                tc_mismatch(c, 2, ct)
+            }
+        } else if ct != 2 {
+            tc_mismatch(c, 2, ct)
+        } else {
+            0
+        }
+    } else {
+        let _k: [u8] = kw;
+        0
+    }
+}
+
+// ----- the oracle's assignability checks ---------------------------------------------
+//
+// The oracle types an expression against an expected type in two ways. Where it passes one
+// down (`check_expr` with `Some`), the expression is coerced to it at its end
+// (`coerce_to_expected`): a `T` into a `?T`, a `secret T` or a `[secret T]` is widened, and any
+// other type that is not the expected one is a mismatch, unless the expression diverges. The
+// walk marks those positions: `tc_st` says the expectation the next `dump_texpr` is given is
+// one the oracle coerces to, and `dump_texpr` makes the check (`tc_coerce`) when the node has
+// not diverged; a node that hands its expectation on to a child, as a block to its tail, hands
+// the mark on with it (`tc_in`, the mark the node itself was given). Every other expectation
+// the walk passes is a hint the oracle does not coerce to, and is not checked. Where the oracle
+// compares a type after typing, it is a check of its own at that position.
+
+// Whether the oracle pushes a declared type down to an argument as one it coerces to: a `?T`,
+// a `secret T` or a `[secret T]`.
+fn tc_pushdown(c: &mut TyCtx, t: i64) -> bool {
+    if t < tbase() {
+        false
+    } else {
+        let k: i64 = (*c).tk[t - tbase()];
+        if k == 3 {
+            true
+        } else if k == 4 {
+            true
+        } else if k == 1 {
+            is_secret(c, (*c).ta[t - tbase()])
+        } else {
+            false
+        }
+    }
+}
+
+// Whether the oracle pushes a fn's return type down to its body's tail and to a `return`'s
+// value: the `tc_pushdown` types, a generic instance and a `Vec<T>`.
+fn tc_body_pushdown(c: &mut TyCtx, t: i64) -> bool {
+    if tc_pushdown(c, t) {
+        true
+    } else if t < tbase() {
+        false
+    } else {
+        let k: i64 = (*c).tk[t - tbase()];
+        if k == 10 {
+            true
+        } else {
+            k == 11
+        }
+    }
+}
+
+// The check `coerce_to_expected` makes at a position the walk marked: a value of type `got`
+// meeting the expectation `exp` it is coerced to.
+fn tc_coerce(c: &mut TyCtx, strict: bool, exp: i64, got: i64) -> i64 {
+    if strict {
+        if exp >= 0 {
+            if tc_fits(c, exp, got) {
+                0
+            } else {
+                tc_mismatch(c, exp, got)
+            }
+        } else {
+            0
+        }
+    } else {
+        0
+    }
+}
+
+// A value of type `got` where the oracle compares it with `exp` after typing: a mismatch when
+// they differ.
+fn tc_same(c: &mut TyCtx, exp: i64, got: i64) -> i64 {
+    if exp >= 0 {
+        if got != exp {
+            tc_mismatch(c, exp, got)
+        } else {
+            0
+        }
+    } else {
+        0
+    }
+}
+
+// `sentinel::types::return_type_mismatch`: "`NAME` returns E but its body produces G", the
+// name already in `nm`.
+fn tc_ret_mismatch(c: &mut TyCtx, nm: Vec<u8>, exp: i64, got: i64) -> i64 {
+    if tc_on(c) {
+        let mut m: Vec<u8> = vec_new();
+        push(&mut m, '`');
+        let nn: i64 = len(nm);
+        let mut i: i64 = 0;
+        while i < nn {
+            push(&mut m, nm[i]);
+            i = i + 1;
+        }
+        let _n: [u8] = vec_to_array(nm);
+        append_str(&mut m, "` returns ");
+        tc_put_ty(&mut m, exp, c);
+        append_str(&mut m, " but its body produces ");
+        tc_put_ty(&mut m, got, c);
+        refuse(c, "sentinel::types::return_type_mismatch", vec_to_array(m))
+    } else {
+        let _n2: [u8] = vec_to_array(nm);
+        0
+    }
+}
+
+// `sentinel::types::match_arm_type_mismatch`.
+fn tc_arm_mismatch(c: &mut TyCtx, exp: i64, got: i64) -> i64 {
+    if tc_on(c) {
+        let mut m: Vec<u8> = vec_new();
+        append_str(&mut m, "`match` arms have incompatible types: expected ");
+        tc_put_ty(&mut m, exp, c);
+        append_str(&mut m, ", found ");
+        tc_put_ty(&mut m, got, c);
+        refuse(c, "sentinel::types::match_arm_type_mismatch", vec_to_array(m))
+    } else {
+        0
+    }
+}
+
+// A value of type `got` where the oracle coerces it to `exp` and then compares the two:
+// refused unless it fits `exp` as the coercion lets it. The comparison is by fit rather than
+// by equality because the walk does not widen everywhere the oracle widens (an array
+// literal's elements, a `perform`'s arguments: registers D136 and D132), so a value the
+// oracle widened can reach here as the narrower type.
+fn tc_fit(c: &mut TyCtx, exp: i64, got: i64) -> i64 {
+    if exp >= 0 {
+        if tc_fits(c, exp, got) {
+            0
+        } else {
+            tc_mismatch(c, exp, got)
+        }
+    } else {
+        0
+    }
+}
+
+// ----- operands, indexes and `handle`s ---------------------------------------------------
+
+// An integer scalar: `i64`, `i32` or `u8`.
+fn tc_is_int(h: i64) -> bool {
+    if h == 0 {
+        true
+    } else if h == 1 {
+        true
+    } else {
+        h == 3
+    }
+}
+
+// A unary operator's operand of type `it`, as the oracle checks it: `-` takes an integer or
+// a float, `!` a `bool` (either under one `secret`), `sqrt` an `f64` and `is_null` a `ptr`.
+fn tc_unary(c: &mut TyCtx, uop: i64, it: i64) -> i64 {
+    let st: i64 = strip_secret(c, it);
+    if uop == 1 {
+        if tc_is_int(st) {
+            0
+        } else if st == 4 {
+            0
+        } else {
+            tc_mismatch(c, 0, it)
+        }
+    } else if uop == 2 {
+        if st == 2 {
+            0
+        } else {
+            tc_mismatch(c, 2, it)
+        }
+    } else if uop == 6 {
+        if it == 4 {
+            0
+        } else {
+            tc_mismatch(c, 4, it)
+        }
+    } else if uop == 9 {
+        if it == 5 {
+            0
+        } else {
+            tc_mismatch(c, 5, it)
+        }
+    } else {
+        0
+    }
+}
+
+// `sentinel::types::index_on_non_array` for an indexed value of type `tt` that is neither an
+// array nor a `Vec`.
+fn tc_index_target(c: &mut TyCtx, tt: i64) -> i64 {
+    if tc_on(c) {
+        let k: i64 = if tt >= tbase() {
+            (*c).tk[tt - tbase()]
+        } else {
+            0 - 1
+        };
+        if k == 1 {
+            0
+        } else if k == 11 {
+            0
+        } else {
+            let mut m: Vec<u8> = vec_new();
+            append_str(&mut m, "indexing on non-array type `");
+            tc_put_ty(&mut m, tt, c);
+            push(&mut m, '`');
+            refuse(c, "sentinel::types::index_on_non_array", vec_to_array(m))
+        }
+    } else {
+        0
+    }
+}
+
+// `sentinel::types::index_not_int` for an index of type `it` other than `i64`, a `secret
+// i64` among them, on a read and on a store.
+fn tc_index(c: &mut TyCtx, it: i64) -> i64 {
+    if tc_on(c) {
+        if it == 0 {
+            0
+        } else {
+            let mut m: Vec<u8> = vec_new();
+            append_str(&mut m, "array index must be `i64`, got `");
+            tc_put_ty(&mut m, it, c);
+            push(&mut m, '`');
+            refuse(c, "sentinel::types::index_not_int", vec_to_array(m))
+        }
+    } else {
+        0
+    }
+}
+
+// The type of a `handle`'s `return` arm, typed before its operation arms as the oracle types
+// it, so that the `handle`'s type, which each arm's continuation returns, is known when the
+// arms are typed. The arm is typed once more where it is written; this walk leaves nothing
+// behind: it runs in the type-dump mode, outside any fn's move records, on a copy of the
+// arm's body re-parsed from its tokens, and the VarIds, the bindings, the env entries and the
+// continuations (`tc_kv`, `tc_kt`, `tc_ka`) it makes are removed after it. The VarIds are
+// given out again, so a continuation left behind would make a later variable look like one.
+fn tc_ret_arm_ty(c: &mut TyCtx, nst: i64, tok0: i64, bty: i64, exp: i64, strict: bool, src: &[u8], gb: &mut Vec<u8>) -> i64 {
+    let svmode: i64 = (*c).mode;
+    let svcf: i64 = (*c).curfn;
+    let svnv: i64 = (*c).nextvid;
+    let svenv: i64 = len((*c).env);
+    let mark: i64 = len((*c).scs);
+    let svc: bool = (*c).consuming;
+    let svsd: bool = (*c).sdiv;
+    let svsn: bool = (*c).sdivn;
+    let svss: bool = (*c).sdivs;
+    let svmv: i64 = (*c).mvbv;
+    let svlv: i64 = (*c).lastval;
+    let svmc: i64 = (*c).mir_cur;
+    let svkv: i64 = len((*c).tc_kv);
+    (*c).mode = 0;
+    (*c).curfn = 0 - 1;
+    let ns: i64 = (*c).cgts[nst];
+    let ne: i64 = (*c).cgte[nst];
+    let vid: i64 = (*c).nextvid;
+    (*c).nextvid = (*c).nextvid + 1;
+    bind_name(c, slice_of(src, ns, ne), vid, bty);
+    let mut cur: i64 = tok0;
+    let rbody: Expr = parse_expr(&(*c).cgtk, &(*c).cgts, &(*c).cgte, src, &mut cur);
+    let mut tb: Vec<u8> = vec_new();
+    (*c).tc_st = strict;
+    let rt: i64 = dump_texpr(&mut tb, rbody, exp, src, c, gb);
+    let _tbx: [u8] = vec_to_array(tb);
+    truncate_scope(c, mark);
+    while len((*c).env) > svenv {
+        let _e: i64 = pop(&mut (*c).env);
+        0
+    }
+    while len((*c).tc_kv) > svkv {
+        let _k: i64 = pop(&mut (*c).tc_kv);
+        let _t: i64 = pop(&mut (*c).tc_kt);
+        let _a: i64 = pop(&mut (*c).tc_ka);
+        0
+    }
+    (*c).nextvid = svnv;
+    (*c).mode = svmode;
+    (*c).curfn = svcf;
+    (*c).consuming = svc;
+    (*c).sdiv = svsd;
+    (*c).sdivn = svsn;
+    (*c).sdivs = svss;
+    (*c).mvbv = svmv;
+    (*c).lastval = svlv;
+    (*c).mir_cur = svmc;
+    rt
+}
+
+// The type the continuation `kid` returns, the type of the `handle` whose arm binds it, or
+// -1 when `kid` is not one.
+fn tc_kont_ret(c: &mut TyCtx, kid: i64) -> i64 {
+    let n: i64 = len((*c).tc_kv);
+    let mut i: i64 = 0;
+    let mut found: i64 = 0 - 1;
+    while i < n {
+        if (*c).tc_kv[i] == kid {
+            found = (*c).tc_kt[i];
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    found
+}
+
+// The type the continuation `kid` is resumed with, its operation's result type, or -1.
+fn tc_kont_arg(c: &mut TyCtx, kid: i64) -> i64 {
+    let n: i64 = len((*c).tc_kv);
+    let mut i: i64 = 0;
+    let mut found: i64 = 0 - 1;
+    while i < n {
+        if (*c).tc_kv[i] == kid {
+            found = (*c).tc_ka[i];
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    found
+}
+
+// `sentinel::types::handler_arm_type_mismatch`: "handler arm `E.OP` body returns G but the
+// `handle` expression's type is H".
+fn tc_harm_mismatch(c: &mut TyCtx, nm: Vec<u8>, exp: i64, got: i64) -> i64 {
+    if tc_on(c) {
+        let mut m: Vec<u8> = vec_new();
+        append_str(&mut m, "handler arm `");
+        tc_put_vec(&mut m, nm);
+        append_str(&mut m, "` body returns ");
+        tc_put_ty(&mut m, got, c);
+        append_str(&mut m, " but the `handle` expression's type is ");
+        tc_put_ty(&mut m, exp, c);
+        refuse(c, "sentinel::types::handler_arm_type_mismatch", vec_to_array(m))
+    } else {
+        let _n: [u8] = vec_to_array(nm);
+        0
+    }
+}
+
+// `sentinel::types::operation_arity_mismatch` at a handler arm: "handler arm `E.OP` has G
+// parameter(s) but expected N (including the trailing continuation `k`)".
+fn tc_harm_arity(c: &mut TyCtx, nm: Vec<u8>, exp: i64, got: i64) -> i64 {
+    if tc_on(c) {
+        let mut m: Vec<u8> = vec_new();
+        append_str(&mut m, "handler arm `");
+        tc_put_vec(&mut m, nm);
+        append_str(&mut m, "` has ");
+        append_int(&mut m, got);
+        append_str(&mut m, " parameter(s) but expected ");
+        append_int(&mut m, exp);
+        append_str(&mut m, " (including the trailing continuation `k`)");
+        refuse(c, "sentinel::types::operation_arity_mismatch", vec_to_array(m))
+    } else {
+        let _n: [u8] = vec_to_array(nm);
+        0
+    }
+}
+
+// Append the bytes of `v` to `out`, consuming `v`.
+fn tc_put_vec(out: &mut Vec<u8>, v: Vec<u8>) -> i64 {
+    let n: i64 = len(v);
+    let mut i: i64 = 0;
+    while i < n {
+        push(out, v[i]);
+        i = i + 1;
+    }
+    let _v: [u8] = vec_to_array(v);
+    0
+}
+
+// `E.OP`, the names of an arm's effect and operation.
+fn tc_arm_name(eff: &[u8], op: &[u8]) -> Vec<u8> {
+    let mut v: Vec<u8> = vec_new();
+    rf_put(&mut v, eff);
+    push(&mut v, '.');
+    rf_put(&mut v, op);
+    v
+}
+
+// ----- arguments --------------------------------------------------------------------
+
+// The flat row of effect `eid`'s `oidx`-th op (an index into `efoo`, `efp0`, `efpn`), or -1.
+fn tc_op_row(c: &mut TyCtx, eid: i64, oidx: i64) -> i64 {
+    let n: i64 = len((*c).efoo);
+    let mut i: i64 = 0;
+    let mut idx: i64 = 0;
+    let mut found: i64 = 0 - 1;
+    while i < n {
+        if (*c).efoo[i] == eid {
+            if found == 0 - 1 {
+                if idx == oidx {
+                    found = i;
+                    0
+                } else {
+                    0
+                };
+                0
+            } else {
+                0
+            };
+            idx = idx + 1;
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    found
+}
+
+// A declared parameter type at index `i` of the pool an argument list names: 0 a method's,
+// an `init`'s or a qualified call's parameters (`mpp`), 1 an enum variant's payload
+// (`varpay`), 2 an operation's parameters (`efpt`).
+fn tc_pool_ty(c: &mut TyCtx, pool: i64, i: i64) -> i64 {
+    if pool == 1 {
+        (*c).varpay[i]
+    } else if pool == 2 {
+        (*c).efpt[i]
+    } else {
+        (*c).mpp[i]
+    }
+}
+
+// The oracle's `unify_one` of a parameter type `p` with an argument type `a` that holds no
+// type parameter: true when they unify, else false with the innermost pair that does not
+// in `tc_ue` (the parameter's) and `tc_ug` (the argument's).
+fn tc_unify(c: &mut TyCtx, p: i64, a: i64) -> bool {
+    if p == a {
+        true
+    } else if p < tbase() {
+        tc_unfail(c, p, a)
+    } else if a < tbase() {
+        tc_unfail(c, p, a)
+    } else {
+        let kp: i64 = (*c).tk[p - tbase()];
+        let ka: i64 = (*c).tk[a - tbase()];
+        let pa: i64 = (*c).ta[p - tbase()];
+        let aa: i64 = (*c).ta[a - tbase()];
+        if kp != ka {
+            tc_unfail(c, p, a)
+        } else if kp == 4 {
+            tc_unify(c, pa, aa)
+        } else if kp == 11 {
+            tc_unify(c, pa, aa)
+        } else if kp == 1 {
+            // A nested array's element is compared whole.
+            let pn: bool = if pa >= tbase() {
+                (*c).tk[pa - tbase()] == 1
+            } else {
+                false
+            };
+            let an: bool = if aa >= tbase() {
+                (*c).tk[aa - tbase()] == 1
+            } else {
+                false
+            };
+            if pn {
+                tc_unfail(c, p, a)
+            } else if an {
+                tc_unfail(c, p, a)
+            } else {
+                tc_unify(c, pa, aa)
+            }
+        } else if kp == 2 {
+            if pa != aa {
+                tc_unfail(c, p, a)
+            } else {
+                let pb: i64 = (*c).tb[p - tbase()];
+                let ab: i64 = (*c).tb[a - tbase()];
+                tc_unify(c, pb, ab)
+            }
+        } else if kp == 10 {
+            let pr: i64 = (*c).tb[p - tbase()];
+            let ar: i64 = (*c).tb[a - tbase()];
+            let ps: i64 = (*c).girs[pr];
+            let pe: i64 = (*c).gire[pr];
+            let as0: i64 = (*c).girs[ar];
+            let ae: i64 = (*c).gire[ar];
+            if pa != aa {
+                tc_unfail(c, p, a)
+            } else if pe - ps != ae - as0 {
+                tc_unfail(c, p, a)
+            } else {
+                let mut ok: bool = true;
+                let mut i: i64 = 0;
+                while i < pe - ps {
+                    if ok {
+                        let ph: i64 = (*c).gia[ps + i];
+                        let ah: i64 = (*c).gia[as0 + i];
+                        ok = tc_unify(c, ph, ah);
+                        0
+                    } else {
+                        0
+                    };
+                    i = i + 1;
+                }
+                ok
+            }
+        } else {
+            tc_unfail(c, p, a)
+        }
+    }
+}
+
+fn tc_unfail(c: &mut TyCtx, p: i64, a: i64) -> bool {
+    (*c).tc_ue = p;
+    (*c).tc_ug = a;
+    false
+}
+
+// `sentinel::types::call_arg_mismatch`: "argument I of `NAME` expects E, got G".
+fn tc_callarg_msg(c: &mut TyCtx, nm: Vec<u8>, i: i64, exp: i64, got: i64) -> i64 {
+    if tc_on(c) {
+        let mut m: Vec<u8> = vec_new();
+        append_str(&mut m, "argument ");
+        append_int(&mut m, i);
+        append_str(&mut m, " of `");
+        let nn: i64 = len(nm);
+        let mut j: i64 = 0;
+        while j < nn {
+            push(&mut m, nm[j]);
+            j = j + 1;
+        }
+        let _n: [u8] = vec_to_array(nm);
+        append_str(&mut m, "` expects ");
+        tc_put_ty(&mut m, exp, c);
+        append_str(&mut m, ", got ");
+        tc_put_ty(&mut m, got, c);
+        refuse(c, "sentinel::types::call_arg_mismatch", vec_to_array(m))
+    } else {
+        let _n2: [u8] = vec_to_array(nm);
+        0
+    }
+}
+
+// The name of user fn `fid` (42 and up).
+fn tc_fn_name(c: &mut TyCtx, fid: i64) -> Vec<u8> {
+    let mut v: Vec<u8> = vec_new();
+    if fid >= 42 {
+        let s0: i64 = (*c).ufns[fid - 42];
+        let e0: i64 = (*c).ufne[fid - 42];
+        let mut i: i64 = s0;
+        while i < e0 {
+            push(&mut v, (*c).ufnb[i]);
+            i = i + 1;
+        }
+        0
+    } else {
+        0
+    };
+    v
+}
+
+// Argument `pidx` of a call to the user fn `pfid`, of type `got`, where the parameter's
+// declared type is `pty`: the oracle unifies the two after typing the argument. Where it
+// first coerces the argument to `pty` (`tc_pushdown`), what it unifies is the coerced
+// argument, of type `pty`, when the argument fits (when it does not, the coercion refused it).
+fn tc_callarg(c: &mut TyCtx, pfid: i64, pidx: i64, pty: i64, got: i64) -> i64 {
+    let coerced: bool = if pty < 0 {
+        false
+    } else if tc_pushdown(c, pty) {
+        tc_fits(c, pty, got)
+    } else {
+        false
+    };
+    if pfid >= 42 {
+        if pty >= 0 {
+            if coerced {
+                0
+            } else if tc_unify(c, pty, got) {
+                0
+            } else {
+                let ue: i64 = (*c).tc_ue;
+                let ug: i64 = (*c).tc_ug;
+                let nm: Vec<u8> = tc_fn_name(c, pfid);
+                tc_callarg_msg(c, nm, pidx, ue, ug)
+            }
+        } else {
+            0
+        }
+    } else {
+        0
+    }
+}
+
+// `NAME` with `n` bytes of the `snb` blob from `bs`.
+fn tc_snb(c: &mut TyCtx, out: &mut Vec<u8>, bs: i64, be: i64) -> i64 {
+    let mut i: i64 = bs;
+    while i < be {
+        push(out, (*c).snb[i]);
+        i = i + 1;
+    }
+    0
+}
+
+// `sentinel::resolve::arity_mismatch`: "`NAME` takes E argument(s), got G".
+fn tc_fn_arity(c: &mut TyCtx, nm: Vec<u8>, exp: i64, got: i64) -> i64 {
+    if tc_on(c) {
+        let mut m: Vec<u8> = vec_new();
+        push(&mut m, '`');
+        let nn: i64 = len(nm);
+        let mut j: i64 = 0;
+        while j < nn {
+            push(&mut m, nm[j]);
+            j = j + 1;
+        }
+        let _n: [u8] = vec_to_array(nm);
+        append_str(&mut m, "` takes ");
+        append_int(&mut m, exp);
+        append_str(&mut m, " argument(s), got ");
+        append_int(&mut m, got);
+        refuse(c, "sentinel::resolve::arity_mismatch", vec_to_array(m))
+    } else {
+        let _n2: [u8] = vec_to_array(nm);
+        0
+    }
+}
+
+// `sentinel::types::variant_payload_arity_mismatch`: "variant `E::V` takes N payload(s), got M".
+fn tc_payload_arity(c: &mut TyCtx, eid: i64, vflat: i64, exp: i64, got: i64) -> i64 {
+    if tc_on(c) {
+        let mut m: Vec<u8> = vec_new();
+        append_str(&mut m, "variant `");
+        let es: i64 = (*c).ets[eid];
+        let ee: i64 = (*c).ete[eid];
+        tc_snb(c, &mut m, es, ee);
+        append_str(&mut m, "::");
+        let vs: i64 = (*c).varns[vflat];
+        let ve: i64 = (*c).varne[vflat];
+        tc_snb(c, &mut m, vs, ve);
+        append_str(&mut m, "` takes ");
+        append_int(&mut m, exp);
+        append_str(&mut m, " payload(s), got ");
+        append_int(&mut m, got);
+        refuse(c, "sentinel::types::variant_payload_arity_mismatch", vec_to_array(m))
+    } else {
+        0
+    }
+}
+
+// `sentinel::types::operation_arity_mismatch` at a `perform`, whose message the oracle words
+// as a handler arm's: "handler arm `E.OP` has G parameter(s) but expected N (including the
+// trailing continuation `k`)".
+fn tc_op_arity(c: &mut TyCtx, eff: [u8], op: [u8], exp: i64, got: i64) -> i64 {
+    if tc_on(c) {
+        let mut m: Vec<u8> = vec_new();
+        append_str(&mut m, "handler arm `");
+        append_str(&mut m, eff);
+        push(&mut m, '.');
+        append_str(&mut m, op);
+        append_str(&mut m, "` has ");
+        append_int(&mut m, got);
+        append_str(&mut m, " parameter(s) but expected ");
+        append_int(&mut m, exp);
+        append_str(&mut m, " (including the trailing continuation `k`)");
+        refuse(c, "sentinel::types::operation_arity_mismatch", vec_to_array(m))
+    } else {
+        let _e: [u8] = eff;
+        let _o: [u8] = op;
+        0
+    }
+}
+
+// `sentinel::types::class_init_arity_mismatch`: "class `C::init` expected N argument(s), got M".
+fn tc_init_arity(c: &mut TyCtx, cid: i64, exp: i64, got: i64) -> i64 {
+    if tc_on(c) {
+        let mut m: Vec<u8> = vec_new();
+        append_str(&mut m, "class `");
+        let cs: i64 = (*c).clns[cid];
+        let ce: i64 = (*c).clne[cid];
+        tc_snb(c, &mut m, cs, ce);
+        append_str(&mut m, "::init` expected ");
+        append_int(&mut m, exp);
+        append_str(&mut m, " argument(s), got ");
+        append_int(&mut m, got);
+        refuse(c, "sentinel::types::class_init_arity_mismatch", vec_to_array(m))
+    } else {
+        0
+    }
+}
+
+// `sentinel::types::method_arity_mismatch`: "method `C.M` expected N argument(s), got M", the
+// type's name in `tn`.
+fn tc_method_arity(c: &mut TyCtx, tn: Vec<u8>, mn: [u8], exp: i64, got: i64) -> i64 {
+    if tc_on(c) {
+        let mut m: Vec<u8> = vec_new();
+        append_str(&mut m, "method `");
+        let nn: i64 = len(tn);
+        let mut j: i64 = 0;
+        while j < nn {
+            push(&mut m, tn[j]);
+            j = j + 1;
+        }
+        let _t: [u8] = vec_to_array(tn);
+        push(&mut m, '.');
+        append_str(&mut m, mn);
+        append_str(&mut m, "` expected ");
+        append_int(&mut m, exp);
+        append_str(&mut m, " argument(s), got ");
+        append_int(&mut m, got);
+        refuse(c, "sentinel::types::method_arity_mismatch", vec_to_array(m))
+    } else {
+        let _t2: [u8] = vec_to_array(tn);
+        let _mn: [u8] = mn;
+        0
+    }
+}
+
+// ----- calls ----------------------------------------------------------------------------
+
+// `a` rebuilt unchanged, with its length added to `n`.
+fn tc_args_count(a: Args, n: &mut i64) -> Args {
+    match a {
+        Args::End => Args::End,
+        Args::Cell(x, rest) => {
+            *n = *n + 1;
+            Args::Cell(x, tc_args_count(rest, n))
+        },
+    }
+}
+
+// The TCP socket builtins' FnIds (ADR 0056: 14 to 20), or -1.
+fn tc_socket_id(q: &[u8]) -> i64 {
+    if name_eq_lit(q, "tcp_listen") {
+        14
+    } else if name_eq_lit(q, "tcp_local_port") {
+        15
+    } else if name_eq_lit(q, "tcp_accept") {
+        16
+    } else if name_eq_lit(q, "tcp_connect") {
+        17
+    } else if name_eq_lit(q, "tcp_read") {
+        18
+    } else if name_eq_lit(q, "tcp_write") {
+        19
+    } else if name_eq_lit(q, "tcp_close") {
+        20
+    } else {
+        0 - 1
+    }
+}
+
+// The name of builtin `fid` (0 to 41).
+fn tc_builtin_name(fid: i64) -> [u8] {
+    if fid == 0 { "print" } else if fid == 1 { "unwrap_or" } else if fid == 2 { "is_some" }
+    else if fid == 3 { "len" } else if fid == 4 { "str_eq" } else if fid == 5 { "u8_to_i64" }
+    else if fid == 6 { "i64_to_u8" } else if fid == 7 { "vec_new" } else if fid == 8 { "push" }
+    else if fid == 9 { "pop" } else if fid == 10 { "vec_to_array" } else if fid == 11 { "read_file" }
+    else if fid == 12 { "write_file" } else if fid == 13 { "print_bytes" } else if fid == 14 { "tcp_listen" }
+    else if fid == 15 { "tcp_local_port" } else if fid == 16 { "tcp_accept" } else if fid == 17 { "tcp_connect" }
+    else if fid == 18 { "tcp_read" } else if fid == 19 { "tcp_write" } else if fid == 20 { "tcp_close" }
+    else if fid == 21 { "channel_new" } else if fid == 22 { "send" } else if fid == 23 { "recv" }
+    else if fid == 24 { "channel_close" } else if fid == 25 { "process_spawn" } else if fid == 26 { "process_wait" }
+    else if fid == 27 { "process_write" } else if fid == 28 { "process_read" } else if fid == 29 { "process_send" }
+    else if fid == 30 { "process_recv" } else if fid == 31 { "sealed_channel" } else if fid == 32 { "sealed_process" }
+    else if fid == 33 { "stdin_recv" } else if fid == 34 { "stdout_send" } else if fid == 35 { "arg_count" }
+    else if fid == 36 { "arg" } else if fid == 37 { "apply" } else if fid == 38 { "shared_new" }
+    else if fid == 39 { "shared_get" } else if fid == 40 { "mutex_new" } else { "lock" }
+}
+
+// How many arguments builtin `fid` takes (the resolver's arity).
+fn tc_builtin_arity(fid: i64) -> i64 {
+    if fid == 7 {
+        0
+    } else if fid == 21 {
+        0
+    } else if fid == 33 {
+        0
+    } else if fid == 35 {
+        0
+    } else if fid == 1 {
+        2
+    } else if fid == 4 {
+        2
+    } else if fid == 8 {
+        2
+    } else if fid == 12 {
+        2
+    } else if fid == 17 {
+        2
+    } else if fid == 18 {
+        2
+    } else if fid == 19 {
+        2
+    } else if fid == 22 {
+        2
+    } else if fid == 25 {
+        2
+    } else if fid == 27 {
+        2
+    } else if fid == 29 {
+        2
+    } else if fid == 37 {
+        2
+    } else {
+        1
+    }
+}
+
+// A call to `fid` with `n` arguments: the resolver's arity check for a named fn, and the
+// oracle's for a call through a `Fn` value (`fnvar`, whose first argument is the value).
+fn tc_call_arity(c: &mut TyCtx, fid: i64, n: i64, fnvar: bool) -> i64 {
+    if fnvar {
+        if n - 1 != 1 {
+            if tc_on(c) {
+                let mut m: Vec<u8> = vec_new();
+                append_str(&mut m, "function value expects 1 argument(s), got ");
+                append_int(&mut m, n - 1);
+                refuse(c, "sentinel::types::fn_value_arity_mismatch", vec_to_array(m))
+            } else {
+                0
+            }
+        } else {
+            0
+        }
+    } else if fid >= 42 {
+        let np: i64 = (*c).ufpe[fid - 42] - (*c).ufps[fid - 42];
+        if n != np {
+            let nm: Vec<u8> = tc_fn_name(c, fid);
+            tc_fn_arity(c, nm, np, n)
+        } else {
+            0
+        }
+    } else if fid >= 0 {
+        let na: i64 = tc_builtin_arity(fid);
+        if n != na {
+            let mut bn: Vec<u8> = vec_new();
+            append_str(&mut bn, tc_builtin_name(fid));
+            tc_fn_arity(c, bn, na, n)
+        } else {
+            0
+        }
+    } else {
+        0
+    }
+}
+
+// The declared type of parameter `i` of a builtin whose arguments the oracle unifies with
+// fixed parameter types, or -1 for any other builtin (one generic over its arguments, or
+// one the oracle checks in a case of its own).
+fn tc_builtin_param(c: &mut TyCtx, fid: i64, i: i64) -> i64 {
+    let bytes: i64 = mk_array(c, 3);
+    if fid == 0 {
+        0
+    } else if fid == 4 {
+        bytes
+    } else if fid == 5 {
+        3
+    } else if fid == 6 {
+        0
+    } else if fid == 11 {
+        bytes
+    } else if fid == 12 {
+        bytes
+    } else if fid == 13 {
+        bytes
+    } else if fid == 14 {
+        0
+    } else if fid == 15 {
+        0
+    } else if fid == 16 {
+        0
+    } else if fid == 17 {
+        if i == 0 {
+            bytes
+        } else {
+            0
+        }
+    } else if fid == 18 {
+        0
+    } else if fid == 19 {
+        if i == 0 {
+            0
+        } else {
+            bytes
+        }
+    } else if fid == 20 {
+        0
+    } else if fid == 25 {
+        if i == 0 {
+            bytes
+        } else {
+            mk_array(c, bytes)
+        }
+    } else if fid == 26 {
+        mk_process(c)
+    } else if fid == 27 {
+        if i == 0 {
+            mk_process(c)
+        } else {
+            bytes
+        }
+    } else if fid == 28 {
+        mk_process(c)
+    } else if fid == 29 {
+        if i == 0 {
+            mk_process(c)
+        } else {
+            0 - 1
+        }
+    } else if fid == 30 {
+        mk_process(c)
+    } else if fid == 31 {
+        mk_process(c)
+    } else if fid == 32 {
+        mk_sealed_channel(c)
+    } else if fid == 34 {
+        0
+    } else if fid == 36 {
+        0
+    } else {
+        0 - 1
+    }
+}
+
+// Argument `i` of a call to builtin `fid`, of type `got`: unified with its fixed parameter
+// type, or for `send`, `recv`, `channel_close`, `shared_get` and `lock` the oracle's own
+// check that the first argument is a channel, a `Shared` or a `Mutex` of any element and that
+// `send`'s second fits the channel's element.
+fn tc_builtin_arg(c: &mut TyCtx, fid: i64, i: i64, got: i64, first: i64) -> i64 {
+    let bp: i64 = tc_builtin_param(c, fid, i);
+    if bp >= 0 {
+        if tc_unify(c, bp, got) {
+            0
+        } else {
+            let ue: i64 = (*c).tc_ue;
+            let ug: i64 = (*c).tc_ug;
+            let mut bn: Vec<u8> = vec_new();
+            append_str(&mut bn, tc_builtin_name(fid));
+            tc_callarg_msg(c, bn, i, ue, ug)
+        }
+    } else if i == 0 {
+        let k: i64 = if got >= tbase() {
+            (*c).tk[got - tbase()]
+        } else {
+            0 - 1
+        };
+        let want: i64 = if fid == 22 {
+            13
+        } else if fid == 23 {
+            13
+        } else if fid == 24 {
+            13
+        } else if fid == 39 {
+            17
+        } else if fid == 41 {
+            18
+        } else {
+            0 - 1
+        };
+        if want < 0 {
+            0
+        } else if k == want {
+            0
+        } else {
+            let canon: i64 = if want == 13 {
+                mk_channel(c, 0)
+            } else if want == 17 {
+                mk_shared(c, 0)
+            } else {
+                mk_mutex(c, 0)
+            };
+            let mut bn2: Vec<u8> = vec_new();
+            append_str(&mut bn2, tc_builtin_name(fid));
+            tc_callarg_msg(c, bn2, 0, canon, got)
+        }
+    } else if fid == 29 {
+        // `process_send`'s value is a public word scalar (the oracle's own case).
+        if got >= 0 {
+            if got <= 5 {
+                0
+            } else {
+                let mut psn: Vec<u8> = vec_new();
+                append_str(&mut psn, "process_send");
+                tc_callarg_msg(c, psn, 1, 0, got)
+            }
+        } else {
+            0
+        }
+    } else if fid == 22 {
+        // `send`'s value fits the channel's element.
+        let ce: i64 = if first >= tbase() {
+            if (*c).tk[first - tbase()] == 13 {
+                (*c).ta[first - tbase()]
+            } else {
+                0 - 1
+            }
+        } else {
+            0 - 1
+        };
+        if ce < 0 {
+            0
+        } else if tc_fits(c, ce, got) {
+            0
+        } else {
+            // The oracle coerces the value to the channel's element: a mismatch.
+            tc_mismatch(c, ce, got)
+        }
+    } else {
+        0
+    }
+}
+
+// ----- operators ----------------------------------------------------------------------
+
+// A binary operator `bop` over operands of types `lt` and `rt` (`lnull` / `rnull`: the
+// operand is the `null` literal), as the oracle's `check_expr` checks them: arithmetic and
+// bitwise operands are integers or floats, a float with the other operand's type, a shift
+// amount an integer (the oracle also refuses a float under a bitwise or shift operator,
+// `float_bitwise`, which is not ported); a comparison's left operand is not a struct, a
+// generic instance or a `?T` (bar a comparison with `null`, `==` or `!=` with a `?T`); and a
+// logical operator's operands are `bool`s of the same secrecy. Where one operand is `secret`
+// and the other is the same public type, the public one is widened first (not for `/` or a
+// shift, nor for `&&` / `||`), and then the two must be the same type.
+fn tc_binary(c: &mut TyCtx, bop: i64, lt: i64, rt: i64, lnull: bool, rnull: bool) -> i64 {
+    let ls: i64 = strip_secret(c, lt);
+    let rs: i64 = strip_secret(c, rt);
+    let lsec: bool = is_secret(c, lt);
+    let rsec: bool = is_secret(c, rt);
+    if bop == 14 || bop == 15 {
+        if ls != 2 {
+            tc_mismatch(c, 2, lt)
+        } else if rs != 2 {
+            tc_mismatch(c, 2, rt)
+        } else if lsec != rsec {
+            tc_mismatch(c, lt, rt)
+        } else {
+            0
+        }
+    } else if bop >= 8 && bop <= 13 {
+        if lnull || rnull {
+            if bop != 8 && bop != 9 {
+                tc_mismatch(c, 2, 2)
+            } else {
+                let side: i64 = if lnull {
+                    rt
+                } else {
+                    lt
+                };
+                let sk: i64 = if side >= tbase() {
+                    (*c).tk[side - tbase()]
+                } else {
+                    0 - 1
+                };
+                if sk == 4 {
+                    0
+                } else {
+                    let hint: i64 = mk_nullable(c, 0);
+                    tc_mismatch(c, hint, side)
+                }
+            }
+        } else {
+            let lk: i64 = if ls >= tbase() {
+                (*c).tk[ls - tbase()]
+            } else {
+                0 - 1
+            };
+            if lk == 6 || lk == 10 || lk == 4 {
+                tc_mismatch(c, 0, lt)
+            } else {
+                tc_widened_same(c, lt, rt, ls, rs, lsec, rsec, true)
+            }
+        }
+    } else {
+        // Arithmetic, bitwise and shifts.
+        if tc_is_int(ls) || ls == 4 {
+            if ls == 4 {
+                if lt != rt {
+                    tc_mismatch(c, lt, rt)
+                } else {
+                    0
+                }
+            } else if bop == 16 || bop == 17 {
+                if tc_is_int(rs) {
+                    0
+                } else {
+                    tc_mismatch(c, 0, rt)
+                }
+            } else {
+                tc_widened_same(c, lt, rt, ls, rs, lsec, rsec, bop != 4)
+            }
+        } else {
+            tc_mismatch(c, 0, lt)
+        }
+    }
+}
+
+// The two operands after the oracle's widening of a public one to the other's `secret`
+// (`widen`: the operator widens), which must then be the same type.
+fn tc_widened_same(c: &mut TyCtx, lt: i64, rt: i64, ls: i64, rs: i64, lsec: bool, rsec: bool, widen: bool) -> i64 {
+    let both: bool = if widen {
+        if ls == rs {
+            lsec != rsec
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+    let l2: i64 = if both {
+        mk_secret(c, ls)
+    } else {
+        lt
+    };
+    let r2: i64 = if both {
+        mk_secret(c, rs)
+    } else {
+        rt
+    };
+    if l2 != r2 {
+        tc_mismatch(c, l2, r2)
+    } else {
+        0
+    }
+}
+
+// ----- `apply`, a `Fn` value called, and a call through a variable ------------------------
+
+// `sentinel::types::apply_target_not_fn`.
+fn tc_apply_target(c: &mut TyCtx, ft: i64) -> i64 {
+    let k: i64 = if ft >= tbase() {
+        (*c).tk[ft - tbase()]
+    } else {
+        0 - 1
+    };
+    if k == 16 {
+        0
+    } else if tc_on(c) {
+        let mut m: Vec<u8> = vec_new();
+        append_str(&mut m, "`apply`'s first argument must be a function value (`Fn<T,R>`), got `");
+        tc_put_ty(&mut m, ft, c);
+        push(&mut m, '`');
+        refuse(c, "sentinel::types::apply_target_not_fn", vec_to_array(m))
+    } else {
+        0
+    }
+}
+
+// The argument of `apply(f, x)`, or of `f(x)` through a `Fn` value (`direct`), of type `xt`,
+// against the value's parameter type `pt`: the oracle compares the two without coercing.
+fn tc_apply_arg(c: &mut TyCtx, pt: i64, xt: i64, direct: bool) -> i64 {
+    if xt == pt {
+        0
+    } else if direct {
+        if tc_on(c) {
+            let mut m: Vec<u8> = vec_new();
+            append_str(&mut m, "function value expects an argument of type `");
+            tc_put_ty(&mut m, pt, c);
+            append_str(&mut m, "`, got `");
+            tc_put_ty(&mut m, xt, c);
+            push(&mut m, '`');
+            refuse(c, "sentinel::types::fn_value_arg_mismatch", vec_to_array(m))
+        } else {
+            0
+        }
+    } else {
+        let mut an: Vec<u8> = vec_new();
+        append_str(&mut an, "apply");
+        tc_callarg_msg(c, an, 1, pt, xt)
+    }
+}
+
+// `sentinel::types::callee_not_callable`, a call through a variable of type `vt` that is
+// neither a continuation nor a `Fn` value.
+fn tc_not_callable(c: &mut TyCtx, vt: i64) -> i64 {
+    if tc_on(c) {
+        let mut m: Vec<u8> = vec_new();
+        append_str(&mut m, "cannot call `");
+        tc_put_ty(&mut m, vt, c);
+        append_str(&mut m, "` — expected a continuation or a function value (`Fn<T,R>`)");
+        refuse(c, "sentinel::types::callee_not_callable", vec_to_array(m))
+    } else {
+        0
+    }
+}
+
+// ----- the generic builtins -------------------------------------------------------------
+
+// A generic builtin's arguments (`fid`: 1 `unwrap_or`, 2 `is_some`, 3 `len`, 8 `push`, 9
+// `pop`, 10 `vec_to_array`), the first of type `a0` (-1 for a `null` typed with no
+// expectation) and the second `a1` (-1 when absent), as the oracle's unifier checks them
+// against the builtin's generic signature: a first argument of the wrong shape is a mismatch
+// against the unsubstituted parameter type, and the second, `T` once bound, a conflict, or a
+// mismatch where the oracle coerces it. `useed` is the type `unwrap_or`'s `T` was bound to
+// from the call's expected type first (`dump_gcall`), else -1: the first argument must then
+// agree with it, and a `null` one is typed `?T` from it or from the second argument.
+fn tc_gbuiltin(c: &mut TyCtx, fid: i64, a0: i64, a1: i64, useed: i64) -> i64 {
+    let k0: i64 = if a0 >= tbase() {
+        (*c).tk[a0 - tbase()]
+    } else {
+        0 - 1
+    };
+    let tp: i64 = mk_tparam(c, 0);
+    if fid == 3 {
+        if k0 == 1 {
+            0
+        } else if k0 == 11 {
+            0
+        } else {
+            let p3: i64 = mk_array(c, tp);
+            tc_mismatch(c, p3, a0)
+        }
+    } else if fid == 1 || fid == 2 {
+        if k0 == 4 {
+            if fid == 1 {
+                let inner: i64 = (*c).ta[a0 - tbase()];
+                if useed >= 0 && inner != useed {
+                    tc_conflict(c, "unwrap_or", useed, inner)
+                } else if a1 >= 0 {
+                    tc_unwrap_default(c, inner, a1)
+                } else {
+                    0
+                }
+            } else {
+                0
+            }
+        } else if fid == 1 && a0 < 0 {
+            // A `null`: the oracle types the second argument first, then the `null` as `?T`.
+            let tv: i64 = if useed >= 0 {
+                useed
+            } else {
+                a1
+            };
+            if useed >= 0 && a1 >= 0 {
+                tc_unwrap_default(c, useed, a1)
+            } else {
+                0
+            };
+            if tv >= 0 && tc_null_inner(c, tv) {
+                0
+            } else {
+                let pn: i64 = mk_nullable(c, tp);
+                tc_mismatch(c, pn, a0)
+            }
+        } else {
+            let p1: i64 = mk_nullable(c, tp);
+            tc_mismatch(c, p1, a0)
+        }
+    } else if fid == 8 || fid == 9 {
+        // `&mut Vec<T>`.
+        let ok: bool = if k0 == 2 {
+            if (*c).ta[a0 - tbase()] == 1 {
+                let vb: i64 = (*c).tb[a0 - tbase()];
+                if vb >= tbase() {
+                    (*c).tk[vb - tbase()] == 11
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        if ok {
+            if fid == 8 {
+                let ve: i64 = (*c).ta[(*c).tb[a0 - tbase()] - tbase()];
+                if a1 >= 0 {
+                    if tc_fits(c, ve, a1) {
+                        0
+                    } else {
+                        tc_conflict(c, "push", ve, a1)
+                    }
+                } else {
+                    0
+                }
+            } else {
+                0
+            }
+        } else if tc_on(c) {
+            // The oracle's `&mut Vec<T>` parameter is the first reference it interns.
+            let mut m: Vec<u8> = vec_new();
+            append_str(&mut m, "type mismatch: expected <ref#0>, found ");
+            tc_put_ty(&mut m, a0, c);
+            refuse(c, "sentinel::types::mismatch", vec_to_array(m))
+        } else {
+            0
+        }
+    } else if fid == 10 {
+        if k0 == 11 {
+            0
+        } else {
+            let p10: i64 = mk_vec(c, tp);
+            tc_mismatch(c, p10, a0)
+        }
+    } else {
+        0
+    }
+}
+
+// `sentinel::types::type_arg_inference_conflict` for the builtin `callee`'s type parameter
+// `T`: "conflicting inference for `T` in call to `CALLEE`: bound to `A` then to `B`".
+fn tc_conflict(c: &mut TyCtx, callee: [u8], first: i64, second: i64) -> i64 {
+    if tc_on(c) {
+        let mut m: Vec<u8> = vec_new();
+        append_str(&mut m, "conflicting inference for `T` in call to `");
+        append_str(&mut m, callee);
+        append_str(&mut m, "`: bound to `");
+        tc_put_ty(&mut m, first, c);
+        append_str(&mut m, "` then to `");
+        tc_put_ty(&mut m, second, c);
+        push(&mut m, '`');
+        refuse(c, "sentinel::types::type_arg_inference_conflict", vec_to_array(m))
+    } else {
+        let _c: [u8] = callee;
+        0
+    }
+}
+
+// `unwrap_or`'s second argument, of type `a1`, against `T` bound to `tv`: the oracle coerces
+// it where `T` is a type it coerces to (`tc_pushdown`), a mismatch if it does not fit, and
+// otherwise unifies, a conflict unless the two are the same.
+fn tc_unwrap_default(c: &mut TyCtx, tv: i64, a1: i64) -> i64 {
+    if tc_pushdown(c, tv) {
+        if tc_fits(c, tv, a1) {
+            0
+        } else {
+            tc_mismatch(c, tv, a1)
+        }
+    } else if a1 == tv {
+        0
+    } else {
+        tc_conflict(c, "unwrap_or", tv, a1)
+    }
+}
+
+// The name of class `cid`.
+fn tc_class_name(c: &mut TyCtx, cid: i64) -> Vec<u8> {
+    let mut v: Vec<u8> = vec_new();
+    if cid >= 0 {
+        let cs: i64 = (*c).clns[cid];
+        let ce: i64 = (*c).clne[cid];
+        tc_snb(c, &mut v, cs, ce);
+        0
+    } else {
+        0
+    };
+    v
+}
+
+// The name of impl `iid`'s target type, a class or a struct.
+fn tc_impl_type_name(c: &mut TyCtx, iid: i64) -> Vec<u8> {
+    let mut v: Vec<u8> = vec_new();
+    if iid >= 0 {
+        let sid: i64 = (*c).imsid[iid];
+        let cid: i64 = (*c).imcid[iid];
+        if sid >= 0 {
+            let ss: i64 = (*c).sts[sid];
+            let se: i64 = (*c).ste[sid];
+            tc_snb(c, &mut v, ss, se);
+            0
+        } else if cid >= 0 {
+            let cs: i64 = (*c).clns[cid];
+            let ce: i64 = (*c).clne[cid];
+            tc_snb(c, &mut v, cs, ce);
+            0
+        } else {
+            0
+        };
+        0
+    } else {
+        0
+    };
+    v
+}
+
+// ----- generic user calls ---------------------------------------------------------------
+
+// The oracle's `unify_one` of a generic fn's parameter type `p` with an argument type `a`,
+// against the type arguments bound so far (`bi` / `bt`), binding nothing: 0 when they
+// unify, 1 when they do not (the innermost pair in `tc_ue` / `tc_ug`), 2 when a type
+// parameter bound earlier meets another type (its index in `tc_ue`, the earlier binding in
+// `tc_cf`, the new type in `tc_ug`).
+fn tc_gunify(c: &mut TyCtx, p: i64, a: i64, bi: &mut Vec<i64>, bt: &mut Vec<i64>) -> i64 {
+    let pk: i64 = if p >= tbase() {
+        (*c).tk[p - tbase()]
+    } else {
+        0 - 1
+    };
+    if pk == 9 {
+        let idx: i64 = (*c).ta[p - tbase()];
+        let ex: i64 = subst_get(bi, bt, idx);
+        if ex < 0 {
+            0
+        } else if ex == a {
+            0
+        } else {
+            (*c).tc_ue = idx;
+            (*c).tc_cf = ex;
+            (*c).tc_ug = a;
+            2
+        }
+    } else if p == a {
+        0
+    } else if p < tbase() {
+        tc_gfail(c, p, a)
+    } else if a < tbase() {
+        tc_gfail(c, p, a)
+    } else {
+        let ak: i64 = (*c).tk[a - tbase()];
+        let pa: i64 = (*c).ta[p - tbase()];
+        let aa: i64 = (*c).ta[a - tbase()];
+        if pk != ak {
+            tc_gfail(c, p, a)
+        } else if pk == 4 {
+            tc_gunify(c, pa, aa, bi, bt)
+        } else if pk == 11 {
+            tc_gunify(c, pa, aa, bi, bt)
+        } else if pk == 1 {
+            let pn: bool = if pa >= tbase() {
+                (*c).tk[pa - tbase()] == 1
+            } else {
+                false
+            };
+            let an: bool = if aa >= tbase() {
+                (*c).tk[aa - tbase()] == 1
+            } else {
+                false
+            };
+            if pn {
+                tc_gfail(c, p, a)
+            } else if an {
+                tc_gfail(c, p, a)
+            } else {
+                tc_gunify(c, pa, aa, bi, bt)
+            }
+        } else if pk == 2 {
+            if pa != aa {
+                tc_gfail(c, p, a)
+            } else {
+                let pb: i64 = (*c).tb[p - tbase()];
+                let ab: i64 = (*c).tb[a - tbase()];
+                tc_gunify(c, pb, ab, bi, bt)
+            }
+        } else if pk == 10 {
+            let pr: i64 = (*c).tb[p - tbase()];
+            let ar: i64 = (*c).tb[a - tbase()];
+            let ps: i64 = (*c).girs[pr];
+            let pe: i64 = (*c).gire[pr];
+            let as0: i64 = (*c).girs[ar];
+            let ae: i64 = (*c).gire[ar];
+            if pa != aa {
+                tc_gfail(c, p, a)
+            } else if pe - ps != ae - as0 {
+                tc_gfail(c, p, a)
+            } else {
+                let mut r: i64 = 0;
+                let mut i: i64 = 0;
+                while i < pe - ps {
+                    if r == 0 {
+                        let ph: i64 = (*c).gia[ps + i];
+                        let ah: i64 = (*c).gia[as0 + i];
+                        r = tc_gunify(c, ph, ah, bi, bt);
+                        0
+                    } else {
+                        0
+                    };
+                    i = i + 1;
+                }
+                r
+            }
+        } else {
+            tc_gfail(c, p, a)
+        }
+    }
+}
+
+fn tc_gfail(c: &mut TyCtx, p: i64, a: i64) -> i64 {
+    (*c).tc_ue = p;
+    (*c).tc_ug = a;
+    1
+}
+
+// The name of user fn `fid`'s `idx`-th type parameter, read from its declaration's `<…>`.
+fn tc_tparam_name(c: &mut TyCtx, src: &[u8], fid: i64, idx: i64) -> Vec<u8> {
+    let mut v: Vec<u8> = vec_new();
+    let n: i64 = len(*src);
+    let mut i: i64 = (*c).ufe[fid - 42];
+    while i < n && (*src)[i] != '<' {
+        i = i + 1;
+    }
+    i = i + 1;
+    let mut k: i64 = 0;
+    let mut done: bool = false;
+    while i < n && !done {
+        let b: u8 = (*src)[i];
+        if b == '>' {
+            done = true;
+            0
+        } else if b == ',' {
+            k = k + 1;
+            0
+        } else if b == ' ' {
+            0
+        } else if k == idx {
+            push(&mut v, b);
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    v
+}
+
+// Argument `pi` of a call to the generic user fn `gfid`, of type `got`, against its
+// parameter type `pty` and the type arguments bound so far: the oracle's failure for it.
+fn tc_gcallarg(c: &mut TyCtx, src: &[u8], gfid: i64, pi: i64, pty: i64, got: i64, bi: &mut Vec<i64>, bt: &mut Vec<i64>) -> i64 {
+    let pk: i64 = if pty >= tbase() {
+        (*c).tk[pty - tbase()]
+    } else {
+        0 - 1
+    };
+    let psecret_t: bool = if pk == 3 {
+        let pin: i64 = (*c).ta[pty - tbase()];
+        if pin >= tbase() {
+            (*c).tk[pin - tbase()] == 9
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+    if !tc_on(c) {
+        0
+    } else if got < 0 && pk == 4 {
+        // A `null` the walk typed with no expectation: the oracle types it after the arguments
+        // that bind its parameter, so it is not refused here.
+        0
+    } else if psecret_t {
+        // A `secret T` parameter: the oracle pushes it down unsubstituted, and no argument is
+        // coerced to it.
+        tc_mismatch(c, pty, got)
+    } else {
+        let r: i64 = tc_gunify(c, pty, got, bi, bt);
+        if r == 2 {
+            let idx: i64 = (*c).tc_ue;
+            let first: i64 = (*c).tc_cf;
+            let second: i64 = (*c).tc_ug;
+            let mut m: Vec<u8> = vec_new();
+            append_str(&mut m, "conflicting inference for `");
+            let tn: Vec<u8> = tc_tparam_name(c, src, gfid, idx);
+            tc_put_vec(&mut m, tn);
+            append_str(&mut m, "` in call to `");
+            let fnm: Vec<u8> = tc_fn_name(c, gfid);
+            tc_put_vec(&mut m, fnm);
+            append_str(&mut m, "`: bound to `");
+            tc_put_ty(&mut m, first, c);
+            append_str(&mut m, "` then to `");
+            tc_put_ty(&mut m, second, c);
+            push(&mut m, '`');
+            refuse(c, "sentinel::types::type_arg_inference_conflict", vec_to_array(m))
+        } else if r == 1 {
+            let comp: i64 = (*c).tc_ue;
+            let ag: i64 = (*c).tc_ug;
+            let conc: i64 = subst_fully(c, comp, bi, bt);
+            if conc >= 0 {
+                let fnm2: Vec<u8> = tc_fn_name(c, gfid);
+                tc_callarg_msg(c, fnm2, pi, conc, ag)
+            } else {
+                tc_mismatch(c, comp, ag)
+            }
+        } else {
+            0
+        }
+    }
+}
+
+// `sentinel::types::field_access_on_non_struct`: "field access on non-struct type `T`", for a
+// field access whose target, of type `tt`, is not a struct, a generic instance or a class.
+fn tc_field_non_struct(c: &mut TyCtx, tt: i64) -> i64 {
+    if tc_on(c) {
+        let mut m: Vec<u8> = vec_new();
+        append_str(&mut m, "field access on non-struct type `");
+        tc_put_ty(&mut m, tt, c);
+        push(&mut m, '`');
+        refuse(c, "sentinel::types::field_access_on_non_struct", vec_to_array(m))
+    } else {
+        0
+    }
+}
+
+// ----- type expressions and impls --------------------------------------------------------
+
+// `sentinel::types::unknown_type` for a type name nothing declares: "unknown type `NAME`".
+// The walk resolved such a name to `i64` before. `Self` is not refused here: outside a
+// receiver the oracle's parser refuses it (`sentinel::parse::unexpected_token`), and the walk
+// types it `i64`, as it did before this check.
+fn tc_unknown_type(c: &mut TyCtx, nm: &[u8]) -> i64 {
+    if tc_on(c) {
+        if name_eq_lit(nm, "Self") {
+            0
+        } else {
+            let mut m: Vec<u8> = vec_new();
+            append_str(&mut m, "unknown type `");
+            rf_put(&mut m, nm);
+            push(&mut m, '`');
+            refuse(c, "sentinel::types::unknown_type", vec_to_array(m))
+        }
+    } else {
+        0
+    }
+}
+
+// A type written with the type arguments `av`, resolved already, where `NAME` takes `exp`:
+// the oracle checks the count before it resolves any argument, so when the count is wrong a
+// refusal the arguments recorded (none was before, `pre`; the record was `plen` bytes) gives
+// way to the count's. `av` is then padded with `i64`s or trimmed to `exp`, so that nothing
+// after reads past it (the walk runs on after a refusal).
+fn tc_targ_count_first(c: &mut TyCtx, nm: &[u8], exp: i64, av: &mut Vec<i64>, pre: bool, plen: i64) -> i64 {
+    let got: i64 = len(*av);
+    if got != exp {
+        if tc_on(c) && !pre && (*c).rfd {
+            while len((*c).rfm) > plen {
+                let _b: u8 = pop(&mut (*c).rfm);
+                0
+            }
+            (*c).rfd = false;
+            0
+        } else {
+            0
+        };
+        tc_targ_count(c, nm, exp, got);
+        while len(*av) < exp {
+            push(av, 0);
+        }
+        while len(*av) > exp {
+            let _x: i64 = pop(av);
+            0
+        }
+        0
+    } else {
+        0
+    }
+}
+
+// `sentinel::types::type_arg_count_mismatch`: "`NAME` takes E type argument(s), got G".
+fn tc_targ_count(c: &mut TyCtx, nm: &[u8], exp: i64, got: i64) -> i64 {
+    if got == exp {
+        0
+    } else if tc_on(c) {
+        let mut m: Vec<u8> = vec_new();
+        push(&mut m, '`');
+        rf_put(&mut m, nm);
+        append_str(&mut m, "` takes ");
+        append_int(&mut m, exp);
+        append_str(&mut m, " type argument(s), got ");
+        append_int(&mut m, got);
+        refuse(c, "sentinel::types::type_arg_count_mismatch", vec_to_array(m))
+    } else {
+        0
+    }
+}
+
+// The EffectIds of the effect row whose `!` is token `at` (`! { E, F }`), each once and
+// sorted, into `out`, as the oracle sorts and dedups a method's row before it compares two.
+fn tc_read_row(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], at: i64, c: &mut TyCtx, out: &mut Vec<i64>) -> i64 {
+    let mut j: i64 = at + 2;
+    while (*k)[j] != 7 {
+        if (*k)[j] == 2 {
+            let nm: [u8] = slice_of(src, (*s)[j], (*e)[j]);
+            let id: i64 = effect_lookup(c, src, &nm);
+            tc_row_insert(out, id);
+            0
+        } else {
+            0
+        };
+        j = j + 1;
+    }
+    len(*out)
+}
+
+// Insert `id` into the sorted list `out` unless it is there.
+fn tc_row_insert(out: &mut Vec<i64>, id: i64) -> i64 {
+    let n: i64 = len(*out);
+    let mut keep: Vec<i64> = vec_new();
+    let mut dup: bool = false;
+    while len(*out) > 0 {
+        let x: i64 = pop(out);
+        if x == id {
+            dup = true;
+            0
+        } else {
+            0
+        };
+        push(&mut keep, x);
+    }
+    // `keep` holds the list reversed: put it back in order, `id` in its place.
+    let mut placed: bool = dup;
+    let mut i: i64 = n - 1;
+    while i >= 0 {
+        let y: i64 = keep[i];
+        if !placed {
+            if y > id {
+                push(out, id);
+                placed = true;
+                0
+            } else {
+                0
+            }
+        } else {
+            0
+        };
+        push(out, y);
+        i = i - 1;
+    }
+    if !placed {
+        push(out, id);
+        0
+    } else {
+        0
+    }
+}
+
+// An impl method's signature against its trait's (the oracle's check, made before the body
+// is typed): the same receiver kind (`&Self` or `&mut Self`, `excl`), the same number of
+// parameters, each of the same type, the same return type and the same effect row (`mrow`,
+// sorted). Its parameters are the VarIds `pv0`..`pvn`; `ret` is its return type.
+fn tc_impl_sig(c: &mut TyCtx, src: &[u8], mn_s: i64, mn_e: i64, pv0: i64, pvn: i64, ret: i64, excl: bool, mrow: &Vec<i64>) -> i64 {
+    if tc_on(c) {
+        let tid: i64 = (*c).tc_itid;
+        let mq: [u8] = slice_of(src, mn_s, mn_e);
+        let row: i64 = trait_method_row(c, tid, &mq);
+        if row >= 0 {
+            let ps: i64 = (*c).trmps[row];
+            let pe: i64 = (*c).trmpe[row];
+            let tx: bool = (*c).tc_trx[row] == 1;
+            let rs: i64 = (*c).tc_tres[row];
+            let re: i64 = (*c).tc_tree[row];
+            let mut same: bool = (*c).trmr[row] == ret && pe - ps == pvn - pv0 && tx == excl && re - rs == len(*mrow);
+            let mut ri: i64 = 0;
+            while same && ri < re - rs {
+                if (*c).tc_trep[rs + ri] != (*mrow)[ri] {
+                    same = false;
+                    0
+                } else {
+                    0
+                };
+                ri = ri + 1;
+            }
+            let mut i: i64 = 0;
+            while same && i < pe - ps {
+                let tp: i64 = (*c).mpp[ps + i];
+                let ip: i64 = env_get(c, pv0 + i);
+                if tp != ip {
+                    same = false;
+                    0
+                } else {
+                    0
+                };
+                i = i + 1;
+            }
+            if same {
+                0
+            } else {
+                let mut m: Vec<u8> = vec_new();
+                append_str(&mut m, "impl method `");
+                append_slice(&mut m, src, mn_s, mn_e);
+                append_str(&mut m, "` for `");
+                let its: i64 = (*c).tc_its;
+                let ite: i64 = (*c).tc_ite;
+                append_slice(&mut m, src, its, ite);
+                append_str(&mut m, "` on `");
+                let iys: i64 = (*c).tc_iys;
+                let iye: i64 = (*c).tc_iye;
+                append_slice(&mut m, src, iys, iye);
+                append_str(&mut m, "` has a signature that doesn't match the trait");
+                refuse(c, "sentinel::types::impl_method_signature_mismatch", vec_to_array(m))
+            }
+        } else {
+            0
+        }
+    } else {
+        0
+    }
+}
+
+// A qualified call's receiver, of type `rt`, against impl `iid`'s target (one `&` or
+// `&mut` taken off it first): `sentinel::types::impl_method_receiver_mismatch`, "impl `I`
+// (for `T`) doesn't apply to receiver type `R`".
+fn tc_impl_recv(c: &mut TyCtx, iid: i64, rt: i64) -> i64 {
+    if tc_on(c) {
+        if iid >= 0 {
+            let sid: i64 = (*c).imsid[iid];
+            let cid: i64 = (*c).imcid[iid];
+            let target: i64 = if sid >= 0 {
+                mk_struct(c, sid)
+            } else {
+                mk_class(c, cid)
+            };
+            let rb: i64 = strip_ref(c, rt);
+            if rb == target {
+                0
+            } else {
+                let mut m: Vec<u8> = vec_new();
+                append_str(&mut m, "impl `");
+                let ns: i64 = (*c).imns[iid];
+                let ne: i64 = (*c).imne[iid];
+                tc_snb(c, &mut m, ns, ne);
+                append_str(&mut m, "` (for `");
+                let tn: Vec<u8> = tc_impl_type_name(c, iid);
+                tc_put_vec(&mut m, tn);
+                append_str(&mut m, "`) doesn't apply to receiver type `");
+                tc_put_ty(&mut m, rt, c);
+                push(&mut m, '`');
+                refuse(c, "sentinel::types::impl_method_receiver_mismatch", vec_to_array(m))
+            }
+        } else {
+            0
+        }
+    } else {
+        0
+    }
+}
+
+// `b` rebuilt unchanged, with its length added to `n`.
+fn tc_binds_count(b: Binds, n: &mut i64) -> Binds {
+    match b {
+        Binds::BindEnd => Binds::BindEnd,
+        Binds::BindCell(nm, rest) => {
+            *n = *n + 1;
+            Binds::BindCell(nm, tc_binds_count(rest, n))
+        },
+    }
+}

@@ -1,0 +1,14 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c42_impl_method_receiver_mismatch.sentinel\")"
+---
+sentinel::types::impl_method_receiver_mismatch
+
+  × impl `Direct` (for `P`) doesn't apply to receiver type `i64`
+    ╭─[tests/ui/c42_impl_method_receiver_mismatch.sentinel:18:17]
+ 17 │ fn main() -> i64 {
+ 18 │     Direct::eat(5, 1)
+    ·                 ┬
+    ·                 ╰── 
+ 19 │ }
+    ╰────
