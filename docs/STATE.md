@@ -14,8 +14,48 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
-**Latest (2026-11-08) — `scg`'s code generator makes its ported type checks and runs the
-constant-time verifier before it generates code, and its typer ports the oracle's checks that a
+**Latest (2026-11-08, second slice) — `scg`'s checking modes port the oracle's type-level `secret`
+rules and the checks beside them, and its code generator refuses a `secret` over a type parameter
+([ADR 0041](decisions/0041-self-host-port-types.md) amendment A17; register D20's cast half and
+D146's `scg` half closed, D145, D179 and D180 extended, D181, D182, D183 and D184 filed).** A16 left
+the oracle's type-level `secret` rules unported. In every mode but the code generator's own walk,
+and so in the checking pass the code generator runs first, the typer now makes them as the oracle
+does: `secret_float` (a `secret f64` wherever a type is written, and a `secret` integer cast to
+`f64`), `secret_handle` (a `secret` `Shared` or `Mutex`), `secret_in_ref_deref` (a deref of a
+`secret` reference), `match_scrutinee_not_enum` (a `match` over anything but an enum, a `secret` one
+among them) and `extern_ffi_type` (the FFI fence over an `extern "C"` declaration's types and an
+`export "C"` fn's), with the checks the oracle makes in the same places: a cast's operand and target
+(`non_integer_cast`; a `u128` target is refused as an unknown type, D20), a deref's operand
+(`deref_of_non_ref`), the variant a pattern or a construction names (`unknown_variant`) and a
+`match`'s exhaustiveness (`non_exhaustive_match`). Nine codes join `PORTED_REFUSALS` (forty-two).
+Those modes also leave a `secret` type unsubstituted and let a `secret` parameter type bind nothing
+in unification, as the oracle's typer does, refusing a type parameter then left unbound as it does
+(`ambiguous_type_arg`, for those callees only), so no `secret f64` or `secret` handle is made by
+instantiating a generic; that refuses D146's element as the oracle does (which side should move is
+still the maintainer's call). Since the code generator's own walk still substitutes and binds
+through a `secret`, its checking pass refuses any `secret` written over a type parameter, once
+nothing else is to be reported (D182, which records where that over-refuses: a generic nothing
+instantiates and a phantom type argument, both of which `snc llvm` lowers; D183 is `snc build`'s
+internal error on such a type). The merged text writes an export as a plain fn, so the code
+generator reads the exports' names from the sources first; a program of more than one file that
+declares one is refused, since the merge qualifies the export's name where the oracle keeps its C
+symbol (D181). The code generator's own walk is unchanged, so no accepted program's emitted IR
+moves. Pinned by fourteen new `tests/ui` fixtures (fifty-eight carry a ported code, each held by
+every self-hosted driver), 307 typer shapes (248 before), 40 code-generator shapes (34 before) and
+four new tests. Of fifty-seven mutations of the new code, fifty-four are caught by a test, judged by
+what that test reads; one of the other three is equivalent, one is a backstop caught together with
+the check in front of it, and one widens a check only to programs the oracle refuses with the same
+message. Over the 563 `.sentinel` files in the tree, every file whose output changes is one the
+oracle refuses but for the registered `crypto_lib`, and no accepted program's output moves in any
+driver. Four adversarial review rounds, each finding verified by constructing it; the second and
+third each found another way a type built from a `secret` over a type parameter reached the code
+generator's walk, which types it otherwise than the checks, so the code generator now refuses every
+`secret` written over a type parameter rather than mirror one more piece of the oracle's typing, and
+the fourth found no way past that. Four-check on Windows: **2,199 passed with exactly the 18 known Windows failures**, 6 ignored, doctests and clippy clean, every `selfhost_*` differential green including both bootstrap fixed points. `scg`-only: the oracle and inkwell move no byte, so a
+patch by ADR 0076 D2, as A14 and A16 were.
+
+**Previously (2026-11-08, first slice) — `scg`'s code generator makes its ported type checks and
+runs the constant-time verifier before it generates code, and its typer ports the oracle's checks that a
 value fits where it flows ([ADR 0041](decisions/0041-self-host-port-types.md) amendment A16, [ADR
 0026](decisions/0026-hir-mir-pipeline-and-constant-time-secret-codegen.md) A3; registers D20, D142
 and D143 DONE, D149's code-generator half and D152's refusal half closed, the checking halves of

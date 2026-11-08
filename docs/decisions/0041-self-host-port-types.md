@@ -705,6 +705,112 @@ ADR-0040 A1 discipline — `docs/agent-protocol.md`). See ## Amendments A1.
   too (`snc types`, `snc build`, or for `u128` `snc llvm`, the text oracle the code generator
   mirrors), so a patch by ADR 0076 D2, as A14 was.
 
+- **A17 — (2026-11-08, registers D20's cast half, D145, D146's `scg` half, D179, D180, D181,
+  D182, D183, D184) the checking modes port the oracle's type-level `secret` rules and the
+  checks beside them; the code generator refuses a `secret` over a type parameter.** A16
+  deferred the oracle's type-level `secret` rules. They are ported now, in every mode but 4,
+  as the oracle makes them: `secret_float` for a `secret f64` wherever a type is written (a
+  parameter, a return, a field, a payload, a `let`, a type argument, a nullable, a class
+  field, a trait method's or an effect operation's signature) and for a `secret` integer cast
+  to `f64`; `secret_handle` for a `secret` `Shared` or `Mutex`; `secret_in_ref_deref` for a
+  deref of a `secret` reference; `match_scrutinee_not_enum` for a `match` over anything but an
+  enum, a `secret` one among them; and `extern_ffi_type`, the FFI fence: each type an `extern
+  "C"` declaration names, checked as it is resolved after every fn signature, must be a public
+  `i64`, `f64` or `ptr`, each parameter of an `export "C"` fn that or a `&[u8]` / `&mut [u8]`,
+  and its return that or an owned public `[u8]`, checked after the declarations. The checks
+  the oracle makes in the same places come with them: a cast's operand must be an integer or a
+  float and its target `i64`, `i32`, `u8`, `u128` or `f64` (`non_integer_cast`; a `u128`
+  target is refused as an unknown type, since `scg` does not model `u128`, D20); a deref's
+  operand a reference or the `?Guard` a `lock` binds (`deref_of_non_ref`); a pattern must name
+  a variant of the scrutinee's own enum, and a construction a variant its enum declares
+  (`unknown_variant`; the walk no longer indexes past the variant table when one does not);
+  and a `match` with no `_` arm must name every variant (`non_exhaustive_match`). Nine codes
+  join `PORTED_REFUSALS` (forty-two in all). Two typing rules of the oracle's come with them,
+  in the same modes: a `secret` type is left unsubstituted in a generic call's result and a
+  generic instance's field, as `Type::substitute` leaves one, so that no `secret f64` or
+  `secret` handle is made by instantiating a generic; and a `secret` parameter type binds no
+  type parameter in unification, as in the oracle's `unify_one`, which has no arm for it
+  (without that, the unsubstituted `secret T` one call returns, expected of a second call,
+  bound `T` there to the first call's `T`), an argument of that very `secret T` fits a `secret
+  T` parameter, and a type parameter nothing else binds is then refused as the oracle refuses
+  it (`ambiguous_type_arg`, ported for the callees whose signature holds a `secret` over a
+  type parameter, and only for them, so it is not among `PORTED_REFUSALS`). The first also
+  refuses D146's element as the oracle does (which side should move is still the maintainer's
+  call; if the oracle comes to accept it, this rule moves with it). Mode 4 keeps substituting
+  and binding through a `secret`, so its emitted IR for an accepted program does not move; but
+  a type made from a `secret` over a type parameter (a generic call's result, a generic
+  instance's field) is then typed differently by the checks and by the walk that lowers it,
+  and the back ends do not lower such a type where they lay it out (`snc llvm` refuses it as
+  not yet ported, and `snc build` stops on it with an internal error, D183). So the code
+  generator's checking pass refuses any `secret` written over a type parameter,
+  `sentinel::codegen::secret_over_type_param`, once neither a type error nor a leak is to be
+  reported, as `snc build` reaches its back end last (D182 records where it over-refuses: a
+  generic fn or struct written so that nothing instantiates, and a phantom type argument,
+  `P<secret T>` of a `struct P<T>` that does not use `T`, both of which `snc llvm` lowers).
+  The merged text writes an `export "C"` fn as a plain `fn`, as `snc merge` does, so the code
+  generator reads the exports' names from the sources first (`merge::merge_exports`) and its
+  checking pass checks the fns of those names as exports. A program of more than one file (a
+  `use`, or a module split into `part` files) that declares an export is refused with
+  `sentinel::codegen::merged_export_not_supported`: the merge qualifies the export's name
+  (`input$f` where the oracle keeps `f`, its C symbol), so the code generator could not emit
+  the library the oracle builds (D181, the corpus's `examples/export/crypto_lib.sentinel`
+  among the refused). The orders and codes that differ are registered: a class's fields and a
+  class's or trait's method return types are resolved before the FFI fence, where the oracle
+  checks the fence first (D145); `null as i64` is `non_integer_cast` where the oracle reports
+  `ambiguous_null`, and `export "Rust" fn` is `extern_ffi_type` where the oracle refuses it as
+  it parses (D179). Pinned by `common::assert_refuses_what_the_oracle_refuses` over the
+  fifty-eight `tests/ui` fixtures that carry a ported code (forty before): fourteen are new
+  (`c54_non_integer_cast`, `c54_cast_to_non_integer`, `c58_secret_float_param`,
+  `c58_secret_float_cast`, `c58_secret_float_through_generic`, `c31_deref_secret_ref`,
+  `c21_deref_of_non_ref`, `c5d1_match_secret_scrutinee`, `c5d1_match_unknown_variant`,
+  `c5d1_construct_unknown_variant`, `c57_extern_secret_param`, `c57_extern_secret_return`,
+  `c59_export_secret_param`, `c59_export_secret_return`), and four that were there now carry a
+  ported code (`c21_extern_ref_param`, `c71_secret_handle`, `c71_secret_mutex_handle`,
+  `c5d1_non_exhaustive_match`); by `sentinel_typer_refusals_match_the_oracle_on_shapes` (307
+  programs, 248 before); by `sentinel_codegen_checks_as_the_typer_does` (40 programs, 34
+  before), among them an export beside a plain fn whose signature the fence would refuse, and
+  one whose name is a prefix of the export's; and by four new tests:
+  `sentinel_codegen_refuses_an_export_the_merge_would_rename`, `sentinel_codegen_refuses_u128`
+  (`u128` written and as a cast's target, which D20 left unpinned),
+  `sentinel_codegen_refuses_a_secret_over_a_type_parameter` (calls, a struct field, an
+  uncalled generic, with a type error and a leak each reported first) and
+  `sentinel_typer_refuses_a_deref_of_a_late_declared_struct`. Of fifty-seven mutations of the
+  new code, fifty-four are caught by a test, judged by what that test reads; of the other
+  three, one leaves set a flag that nothing reads after the last `extern` declaration
+  (equivalent); one lets a pattern of another enum count toward exhaustiveness, which the
+  variant check refuses first: with that check off too, it alone turns the exhaustiveness
+  refusal into an acceptance, and the pair is caught; and one widens the ambiguity check from
+  this family to every generic call, which refuses only programs the oracle refuses with the
+  same message, which no test holds while the check is ported for the family alone. Over the
+  563 `.sentinel` files in the tree, each driver run on each file alone with the standard
+  library beside it, HEAD against the change: every changed file is one the oracle refuses,
+  but for the registered `crypto_lib` refusal; no accepted program's output moves in any
+  driver. The typer, borrow, MIR and `ctverify` drivers change on 34 files each: the seventeen
+  fixtures above newly refused, sixteen inputs on which they aborted at HEAD (part files of
+  modules and an example, read alone) now refused, and `c31_deref_secret_ref` refused with the
+  oracle's code where it was a mismatch; the code generator changes on 32: sixteen of those
+  fixtures and `crypto_lib` newly refused, fourteen inputs on which it aborted at HEAD
+  (`c5d1_construct_unknown_variant` among them) now refused, and `c31_deref_secret_ref`. Four
+  review rounds, each finding verified by constructing it (`wf_eac3bad8-0fc`, four lenses;
+  `wf_1cac90bc-484`, two, over the first round's fixes; `wf_e7fbfd12-156`, two, over the
+  second's and the texts; `wf_ed65da1d-f77`, one, on the final rule). The first found an
+  over-refusal the substitution rule made (two calls of a `secret T`-returning generic in one
+  comparison, array or assignment), an out-of-range read in the deref check on a struct
+  numbered past 100, and texts that claimed more than they showed, all fixed. The second found
+  that the unification rule made for the first let such calls reach the code generator's walk,
+  which types them otherwise; the third, that a generic struct's `secret T` field reaches it
+  the same way, with no call of such a generic, and that the typer drivers accepted a call
+  whose type parameter nothing bound. Each round found more of one family, so rather than
+  mirror one more piece of the oracle's typing, the code generator refuses every `secret`
+  written over a type parameter (D182), and the ambiguity refusal is ported for the family.
+  The fourth found no program this change lets the code generator lower that it refused
+  before; it found pre-existing ways in which the code generator's walk reads a generic
+  instance otherwise than the checks do (registered, or with the maintainer first), and the
+  over-refusal of a phantom type argument, which D182 now records. The pre-existing defects
+  the rounds found are registered (D180, D182, D183, D184) or went to the maintainer first.
+  `scg`-only: the oracle and inkwell move no byte, so a patch by ADR 0076 D2, as A14 and A16
+  were.
+
 ## Context
 
 The lexer (1/N), parser (2/N), and resolve (3/N) proved the **differential-oracle
