@@ -124,7 +124,11 @@ reference as you work through the milestones.
 > confirming nothing pre-existing is newly refused; oracle-vs-scg byte-equality on the new
 > fixture at types, mir and llvm; and the secret-taint check in both directions.
 
-### ▶ RESUME HERE (2026-11-08, second slice — start here. `origin/main` was `3863fde` when this was written; the first slice's `27ce9b3` and `661773b` and this slice's two commits sit on top of it, unpushed; read `git reflog show refs/remotes/origin/main` and `git log --oneline origin/main..HEAD` at the START and AGAIN before writing either down. **`scg`'s checking modes port the oracle's type-level `secret` rules and the checks beside them, and its code generator refuses a `secret` over a type parameter** (`8afd81a` fix, then this docs commit), by [ADR 0041](decisions/0041-self-host-port-types.md) amendment **A17**: in every mode but 4 the typer makes `secret_float`, `secret_handle`, `secret_in_ref_deref`, `match_scrutinee_not_enum` and the FFI fence (`extern_ffi_type`, over `extern "C"` declarations and `export "C"` fns), with `non_integer_cast`, `deref_of_non_ref`, `unknown_variant` and `non_exhaustive_match` beside them: nine codes join `PORTED_REFUSALS` (forty-two). Those modes leave a `secret` type unsubstituted and let a `secret` parameter type bind nothing, as the oracle's typer does, and refuse a type parameter then left unbound (`ambiguous_type_arg`, for those callees only; D146's element is refused as the oracle refuses it, and which side moves is still the maintainer's call); because mode 4 still substitutes and binds through a `secret`, the code generator's checking pass refuses any `secret` written over a type parameter (**D182**, which records where that over-refuses; **D183** is the oracle's `snc build` internal error on such a type). The code generator reads the exports' names from the sources (the merged text drops the prefix) and refuses an export in a program of more than one file (**D181**, `crypto_lib` among the refused). A `u128` cast target is refused as D20's `u128` is, now pinned. Registers extended: D145 (a sixth order), D179 (two codes), D180 (two relatives); **D184** lists the pre-existing aborts and acceptances the reviews found. Pins: fourteen new `tests/ui` fixtures (fifty-eight carry a ported code), 307 typer shapes, 40 code-generator shapes, four new tests. Of fifty-seven mutations, fifty-four caught; one equivalent, one backstop caught with the check in front of it, one that widens a check only to programs the oracle refuses with the same message. Sweep over 563 files: only files the oracle refuses change (and the registered `crypto_lib`); no accepted program's output moves. Four review rounds (`wf_eac3bad8-0fc`, `wf_1cac90bc-484`, `wf_e7fbfd12-156`, `wf_ed65da1d-f77`): the second and third each found another way a type built from a `secret` over a type parameter reached the code generator's walk, which is why the rule refuses every one written rather than mirror more of the oracle's typing; the fourth found no way past it. Four-check on Windows: **2,199 passed, exactly the 18 known Windows failures**, 6 ignored, doctests and clippy clean, both bootstrap fixed points green. `scg`-only: a patch by ADR 0076 D2.)
+### ▶ RESUME HERE (2026-11-10 — start here. `origin/main` was `3863fde` when this was written; the 2026-11-08 slices' `27ce9b3`, `661773b`, `8afd81a` and `b9a1aeb` and this slice's two commits sit on top of it, unpushed; read `git reflog show refs/remotes/origin/main` and `git log --oneline origin/main..HEAD` at the START and AGAIN before writing either down. **A comparison takes scalar operands, and a type parameter stays opaque** (`3e4d880` fix, then this docs commit), by [ADR 0016](decisions/0016-concrete-c1-7-generics-syntax.md) amendment **A2**, register **D185** DONE: the oracle's comparison rule refused only a struct or a nullable left operand, so a comparison of two `T` values type-checked as `bool` and each generic instance kept that type (invalid IR and a `snc build` internal error at a struct, a presence-flag-only comparison at a `?i64`, a result typed `bool` at a `secret` scalar), and arrays, `Vec`s, enums, classes, references, `ptr`, `Fn` values and handles got through as well. Now the left operand, once an outer `secret` is stripped, is an integer, `bool` or `f64` (`is_comparable_scalar`), else `sentinel::types::mismatch` at the left operand; `x == null` keeps its own rule; `scg`'s checking modes refuse the same (`tc_binary`). Pins: `comparison_operands_are_scalars`, sixteen `tests/ui` `c13_compare_*` fixtures held by every self-hosted driver, `tests/pass` `c13_generic_null_compare`, a codegen seed of two untyped operands; the D182 test's compared case now answers the oracle's mismatch, and the same calls uncompared still reach D182. Thirteen oracle mutations and ten `scg` mutations, all caught. Sweeps: nothing moves in the oracle over the tracked corpus outside `selfhost/` (types standalone and merged, `snc build`), and every self-hosted driver moves only the sixteen fixtures over 580 files. Two review rounds, each finding verified by constructing it (`wf_ef6604f9-9e8`, four lenses, nineteen confirmed; `wf_8b2c4ecb-1ab`, three lenses over the final texts, twenty-three confirmed, none a regression), those in this change fixed; **D140** closed with D185 (its array and enum half); filed **D186** (`scg` lowers a `null` on the left of a comparison to invalid IR) and **D187** (inkwell leaks a nullable struct's heap fields), extended D33, D117, D152, D179, D183 and D184; the rest went to the maintainer first. Four-check on Windows: **2,217 passed, exactly the 18 known Windows failures**, 6 ignored, doctests and clippy clean, both bootstrap fixed points green. Oracle-moving by refusals only: at least MINOR, covered by the owed 0.3.0.)
+
+> **NEXT:** first the follow-ups the maintainer was told of; then, in the order agreed on 2026-10-05, D36's option A with D146 and the bump to 0.3.0 (ADR 0076 D2), which this slice also needs. D167 is the maintainer's call. Open: D172, D173, D174, D177, D178, D179, D180, D181, D182, D183, D184, D186, D187, D120's field half, and the rest of D154.
+
+### ▶ RESUME HERE (2026-11-08, second slice — superseded by the block above. `origin/main` was `3863fde` when this was written; the first slice's `27ce9b3` and `661773b` and this slice's two commits sit on top of it, unpushed; read `git reflog show refs/remotes/origin/main` and `git log --oneline origin/main..HEAD` at the START and AGAIN before writing either down. **`scg`'s checking modes port the oracle's type-level `secret` rules and the checks beside them, and its code generator refuses a `secret` over a type parameter** (`8afd81a` fix, then this docs commit), by [ADR 0041](decisions/0041-self-host-port-types.md) amendment **A17**: in every mode but 4 the typer makes `secret_float`, `secret_handle`, `secret_in_ref_deref`, `match_scrutinee_not_enum` and the FFI fence (`extern_ffi_type`, over `extern "C"` declarations and `export "C"` fns), with `non_integer_cast`, `deref_of_non_ref`, `unknown_variant` and `non_exhaustive_match` beside them: nine codes join `PORTED_REFUSALS` (forty-two). Those modes leave a `secret` type unsubstituted and let a `secret` parameter type bind nothing, as the oracle's typer does, and refuse a type parameter then left unbound (`ambiguous_type_arg`, for those callees only; D146's element is refused as the oracle refuses it, and which side moves is still the maintainer's call); because mode 4 still substitutes and binds through a `secret`, the code generator's checking pass refuses any `secret` written over a type parameter (**D182**, which records where that over-refuses; **D183** is the oracle's `snc build` internal error on such a type). The code generator reads the exports' names from the sources (the merged text drops the prefix) and refuses an export in a program of more than one file (**D181**, `crypto_lib` among the refused). A `u128` cast target is refused as D20's `u128` is, now pinned. Registers extended: D145 (a sixth order), D179 (two codes), D180 (two relatives); **D184** lists the pre-existing aborts and acceptances the reviews found. Pins: fourteen new `tests/ui` fixtures (fifty-eight carry a ported code), 307 typer shapes, 40 code-generator shapes, four new tests. Of fifty-seven mutations, fifty-four caught; one equivalent, one backstop caught with the check in front of it, one that widens a check only to programs the oracle refuses with the same message. Sweep over 563 files: only files the oracle refuses change (and the registered `crypto_lib`); no accepted program's output moves. Four review rounds (`wf_eac3bad8-0fc`, `wf_1cac90bc-484`, `wf_e7fbfd12-156`, `wf_ed65da1d-f77`): the second and third each found another way a type built from a `secret` over a type parameter reached the code generator's walk, which is why the rule refuses every one written rather than mirror more of the oracle's typing; the fourth found no way past it. Four-check on Windows: **2,199 passed, exactly the 18 known Windows failures**, 6 ignored, doctests and clippy clean, both bootstrap fixed points green. `scg`-only: a patch by ADR 0076 D2.)
 
 > **NEXT:** first the follow-ups the maintainer was told of; then, in the order agreed on 2026-10-05, D36's option A with D146 and the bump to 0.3.0 (ADR 0076 D2). D167 is the maintainer's call. Open: D172, D173, D174, D177, D178, D179, D180, D181, D182, D183, D184, D120's field half, and the rest of D154.
 
@@ -2262,6 +2266,13 @@ reference as you work through the milestones.
 >      `lock` of that mutex times out (a probe that locks, compares and returns, twice, then
 >      relocks answers 101 where 42 is right), and the text back ends fail `llc` on the
 >      comparison. `is_some(g)` is the form that works.
+>      In a generic body, `x == null` on a `?T` parameter is recorded the same way (found
+>      2026-11-10 by D185's review; the same before and after it): the oracle's borrow dump lists
+>      the parameter, a second `x == null` is refused as a use of a moved binding, and `scg`'s
+>      borrow checker lists nothing, so its dump differs (`tests/pass/c13_generic_null_compare`
+>      compares a call's result for that reason). Measured on Windows (peak working set,
+>      inkwell, 800,000 calls): `fn present(x: ?P) -> i64 { if x == null { 0 } else { 1 } }`, `P`
+>      eight `i64` fields, peaks at 66.3 MB, against 4.9 MB when the body does not compare.
 >
 >      **D118 — `scg` gives an enum payload argument no expected type, so a `null` or a value
 >      that needs a `?T` widen, passed directly, is invalid IR.** Found
@@ -2717,8 +2728,10 @@ reference as you work through the milestones.
 >      the push and the `ret`, behind the flag only where the parent moves the parameter), and
 >      two codegen seeds in the chained shape.
 >
->      **D140 — `==` between two arrays type-checks and borrow-checks, then fails in every back
->      end.** Found 2026-09-25 by a review of the checker slice; re-verified 2026-09-26.
+>      **D140 — DONE (2026-11-10, with D185). `==` between two arrays type-checks and
+>      borrow-checks, then fails in every back end.** ADR 0016 A2 refuses a comparison of two
+>      arrays, or of two enum values, in the type checker (`c13_compare_array`,
+>      `c13_compare_enum`); the text below is the entry as filed. Found 2026-09-25 by a review of the checker slice; re-verified 2026-09-26.
 >      `let a: [i64] = [1, 2]; let b: [i64] = [1, 2]; if a == b { 42 } else { 1 }`: `snc build`
 >      panics in inkwell (exit 101, "Found StructValue ... but expected the IntValue variant"),
 >      against the rule that user input gets a diagnostic, not a panic; the oracle and `scg`
@@ -2962,6 +2975,12 @@ reference as you work through the milestones.
 >      pass binds an arm's parameters at their declared types, as the other four drivers do,
 >      so it makes their refusals: an unknown field of a struct parameter is refused before
 >      code is generated. The IR half, the binding in the code generator's own walk, is open.
+>      A `return` arm's parameter is bound the same way (found 2026-11-10 by D185's review; the
+>      same before and after it): in `handle ask() with { Io.r(k) => k(1), return x => if x ==
+>      true { 1 } else { 0 } }` over `fn ask() -> bool ! { Io }`, the oracle loads `x` as `i1`
+>      and compares `icmp eq i1`, `scg`'s walk loads an `i64` and compares `icmp eq i64`; with
+>      `ask` returning a literal, as here, both modules pass `llvm-as`. No corpus fixture has the
+>      shape.
 >
 >      **D153 — DONE (2026-10-03, `d25d196`, [ADR
 >      0071](decisions/0071-shared-ownership-and-mutex.md) D2 amendment A2). inkwell
@@ -3667,10 +3686,18 @@ reference as you work through the milestones.
 >      vec_to_array(pass(sv))` over a `Vec<secret i64>` is a conflict in the oracle and a
 >      `mismatch` in `scg` (and `pop` into a `?i64` likewise); a type the message numbers by
 >      when it was first met (`<ref#N>`, `<gi#N>`), which `scg` numbers in its own interner, so
->      an index into a reference reads `<ref#0>` where the oracle reads `<ref#1>`, and a
+>      an index into a reference reads `<ref#0>` where the oracle reads `<ref#1>` (as does a
+>      comparison of two references since ADR 0016 A2, which is why that refusal has no
+>      `tests/ui` fixture), and a
 >      `secret` type over other than the four word scalars can take another `<secret#N>`, so
 >      `fn g(x: secret [i64]) -> bool { x }` before `struct P { a: secret [u8] }` reads
->      `<secret#4>` where the oracle reads `<secret#5>` (agreed when A16 was planned); `P<i64>`
+>      `<secret#4>` where the oracle reads `<secret#5>` (agreed when A16 was planned), and a
+>      nested array likewise (`[<arr#0>]` where the oracle reads `[<arr#1>]`, found by D185's
+>      review: ADR 0016 A2 refuses comparing two `[[i64]]`, and the two messages differ); since A2,
+>      programs the oracle refuses earlier with a code `scg` does not port, and `scg` accepted, are
+>      refused by `scg` as a comparison's `mismatch` (`vec_new() == vec_new()`, `ambiguous_type_arg`;
+>      `a == []`, `ambiguous_empty_array`; `a == [null]` over `[?i64]`, `nested_array`; a doubled
+>      `secret`, `parse::double_secret`); `P<i64>`
 >      for a struct that takes no type argument, `type_arg_count_mismatch` in `scg` and
 >      `type_args_on_non_generic` in the oracle; and a generic struct literal with no expected
 >      type, `let o: ?B<i64> = B { v: 3 };`, which the oracle refuses as ambiguous and `scg` as
@@ -3749,8 +3776,9 @@ reference as you work through the milestones.
 >      `snc build` panics in `crates/sentinel-codegen/src/lib.rs` ("`llvm_basic_type` called on
 >      `Type::TypeParam`"), where the project's rule is a diagnostic for anything a user program
 >      can reach, and `snc llvm` refuses it as not yet ported. Because the typer types every such
->      call as the one unsubstituted `secret T`, it also accepts comparing two calls at different
->      instances (`g(1) != g(true)`). Matching needs the typer to substitute through a `secret`
+>      call as the one unsubstituted `secret T`, it also accepted comparing two calls at different
+>      instances (`g(1) != g(true)`), until ADR 0016 A2 refused a comparison over a type parameter
+>      (D185). Matching needs the typer to substitute through a `secret`
 >      (with D146's question), or a diagnostic in the back end.
 
 >      **D184 — pre-existing aborts and acceptances A17's reviews found in `scg`.** Found
@@ -3772,7 +3800,65 @@ reference as you work through the milestones.
 >      (`<module>_<os>.sentinel`), which `scg`'s merge does not read, so it checks and lowers the
 >      portable module where the oracle reads the variant. Refused where the oracle accepts: a
 >      zero-arm `match` over an empty enum, which `scg` types as `?T` and so refuses its fn's
->      return.
+>      return. (Compared with another, it is accepted: ADR 0016 A2's comparison rule leaves an
+>      operand `scg` gave no type to the same-type check, as the oracle accepts the program. Its
+>      types and MIR dumps read `?T` where the oracle's read `i64`, and its IR is the oracle's, so a
+>      codegen seed holds it. Compared with a typed operand, `(match e {}) == 1`, it is refused,
+>      before and after A2.) The same untyped operand also reaches the rule from a fn named as a value
+>      whose signature cannot be one, `fn g(x: [i64]) -> i64 { 0 }` with `g == g`: the oracle
+>      refuses it (`fn_value_signature_not_supported`, not ported), and `scg`'s code generator
+>      emits `icmp eq i64 @g, @g`, which `llvm-as` rejects (found by D185's review; the same
+>      before and after it). Accepted where the oracle refuses, found by its second round: `k ==
+>      k` over a handler arm's continuation, which the oracle refuses as `kont_used_as_value` (not
+>      ported) and `scg` types as `i64` and lowers.
+>
+>      **D185 — DONE (2026-11-10). A comparison accepted any operand type but a struct or a
+>      nullable, a type parameter among them.** Found 2026-11-10; pre-existing. ADR 0016 holds a
+>      type parameter opaque inside a generic body, and the arithmetic, bitwise, shift and logical
+>      operators, casts and indexing refuse one, but the comparison rule refused only a struct and
+>      a nullable left operand. A comparison of two `T`
+>      values was typed `bool` in the body, and each instance kept that type (ADR 0016 D7c): at a
+>      struct its `icmp` was invalid IR and `snc build` stopped with an internal error; at a `?i64`
+>      only the presence flags were compared, so `eq(?4, ?5)` was `true`; at a `secret` scalar the
+>      result was `bool`, not `secret bool`. Arrays, `Vec`s, enums and class instances made the
+>      same invalid IR and internal error (D140, closed with this), `[secret i64] == [secret i64]`
+>      was typed `bool`, and references, `ptr`, `Fn` values and the handle types got through as
+>      well. [ADR 0016](decisions/0016-concrete-c1-7-generics-syntax.md)
+>      **A2**: a comparison's left operand, an outer `secret` stripped, is an integer, `bool` or
+>      `f64` (`is_comparable_scalar`), else `sentinel::types::mismatch`; `== null` on a nullable
+>      keeps its own rule; `scg`'s checking modes refuse the same (`tc_binary`; an operand it gave
+>      no type, a zero-arm `match`, goes on to the same-type check, D184), with the oracle's code
+>      and, but for the types D179 numbers, its message. Refused now that the text back ends
+>      lowered (to a comparison of addresses) and `snc build` could not build: a comparison of two
+>      references or two handles, and of two results of a generic fn returning `secret T` (D183);
+>      nothing in the corpus. A refused comparison whose right operand has another type is now reported at
+>      the left operand. Pins: `comparison_operands_are_scalars` (every comparison operator over
+>      each kind of operand type a parameter can be written with, and the expression-only
+>      handles, with the result's `secret` checked), sixteen `tests/ui` `c13_compare_*` fixtures
+>      held by every self-hosted driver, `tests/pass` `c13_generic_null_compare` and a codegen
+>      seed of two untyped operands.
+>      Oracle-moving by refusals only: at least MINOR (ADR 0076 D2), covered by the owed 0.3.0.
+>
+>      **D186 — `scg` types a `null` on the left of a comparison as `?T`, and its code generator
+>      lowers it to invalid IR.** Found 2026-11-10 while pinning D185; pre-existing (HEAD answers
+>      the same). For `null == a` with `a: ?i64`, the oracle types the literal by the other
+>      operand, `(null :?i64)`, and lowers `extractvalue { i1, i64 } { i1 0, i64 0 }, 0`; `scg`
+>      dumps `(null :?T)` (in a generic body too, where the oracle dumps `(null :?<T#0>)`) and
+>      emits `extractvalue i64 { i1 0, i64 0 }, 0`, which `llvm-as` rejects. It fails closed, and
+>      no corpus program writes `null` on the left. `tests/pass/c13_generic_null_compare` keeps
+>      `null` on the right for this reason. The fix is for `scg` to type the other operand first
+>      when the left one is `null`, as the oracle does.
+>
+>      **D187 — inkwell frees a nullable struct's payload but not the heap its fields own (a
+>      leak).** Found 2026-11-10 while probing D117's shape for D185; pre-existing (the compiler
+>      before D185 measures the same). A loop binding `let a: ?H = H { a: [1, 2, 3, 4, 5, 6, 7,
+>      8] }` 800,000 times, for `struct H { a: [i64] }`, peaks at 66.3 MB (Windows peak working
+>      set, inkwell), against under 5 MB (4.4 to 4.9 over runs) for a `?P` whose eight fields are
+>      `i64`, and 4.9 MB for the same loop over a plain `H`. The payload is freed (the `?P` loop does not grow) and the
+>      array inside it is not (the growth is about one array per round). D48 records how the three
+>      back ends differ on a nullable's drop; D137 and D138 are the class and enum-payload cases
+>      of a heap field left behind. The drop path is the maintainer's to
+>      change first; not changed here.
 >
 >      **D78 — stale corpus fixture counts in `llvm.rs` and `README.md`, at six sites, stale
 >      before this change.** Found by D74's reviews. `crates/sentinel-driver/tests/llvm.rs`
@@ -4864,6 +4950,11 @@ reference as you work through the milestones.
 >      its trailing `i64`. Not cosmetic: it is what makes D17's omission of those two
 >      elements CORRECT rather than lazy, and it is the first thing that has to change
 >      before D30 can be closed. Its `ll_type_to` twin needs the same.
+>      A comparison shows it too (found 2026-11-10 by D185's review; the same before and after
+>      it): `scg`'s checks accept an `f64` comparison, as the oracle's do, and its code generator
+>      lowers `fn f(a: f64, b: f64) -> bool { a < b }` to an `icmp slt` over `i64` parameters,
+>      and a comparison of float literals or `sqrt` results to IR `llvm-as` rejects. `snc llvm`
+>      refuses these programs, so no differential compares them.
 >
 >      **D34 — DONE (`b9c0aa7`).** `process_send`/`process_recv` (fids 29/30) were the
 >      last unmirrored member of D17's set. Three parts: a new `dump_process_recv` whose

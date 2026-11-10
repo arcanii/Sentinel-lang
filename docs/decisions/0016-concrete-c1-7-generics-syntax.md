@@ -1,6 +1,6 @@
 # ADR 0016: Concrete C1.7 surface syntax — generic fns, generic structs, monomorphization
 
-Status: ACCEPTED-WITH-AMENDMENTS (A1) — all twelve D-decisions exercised
+Status: ACCEPTED-WITH-AMENDMENTS (A1, A2) — all twelve D-decisions exercised
 across the C1.7 scaffolding commit (c1e5083, AST + parser + resolve), the
 C1.7.4a commit (d32a9fe, types crate + builtin re-route), the
 C1.7.5 commit (ad7e10d, codegen monomorphization for generic
@@ -15,9 +15,12 @@ structural, id-free, exhaustive, and identical across all three back ends. See
 "no amendments — each D-decision survived implementation as written"; that stayed
 true of the *syntax* decisions, but the deferred half of D7 did not.)
 
+**A2 (2026-11-10)** makes the comparison rule hold a type parameter opaque, as the Context
+says it is: a comparison takes scalar operands only (register item D185).
+
 Date: 2026-05-26
-Last touched: 2026-09-02 (A1 — D7's mangling scheme pinned; register item D5
-closed)
+Last touched: 2026-11-10 (A2 — a comparison takes scalar operands; register item
+D185 closed)
 Related: 0011 (Phase C1 kickoff; D3 names generics as a C1 type-
 system deliverable, D6 schedules C1.7 last, D12 perf discipline
 becomes measurable here), 0015 (concrete C1.6 surface — D6
@@ -1046,3 +1049,84 @@ diverged for an unrelated reason (register D17) — now CLOSED (`6337bea`), and 
 is written: both back ends emit `@idg__opt_guard_u8` byte-identically, so
 `c16_mono_key_handle_tags` exercises the element-READING half of `guard_<elem>` and not
 just `guard_i64`.
+
+### A2 — a comparison takes scalar operands; a type parameter stays opaque (2026-11-10)
+
+**Status: ACCEPTED.** Register item **D185**.
+
+The Context above says a type parameter is *"opaque inside the body — you can pass it,
+store it, return it, but you can't `+` it or compare it"*, and D10 defers bounds such as
+`<T: Eq>` to the trait work. The arithmetic, bitwise and shift operators, unary `-` and `!`,
+`&&` / `||`, `as`, indexing and an `if` condition each refuse an operand of type `T`. The
+comparison rule did not. It refused a struct operand and a nullable one (bar `== null`) and
+accepted every other type, a type parameter among them.
+
+A generic body is type-checked once, as written, and codegen then builds a copy of it for
+each set of type arguments, keeping the types the checker assigned (D7c). So a comparison of
+two `T` values, typed `bool` in the body, stayed `bool` in every copy, and a copy compared
+values a hand-written concrete program would have been refused for:
+
+- at a struct, `snc llvm` emitted an `icmp` over the struct, which `llvm-as` rejects, and
+  `snc build` stopped with an internal error;
+- at a `?i64`, only the presence flags were compared, so two present values always compared
+  equal;
+- at a `secret` scalar, the result was typed `bool`, not `secret bool`, so nothing that
+  reads secrecy from a type (the type checker's own rules, the constant-time verifier) saw it
+  as secret.
+
+The same rule let arrays, `Vec`s, enums and class instances through. Comparing two of them
+produced the same invalid `icmp`, over the value's fields, and the same internal error. The rule also read a
+result's `secret` qualifier from an operand's outer type only, so `[secret i64] == [secret
+i64]` was typed `bool`. References, `ptr` and every handle type got through as well.
+
+**The rule.** A comparison's left operand, once an outer `secret` is stripped, is an integer
+(`i64`, `i32`, `u8`, `u128`), `bool` or `f64` (`is_comparable_scalar`). The right operand must
+then have the same type, as before. `x == null` and `x != null` on a nullable keep their own
+rule, in a generic body as anywhere; they test only whether a value is present (the borrow
+checker still counts a Move-typed binding compared that way as moved, D117). Anything else is
+`sentinel::types::mismatch` at the left operand ("expected i64, found …"), as a struct or
+nullable operand already was and as the arithmetic operators report; where the right operand
+had another type, that is now reported at the left operand rather than at the right one. For
+these scalars an operand's outer `secret` is the whole of its type's secrecy, so the result's
+type is `secret bool` exactly when an operand's type is `secret`. The list is explicit, so a
+type added to the language is refused until it is added here on purpose.
+
+**What it refuses that compiled before.** No program in the corpus: a matched sweep over the
+tracked `.sentinel` files outside `selfhost/` (standalone, merged and through `snc build`; the
+self-hosted sources are compiled by the bootstrap tests) and all five self-hosted drivers moved
+only the new fixtures. A comparison of two references or two handles (`Shared`, `Mutex`,
+`Channel`, `SealedChannel`, `Task`, `Process` and `Fn` values among them) was lowered by `snc
+llvm` and `scg` to a comparison of their addresses, and `snc build` stopped on it with the same
+internal error; compare the values two references point at (`*a == *b`), and test a `ptr` with
+`is_null`. Comparing two results of a generic fn returning `secret T`, which the typer leaves
+unsubstituted (register D183), is refused too; `snc build` could not build such a call. A
+generic fn that compares values of its type parameter, such as `max<T>`, waits for bounds
+(D10). When they come, the trait-bounds ADR must type a bounded comparison's result from the
+instance, `secret bool` exactly when `T` is bound to a secret type, or check each instance at
+its concrete types, because the body is checked once.
+
+**Mirror.** `scg`'s checking modes make the same refusal (`tc_binary`, the scalar handles
+`i64`, `i32`, `bool`, `u8`, `f64`) with the same code, so its code generator's checking pass
+refuses these programs before its own walk runs. An operand it gave no type, as it types a
+zero-arm `match` (D184), goes on to the same-type check as before: two such operands pass it,
+as the oracle accepts them, and one against a typed operand is refused, as it was. `scg` does
+not model `u128`. The message is the oracle's but where it names a type `scg` numbers in its
+own order (D179): a reference, a nested array, a `secret` over other than a word scalar when
+later declarations intern more. Where the oracle refuses a program earlier with a code `scg`
+does not port, `scg` may now refuse it here instead (D179).
+
+**Pins.** `comparison_operands_are_scalars` (sentinel-types) checks every comparison
+operator over each kind of operand type a parameter can be written with, and the `Task` and
+`Process` handles only an expression makes: a scalar is accepted and its result is `secret`
+exactly when an operand's type is (both, or either of a mixed pair), and every other kind is
+refused at the left operand.
+Sixteen `tests/ui` fixtures (`c13_compare_*`: a type parameter bare, as a generic struct's
+field, and with every call at `secret i64`; an array; an array of `secret`; a `secret` array;
+a `Vec`; an enum; a class; a `ptr`; an `Fn` value; and the `Shared`, `Mutex`, `Channel`,
+`Process` and `Task` handles) each carry the ported code, so every self-hosted driver must
+refuse each as the oracle does. `tests/pass` `c13_generic_null_compare` holds the `null` form
+in a generic body, and a codegen seed holds `scg`'s acceptance of two untyped operands.
+
+**Versioning.** The oracle now refuses programs it accepted, so this is oracle-moving: at
+least a MINOR bump by ADR 0076 D2, which the bump to 0.3.0 already owed covers. No accepted
+program's emitted IR moves.

@@ -14,7 +14,55 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
-**Latest (2026-11-08, second slice) — `scg`'s checking modes port the oracle's type-level `secret`
+**Latest (2026-11-10) — a comparison takes scalar operands, and a type parameter stays opaque
+([ADR 0016](decisions/0016-concrete-c1-7-generics-syntax.md) amendment A2; register D185 closed,
+D186 and D187 filed, D33, D117, D152, D179, D183 and D184 extended).** The oracle's comparison
+rule refused a struct or a nullable left operand and accepted every other type, though ADR 0016
+holds a type parameter opaque in a generic body and the arithmetic, bitwise, shift and logical
+operators, casts and indexing refuse one. A comparison
+of two `T` values was typed `bool` and each instance kept that type: an instance at a struct
+emitted invalid IR (and `snc build` stopped with an internal error), one at a `?i64` compared only
+the presence flags, and one at a `secret` scalar typed its result `bool` rather than `secret bool`.
+Arrays, `Vec`s, enums and class instances made the same invalid IR and internal error, `[secret
+i64] == [secret i64]` was typed `bool`, and references, `ptr`, `Fn` values and the handle types got
+through as well. Now a comparison's left operand, once an outer `secret` is stripped, is an integer
+(`i64`, `i32`, `u8`, `u128`), `bool` or `f64` (`is_comparable_scalar`, an explicit list), the right
+operand must have its type as before, and anything else is `sentinel::types::mismatch` at the left
+operand; `x == null` on a nullable keeps its own rule, in a generic body too. `scg`'s checking modes
+make the same refusal with the same code (`tc_binary`; an operand it gave no type, a zero-arm
+`match`, goes on to the same-type check as before, and `u128` it does not model), so its code
+generator's checking pass refuses these programs before its walk. Refused now that the text back
+ends lowered (to a comparison of addresses) and `snc build` could not build: a comparison of two
+references or two handles, and of two results of a generic fn returning `secret T` (D183). Nothing
+in the corpus moves; a generic fn that compares
+its type parameter's values waits for bounds (ADR 0016 D10), and A2 records what the bounds ADR owes
+the `secret` qualifier. Pinned by `comparison_operands_are_scalars` (every comparison operator over
+each kind of operand type a parameter can be written with and the expression-only handles, the
+result's `secret` checked, mixed pairs too), sixteen `tests/ui` fixtures (`c13_compare_*`, each held
+by every self-hosted driver), `tests/pass` `c13_generic_null_compare` and a codegen seed of two
+untyped (zero-arm `match`) operands. All thirteen oracle mutations and all ten `scg` mutations are
+caught, each by a test that reads it.
+Sweeps, the compiler before the change against it: `snc types` over the 530 tracked `.sentinel` files
+outside `selfhost/` (and over the 205 of them `snc merge` takes) and `snc build` over the 92 only it
+reaches move nothing; all five
+self-hosted drivers over 580 files move only the sixteen new fixtures. Two review rounds, each
+finding verified by constructing it: the first (`wf_ef6604f9-9e8`, four lenses) confirmed nineteen
+findings. Those in this change are fixed: the pass fixture first hit two `scg` differences, now
+registered (a `null` on the left, D186; a compared `?T` binding counted as moved, D117); the `scg`
+rule first refused the untyped operand, a program the oracle accepts; seven refused kinds and a
+secret result typed `bool` had no pin; comments and D183 over-claimed. The others, none a
+regression this change makes, are registered or went to the maintainer first. The second
+(`wf_8b2c4ecb-1ab`, three lenses, over the final texts and the code changed since) confirmed
+twenty-three, none a regression: those in the texts, comments and pins are fixed (the texts said
+references and handles compiled before (only the text back ends lowered them), cited a sweep over
+every tracked file (it left out `selfhost/`), left D140 (this defect's array and enum half) open,
+called D184's program uncarried (a codegen seed carries it, and now holds the last `scg` mutation),
+miscounted the first round, and the instance fixture branched on its result where the refusal it
+pins needs no branch), and the pre-existing `scg` differences are registered. Four-check on Windows: **2,217 passed with exactly the 18 known Windows failures**, 6 ignored, doctests and clippy clean, every `selfhost_*` differential green including both bootstrap fixed points. The
+oracle now refuses programs it accepted and no accepted program's emitted IR moves: at least a
+MINOR bump by ADR 0076 D2, which the bump to 0.3.0 already owed covers.
+
+**Previously (2026-11-08, second slice) — `scg`'s checking modes port the oracle's type-level `secret`
 rules and the checks beside them, and its code generator refuses a `secret` over a type parameter
 ([ADR 0041](decisions/0041-self-host-port-types.md) amendment A17; register D20's cast half and
 D146's `scg` half closed, D145, D179 and D180 extended, D181, D182, D183 and D184 filed).** A16 left
