@@ -1,0 +1,10 @@
+// ADR 0016 A2: a comparison takes scalar operands, and `ptr` is not one of them; test a
+// pointer for null with `is_null`. Surfaces Mismatch at the left operand.
+
+fn same(a: ptr, b: ptr) -> bool {
+    a == b
+}
+
+fn main() -> i64 {
+    0
+}

@@ -1,0 +1,14 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c13_compare_mutex.sentinel\")"
+---
+sentinel::types::mismatch
+
+  × type mismatch: expected i64, found <mutex#0>
+   ╭─[tests/ui/c13_compare_mutex.sentinel:5:5]
+ 4 │ fn same(a: Mutex<i64>, b: Mutex<i64>) -> bool {
+ 5 │     a == b
+   ·     ┬
+   ·     ╰── 
+ 6 │ }
+   ╰────

@@ -1,0 +1,14 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c13_compare_fn_value.sentinel\")"
+---
+sentinel::types::mismatch
+
+  × type mismatch: expected i64, found Fn<i64,i64>
+   ╭─[tests/ui/c13_compare_fn_value.sentinel:5:5]
+ 4 │ fn same(a: Fn<i64, i64>, b: Fn<i64, i64>) -> bool {
+ 5 │     a == b
+   ·     ┬
+   ·     ╰── 
+ 6 │ }
+   ╰────

@@ -1,0 +1,10 @@
+// ADR 0016 A2: a comparison takes scalar operands, so two `Fn` values are refused. Surfaces
+// Mismatch at the left operand.
+
+fn same(a: Fn<i64, i64>, b: Fn<i64, i64>) -> bool {
+    a == b
+}
+
+fn main() -> i64 {
+    0
+}

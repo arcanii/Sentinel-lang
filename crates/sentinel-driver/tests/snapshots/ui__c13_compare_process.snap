@@ -1,0 +1,14 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c13_compare_process.sentinel\")"
+---
+sentinel::types::mismatch
+
+  × type mismatch: expected i64, found Process
+   ╭─[tests/ui/c13_compare_process.sentinel:8:5]
+ 7 │     let q = process_spawn("b", argv);
+ 8 │     p == q
+   ·     ┬
+   ·     ╰── 
+ 9 │ }
+   ╰────

@@ -1,0 +1,34 @@
+// ADR 0016 A2: comparing a `?T` with `null` keeps its own rule, inside a generic body too
+// (it tests only whether a value is present). present<i64> over 7, null, 7 gives 1 + 0 + 1,
+// present<bool> over true, true gives 1 + 1, and absent<i64>(null) is true, compared as a
+// `bool`: prints 4. The value compared is a call's result, not a binding, and `null` is on the
+// right: `snc borrow` counts a compared binding as moved (D117), and `scg` cannot yet lower a
+// `null` on the left (D186).
+
+fn id<T>(x: ?T) -> ?T {
+    x
+}
+
+fn present<T>(x: ?T) -> i64 {
+    if id(x) == null {
+        0
+    } else {
+        1
+    }
+}
+
+fn absent<T>(x: ?T) -> bool {
+    !(id(x) != null)
+}
+
+fn main() -> i64 {
+    let a: ?i64 = 7;
+    let b: ?i64 = null;
+    let c: ?bool = true;
+    let n: i64 = present(a) + present(b) + present(a) + present(c) + present(c);
+    if absent(b) == true {
+        print(n)
+    } else {
+        print(0)
+    }
+}

@@ -1480,6 +1480,19 @@ pub fn fn_value_sig_param_ret(id: FnValueSigId) -> (Type, Type) {
     (fn_value_word_scalar_at(id.0 / 6), fn_value_word_scalar_at(id.0 % 6))
 }
 
+/// ADR 0016 A2: may a comparison (`==`, `!=`, `<`, `<=`, `>`, `>=`) take an operand
+/// of type `ty`, once an outer `secret` is stripped? Only the integer scalars,
+/// `bool` and `f64`. The list is explicit, so a type nobody has decided on is
+/// refused: a type parameter (opaque inside a generic body, as ADR 0016 says), an
+/// array, a `Vec`, a struct, an enum, a class, a nullable, a reference, `ptr`, an
+/// `Fn` value and every handle. (`x == null` on a nullable has its own rule and is
+/// typed before this one is read.) For these scalars an operand type's outer `secret`
+/// is the whole of its secrecy, so a comparison's result type is `secret bool` exactly
+/// when an operand's type is `secret`.
+pub fn is_comparable_scalar(ty: Type) -> bool {
+    matches!(ty, Type::I64 | Type::I32 | Type::U8 | Type::U128 | Type::Bool | Type::F64)
+}
+
 /// ADR 0066 M1.1: is `ty` a **word-sized scalar** that the per-spawn
 /// wrapper can pack into an 8-byte arg slot and encode into the Task's
 /// `i64` result slot? These are the single-LLVM-value types ≤ 8 bytes:
@@ -10184,11 +10197,13 @@ fn check_expr(
             let (l_inner, l_secret) = l.ty.strip_secret(secrets);
             let (r_inner, r_secret) = r.ty.strip_secret(secrets);
             // C1.3: comparisons require both operands the same type.
-            // C1.4 + C1.5 keep this as int + bool only (ADR 0013 D6
-            // defers struct equality; nullable-vs-nullable equality
-            // also deferred). Reject struct + nullable operands when
-            // neither side is null.
-            if l_inner.is_struct() || l_inner.is_nullable() {
+            // ADR 0016 A2: and that type a scalar (`is_comparable_scalar`;
+            // ADR 0013 D6 defers struct equality, nullable-vs-nullable
+            // equality is deferred too, and a type parameter is opaque).
+            // The left operand is checked here, the right one by the
+            // same-type check below. This was a deny-list of struct and
+            // nullable operands, which let every other type through.
+            if !is_comparable_scalar(l_inner) {
                 return Err(TypeError::Mismatch {
                     expected: Type::I64,
                     got: l.ty,
@@ -14299,6 +14314,115 @@ fn main() -> i64 { let p = P { x: 1, x: 2, y: 3 }; 0 }",
             "struct P { x: i64 }\nfn eq(a: P, b: P) -> bool { a == b }\nfn main() -> i64 { 0 }",
         );
         assert!(matches!(err, TypeError::Mismatch { .. }), "got {err:?}");
+    }
+
+    /// ADR 0016 A2: every comparison operator over each kind of operand type a parameter can
+    /// be written with, and the two handles only an expression makes, against the allow-list
+    /// (`is_comparable_scalar`). A scalar is accepted, and its result is `secret bool` exactly
+    /// when an operand's type is `secret` (both, or either one of a mixed pair): a public
+    /// result fits a `bool` return and a secret one does not. Every other kind is refused at
+    /// the left operand. A change that lets one of these kinds through, or that types such a
+    /// comparison's result `bool`, fails this test.
+    #[test]
+    fn comparison_operands_are_scalars() {
+        const DECLS: &str = "struct S { x: i64 }\nenum E { A, B }\nstruct P<T> { v: T }\n\
+                             class C { let n: i64; pub init() { self.n = 0; 0 } }\n";
+        // (type params, operand type, accepted: Some(secret result?) / None = refused)
+        let cases: &[(&str, &str, Option<bool>)] = &[
+            ("", "i64", Some(false)),
+            ("", "i32", Some(false)),
+            ("", "u8", Some(false)),
+            ("", "u128", Some(false)),
+            ("", "bool", Some(false)),
+            ("", "f64", Some(false)),
+            ("", "secret i64", Some(true)),
+            ("", "secret i32", Some(true)),
+            ("", "secret u8", Some(true)),
+            ("", "secret u128", Some(true)),
+            ("", "secret bool", Some(true)),
+            ("<T>", "T", None),
+            ("<T>", "secret T", None),
+            ("", "[i64]", None),
+            ("", "[secret i64]", None),
+            ("", "[[i64]]", None),
+            ("", "secret [i64]", None),
+            ("", "Vec<i64>", None),
+            ("", "secret Vec<i64>", None),
+            ("", "S", None),
+            ("", "secret S", None),
+            ("", "P<i64>", None),
+            ("", "E", None),
+            ("", "secret E", None),
+            ("", "C", None),
+            ("", "?i64", None),
+            ("", "?S", None),
+            ("", "&i64", None),
+            ("", "&mut i64", None),
+            ("", "ptr", None),
+            ("", "Fn<i64, i64>", None),
+            ("", "Shared<i64>", None),
+            ("", "Mutex<i64>", None),
+            ("", "Channel<i64>", None),
+            ("", "SealedChannel<secret i64>", None),
+        ];
+        let typed = |src: &str| {
+            let prog = parse(src).expect("parse");
+            let resolved = resolve(&prog).expect("resolve");
+            check(&resolved)
+        };
+        for op in ["==", "!=", "<", "<=", ">", ">="] {
+            for (tps, ty, want) in cases {
+                let body = format!("fn f{tps}(a: {ty}, b: {ty}) -> bool {{ a {op} b }}");
+                let src = format!("{DECLS}{body}\nfn main() -> i64 {{ 0 }}");
+                match (typed(&src), want) {
+                    (Ok(_), Some(false)) => {}
+                    (Err(TypeError::ReturnTypeMismatch { got, .. }), Some(true)) => {
+                        assert!(matches!(got, Type::Secret(_)), "`{ty} {op} {ty}`: {got:?}");
+                        let sec = format!(
+                            "{DECLS}fn f{tps}(a: {ty}, b: {ty}) -> secret bool {{ a {op} b }}\nfn main() -> i64 {{ 0 }}"
+                        );
+                        assert!(typed(&sec).is_ok(), "`{ty} {op} {ty}` into `secret bool`");
+                    }
+                    (Err(TypeError::Mismatch { expected: Type::I64, got, .. }), None) => {
+                        assert!(!is_comparable_scalar(got), "`{ty} {op} {ty}`: reported {got:?}");
+                    }
+                    (r, _) => panic!("`{ty} {op} {ty}`: expected {want:?}, got {r:?}"),
+                }
+            }
+        }
+        // A mixed pair: the public operand is widened (ADR 0051) and the result is secret.
+        for op in ["==", "!=", "<", "<=", ">", ">="] {
+            for (a, b) in [("i64", "secret i64"), ("secret i64", "i64"), ("u8", "secret u8"), ("secret bool", "bool")] {
+                let err = check_err(&format!("fn f(a: {a}, b: {b}) -> bool {{ a {op} b }}\nfn main() -> i64 {{ 0 }}"));
+                assert!(
+                    matches!(err, TypeError::ReturnTypeMismatch { got: Type::Secret(_), .. }),
+                    "`{a} {op} {b}`: got {err:?}"
+                );
+            }
+        }
+        // The two handles only an expression makes: a `Task`, a `Process`.
+        for (what, src) in [
+            ("Task", "fn w() -> i64 { 1 }\nfn f() -> bool { scope concurrent { let t = spawn w(); let u = spawn w(); t == u } }"),
+            ("Process", "fn f() -> bool ! { Subprocess } { let v: [[u8]] = []; let p = process_spawn(\"a\", v); let q = process_spawn(\"b\", v); p == q }"),
+        ] {
+            let err = check_err(&format!("{src}\nfn main() -> i64 {{ 0 }}"));
+            assert!(
+                matches!(err, TypeError::Mismatch { expected: Type::I64, got, .. } if !is_comparable_scalar(got)),
+                "{what}: got {err:?}"
+            );
+        }
+        // `== null` / `!= null` on a nullable keeps its own rule, generic or not.
+        check_ok("fn f<T>(a: ?T) -> bool { a == null }\nfn main() -> i64 { 0 }");
+        check_ok("fn f(a: ?i64) -> bool { null != a }\nfn main() -> i64 { 0 }");
+        // A type parameter on the right of a scalar is refused by the same-type check.
+        let err = check_err("fn f<T>(a: T) -> bool { 0 == a }\nfn main() -> i64 { 0 }");
+        assert!(matches!(err, TypeError::Mismatch { .. }), "got {err:?}");
+        // A non-scalar on the left is reported there, whatever the right operand's type.
+        let err = check_err("fn f(a: [i64]) -> bool { a == 3 }\nfn main() -> i64 { 0 }");
+        assert!(
+            matches!(err, TypeError::Mismatch { expected: Type::I64, got: Type::Array(_), .. }),
+            "got {err:?}"
+        );
     }
 
     #[test]

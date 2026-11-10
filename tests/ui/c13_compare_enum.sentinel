@@ -1,0 +1,12 @@
+// ADR 0016 A2: a comparison takes scalar operands, so two enum values are refused (`match`
+// on them instead). Surfaces Mismatch at the left operand.
+
+enum Dir { Up, Down }
+
+fn same(a: Dir, b: Dir) -> bool {
+    a == b
+}
+
+fn main() -> i64 {
+    0
+}

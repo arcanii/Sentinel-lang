@@ -476,6 +476,34 @@ ui_snapshot!(
     "c25_borrowed_payload_scrutinee_moved.sentinel"
 );
 
+// ---- ADR 0016 A2: a comparison takes scalar operands ----
+// An integer, `bool` or `f64`, after an outer `secret` is stripped. A type parameter is
+// refused at the generic's definition (bare, as a generic struct's field, and with every call
+// at a type a comparison accepts), and so are an array, one of `secret` elements, a `secret`
+// array, a `Vec`, an enum, a class, `ptr`, an `Fn` value and the `Shared`, `Mutex`,
+// `Channel`, `Process` and `Task` handles, each of which the rule used to let through.
+// `comparison_operands_are_scalars` (sentinel-types) holds the oracle's whole table, with the
+// kinds that have no fixture here: those it refused before (a struct, a generic instance, a
+// nullable), `SealedChannel`, and those whose message `scg` numbers in its own order (a
+// reference, a nested array; D179). Each fixture carries a ported code, so every self-hosted driver must
+// refuse it as the oracle does.
+ui_snapshot!(c13_compare_type_param, "c13_compare_type_param.sentinel");
+ui_snapshot!(c13_compare_type_param_instance, "c13_compare_type_param_instance.sentinel");
+ui_snapshot!(c13_compare_type_param_field, "c13_compare_type_param_field.sentinel");
+ui_snapshot!(c13_compare_array, "c13_compare_array.sentinel");
+ui_snapshot!(c13_compare_secret_array, "c13_compare_secret_array.sentinel");
+ui_snapshot!(c13_compare_vec, "c13_compare_vec.sentinel");
+ui_snapshot!(c13_compare_enum, "c13_compare_enum.sentinel");
+ui_snapshot!(c13_compare_handle, "c13_compare_handle.sentinel");
+ui_snapshot!(c13_compare_ptr, "c13_compare_ptr.sentinel");
+ui_snapshot!(c13_compare_secret_outer, "c13_compare_secret_outer.sentinel");
+ui_snapshot!(c13_compare_fn_value, "c13_compare_fn_value.sentinel");
+ui_snapshot!(c13_compare_mutex, "c13_compare_mutex.sentinel");
+ui_snapshot!(c13_compare_class, "c13_compare_class.sentinel");
+ui_snapshot!(c13_compare_channel, "c13_compare_channel.sentinel");
+ui_snapshot!(c13_compare_process, "c13_compare_process.sentinel");
+ui_snapshot!(c13_compare_task, "c13_compare_task.sentinel");
+
 // Register D111: a move inside nested loop-like constructs is reported once.
 ui_snapshot!(
     c75_return_arm_in_loop_reports_once,

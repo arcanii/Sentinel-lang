@@ -1,0 +1,11 @@
+// ADR 0016 A2: a comparison takes scalar operands. A type parameter is opaque inside a
+// generic body (ADR 0016), so comparing two values of type `T` is refused at the generic's
+// definition, whether or not it is called. Surfaces Mismatch at the left operand.
+
+fn lt<T>(a: T, b: T) -> bool {
+    a < b
+}
+
+fn main() -> i64 {
+    0
+}

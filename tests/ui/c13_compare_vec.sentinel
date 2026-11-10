@@ -1,0 +1,10 @@
+// ADR 0016 A2: a comparison takes scalar operands, so two `Vec`s are refused. Surfaces
+// Mismatch at the left operand.
+
+fn same(a: Vec<i64>, b: Vec<i64>) -> bool {
+    a == b
+}
+
+fn main() -> i64 {
+    0
+}

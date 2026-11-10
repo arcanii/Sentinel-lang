@@ -1,0 +1,10 @@
+// ADR 0016 A2: a comparison takes scalar operands, so two `Mutex` handles are refused.
+// Surfaces Mismatch at the left operand.
+
+fn same(a: Mutex<i64>, b: Mutex<i64>) -> bool {
+    a == b
+}
+
+fn main() -> i64 {
+    0
+}

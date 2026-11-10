@@ -1,0 +1,13 @@
+// ADR 0016 A2: the rule reads an operand's type, however the operand is written, so a
+// generic struct's field of type `T` is refused as a bare `T` is. Surfaces Mismatch at
+// the left operand.
+
+struct P<T> { v: T }
+
+fn same<T>(p: P<T>, b: T) -> bool {
+    p.v == b
+}
+
+fn main() -> i64 {
+    0
+}

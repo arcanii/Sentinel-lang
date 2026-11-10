@@ -460,6 +460,12 @@ const SEEDS: &[&str] = &[
     // `c75_effecting_frames_share_resumers` is.
     "effect Io { read() -> i64; }\neffect Ask { get(x: i64) -> i64; }\nfn two() -> i64 ! { Io } { let a: i64 = perform Io.read(); let b: i64 = perform Io.read(); a + b }\nfn ch(mut p: i64) -> i64 ! { Ask } {\n    let mut a: i64 = perform Ask.get(handle two() with { Io.read(k) => { let r: i64 = k(1); r + p } });\n    let b: i64 = perform Ask.get(handle two() with { Io.read(k) => { let r: i64 = k(1); r + a } });\n    let c: i64 = perform Ask.get(handle two() with { Io.read(k) => { let r: i64 = k(1); r + b } });\n    a + b + c\n}\nfn main() -> i64 { handle ch(1) with { Ask.get(x, k) => k(x) } }\n",
     "effect Ask { q(x: i64) -> i64; }\nenum E { A(i64), B }\nenum F { A(Fn<i64, i64>), B }\nfn ask2() -> i64 ! { Ask } { let a: i64 = perform Ask.q(1); let b: i64 = perform Ask.q(2); a + b }\nfn dbl(n: i64) -> i64 { n * 2 }\nfn pat_fn(f: Fn<i64, i64>) -> i64 { handle ask2() with { Ask.q(x, k) => { let r: i64 = k(x); match F::A(dbl) { F::A(f) => f(r) + 28, F::B => 0 } } } }\nfn pat_int() -> i64 { let mut m: i64 = 1000; m = m + 1; let x: i64 = handle ask2() with { Ask.q(x, k) => { let r: i64 = k(x); match E::A(7) { E::A(m) => r + m, E::B => r } } }; x + m }\nfn pat_then_outer() -> i64 { let y: i64 = 5; handle ask2() with { Ask.q(x, k) => { let r: i64 = k(x); (match E::A(1) { E::A(y) => y, E::B => 0 }) + r + y } } }\nfn main() -> i64 { pat_fn(dbl) + pat_int() + pat_then_outer() - 1087 }\n",
+    // ADR 0016 A2: two zero-arm `match` operands, which `scg` gives no type (D184), are left to
+    // the same-type check, as the oracle accepts the program; the IR is the oracle's.
+    "enum Z {}
+fn same(z: Z, y: Z) -> bool { (match z {}) == (match y {}) }
+fn main() -> i64 { 0 }
+",
 ];
 
 #[test]
@@ -2680,8 +2686,14 @@ fn sentinel_codegen_refuses_a_secret_over_a_type_parameter() {
         (format!("{g}fn main() -> i64 {{ let y = g(1); 0 }}\n"), refusal.clone()),
         (format!("{g}fn main() -> i64 {{ let s: Shared<i64> = shared_new(1); let y = g(s); 0 }}\n"), refusal.clone()),
         (
-            "fn w<T>(p: &mut T, v: T, r: T) -> secret T { *p = v; r }\nfn main() -> i64 { let mut b = true; let mut a = 1; let c = w(&mut a, 5, 6) == w(&mut b, true, false); 0 }\n".to_string(),
+            "fn w<T>(p: &mut T, v: T, r: T) -> secret T { *p = v; r }\nfn main() -> i64 { let mut b = true; let mut a = 1; let c = w(&mut a, 5, 6); let d = w(&mut b, true, false); 0 }\n".to_string(),
             refusal.clone(),
+        ),
+        // The same two calls compared: since ADR 0016 A2 a comparison of two `secret T` values
+        // is a type error, the oracle's own, and it comes before this refusal.
+        (
+            "fn w<T>(p: &mut T, v: T, r: T) -> secret T { *p = v; r }\nfn main() -> i64 { let mut b = true; let mut a = 1; let c = w(&mut a, 5, 6) == w(&mut b, true, false); 0 }\n".to_string(),
+            "sentinel::types::mismatch\nscg: type mismatch: expected i64, found <secret#4>\n".to_string(),
         ),
         (
             "fn k<T>(x: T, y: secret T) -> i64 { 0 }\nfn h<T>(x: T) -> secret T { x }\nfn main() -> i64 { k(true, h(2)) }\n".to_string(),

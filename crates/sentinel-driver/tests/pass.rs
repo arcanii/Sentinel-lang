@@ -237,6 +237,15 @@ fn pass_c13_comparison() {
 }
 
 #[test]
+fn pass_c13_generic_null_compare() {
+    // ADR 0016 A2: a comparison takes scalar operands, but `x == null` on a `?T` keeps its
+    // own rule inside a generic body. 1 + 0 + 1 + 1 + 1 = 4.
+    let r = build_and_run("c13_generic_null_compare.sentinel");
+    assert_eq!(r.stdout, "4\n");
+    assert_eq!(r.exit, 0);
+}
+
+#[test]
 fn pass_c13_logical_and() {
     // let x = 5; if x > 0 && x < 10 { 42 } else { 0 } -> exit 42
     assert_eq!(run_exit("c13_logical_and.sentinel"), 42);

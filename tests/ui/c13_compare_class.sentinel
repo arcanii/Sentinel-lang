@@ -1,0 +1,18 @@
+// ADR 0016 A2: a comparison takes scalar operands, so two class instances are refused.
+// Surfaces Mismatch at the left operand.
+
+class Counter {
+    let n: i64;
+    pub init() {
+        self.n = 0;
+        0
+    }
+}
+
+fn same(a: Counter, b: Counter) -> bool {
+    a == b
+}
+
+fn main() -> i64 {
+    0
+}

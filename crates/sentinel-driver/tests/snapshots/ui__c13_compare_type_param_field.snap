@@ -1,0 +1,14 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c13_compare_type_param_field.sentinel\")"
+---
+sentinel::types::mismatch
+
+  × type mismatch: expected i64, found <T#0>
+   ╭─[tests/ui/c13_compare_type_param_field.sentinel:8:5]
+ 7 │ fn same<T>(p: P<T>, b: T) -> bool {
+ 8 │     p.v == b
+   ·     ─┬─
+   ·      ╰── 
+ 9 │ }
+   ╰────

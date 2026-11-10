@@ -1,0 +1,14 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c13_compare_task.sentinel\")"
+---
+sentinel::types::mismatch
+
+  × type mismatch: expected i64, found <task#0>
+    ╭─[tests/ui/c13_compare_task.sentinel:12:9]
+ 11 │         let u = spawn work();
+ 12 │         t == u
+    ·         ┬
+    ·         ╰── 
+ 13 │     }
+    ╰────

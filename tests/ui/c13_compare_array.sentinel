@@ -1,0 +1,11 @@
+// ADR 0016 A2: a comparison takes scalar operands, so two arrays are refused (compare
+// them element by element, or with `str_eq` for `[u8]`). Surfaces Mismatch at the left
+// operand.
+
+fn same(a: [i64], b: [i64]) -> bool {
+    a == b
+}
+
+fn main() -> i64 {
+    0
+}

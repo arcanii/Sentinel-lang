@@ -1894,8 +1894,9 @@ fn tc_builtin_arg(c: &mut TyCtx, fid: i64, i: i64, got: i64, first: i64) -> i64 
 // operand is the `null` literal), as the oracle's `check_expr` checks them: arithmetic and
 // bitwise operands are integers or floats, a float with the other operand's type, a shift
 // amount an integer (the oracle also refuses a float under a bitwise or shift operator,
-// `float_bitwise`, which is not ported); a comparison's left operand is not a struct, a
-// generic instance or a `?T` (bar a comparison with `null`, `==` or `!=` with a `?T`); and a
+// `float_bitwise`, which is not ported); a comparison's left operand is a scalar, an integer,
+// `bool` or `f64` once a `secret` is stripped (ADR 0016 A2, the oracle's
+// `is_comparable_scalar`; bar a comparison with `null`, `==` or `!=` with a `?T`); and a
 // logical operator's operands are `bool`s of the same secrecy. Where one operand is `secret`
 // and the other is the same public type, the public one is widened first (not for `/` or a
 // shift, nor for `&&` / `||`), and then the two must be the same type.
@@ -1937,12 +1938,14 @@ fn tc_binary(c: &mut TyCtx, bop: i64, lt: i64, rt: i64, lnull: bool, rnull: bool
                 }
             }
         } else {
-            let lk: i64 = if ls >= tbase() {
-                (*c).tk[ls - tbase()]
-            } else {
-                0 - 1
-            };
-            if lk == 6 || lk == 10 || lk == 4 {
+            // ADR 0016 A2: the scalar handles i64 (0), i32 (1), bool (2), u8 (3) and f64 (4)
+            // pass. Refused: `ptr` (5) and every interned type (a type parameter, an array, a
+            // `Vec`, a struct, an enum, a class, a `?T`, a reference, a handle). An operand this
+            // typer gave no type (-1, as it types a zero-arm `match`, D184) goes on to the
+            // same-type check, as before: two such operands pass it, as the oracle accepts them,
+            // and one against a typed operand is refused there. (`u128`, which the oracle also
+            // accepts, is refused earlier as a type `scg` does not model.)
+            if ls == 5 || ls >= tbase() {
                 tc_mismatch(c, 0, lt)
             } else {
                 tc_widened_same(c, lt, rt, ls, rs, lsec, rsec, true)

@@ -1168,8 +1168,10 @@ fn sentinel_typer_refusals_match_the_oracle_on_shapes() {
         // as the oracle does (register D146).
         "struct Box<T> { s: secret T }\nfn main() -> i64 { let mut v: Vec<Box<i32>> = vec_new(); let a: [Box<i32>] = vec_to_array(v); 0 }",
         // (A17) Nor does a `secret T` bind `T` in unification (the oracle's `unify_one` has no arm
-        // for it), so two calls of such a generic in one comparison, array or assignment are
-        // accepted, as `snc types` accepts them (a join of two, accepted before A17 too); an
+        // for it), so two calls of such a generic in one array or assignment are accepted, as
+        // `snc types` accepts them (a join of two, accepted before A17 too). Compared, they are
+        // refused as `snc types` refuses them since ADR 0016 A2: the left operand is the
+        // unsubstituted `secret T`, and a comparison takes scalar operands. An
         // argument of that very `secret T` fits a `secret T` parameter, and a type parameter
         // nothing else binds is then ambiguous, as in the oracle. (The code generator refuses every
         // `secret` written over a type parameter, register D182.)

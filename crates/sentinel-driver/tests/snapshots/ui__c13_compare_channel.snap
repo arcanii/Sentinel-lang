@@ -1,0 +1,14 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c13_compare_channel.sentinel\")"
+---
+sentinel::types::mismatch
+
+  × type mismatch: expected i64, found <channel#0>
+   ╭─[tests/ui/c13_compare_channel.sentinel:5:5]
+ 4 │ fn same(a: Channel<i64>, b: Channel<i64>) -> bool {
+ 5 │     a == b
+   ·     ┬
+   ·     ╰── 
+ 6 │ }
+   ╰────

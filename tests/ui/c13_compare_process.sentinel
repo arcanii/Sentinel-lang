@@ -1,0 +1,13 @@
+// ADR 0016 A2: a comparison takes scalar operands, so two `Process` handles are refused.
+// Surfaces Mismatch at the left operand.
+
+fn same() -> bool ! { Subprocess } {
+    let argv: [[u8]] = [];
+    let p = process_spawn("a", argv);
+    let q = process_spawn("b", argv);
+    p == q
+}
+
+fn main() -> i64 {
+    0
+}

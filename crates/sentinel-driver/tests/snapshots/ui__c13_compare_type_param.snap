@@ -1,0 +1,14 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c13_compare_type_param.sentinel\")"
+---
+sentinel::types::mismatch
+
+  × type mismatch: expected i64, found <T#0>
+   ╭─[tests/ui/c13_compare_type_param.sentinel:6:5]
+ 5 │ fn lt<T>(a: T, b: T) -> bool {
+ 6 │     a < b
+   ·     ┬
+   ·     ╰── 
+ 7 │ }
+   ╰────

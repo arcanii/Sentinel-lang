@@ -1,0 +1,14 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c13_compare_class.sentinel\")"
+---
+sentinel::types::mismatch
+
+  × type mismatch: expected i64, found <class#0>
+    ╭─[tests/ui/c13_compare_class.sentinel:13:5]
+ 12 │ fn same(a: Counter, b: Counter) -> bool {
+ 13 │     a == b
+    ·     ┬
+    ·     ╰── 
+ 14 │ }
+    ╰────
