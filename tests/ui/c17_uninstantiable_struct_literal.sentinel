@@ -1,0 +1,12 @@
+// ADR 0016 A3: a generic struct literal's field type must be instantiable at the
+// instance's type arguments. Substitution leaves the field's `secret T` as written.
+// Surfaces UninstantiableType at the field.
+
+struct B<T> {
+    v: secret T,
+}
+
+fn main() -> i64 {
+    let b: B<i64> = B { v: 5 };
+    0
+}

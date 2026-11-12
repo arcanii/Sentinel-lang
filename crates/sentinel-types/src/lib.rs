@@ -1178,11 +1178,51 @@ impl Type {
     ///
     /// Concrete (non-TypeParam, non-GenericInstance-with-
     /// TypeParam-args) types pass through unchanged.
+    ///
+    /// Where a substituted form does not exist this leaves the written type in
+    /// place, type parameters and all (see [`Type::substitute_checked`]).
     pub fn substitute(
         self,
         subst: &[Type],
         instances: &mut Vec<GenericInstanceData>,
         refs: &mut Vec<RefData>,
+    ) -> Type {
+        let mut complete = true;
+        self.substitute_tracked(subst, instances, refs, None, &mut complete)
+    }
+
+    /// ADR 0016 A3: substitute as [`Type::substitute`] does, and answer `None`
+    /// when the result would still hold a type parameter of the declaration the
+    /// type was written in. That happens where the substituted form does not
+    /// exist and `substitute` keeps the written type instead: a `secret` over a
+    /// type parameter (which substitution leaves as written), and a `?T`, `[T]`
+    /// or `Vec<T>` whose element, substituted, is not one they can hold (`?T` at
+    /// `T := secret i64` or `T := ?i64`, `[T]` at `T := ?i64`). Such a type
+    /// parameter names nothing in the scope the result is used in, so the type
+    /// checker refuses the program where it would carry one there.
+    pub fn substitute_checked(
+        self,
+        subst: &[Type],
+        instances: &mut Vec<GenericInstanceData>,
+        refs: &mut Vec<RefData>,
+        secrets: &[SecretData],
+    ) -> Option<Type> {
+        let mut complete = true;
+        let out = self.substitute_tracked(subst, instances, refs, Some(secrets), &mut complete);
+        complete.then_some(out)
+    }
+
+    /// The one implementation behind [`Type::substitute`] and
+    /// [`Type::substitute_checked`]: `complete` is cleared wherever the written
+    /// type is kept because its substituted form does not exist. The `secret`
+    /// arm can only tell when it is given the `secrets` table.
+    fn substitute_tracked(
+        self,
+        subst: &[Type],
+        instances: &mut Vec<GenericInstanceData>,
+        refs: &mut Vec<RefData>,
+        secrets: Option<&[SecretData]>,
+        complete: &mut bool,
     ) -> Type {
         match self {
             // Classes (like structs) don't carry TypeParam payloads
@@ -1217,15 +1257,18 @@ impl Type {
             }
             Type::Nullable(ni) => {
                 let inner = ni.to_type();
-                let new_inner = inner.substitute(subst, instances, refs);
+                let new_inner = inner.substitute_tracked(subst, instances, refs, secrets, complete);
                 match new_inner.to_nullable_inner() {
                     Some(new_ni) => Type::Nullable(new_ni),
-                    // Substitution can't legally produce a nested
-                    // nullable at C1.7 (no `?(?T)` shape exists in
-                    // the surface), but if a future representation
-                    // allows it, fall back to the unsubstituted
-                    // value rather than panicking.
-                    None => Type::Nullable(ni),
+                    // No `?X` exists for this `X` (`?T` at `T := ?i64` or
+                    // `T := secret i64`): keep the written type rather than
+                    // panicking, and say the substitution is incomplete (ADR 0016
+                    // A3). An unchanged inner always has a nullable form, so this
+                    // arm is reached only through a type parameter.
+                    None => {
+                        *complete = false;
+                        Type::Nullable(ni)
+                    }
                 }
             }
             Type::Array(ae) => {
@@ -1237,19 +1280,23 @@ impl Type {
                     return Type::Array(ae);
                 }
                 let inner = ae.to_type();
-                let new_inner = inner.substitute(subst, instances, refs);
+                let new_inner = inner.substitute_tracked(subst, instances, refs, secrets, complete);
                 // ADR 0053: secret-aware demote so `vec_to_array<T>() -> [T]` over
                 // `T := secret u8` yields `[secret u8]` (mirrors the Vec arm).
                 match new_inner.to_array_elem_subst() {
                     Some(new_ae) => Type::Array(new_ae),
-                    None => Type::Array(ae),
+                    // ADR 0016 A3: no `[X]` for this `X`; the written type is kept.
+                    None => {
+                        *complete = false;
+                        Type::Array(ae)
+                    }
                 }
             }
             // Phase D.3 / ADR 0034: substitute through a Vec's element,
             // mirroring the Array arm exactly.
             Type::Vec(ve) => {
                 let inner = ve.to_type();
-                let new_inner = inner.substitute(subst, instances, refs);
+                let new_inner = inner.substitute_tracked(subst, instances, refs, secrets, complete);
                 // ADR 0052: `to_vec_elem_subst` round-trips a substituted
                 // `secret SCALAR` element to `VecElem::Secret`, so
                 // `vec_new<T>() -> Vec<T>` instantiated with `T = secret u8`
@@ -1257,7 +1304,11 @@ impl Type {
                 // `let`-annotation match fails).
                 match new_inner.to_vec_elem_subst() {
                     Some(new_ve) => Type::Vec(new_ve),
-                    None => Type::Vec(ve),
+                    // ADR 0016 A3: no `Vec<X>` for this `X`; the written type is kept.
+                    None => {
+                        *complete = false;
+                        Type::Vec(ve)
+                    }
                 }
             }
             Type::GenericInstance(id) => {
@@ -1268,7 +1319,7 @@ impl Type {
                 };
                 let new_args: Vec<Type> = old_args
                     .into_iter()
-                    .map(|a| a.substitute(subst, instances, refs))
+                    .map(|a| a.substitute_tracked(subst, instances, refs, secrets, complete))
                     .collect();
                 let new_id = intern_generic_instance(instances, struct_id, new_args);
                 Type::GenericInstance(new_id)
@@ -1283,17 +1334,26 @@ impl Type {
                     let data = &refs[idx];
                     (data.mutable, data.inner)
                 };
-                let new_inner = old_inner.substitute(subst, instances, refs);
+                let new_inner =
+                    old_inner.substitute_tracked(subst, instances, refs, secrets, complete);
                 let new_id = intern_ref(refs, mutable, new_inner);
                 Type::Ref(new_id)
             }
-            Type::Secret(_) => {
-                // C3 / ADR 0019 D5: secrets don't carry TypeParams
-                // at the C3.1 minimum (secret of a TypeParam is
-                // structurally weird; future ADRs may relax). Pass
-                // through unchanged. The mutable `secrets` table is
-                // threaded by [`substitute_secret`] in places that
-                // need to re-intern after substituting the inner.
+            Type::Secret(sid) => {
+                // C3 / ADR 0019 D5: a `secret` passes through substitution
+                // unchanged, so a `secret T` keeps its type parameter: ADR 0016
+                // A3 says the substitution is incomplete when the inner type
+                // mentions one.
+                if let Some(table) = secrets {
+                    let mentions = match table.get(sid.0 as usize) {
+                        Some(data) => contains_type_param(data.inner, instances, refs),
+                        // An id the table does not hold cannot be checked: refuse.
+                        None => true,
+                    };
+                    if mentions {
+                        *complete = false;
+                    }
+                }
                 self
             }
             Type::Kont(_) => {
@@ -4485,6 +4545,22 @@ pub enum TypeError {
         callee: String,
         type_param: String,
         #[label("can't infer the type here")]
+        span: miette::SourceSpan,
+    },
+
+    /// ADR 0016 A3: a type written in a generic declaration — a generic fn's
+    /// return type at a call, a generic struct's field at a literal or a field
+    /// read — has no form at the type arguments it is used at, so substituting
+    /// them would leave one of the declaration's type parameters in it (see
+    /// [`Type::substitute_checked`]).
+    #[error("{what} cannot be instantiated at these type arguments")]
+    #[diagnostic(
+        code(sentinel::types::uninstantiable_type),
+        help("a `secret` over a type parameter is kept as written, and `?T`, `[T]` and `Vec<T>` hold only the element types they support")
+    )]
+    UninstantiableType {
+        what: String,
+        #[label("instantiated here")]
         span: miette::SourceSpan,
     },
 
@@ -9366,10 +9442,20 @@ fn check_call(
             // concrete params synthesize without pushdown so the
             // more specific `CallArgMismatch` (rather than the
             // generic `Mismatch`) surfaces on shape errors.
-            let concrete_param = if contains_type_param(param, instances, refs) {
-                try_substitute(param, &subst, instances, refs)
+            // ADR 0016 A3: push down the parameter type the substitution makes,
+            // and none where it cannot make one: `try_substitute` answers the
+            // written type of a generic instance or a reference, and a `secret`
+            // as written, so an argument typed against it would carry the
+            // callee's own type parameters.
+            let concrete_param = if try_substitute(param, &subst, instances, refs).is_some() {
+                let bound: Vec<Type> = subst
+                    .iter()
+                    .enumerate()
+                    .map(|(k, s)| s.unwrap_or(Type::TypeParam(TypeParamId(k as u32))))
+                    .collect();
+                param.substitute_checked(&bound, instances, refs, secrets)
             } else {
-                Some(param)
+                None
             };
             let arg_expected: Option<Type> = match concrete_param {
                 // ADR 0051: push a `secret T` / `[secret u8]` param type down so
@@ -9483,9 +9569,22 @@ fn check_call(
     // Compute the substituted return type. This may extend
     // `instances` (and `refs`) if the return type contains a
     // GenericInstance with TypeParam args (or a ref-of-TypeParam).
-    let ret_ty = signature
-        .return_type
-        .substitute(&concrete_type_args, instances, refs);
+    // ADR 0016 A3: the return type must be instantiable at these arguments, or
+    // the call's type would keep one of the callee's type parameters.
+    let ret_ty = match signature.return_type.substitute_checked(
+        &concrete_type_args,
+        instances,
+        refs,
+        secrets,
+    ) {
+        Some(t) => t,
+        None => {
+            return Err(TypeError::UninstantiableType {
+                what: format!("the return type of `{}`", signature.name),
+                span: to_source_span(call_span),
+            })
+        }
+    };
     // ADR 0017 D7: a generic call can MINT an aggregate holding a reference in a
     // field — `mk(&x)` returning `Box<&i64>`, built by `Box { v: x }` inside the
     // abstract body, which the struct-literal check below never sees.
@@ -10432,10 +10531,19 @@ fn check_expr(
                 // Field type, substituted by the instance's type-
                 // args when the struct is generic.
                 let raw_field_ty = decl.fields[decl_idx].ty;
+                // ADR 0016 A3: refused where the instance gives the field no form.
                 let expected_field_ty = if type_args.is_empty() {
                     raw_field_ty
                 } else {
-                    raw_field_ty.substitute(&type_args, instances, refs)
+                    match raw_field_ty.substitute_checked(&type_args, instances, refs, secrets) {
+                        Some(t) => t,
+                        None => {
+                            return Err(TypeError::UninstantiableType {
+                                what: format!("field `{}` of `{}`", fi.name, decl.name),
+                                span: to_source_span(&fi.name_span),
+                            })
+                        }
+                    }
                 };
                 // ADR 0017 D7: a generic struct literal whose instance puts a
                 // reference in THIS field (`let b: Box<&i64> = Box { v: &x }`).
@@ -10727,10 +10835,30 @@ fn check_expr(
                         });
                     }
                 };
+            // ADR 0016 A3: refused where the instance gives the field no form.
             let field_ty = if type_args.is_empty() {
                 raw_field_ty
             } else {
-                raw_field_ty.substitute(&type_args, instances, refs)
+                match raw_field_ty.substitute_checked(&type_args, instances, refs, secrets) {
+                    Some(t) => t,
+                    None => {
+                        let owner = match target_t.ty {
+                            Type::GenericInstance(gi) => instances
+                                .get(gi.0 as usize)
+                                .and_then(|d| structs.get(d.struct_id.0 as usize))
+                                .map(|d| d.name.clone()),
+                            _ => None,
+                        };
+                        let what = match owner {
+                            Some(n) => format!("field `{field}` of `{n}`"),
+                            None => format!("field `{field}`"),
+                        };
+                        return Err(TypeError::UninstantiableType {
+                            what,
+                            span: to_source_span(field_span),
+                        });
+                    }
+                }
             };
             (
                 TypedExprKind::FieldAccess {
@@ -12648,6 +12776,11 @@ fn type_error_to_diagnostic(err: &TypeError) -> Diagnostic {
             format!("ambiguous type argument for `{type_param}` in call to `{callee}`"),
             span.offset()..(span.offset() + span.len()),
         ),
+        TypeError::UninstantiableType { what, span } => (
+            "sentinel::types::uninstantiable_type",
+            format!("{what} cannot be instantiated at these type arguments"),
+            span.offset()..(span.offset() + span.len()),
+        ),
         TypeError::TypeArgInferenceConflict {
             callee,
             type_param,
@@ -13877,12 +14010,15 @@ fn main() -> i64 {
         // The demote now admits only a pre-interned secretable SCALAR, so the
         // element cannot be formed and every spelling fails closed. What it fails
         // WITH varies by shape (this one is the consuming spelling); the property
-        // being pinned is that none of them yields `[secret &i64]`.
+        // being pinned is that none of them yields `[secret &i64]`. Since ADR 0016
+        // A3 this spelling is refused at `wrap(r)`, whose `[T]` has no form at
+        // `T := secret &i64`; it was a mismatch further on, against the `[T]` the
+        // substitution kept.
         let err = check_err(
             "fn wrap<T>(x: T) -> [T] { [x] }\nfn first<T>(a: [T]) -> T { a[0] }\nfn main() -> i64 { let o: i64 = 7; let r: secret &i64 = &o; let p: &i64 = declassify(first(wrap(r))); *p }",
         );
         assert!(
-            matches!(err, TypeError::Mismatch { .. }),
+            matches!(&err, TypeError::UninstantiableType { what, .. } if what == "the return type of `wrap`"),
             "expected the substitution to fail closed, got {err:?}"
         );
     }
@@ -14423,6 +14559,135 @@ fn main() -> i64 { let p = P { x: 1, x: 2, y: 3 }; 0 }",
             matches!(err, TypeError::Mismatch { expected: Type::I64, got: Type::Array(_), .. }),
             "got {err:?}"
         );
+    }
+
+    /// ADR 0016 A3: a type written in a generic declaration is used at a call, a struct
+    /// literal or a field read only where substituting the type arguments replaces every
+    /// type parameter it mentions.
+    #[test]
+    fn generic_types_are_instantiated_completely() {
+        // The substitution: `substitute_checked` answers `None` exactly where `substitute`
+        // keeps the written type, and otherwise the type `substitute` makes.
+        let mut instances: Vec<GenericInstanceData> = Vec::new();
+        let mut refs: Vec<RefData> = Vec::new();
+        let mut secrets: Vec<SecretData> = Vec::new();
+        let t0 = Type::TypeParam(TypeParamId(0));
+        let s_i64 = Type::Secret(intern_secret(&mut secrets, Type::I64));
+        let sec_t = Type::Secret(intern_secret(&mut secrets, t0));
+        let q_i64 = Type::Nullable(NullableInner::I64);
+        let q_t = Type::Nullable(NullableInner::TypeParam(TypeParamId(0)));
+        let arr_i64 = Type::Array(ArrayElem::I64);
+        let arr_t = Type::Array(ArrayElem::TypeParam(TypeParamId(0)));
+        let vec_t = Type::Vec(VecElem::TypeParam(TypeParamId(0)));
+        let ref_q_t = Type::Ref(intern_ref(&mut refs, false, q_t));
+        let gi_q_t =
+            Type::GenericInstance(intern_generic_instance(&mut instances, StructId(0), vec![q_t]));
+        let cases = [
+            (t0, Type::I64, true),
+            (t0, s_i64, true),
+            (t0, q_i64, true),
+            (q_t, Type::I64, true),
+            (q_t, q_i64, false),
+            (q_t, s_i64, false),
+            (arr_t, Type::I64, true),
+            (arr_t, s_i64, true),
+            (arr_t, q_i64, false),
+            (arr_t, arr_i64, false),
+            (vec_t, Type::I64, true),
+            (vec_t, s_i64, true),
+            (vec_t, arr_i64, false),
+            (sec_t, Type::I64, false),
+            (s_i64, Type::I64, true),
+            (ref_q_t, Type::I64, true),
+            (ref_q_t, q_i64, false),
+            (gi_q_t, Type::I64, true),
+            (gi_q_t, q_i64, false),
+        ];
+        for (ty, arg, complete) in cases {
+            let got = ty.substitute_checked(&[arg], &mut instances, &mut refs, &secrets);
+            assert_eq!(got.is_some(), complete, "{ty:?} at {arg:?}");
+            let plain = ty.substitute(&[arg], &mut instances, &mut refs);
+            match got {
+                Some(t) => assert_eq!(t, plain, "{ty:?} at {arg:?}"),
+                None => assert!(contains_type_param(plain, &instances, &refs) || plain == sec_t),
+            }
+        }
+
+        // The type checker refuses each site where the substitution would be incomplete.
+        const DECLS: &str = "struct P<T> { v: ?T }\nstruct B<T> { v: secret T }\nstruct Q<T> { n: i64 }\n";
+        let refused: &[(&str, &str)] = &[
+            ("fn w<T>(a: T) -> ?T { a }\nfn main() -> i64 { let n: ?i64 = 4; let x = w(n); 0 }", "the return type of `w`"),
+            ("fn w<T>(a: T) -> ?T { a }\nfn main() -> i64 { let s: secret i64 = 3; let x = w(s); 0 }", "the return type of `w`"),
+            ("fn w<T>(a: T) -> [T] { [a] }\nfn main() -> i64 { let n: ?i64 = 4; let x = w(n); 0 }", "the return type of `w`"),
+            ("fn w<T>(a: T) -> Vec<T> { vec_new() }\nfn main() -> i64 { let x = w([1]); 0 }", "the return type of `w`"),
+            ("fn w<T>(a: T) -> secret T { a }\nfn main() -> i64 { let x = w(1); 0 }", "the return type of `w`"),
+            ("fn w<T>(a: T) -> Q<?T> { Q { n: 1 } }\nfn main() -> i64 { let n: ?i64 = 4; let x = w(n); 0 }", "the return type of `w`"),
+            ("fn w<T>(a: T) -> ?T { a }\nfn g<T>(x: T) -> i64 { let n: ?i64 = 4; let y = w(n); 0 }\nfn main() -> i64 { g(0) }", "the return type of `w`"),
+            ("fn main() -> i64 { let b: B<i64> = B { v: 5 }; 0 }", "field `v` of `B`"),
+            ("fn r(p: P<?i64>) -> i64 { let x = p.v; 0 }\nfn main() -> i64 { 0 }", "field `v` of `P`"),
+        ];
+        for (body, what) in refused {
+            match check_err(&format!("{DECLS}{body}")) {
+                TypeError::UninstantiableType { what: w, .. } => assert_eq!(&w, what, "{body}"),
+                other => panic!("{body}: got {other:?}"),
+            }
+        }
+        // The same shapes at type arguments that have a form are accepted.
+        for body in [
+            "fn w<T>(a: T) -> ?T { a }\nfn main() -> i64 { let x = w(4); 0 }",
+            "fn w<T>(a: T) -> [T] { [a] }\nfn main() -> i64 { let s: secret i64 = 3; let x = w(s); 0 }",
+            "fn w<T>(a: T) -> Q<?T> { Q { n: 1 } }\nfn main() -> i64 { let x = w(4); 0 }",
+            "fn w<T>(a: T) -> ?T { a }\nfn g<T>(x: T) -> i64 { let y = w(x); 0 }\nfn main() -> i64 { g(0) }",
+            "fn r(p: P<i64>) -> i64 { let x = p.v; 0 }\nfn main() -> i64 { 0 }",
+        ] {
+            check_ok(&format!("{DECLS}{body}"));
+        }
+
+        // A parameter type is pushed down into its argument as the substitution makes it.
+        let p = check_ok(
+            "struct Bx<T> { v: T }\nfn first<T>(a: T, b: ?Bx<T>) -> T { a }\n\
+             fn second<T>(a: T, b: ?&T) -> i64 { 0 }\n\
+             fn main() -> i64 { let x: i64 = first(40, null); let y: i64 = second(7, null); x + y }",
+        );
+        let main = p.fns.iter().find(|f| f.name == "main").expect("main");
+        let null_arg = |k: usize| {
+            let TypedStmtKind::Let { value, .. } = &main.body.stmts[k].kind else {
+                panic!("stmt {k}")
+            };
+            let TypedExprKind::Call { args, .. } = &value.kind else { panic!("call {k}") };
+            args[1].ty
+        };
+        match null_arg(0) {
+            Type::Nullable(NullableInner::GenericInstance(id)) => {
+                assert_eq!(p.generic_instances[id.0 as usize].args, vec![Type::I64])
+            }
+            other => panic!("first: {other:?}"),
+        }
+        match null_arg(1) {
+            Type::Nullable(NullableInner::Ref(id)) => assert_eq!(p.refs[id.0 as usize].inner, Type::I64),
+            other => panic!("second: {other:?}"),
+        }
+        // So a value filling such a parameter is widened to the instance's nullable, where the
+        // written `?P<T>` refused it.
+        let p = check_ok(
+            "struct P<T> { v: T }\nfn present<T>(a: T, b: ?P<T>) -> i64 { 0 }\n\
+             fn main() -> i64 { let p: P<i64> = P { v: 1 }; present(5, p) }",
+        );
+        let main = p.fns.iter().find(|f| f.name == "main").expect("main");
+        let TypedExprKind::Call { args, .. } = &main.body.tail.kind else { panic!("call") };
+        assert!(matches!(args[1].kind, TypedExprKind::WidenToNullable(_)), "{:?}", args[1].kind);
+        match args[1].ty {
+            Type::Nullable(NullableInner::GenericInstance(id)) => {
+                assert_eq!(p.generic_instances[id.0 as usize].args, vec![Type::I64])
+            }
+            other => panic!("present: {other:?}"),
+        }
+        // And nothing is pushed down where the substitution makes no type: a `null` filling a
+        // parameter with a `secret` over a type parameter has no type to take.
+        let err = check_err(
+            "struct P<T> { v: T }\nfn f<T>(a: T, b: ?P<secret T>) -> i64 { 0 }\nfn main() -> i64 { f(1, null) }",
+        );
+        assert!(matches!(err, TypeError::AmbiguousNull { .. }), "got {err:?}");
     }
 
     #[test]

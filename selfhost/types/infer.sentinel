@@ -326,6 +326,71 @@ fn subst_type(c: &mut TyCtx, h: i64, args: &Vec<i64>) -> i64 {
     }
 }
 
+// ADR 0016 A3: whether substituting `args` into `h` replaces every type parameter `h`
+// mentions, by the oracle's `Type::substitute_checked`. The oracle keeps the written type,
+// type parameters and all, where no substituted form exists: under a `secret` (which
+// substitution leaves as written), and in a `?X`, `[X]` or `Vec<X>` whose element,
+// substituted, is not one its `to_nullable_inner`, `to_array_elem_subst` or
+// `to_vec_elem_subst` takes. An element this walk could not substitute (an unbound
+// argument, -1) is not answered here: the call's other refusals see to it.
+fn subst_complete(c: &mut TyCtx, h: i64, args: &Vec<i64>) -> bool {
+    if h < tbase() {
+        true
+    } else {
+        let idx: i64 = h - tbase();
+        let k: i64 = (*c).tk[idx];
+        let a: i64 = (*c).ta[idx];
+        let b: i64 = (*c).tb[idx];
+        if k == 4 {
+            if subst_complete(c, a, args) {
+                let s4: i64 = subst_type(c, a, args);
+                s4 < 0 || tc_null_inner(c, s4)
+            } else {
+                false
+            }
+        } else if k == 1 {
+            if a >= tbase() && (*c).tk[a - tbase()] == 1 {
+                // A nested array's element is concrete: the oracle substitutes nothing.
+                true
+            } else if subst_complete(c, a, args) {
+                let s1: i64 = subst_type(c, a, args);
+                s1 < 0 || tc_arr_elem(c, s1)
+            } else {
+                false
+            }
+        } else if k == 11 {
+            if subst_complete(c, a, args) {
+                let s11: i64 = subst_type(c, a, args);
+                s11 < 0 || tc_vec_elem(c, s11)
+            } else {
+                false
+            }
+        } else if k == 3 {
+            tc_has_tparam(c, a) == false
+        } else if k == 2 {
+            subst_complete(c, b, args)
+        } else if k == 10 {
+            let gs: i64 = (*c).girs[b];
+            let ge: i64 = (*c).gire[b];
+            let mut ok: bool = true;
+            let mut gi: i64 = gs;
+            while gi < ge {
+                if ok {
+                    let ga: i64 = (*c).gia[gi];
+                    ok = subst_complete(c, ga, args);
+                    0
+                } else {
+                    0
+                };
+                gi = gi + 1;
+            }
+            ok
+        } else {
+            true
+        }
+    }
+}
+
 // Record a type-param binding (param index `pidx` → arg type `at`) into the
 // parallel (`bi`, `bt`) accumulator lists; FIRST binding wins (clean fixtures are
 // consistent, so a re-encounter of the same param need not re-check).
@@ -532,10 +597,12 @@ fn subst_fully(c: &mut TyCtx, h: i64, bi: &mut Vec<i64>, bt: &mut Vec<i64>) -> i
             // `subst_type` does. The oracle's `try_substitute` CHECKS that every argument
             // of a generic instance substitutes and then returns the instance handle it
             // was given — its own comment says "Doesn't re-intern — that's the mutable-
-            // substitute path". Rebuilding here types a `null` at `?Bx<i64>` where the
-            // oracle types it `?Bx<<T#0>>`, which the LLVM differential CANNOT SEE
-            // (both render `ptr null`) while the types and MIR differentials fail. A fix
-            // validated on the .ll alone would look correct and break two other stages.
+            // substitute path". Since ADR 0016 A3 the oracle no longer pushes that handle
+            // down to an argument (it pushes the substituted type, as `arg_expected` pushes
+            // `subst_bound`'s), but its call-argument mismatch message still renders it,
+            // and so does `tc_callarg_msg` from this answer; `arg_expected` reads only its
+            // kind. A `null`'s type is invisible to the LLVM differential (both render
+            // `ptr null`) and visible to the types and MIR ones.
             let gas: i64 = gi_argstart(c, h);
             let gae: i64 = gi_argend(c, h);
             let mut gj: i64 = gas;
@@ -562,6 +629,33 @@ fn subst_fully(c: &mut TyCtx, h: i64, bi: &mut Vec<i64>, bt: &mut Vec<i64>) -> i
             h
         }
     }
+}
+
+// ADR 0016 A3: `h` substituted by the bindings built so far, as the oracle pushes a
+// parameter type down: rebuilt through a generic instance and a reference, where
+// `subst_fully` (the oracle's `try_substitute`) answers the written type. Read only for a
+// `h` whose type parameters `subst_fully` found all bound.
+fn subst_bound(c: &mut TyCtx, h: i64, bi: &mut Vec<i64>, bt: &mut Vec<i64>) -> i64 {
+    let n: i64 = len(*bi);
+    let mut mx: i64 = 0 - 1;
+    let mut i: i64 = 0;
+    while i < n {
+        if (*bi)[i] > mx {
+            mx = (*bi)[i];
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    let mut args: Vec<i64> = vec_new();
+    let mut j: i64 = 0;
+    while j <= mx {
+        let bj: i64 = subst_get(bi, bt, j);
+        push(&mut args, bj);
+        j = j + 1;
+    }
+    subst_type(c, h, &args)
 }
 
 // (register D45) The expected type to push down into argument `pi` of a generic call,
@@ -591,9 +685,17 @@ fn arg_expected(c: &mut TyCtx, pty: i64, bi: &mut Vec<i64>, bt: &mut Vec<i64>) -
     } else {
         false
     };
+    // ADR 0016 A3: nor, in the checking modes, a parameter with a `secret` over a type
+    // parameter anywhere in it (`[secret T]`, `?P<secret T>`): the oracle's substitution
+    // keeps such a `secret` as written, so it pushes none of them down.
+    let psec_any: bool = if pty >= tbase() {
+        tc_secret_tparam(c, pty, false)
+    } else {
+        false
+    };
     if pty < 0 {
         0 - 1
-    } else if psec_t && tc_on(c) {
+    } else if (psec_t || psec_any) && tc_on(c) {
         0 - 1
     } else {
         let sub: i64 = subst_fully(c, pty, bi, bt);
@@ -605,14 +707,14 @@ fn arg_expected(c: &mut TyCtx, pty: i64, bi: &mut Vec<i64>, bt: &mut Vec<i64>) -
             if tc_on(c) && !tc_null_inner(c, (*c).ta[sub - tbase()]) {
                 0 - 1
             } else {
-                sub
+                subst_bound(c, pty, bi, bt)
             }
         } else if is_secret_ty(c, sub) {
-            sub
+            subst_bound(c, pty, bi, bt)
         } else if tc_on(c) && tc_pushdown(c, sub) {
-            // (`types/tcheck.sentinel`) the oracle's list holds `[secret T]` too; the checking
+            // (`types/tcheck.sentinel`) the oracle's list holds `[secret X]` too; the checking
             // modes push it down, the code generator's walk does not (see above).
-            sub
+            subst_bound(c, pty, bi, bt)
         } else {
             0 - 1
         }
@@ -788,6 +890,17 @@ fn dump_generic_call(out: &mut Vec<u8>, fid: i64, ca: Args, exp: i64, src: &[u8]
     let argbytes: [u8] = vec_to_array(abuf);
     append_str(out, argbytes);
     let rh: i64 = (*c).ufret[fid - 42];
+    // ADR 0016 A3: the return type must be instantiable at these type arguments.
+    if tc_on(c) && subst_complete(c, rh, &subst) == false {
+        let mut um: Vec<u8> = vec_new();
+        append_str(&mut um, "the return type of `");
+        let ufn: Vec<u8> = tc_fn_name(c, fid);
+        tc_put_vec(&mut um, ufn);
+        push(&mut um, '`');
+        tc_uninstantiable(c, um)
+    } else {
+        0
+    };
     subst_type(c, rh, &subst)
 }
 
@@ -1423,6 +1536,18 @@ fn dump_sfields(out: &mut Vec<u8>, f: Fields, sid: i64, gen: bool, gargs: &Vec<i
             // widens a `T` value / types a bare `null`. Look up the type by name
             // BEFORE `fnm` is sunk.
             let ftype0: i64 = field_type(c, sid, &fnm);
+            // ADR 0016 A3: refused where the instance gives the field no form.
+            if gen && tc_on(c) && subst_complete(c, ftype0, gargs) == false {
+                let mut fm: Vec<u8> = vec_new();
+                append_str(&mut fm, "field `");
+                rf_put(&mut fm, &fnm);
+                append_str(&mut fm, "` of `");
+                rf_put_snb(c, (*c).sts[sid], (*c).ste[sid], &mut fm);
+                push(&mut fm, '`');
+                tc_uninstantiable(c, fm)
+            } else {
+                0
+            };
             let ftype: i64 = if gen {
                 subst_type(c, ftype0, gargs)
             } else {

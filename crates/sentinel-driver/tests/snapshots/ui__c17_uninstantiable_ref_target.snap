@@ -1,0 +1,14 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c17_uninstantiable_ref_target.sentinel\")"
+---
+sentinel::types::uninstantiable_type
+
+  × the return type of `again` cannot be instantiated at these type arguments
+    ╭─[tests/ui/c17_uninstantiable_ref_target.sentinel:11:13]
+ 10 │     let n: ?i64 = 4;
+ 11 │     let p = again(n);
+    ·             ────┬───
+    ·                 ╰── 
+ 12 │     0
+    ╰────

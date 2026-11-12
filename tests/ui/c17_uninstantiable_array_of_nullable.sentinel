@@ -1,0 +1,12 @@
+// ADR 0016 A3: `[T]` has no form at `T := ?i64` (an array holds no nullable), so this
+// call's return type cannot be instantiated. Surfaces UninstantiableType at the call.
+
+fn one<T>(a: T) -> [T] {
+    [a]
+}
+
+fn main() -> i64 {
+    let n: ?i64 = 4;
+    let a = one(n);
+    0
+}

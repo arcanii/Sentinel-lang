@@ -1,0 +1,30 @@
+// ADR 0016 A3: a generic call pushes a parameter type down into its argument as the
+// substitution makes it, here after `a` bound `T := i64`. A `null` filling a `?Bx<T>` is typed
+// at the instance the call makes, `?Bx<i64>`, where the type checker used to type it at the
+// written `?Bx<T>`; and a `&i64` filling a `?&T` is widened to `?&i64`, where the written type
+// refused it. (A `null` filling the `?&T` is typed `?&i64` too, but the text back ends spell a
+// `?&T` `null` as `ptr 0`, register D46, so sentinel-types' table pins that one.)
+// 40 + 1 + 1 = 42.
+
+struct Bx<T> {
+    v: T,
+}
+
+fn first<T>(a: T, b: ?Bx<T>) -> T {
+    a
+}
+
+fn present<T>(a: T, b: ?&T) -> i64 {
+    if is_some(b) {
+        1
+    } else {
+        0
+    }
+}
+
+fn main() -> i64 {
+    let x: i64 = first(40, null);
+    let w: i64 = 3;
+    let y: i64 = present(7, &w);
+    x + y + 1
+}

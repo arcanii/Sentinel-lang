@@ -1,0 +1,11 @@
+// ADR 0016 A3: `Vec<T>` has no form at `T := [i64]` (a `Vec` holds no array), so this
+// call's return type cannot be instantiated. Surfaces UninstantiableType at the call.
+
+fn empty<T>(a: T) -> Vec<T> {
+    vec_new()
+}
+
+fn main() -> i64 {
+    let v = empty([1, 2]);
+    0
+}

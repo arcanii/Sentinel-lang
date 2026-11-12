@@ -119,8 +119,9 @@ const SEEDS: &[&str] = &[
     // (ADR 0041 A16) places the typer now types as the oracle does: an enum payload, a
     // `perform`'s argument and an array element with the type expected there (registers D118,
     // D132, D136), a `Vec<T>` a generic call or a generic instance's field gives, substituted
-    // by the oracle's rule (D147; an enum, `f64` or `?i64` element keeps `Vec<T>`), and a
-    // `handle` by its `return` arm (D151).
+    // by the oracle's rule (D147; an enum, `f64` or `?i64` element, which keeps `Vec<T>`, is
+    // refused at the call since ADR 0016 A3: see the refusal shapes), and a `handle` by its
+    // `return` arm (D151).
     "struct S1 { a: i64 }\nenum H { A(?S1), B }\nfn main() -> i64 { let h = H::A(null); 0 }\n",
     "enum G { A(?i64), B }\nfn main() -> i64 { let g = G::A(40); 0 }\n",
     "effect Io { write(x: secret i64) -> i64; }\nfn w() -> i64 ! { Io } { perform Io.write(40) }\nfn main() -> i64 { handle w() with { Io.write(x, k) => k(1) } }\n",
@@ -128,7 +129,7 @@ const SEEDS: &[&str] = &[
     "fn pass<T>(v: Vec<T>) -> Vec<T> { v }\nfn main() -> i64 { let mut v: Vec<i64> = vec_new(); push(&mut v, 4); let a: [i64] = vec_to_array(pass(v)); a[0] }\n",
     "struct Stack<T> { items: Vec<T> }\nfn main() -> i64 { let mut v: Vec<i64> = vec_new(); push(&mut v, 3); let s: Stack<i64> = Stack { items: v }; let a: [i64] = vec_to_array(s.items); a[0] }\n",
     "fn main() -> i64 { let x: ?i64 = handle 5 with { return v => v }; 0 }\n",
-    "enum E { A, B }\nstruct Q { a: i64 }\nstruct B<T> { v: T }\nfn mk<T>(x: T) -> Vec<T> { vec_new() }\nfn pass<T>(v: Vec<T>) -> Vec<T> { v }\nfn main() -> i64 {\n    let a = mk(E::A);\n    let b = mk(1.5);\n    let c = mk(Q { a: 1 });\n    let s: secret i64 = 2;\n    let d = mk(s);\n    let n: ?i64 = null;\n    let e = mk(n);\n    let h = pass(c);\n    let u: secret u8 = 7 as u8;\n    let i = mk(u);\n    0\n}\n",
+    "struct Q { a: i64 }\nstruct B<T> { v: T }\nfn mk<T>(x: T) -> Vec<T> { vec_new() }\nfn pass<T>(v: Vec<T>) -> Vec<T> { v }\nfn main() -> i64 {\n    let c = mk(Q { a: 1 });\n    let s: secret i64 = 2;\n    let d = mk(s);\n    let h = pass(c);\n    let u: secret u8 = 7 as u8;\n    let i = mk(u);\n    0\n}\n",
 ];
 
 #[test]

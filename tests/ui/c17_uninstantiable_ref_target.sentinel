@@ -1,0 +1,13 @@
+// ADR 0016 A3: the check reaches through a reference to its target. `&?T` at `T := ?i64`
+// would need a `?(?i64)`, which has no form. (The body only has to type-check: the call is
+// refused before anything runs.) Surfaces UninstantiableType at the call.
+
+fn again<T>(x: T) -> &?T {
+    again(x)
+}
+
+fn main() -> i64 {
+    let n: ?i64 = 4;
+    let p = again(n);
+    0
+}

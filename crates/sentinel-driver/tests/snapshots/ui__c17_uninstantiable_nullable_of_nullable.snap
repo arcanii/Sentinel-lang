@@ -1,0 +1,14 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c17_uninstantiable_nullable_of_nullable.sentinel\")"
+---
+sentinel::types::uninstantiable_type
+
+  × the return type of `wrap` cannot be instantiated at these type arguments
+    ╭─[tests/ui/c17_uninstantiable_nullable_of_nullable.sentinel:12:13]
+ 11 │     let n: ?i64 = 4;
+ 12 │     let w = wrap(n);
+    ·             ───┬───
+    ·                ╰── 
+ 13 │     0
+    ╰────

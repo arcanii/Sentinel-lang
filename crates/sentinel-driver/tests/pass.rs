@@ -536,6 +536,15 @@ fn pass_c17_generic_null_arg_second() {
 }
 
 #[test]
+fn pass_c17_generic_param_pushdown_instance() {
+    // ADR 0016 A3: a `null` filling a `?Bx<T>` parameter is typed at the instance the call
+    // makes (`?Bx<i64>`), not at the written parameter type, and a `&i64` filling a `?&T` is
+    // widened to `?&i64`, which the written type refused. The self-hosted differentials
+    // compare every stage of it. 40 + 1 + 1 = 42.
+    assert_eq!(run_exit("c17_generic_param_pushdown_instance.sentinel"), 42);
+}
+
+#[test]
 fn pass_c17_generic_ref_param_infer() {
     // ADR 0017 D11 / register D37: a generic type param behind a REF (`&T`) or a
     // `Vec<T>`. `unify_one` had no arm for either, so `T` never bound and the unbound

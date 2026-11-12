@@ -1,0 +1,14 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c17_uninstantiable_field_read.sentinel\")"
+---
+sentinel::types::uninstantiable_type
+
+  × field `v` of `P` cannot be instantiated at these type arguments
+    ╭─[tests/ui/c17_uninstantiable_field_read.sentinel:10:15]
+  9 │ fn get(p: P<?i64>) -> i64 {
+ 10 │     let x = p.v;
+    ·               ┬
+    ·               ╰── 
+ 11 │     0
+    ╰────

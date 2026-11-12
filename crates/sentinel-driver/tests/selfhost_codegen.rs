@@ -2661,14 +2661,16 @@ fn sentinel_codegen_refuses_an_export_the_merge_would_rename() {
 }
 
 /// ADR 0041 A17: the oracle's typer leaves a `secret` over a type parameter unsubstituted at every
-/// instance (`fn g<T>(x: T) -> secret T` returns `secret T`, a `B<i64>`'s `v: secret T` field is
-/// `secret T`) and accepts the program, and `snc llvm` refuses each program here as not yet
-/// ported. The code generator's own walk substitutes inside the `secret`, so it would read such a
-/// program otherwise than its checks do; its checking pass refuses any `secret` written over a
-/// type parameter, once neither a type error nor a leak is to be reported (both come first, as
-/// in `snc build`). A generic fn with such a signature that is never called is refused too,
-/// which `snc llvm` lowers (register D182). A generic with no `secret` over a type parameter is
-/// lowered.
+/// instance, and since ADR 0016 A3 both compilers' typers refuse every use of a type that keeps
+/// one — a call returning it, a struct literal or a field read holding it
+/// (`uninstantiable_type`) — so such a program never reaches the code generator. What still
+/// does is a declaration nothing uses that way: a generic fn whose signature holds one and that
+/// nothing calls, a generic struct with such a field that nothing builds, a phantom type
+/// argument. `snc llvm` lowers those; the code generator's own walk would substitute inside the
+/// `secret` and read the program otherwise than its checks do, so its checking pass refuses any
+/// `secret` written over a type parameter, once neither a type error nor a leak is to be
+/// reported (both come first, as in `snc build`). That is the over-refusal register D182
+/// records. A generic with no `secret` over a type parameter is lowered.
 #[test]
 fn sentinel_codegen_refuses_a_secret_over_a_type_parameter() {
     let tmp = std::env::temp_dir()
@@ -2680,41 +2682,33 @@ fn sentinel_codegen_refuses_a_secret_over_a_type_parameter() {
     std::fs::create_dir_all(&work).expect("create work dir");
     let input = work.join("input.sentinel");
     let refusal = "sentinel::codegen::secret_over_type_param\nscg: a `secret` over a type parameter is not supported by the code generator\n".to_string();
+    let unin = |what: &str| {
+        format!("sentinel::types::uninstantiable_type\nscg: {what} cannot be instantiated at these type arguments\n")
+    };
     let g = "fn g<T>(x: T) -> secret T { x }\n";
     let b = "struct B<T> { v: secret T, w: i64 }\nfn mk<T>(x: T, w: i64) -> B<T> { B { v: x, w: w } }\n";
-    let cases: Vec<(String, String)> = vec![
-        (format!("{g}fn main() -> i64 {{ let y = g(1); 0 }}\n"), refusal.clone()),
-        (format!("{g}fn main() -> i64 {{ let s: Shared<i64> = shared_new(1); let y = g(s); 0 }}\n"), refusal.clone()),
+    // ADR 0016 A3: each use is the typer's refusal, the oracle's too, so `snc llvm` refuses it.
+    let used: Vec<(String, String)> = vec![
+        (format!("{g}fn main() -> i64 {{ let y = g(1); 0 }}\n"), unin("the return type of `g`")),
         (
-            "fn w<T>(p: &mut T, v: T, r: T) -> secret T { *p = v; r }\nfn main() -> i64 { let mut b = true; let mut a = 1; let c = w(&mut a, 5, 6); let d = w(&mut b, true, false); 0 }\n".to_string(),
-            refusal.clone(),
+            format!("{g}fn main() -> i64 {{ let s: Shared<i64> = shared_new(1); let y = g(s); 0 }}\n"),
+            unin("the return type of `g`"),
         ),
-        // The same two calls compared: since ADR 0016 A2 a comparison of two `secret T` values
-        // is a type error, the oracle's own, and it comes before this refusal.
         (
             "fn w<T>(p: &mut T, v: T, r: T) -> secret T { *p = v; r }\nfn main() -> i64 { let mut b = true; let mut a = 1; let c = w(&mut a, 5, 6) == w(&mut b, true, false); 0 }\n".to_string(),
-            "sentinel::types::mismatch\nscg: type mismatch: expected i64, found <secret#4>\n".to_string(),
+            unin("the return type of `w`"),
         ),
         (
             "fn k<T>(x: T, y: secret T) -> i64 { 0 }\nfn h<T>(x: T) -> secret T { x }\nfn main() -> i64 { k(true, h(2)) }\n".to_string(),
-            refusal.clone(),
+            unin("the return type of `h`"),
         ),
-        (format!("{b}fn main() -> i64 {{ let b = mk(true, 7); let c = mk(9, 8); let mut x = b.v; x = c.v; 0 }}\n"), refusal.clone()),
+        (format!("{b}fn main() -> i64 {{ let b = mk(true, 7); let c = mk(9, 8); c.w + b.w }}\n"), unin("field `v` of `B`")),
         (
             format!("{b}fn pick<A, U>(a: A, b: B<U>) -> A {{ declassify(b.v) }}\nfn main() -> i64 {{ let big: [i64] = [1, 2, 3, 4]; let small: [u8] = [1 as u8, 2 as u8, 3 as u8, 4 as u8]; let r: [i64] = pick(big, mk(small, 1)); r[3] }}\n"),
-            refusal.clone(),
-        ),
-        (format!("{b}fn main() -> i64 {{ let b = mk(true, 7); let c = mk(9, 8); c.w + b.w }}\n"), refusal.clone()),
-        (
-            format!("{g}fn main() -> i64 {{ let y = g(1); let z: bool = 5; 0 }}\n"),
-            "sentinel::types::mismatch\nscg: type mismatch: expected bool, found i64\n".to_string(),
-        ),
-        (
-            format!("{g}fn leaky(a: secret bool, b: secret bool) -> secret bool {{ a && b }}\nfn main() -> i64 {{ let y = g(1); 0 }}\n"),
-            "sentinel::mir::secret_leak\nscg: a `secret` value reaches a conditional branch, which would leak it via timing\n".to_string(),
+            unin("field `v` of `B`"),
         ),
     ];
-    for (prog, want) in &cases {
+    for (prog, want) in &used {
         std::fs::write(&input, prog).expect("stage program");
         let llvm = Command::new(env!("CARGO_BIN_EXE_snc")).arg("llvm").arg(&input).output().expect("run snc llvm");
         assert!(!llvm.status.success(), "snc llvm lowered {prog:?}");
@@ -2722,12 +2716,34 @@ fn sentinel_codegen_refuses_a_secret_over_a_type_parameter() {
         assert_eq!(&String::from_utf8_lossy(&out.stdout), want, "the code generator's answer to {prog:?}");
         assert!(!out.status.success());
     }
-    // The over-refusal D182 records: a generic fn with such a signature that nothing calls.
-    std::fs::write(&input, format!("{g}fn main() -> i64 {{ 0 }}\n")).expect("stage program");
-    let llvm = Command::new(env!("CARGO_BIN_EXE_snc")).arg("llvm").arg(&input).output().expect("run snc llvm");
-    assert!(llvm.status.success(), "snc llvm no longer lowers a generic nothing calls");
-    let out = Command::new(&driver).current_dir(&work).output().expect("run the code generator");
-    assert_eq!(String::from_utf8_lossy(&out.stdout), refusal, "the code generator's answer to an uncalled generic");
+    // A type error and a leak come before this refusal.
+    for (prog, want) in [
+        (
+            format!("{g}fn main() -> i64 {{ let z: bool = 5; 0 }}\n"),
+            "sentinel::types::mismatch\nscg: type mismatch: expected bool, found i64\n",
+        ),
+        (
+            format!("{g}fn leaky(a: secret bool, b: secret bool) -> secret bool {{ a && b }}\nfn main() -> i64 {{ 0 }}\n"),
+            "sentinel::mir::secret_leak\nscg: a `secret` value reaches a conditional branch, which would leak it via timing\n",
+        ),
+    ] {
+        std::fs::write(&input, &prog).expect("stage program");
+        let out = Command::new(&driver).current_dir(&work).output().expect("run the code generator");
+        assert_eq!(String::from_utf8_lossy(&out.stdout), want, "the code generator's answer to {prog:?}");
+        assert!(!out.status.success());
+    }
+    // The over-refusal D182 records: a declaration nothing uses, which `snc llvm` lowers.
+    for prog in [
+        format!("{g}fn main() -> i64 {{ 0 }}\n"),
+        "struct B<T> { v: secret T, w: i64 }\nfn main() -> i64 { 0 }\n".to_string(),
+        "struct P<T> { n: i64 }\nfn g<T>(y: T) -> P<secret T> { P { n: 1 } }\nfn main() -> i64 { 0 }\n".to_string(),
+    ] {
+        std::fs::write(&input, &prog).expect("stage program");
+        let llvm = Command::new(env!("CARGO_BIN_EXE_snc")).arg("llvm").arg(&input).output().expect("run snc llvm");
+        assert!(llvm.status.success(), "snc llvm no longer lowers {prog:?}");
+        let out = Command::new(&driver).current_dir(&work).output().expect("run the code generator");
+        assert_eq!(String::from_utf8_lossy(&out.stdout), refusal, "the code generator's answer to {prog:?}");
+    }
     std::fs::write(&input, "fn id<T>(x: T) -> T { x }\nfn main() -> i64 { id(1) }\n").expect("stage program");
     let out = Command::new(&driver).current_dir(&work).output().expect("run the code generator");
     assert!(

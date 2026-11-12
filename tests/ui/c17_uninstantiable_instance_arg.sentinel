@@ -1,0 +1,17 @@
+// ADR 0016 A3: the check reaches into a generic instance's type arguments. `Q<?T>` at
+// `T := ?i64` would need a `?(?i64)`, which has no form. Surfaces UninstantiableType at
+// the call.
+
+struct Q<T> {
+    n: i64,
+}
+
+fn tag<T>(a: T) -> Q<?T> {
+    Q { n: 1 }
+}
+
+fn main() -> i64 {
+    let n: ?i64 = 4;
+    let q = tag(n);
+    0
+}

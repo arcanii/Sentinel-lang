@@ -1,0 +1,16 @@
+// ADR 0016 A3: a field read on a generic instance must find the field's type
+// instantiable at the instance's type arguments. `P<?i64>`'s field `?T` would need a
+// `?(?i64)`. Surfaces UninstantiableType at the field.
+
+struct P<T> {
+    v: ?T,
+}
+
+fn get(p: P<?i64>) -> i64 {
+    let x = p.v;
+    0
+}
+
+fn main() -> i64 {
+    0
+}

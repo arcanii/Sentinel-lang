@@ -208,8 +208,9 @@ const SEEDS: &[&str] = &[
     // (ADR 0041 A16) places the typer now types as the oracle does: an enum payload, a
     // `perform`'s argument and an array element with the type expected there (registers D118,
     // D132, D136), a `Vec<T>` a generic call or a generic instance's field gives, substituted
-    // by the oracle's rule (D147; an enum, `f64` or `?i64` element keeps `Vec<T>`), and a
-    // `handle` by its `return` arm (D151).
+    // by the oracle's rule (D147; an enum, `f64` or `?i64` element, which keeps `Vec<T>`, is
+    // refused at the call since ADR 0016 A3: see the refusal shapes), and a `handle` by its
+    // `return` arm (D151).
     "struct S1 { a: i64 }\nenum H { A(?S1), B }\nfn main() -> i64 { let h = H::A(null); 0 }\n",
     "enum G { A(?i64), B }\nfn main() -> i64 { let g = G::A(40); 0 }\n",
     "effect Io { write(x: secret i64) -> i64; }\nfn w() -> i64 ! { Io } { perform Io.write(40) }\nfn main() -> i64 { handle w() with { Io.write(x, k) => k(1) } }\n",
@@ -217,7 +218,7 @@ const SEEDS: &[&str] = &[
     "fn pass<T>(v: Vec<T>) -> Vec<T> { v }\nfn main() -> i64 { let mut v: Vec<i64> = vec_new(); push(&mut v, 4); let a: [i64] = vec_to_array(pass(v)); a[0] }\n",
     "struct Stack<T> { items: Vec<T> }\nfn main() -> i64 { let mut v: Vec<i64> = vec_new(); push(&mut v, 3); let s: Stack<i64> = Stack { items: v }; let a: [i64] = vec_to_array(s.items); a[0] }\n",
     "fn main() -> i64 { let x: ?i64 = handle 5 with { return v => v }; 0 }\n",
-    "enum E { A, B }\nstruct Q { a: i64 }\nstruct B<T> { v: T }\nfn mk<T>(x: T) -> Vec<T> { vec_new() }\nfn pass<T>(v: Vec<T>) -> Vec<T> { v }\nfn main() -> i64 {\n    let a = mk(E::A);\n    let b = mk(1.5);\n    let c = mk(Q { a: 1 });\n    let s: secret i64 = 2;\n    let d = mk(s);\n    let n: ?i64 = null;\n    let e = mk(n);\n    let h = pass(c);\n    let u: secret u8 = 7 as u8;\n    let i = mk(u);\n    0\n}\n",
+    "struct Q { a: i64 }\nstruct B<T> { v: T }\nfn mk<T>(x: T) -> Vec<T> { vec_new() }\nfn pass<T>(v: Vec<T>) -> Vec<T> { v }\nfn main() -> i64 {\n    let c = mk(Q { a: 1 });\n    let s: secret i64 = 2;\n    let d = mk(s);\n    let h = pass(c);\n    let u: secret u8 = 7 as u8;\n    let i = mk(u);\n    0\n}\n",
 ];
 
 #[test]
@@ -859,9 +860,11 @@ fn sentinel_typer_refusals_match_the_oracle_on_shapes() {
         "fn first<T>(v: Vec<T>) -> i64 { let a = vec_to_array(v); 0 }\nfn main() -> i64 { 0 }",
         // `vec_to_array` over a `Vec<T>` a generic call returns: both substitute `T` where it
         // can be a `Vec` element and refuse an element that is not plain (a struct holding an
-        // array), and keep `Vec<T>` (refused) where it cannot be (an enum).
+        // array), and refuse the call where it cannot be (an enum, `f64`, `?i64`: ADR 0016 A3).
         "struct E2 { e: [i64] }\nfn pass<T>(v: Vec<T>) -> Vec<T> { v }\nfn main() -> i64 { let v: Vec<E2> = vec_new(); let a = vec_to_array(pass(v)); len(a) }",
         "enum E { A, B }\nfn mk<T>(x: T) -> Vec<T> { vec_new() }\nfn main() -> i64 { let a = vec_to_array(mk(E::A)); len(a) }",
+        "fn mk<T>(x: T) -> Vec<T> { vec_new() }\nfn main() -> i64 { let b = mk(1.5); 0 }",
+        "fn mk<T>(x: T) -> Vec<T> { vec_new() }\nfn main() -> i64 { let n: ?i64 = null; let e = mk(n); 0 }",
         // An `if` or `while` condition is a `bool`: a `secret bool` is `secret_branch`, in any
         // body, a method's and a handler arm's among them, and any other type a mismatch.
         "fn main() -> i64 { if 1 { 1 } else { 0 } }",
@@ -1158,7 +1161,8 @@ fn sentinel_typer_refusals_match_the_oracle_on_shapes() {
         "export \"C\" fn f(x: &mut [u8]) -> [u8] { let v: [u8] = \"ab\"; v }\nfn main() -> i64 { 0 }",
         "export \"C\" fn f(x: i64) -> i64 { if keep(true) { x } else { 0 } }\nfn keep(b: bool) -> bool { b }\nfn main() -> i64 { 0 }",
         // (A17) `secret T` passes through substitution unchanged, as the oracle's does: no
-        // `secret f64` or `secret` handle is made by instantiating a generic.
+        // `secret f64` or `secret` handle is made by instantiating a generic. Since ADR 0016 A3
+        // both typers refuse each of these at the use that would keep it (`uninstantiable_type`).
         "struct B<T> { v: secret T }\nfn main() -> i64 { let b: B<f64> = B { v: 1.5 }; 0 }",
         "fn g<T>(x: T) -> secret T { x }\nfn main() -> i64 { let y = g(1.5); let z = y * y; 0 }",
         "fn g<T>(x: T) -> secret T { x }\nfn main() -> i64 { let a: i64 = 4; let r = g(&a); let v = *r; 0 }",
@@ -1168,13 +1172,11 @@ fn sentinel_typer_refusals_match_the_oracle_on_shapes() {
         // as the oracle does (register D146).
         "struct Box<T> { s: secret T }\nfn main() -> i64 { let mut v: Vec<Box<i32>> = vec_new(); let a: [Box<i32>] = vec_to_array(v); 0 }",
         // (A17) Nor does a `secret T` bind `T` in unification (the oracle's `unify_one` has no arm
-        // for it), so two calls of such a generic in one array or assignment are accepted, as
-        // `snc types` accepts them (a join of two, accepted before A17 too). Compared, they are
-        // refused as `snc types` refuses them since ADR 0016 A2: the left operand is the
-        // unsubstituted `secret T`, and a comparison takes scalar operands. An
-        // argument of that very `secret T` fits a `secret T` parameter, and a type parameter
-        // nothing else binds is then ambiguous, as in the oracle. (The code generator refuses every
-        // `secret` written over a type parameter, register D182.)
+        // for it). These programs were accepted, or refused at a comparison (ADR 0016 A2), as
+        // `snc types` answered them; since ADR 0016 A3 each is refused at its first call of a
+        // generic returning `secret T` (or the literal of a struct with a `secret T` field), as
+        // `snc types` refuses it, and they stay here as shapes the two typers must answer alike.
+        // (The code generator refuses every `secret` written over a type parameter, register D182.)
         "fn g<T>(x: T) -> secret T { x }\nfn main() -> i64 { let b = g(1) != g(2); 0 }",
         "fn g<T>(x: T) -> secret T { x }\nfn main() -> i64 { let a = [g(1), g(2)]; 0 }",
         "fn g<T>(x: T) -> secret T { x }\nfn main() -> i64 { let mut y = g(1); y = g(2); 0 }",

@@ -1,0 +1,14 @@
+// ADR 0016 A3: a generic call's return type must be instantiable at the call's type
+// arguments. `?T` has no form at `T := ?i64` (a nullable does not nest), so the
+// substitution would keep the callee's written `?T`. Surfaces UninstantiableType at the
+// call.
+
+fn wrap<T>(a: T) -> ?T {
+    a
+}
+
+fn main() -> i64 {
+    let n: ?i64 = 4;
+    let w = wrap(n);
+    0
+}

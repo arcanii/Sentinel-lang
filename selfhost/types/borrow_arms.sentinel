@@ -1474,6 +1474,18 @@ fn dump_te_field(out: &mut Vec<u8>, ft: Expr, fdn: [u8], exp: i64, src: &[u8], c
                     push(&mut fargs, fd_a);
                     fd_j = fd_j + 1;
                 }
+                // ADR 0016 A3: refused where the instance gives the field no form.
+                if tc_on(c) && subst_complete(c, fty0, &fargs) == false {
+                    let mut fdm: Vec<u8> = vec_new();
+                    append_str(&mut fdm, "field `");
+                    rf_put(&mut fdm, &fdn);
+                    append_str(&mut fdm, "` of `");
+                    rf_put_snb(c, (*c).sts[sid], (*c).ste[sid], &mut fdm);
+                    push(&mut fdm, '`');
+                    tc_uninstantiable(c, fdm)
+                } else {
+                    0
+                };
                 subst_type(c, fty0, &fargs)
             } else {
                 fty0

@@ -268,11 +268,12 @@ fn tc_secret_tparam(c: &mut TyCtx, h: i64, under: bool) -> bool {
 // `resume`'s argument and an array literal's elements with the type expected there, where the
 // oracle has one (D118, D132, D136); a value coerced into `[secret S]` with that type; a
 // `Vec<T>` a generic call returns, substituted by the oracle's rule (D147); a generic call's
-// argument with a `[secret T]` parameter pushed down, a `secret T` one with none, and a `null`
-// one bound after the rest; `unwrap_or`'s `T` from the type expected of it, where the oracle
-// has one; a `let`'s annotation, with no type parameter in scope; and (A17) a `secret` type
-// left unsubstituted in a generic call's result or a generic instance's field, as the oracle
-// leaves one, and a `secret` parameter type that binds no type parameter in unification, as
+// argument with nothing pushed down from a parameter that holds a `secret` over a type
+// parameter (ADR 0016 A3), and a `null` one bound after the rest; `unwrap_or`'s `T` from the
+// type expected of it, where the oracle has one; a `let`'s annotation, with no type parameter
+// in scope; and (A17) a `secret` type left unsubstituted in a generic call's result or a
+// generic instance's field, as the oracle leaves one (and, since A3, refuses:
+// `subst_complete`), and a `secret` parameter type that binds no type parameter in unification, as
 // in the oracle's, with the oracle's refusal of a type parameter that is then left unbound
 // (`tc_ambiguous`). Since the code generator's walk does both otherwise, its checking pass
 // refuses any `secret` written over a type parameter (`tc_secret_over_tparam`).
@@ -308,6 +309,77 @@ fn tc_vec_elem(c: &mut TyCtx, e: i64) -> bool {
             false
         }
     }
+}
+
+// Whether `e` can be an array element once substituted, by the oracle's
+// `to_array_elem_subst`: `i64`, `i32`, `bool`, `u8`, a struct, a type parameter, a generic
+// instance, or a `secret` one of the four word scalars. (The list is the `Vec` one; it is
+// written out again so each follows its own oracle function.)
+fn tc_arr_elem(c: &mut TyCtx, e: i64) -> bool {
+    if e < tbase() {
+        e >= 0 && e <= 3
+    } else {
+        let k: i64 = (*c).tk[e - tbase()];
+        if k == 6 || k == 9 || k == 10 {
+            true
+        } else if k == 3 {
+            let a: i64 = (*c).ta[e - tbase()];
+            a >= 0 && a <= 3
+        } else {
+            false
+        }
+    }
+}
+
+// Whether `h` mentions a type parameter, by the oracle's `contains_type_param`: through a
+// nullable's, an array's (not a nested array's) and a `Vec`'s element, a reference's
+// target and a generic instance's arguments, and not through a `secret`.
+fn tc_has_tparam(c: &mut TyCtx, h: i64) -> bool {
+    if h < tbase() {
+        false
+    } else {
+        let k: i64 = (*c).tk[h - tbase()];
+        let a: i64 = (*c).ta[h - tbase()];
+        let b: i64 = (*c).tb[h - tbase()];
+        if k == 9 {
+            true
+        } else if k == 1 {
+            if a >= tbase() && (*c).tk[a - tbase()] == 1 {
+                false
+            } else {
+                tc_has_tparam(c, a)
+            }
+        } else if k == 4 || k == 11 {
+            tc_has_tparam(c, a)
+        } else if k == 2 {
+            tc_has_tparam(c, b)
+        } else if k == 10 {
+            let gs: i64 = (*c).girs[b];
+            let ge: i64 = (*c).gire[b];
+            let mut any: bool = false;
+            let mut gi: i64 = gs;
+            while gi < ge {
+                if tc_has_tparam(c, (*c).gia[gi]) {
+                    any = true;
+                    0
+                } else {
+                    0
+                };
+                gi = gi + 1;
+            }
+            any
+        } else {
+            false
+        }
+    }
+}
+
+// ADR 0016 A3: `sentinel::types::uninstantiable_type`, "<what> cannot be instantiated at these
+// type arguments", where `what` is already in `m`.
+fn tc_uninstantiable(c: &mut TyCtx, m: Vec<u8>) -> i64 {
+    let mut mm: Vec<u8> = m;
+    append_str(&mut mm, " cannot be instantiated at these type arguments");
+    refuse(c, "sentinel::types::uninstantiable_type", vec_to_array(mm))
 }
 
 // The number of interner entries of kind `k` before index `idx`.
@@ -2418,13 +2490,17 @@ fn tc_gcallarg(c: &mut TyCtx, src: &[u8], gfid: i64, pi: i64, pty: i64, got: i64
         // that bind its parameter, so it is not refused here.
         0
     } else if psecret_t {
-        // A `secret T` parameter: the oracle pushes it down unsubstituted, and no argument is
-        // coerced to it; only an argument of that very type fits it (since A17, the
-        // unsubstituted `secret T` another generic call returns).
+        // A `secret T` parameter: nothing is pushed down to it (ADR 0016 A3), and only an
+        // argument of that very type unifies with it. Any other argument is the oracle's
+        // call-argument mismatch, which names the written `secret T`; a `null` (the oracle's
+        // ambiguous `null`, not ported) is refused as a mismatch.
         if got == pty {
             0
-        } else {
+        } else if got < 0 {
             tc_mismatch(c, pty, got)
+        } else {
+            let sfn: Vec<u8> = tc_fn_name(c, gfid);
+            tc_callarg_msg(c, sfn, pi, pty, got)
         }
     } else {
         let r: i64 = tc_gunify(c, pty, got, bi, bt);
