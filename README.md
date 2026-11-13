@@ -2,6 +2,17 @@
 
 **A security-first systems programming language for the threats of the 2030s.**
 
+<p align="center">
+  <a href="#versioning"><img src="https://img.shields.io/badge/dynamic/toml?url=https%3A%2F%2Fraw.githubusercontent.com%2Farcanii%2FSentinel-lang%2Fmain%2FCargo.toml&query=%24.workspace.package.version&label=Version&style=for-the-badge&color=D97757" alt="Version"></a>
+  <img src="https://img.shields.io/badge/Rust-stable%201.80%2B-000000?style=for-the-badge&logo=rust&logoColor=white" alt="Rust stable 1.80+">
+  <img src="https://img.shields.io/badge/LLVM-18-262D3A?style=for-the-badge&logo=llvm&logoColor=white" alt="LLVM 18">
+  <img src="https://img.shields.io/badge/macOS-Apple%20Silicon-000000?style=for-the-badge&logo=apple&logoColor=white" alt="macOS on Apple Silicon">
+  <img src="https://img.shields.io/badge/Windows-x86--64%20MSVC-0078D6?style=for-the-badge&logo=windows11&logoColor=white" alt="Windows x86-64 (MSVC)">
+  <img src="https://img.shields.io/badge/Self--hosted-byte--identical%20IR-6E56CF?style=for-the-badge" alt="Self-hosted: byte-identical IR">
+  <a href="#limitations"><img src="https://img.shields.io/badge/Status-research%2C%20not%20production-B7410E?style=for-the-badge" alt="Status: research, not production"></a>
+  <a href="LICENSE.md"><img src="https://img.shields.io/badge/License-MIT-D97757?style=for-the-badge" alt="License: MIT"></a>
+</p>
+
 Sentinel is a memory-safe, capability-bounded systems language built by
 [Anie Ltd.](https://aniesolutions.ai) for the bug classes that dominate modern security
 incidents and that no production language addresses structurally: cryptographic side
