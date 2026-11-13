@@ -272,8 +272,8 @@ ui_snapshot!(c70_apply_target_not_fn, "c70_apply_target_not_fn.sentinel");
 // With the fixtures that already carried an A17 code (`c21_extern_ref_param`,
 // `c71_secret_handle`, `c71_secret_mutex_handle`, `c5d1_non_exhaustive_match`), each code A17
 // ports has at least one, and some have one for each place the walk makes it; and
-// `c58_secret_float_through_generic` holds the rule that leaves `secret T` unsubstituted,
-// which ADR 0016 A3 refuses at the field read.
+// `c58_secret_float_through_generic` held the rule that leaves `secret T` unsubstituted;
+// since ADR 0016 A3 the `secret T` itself is refused where it is written.
 ui_snapshot!(c58_secret_float_param, "c58_secret_float_param.sentinel");
 ui_snapshot!(c58_secret_float_cast, "c58_secret_float_cast.sentinel");
 ui_snapshot!(c54_non_integer_cast, "c54_non_integer_cast.sentinel");
@@ -504,13 +504,17 @@ ui_snapshot!(c13_compare_channel, "c13_compare_channel.sentinel");
 ui_snapshot!(c13_compare_process, "c13_compare_process.sentinel");
 ui_snapshot!(c13_compare_task, "c13_compare_task.sentinel");
 
-// ---- ADR 0016 A3: a generic type is used only where its instance has a form ----
+// ---- ADR 0016 A3: a type parameter stays in its own declaration's types ----
 // A generic call's return type, a generic struct literal's field and a field read on a generic
 // instance are refused where substituting the type arguments would keep a type parameter of
-// the declaration: under a `secret`, and in a `?T`, `[T]` or `Vec<T>` (here also inside a
-// generic instance's argument and behind a reference) at an element it cannot hold. The substitution's own table is
-// `generic_types_are_instantiated_completely` (sentinel-types). Each fixture carries a ported
-// code, so every self-hosted driver must refuse it as the oracle does.
+// the declaration: a `?T`, `[T]` or `Vec<T>` (here also inside a generic instance's argument
+// and behind a reference) at an element the substitution does not build, and a generic
+// instance one of them makes or holds whose own field is such a type. A `secret` over a
+// type parameter and an array of arrays over one are refused where they are written, and
+// unification binds a callee's type parameter where an argument has its own written type.
+// The substitution's own table is `generic_types_are_instantiated_completely`
+// (sentinel-types). Each fixture carries a ported code, so every self-hosted driver must
+// refuse it as the oracle does.
 ui_snapshot!(
     c17_uninstantiable_nullable_of_nullable,
     "c17_uninstantiable_nullable_of_nullable.sentinel"
@@ -521,11 +525,47 @@ ui_snapshot!(
 );
 ui_snapshot!(c17_uninstantiable_array_of_nullable, "c17_uninstantiable_array_of_nullable.sentinel");
 ui_snapshot!(c17_uninstantiable_vec_of_array, "c17_uninstantiable_vec_of_array.sentinel");
-ui_snapshot!(c17_uninstantiable_secret_return, "c17_uninstantiable_secret_return.sentinel");
 ui_snapshot!(c17_uninstantiable_instance_arg, "c17_uninstantiable_instance_arg.sentinel");
 ui_snapshot!(c17_uninstantiable_struct_literal, "c17_uninstantiable_struct_literal.sentinel");
 ui_snapshot!(c17_uninstantiable_field_read, "c17_uninstantiable_field_read.sentinel");
 ui_snapshot!(c17_uninstantiable_ref_target, "c17_uninstantiable_ref_target.sentinel");
+ui_snapshot!(
+    c17_uninstantiable_instance_result,
+    "c17_uninstantiable_instance_result.sentinel"
+);
+ui_snapshot!(
+    c17_uninstantiable_instance_builtin,
+    "c17_uninstantiable_instance_builtin.sentinel"
+);
+ui_snapshot!(c17_uninstantiable_instance_read, "c17_uninstantiable_instance_read.sentinel");
+ui_snapshot!(
+    c17_uninstantiable_instance_nested,
+    "c17_uninstantiable_instance_nested.sentinel"
+);
+ui_snapshot!(
+    c17_uninstantiable_instance_type_arg,
+    "c17_uninstantiable_instance_type_arg.sentinel"
+);
+ui_snapshot!(c17_uninstantiable_nonregular, "c17_uninstantiable_nonregular.sentinel");
+ui_snapshot!(
+    c17_uninstantiable_literal_instance,
+    "c17_uninstantiable_literal_instance.sentinel"
+);
+ui_snapshot!(
+    c17_secret_over_type_param_return,
+    "c17_secret_over_type_param_return.sentinel"
+);
+ui_snapshot!(
+    c17_secret_over_type_param_field,
+    "c17_secret_over_type_param_field.sentinel"
+);
+ui_snapshot!(c17_generic_nested_array_param, "c17_generic_nested_array_param.sentinel");
+ui_snapshot!(
+    c17_generic_nested_array_literal,
+    "c17_generic_nested_array_literal.sentinel"
+);
+ui_snapshot!(c17_unify_instance_scope, "c17_unify_instance_scope.sentinel");
+ui_snapshot!(c17_unify_ref_scope, "c17_unify_ref_scope.sentinel");
 
 // Register D111: a move inside nested loop-like constructs is reported once.
 ui_snapshot!(

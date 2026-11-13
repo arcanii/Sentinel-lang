@@ -1,0 +1,14 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c17_uninstantiable_literal_instance.sentinel\")"
+---
+sentinel::types::uninstantiable_type
+
+  × field `v` of `P` cannot be instantiated at these type arguments
+    ╭─[tests/ui/c17_uninstantiable_literal_instance.sentinel:16:32]
+ 15 │ fn main() -> i64 {
+ 16 │     let w: W<?i64> = W { a: 1, p: null };
+    ·                                ┬
+    ·                                ╰── 
+ 17 │     w.a
+    ╰────

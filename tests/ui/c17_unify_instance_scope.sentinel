@@ -1,0 +1,24 @@
+// ADR 0016 A3: unification binds a callee's type parameter even where an argument has the
+// parameter's own written type. In `g`, `mk(x)` is an `R<A>`, which is the same interned
+// instance as `take`'s `R<U>`; `take`'s `U`, bound to `i64` by `0`, then meets `A`.
+// Surfaces TypeArgInferenceConflict at the second argument.
+
+struct R<T> {
+    v: T,
+}
+
+fn mk<T>(a: T) -> R<T> {
+    R { v: a }
+}
+
+fn take<U>(a: U, w: R<U>) -> U {
+    a
+}
+
+fn g<A>(x: A) -> i64 {
+    take(0, mk(x))
+}
+
+fn main() -> i64 {
+    g(true)
+}

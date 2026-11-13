@@ -1,0 +1,21 @@
+// ADR 0016 A3: and an instance that is another instance's type argument. `tag(n)` returns a
+// `Q<P<?i64>>`; `Q` uses no field of its argument, but `P<?i64>`'s field `?T` has no form at
+// `T := ?i64`. Surfaces UninstantiableType at the call.
+
+struct P<T> {
+    v: ?T,
+}
+
+struct Q<T> {
+    n: i64,
+}
+
+fn tag<T>(a: T) -> Q<P<T>> {
+    Q { n: 1 }
+}
+
+fn main() -> i64 {
+    let n: ?i64 = 3;
+    let q = tag(n);
+    0
+}

@@ -1162,7 +1162,7 @@ fn sentinel_typer_refusals_match_the_oracle_on_shapes() {
         "export \"C\" fn f(x: i64) -> i64 { if keep(true) { x } else { 0 } }\nfn keep(b: bool) -> bool { b }\nfn main() -> i64 { 0 }",
         // (A17) `secret T` passes through substitution unchanged, as the oracle's does: no
         // `secret f64` or `secret` handle is made by instantiating a generic. Since ADR 0016 A3
-        // both typers refuse each of these at the use that would keep it (`uninstantiable_type`).
+        // both typers refuse each `secret T` where it is written (`secret_over_type_param`).
         "struct B<T> { v: secret T }\nfn main() -> i64 { let b: B<f64> = B { v: 1.5 }; 0 }",
         "fn g<T>(x: T) -> secret T { x }\nfn main() -> i64 { let y = g(1.5); let z = y * y; 0 }",
         "fn g<T>(x: T) -> secret T { x }\nfn main() -> i64 { let a: i64 = 4; let r = g(&a); let v = *r; 0 }",
@@ -1173,10 +1173,9 @@ fn sentinel_typer_refusals_match_the_oracle_on_shapes() {
         "struct Box<T> { s: secret T }\nfn main() -> i64 { let mut v: Vec<Box<i32>> = vec_new(); let a: [Box<i32>] = vec_to_array(v); 0 }",
         // (A17) Nor does a `secret T` bind `T` in unification (the oracle's `unify_one` has no arm
         // for it). These programs were accepted, or refused at a comparison (ADR 0016 A2), as
-        // `snc types` answered them; since ADR 0016 A3 each is refused at its first call of a
-        // generic returning `secret T` (or the literal of a struct with a `secret T` field), as
-        // `snc types` refuses it, and they stay here as shapes the two typers must answer alike.
-        // (The code generator refuses every `secret` written over a type parameter, register D182.)
+        // `snc types` answered them; since ADR 0016 A3 each is refused at its first `secret T`,
+        // where it is written, as `snc types` refuses it, and they stay here as shapes the two
+        // typers must answer alike.
         "fn g<T>(x: T) -> secret T { x }\nfn main() -> i64 { let b = g(1) != g(2); 0 }",
         "fn g<T>(x: T) -> secret T { x }\nfn main() -> i64 { let a = [g(1), g(2)]; 0 }",
         "fn g<T>(x: T) -> secret T { x }\nfn main() -> i64 { let mut y = g(1); y = g(2); 0 }",

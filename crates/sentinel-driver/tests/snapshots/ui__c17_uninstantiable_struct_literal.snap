@@ -4,11 +4,11 @@ expression: "reject_stderr(\"c17_uninstantiable_struct_literal.sentinel\")"
 ---
 sentinel::types::uninstantiable_type
 
-  × field `v` of `B` cannot be instantiated at these type arguments
-    ╭─[tests/ui/c17_uninstantiable_struct_literal.sentinel:10:25]
+  × field `v` of `P` cannot be instantiated at these type arguments
+    ╭─[tests/ui/c17_uninstantiable_struct_literal.sentinel:10:26]
   9 │ fn main() -> i64 {
- 10 │     let b: B<i64> = B { v: 5 };
-    ·                         ┬
-    ·                         ╰── 
+ 10 │     let p: P<?i64> = P { v: null };
+    ·                          ┬
+    ·                          ╰── 
  11 │     0
     ╰────

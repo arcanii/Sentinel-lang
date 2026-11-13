@@ -1,0 +1,18 @@
+// ADR 0016 A3: a generic struct literal's field type may not hold a generic instance whose own
+// field the substitution does not build. `W<?i64>`'s field `p` is a `?P<?i64>`, whose field `?T`
+// has no form at `T := ?i64`. Surfaces UninstantiableType at the literal's field.
+
+struct P<T> {
+    v: ?T,
+    w: i64,
+}
+
+struct W<T> {
+    a: i64,
+    p: ?P<T>,
+}
+
+fn main() -> i64 {
+    let w: W<?i64> = W { a: 1, p: null };
+    w.a
+}

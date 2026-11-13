@@ -10,8 +10,10 @@ use std::process::Command;
 /// and unknown-type checks; since A17 its type-level `secret` rules (`secret f64`, a `secret`
 /// handle, a deref of a `secret` reference, a `match` over other than an enum, the FFI fence)
 /// and the cast, deref, variant and exhaustiveness checks beside them
-/// (`selfhost/types/tcheck.sentinel`); and since ADR 0016 A3 the refusal of a generic type
-/// whose instance has no form (`selfhost/types/infer.sentinel`). Every
+/// (`selfhost/types/tcheck.sentinel`); and since ADR 0016 A3 the refusals that keep a type
+/// parameter in its own declaration's types: a generic type the substitution does not build at
+/// its instance (`selfhost/types/infer.sentinel`), a `secret` over a type parameter and an array
+/// of arrays over one (`selfhost/types/interner.sentinel`). Every
 /// other error is still out of scope (ADR 0041 D7), so a driver typing such a program need not
 /// refuse it.
 const PORTED_REFUSALS: &[&str] = &[
@@ -56,6 +58,8 @@ const PORTED_REFUSALS: &[&str] = &[
     "sentinel::types::non_exhaustive_match",
     "sentinel::types::extern_ffi_type",
     "sentinel::types::uninstantiable_type",
+    "sentinel::types::secret_over_type_param",
+    "sentinel::types::generic_nested_array",
     "sentinel::resolve::arity_mismatch",
     "sentinel::resolve::undefined_function",
 ];

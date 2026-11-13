@@ -1,0 +1,11 @@
+// ADR 0016 A3 (ADR 0068 D6): the same for an array literal whose elements are arrays over a
+// type parameter. Surfaces GenericNestedArray at the literal.
+
+fn wrap<T>(x: [T]) -> i64 {
+    let w = [x];
+    0
+}
+
+fn main() -> i64 {
+    0
+}

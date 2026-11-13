@@ -1270,7 +1270,12 @@ fn dump_te_call(out: &mut Vec<u8>, cn: [u8], ca: Args, exp: i64, src: &[u8], c: 
                     0
                 };
                 let rt: i64 = if is_generic_builtin(fid) {
-                    dump_gcall(out, fid, cargs, exp, src, c, gb)
+                    let grt: i64 = dump_gcall(out, fid, cargs, exp, src, c, gb);
+                    // (ADR 0016 A3) a generic builtin's result too may not be a generic instance
+                    // with a field the substitution does not build, as in the oracle's `check_call`.
+                    let mut gseen: Vec<i64> = vec_new();
+                    tc_instance_fields(c, grt, &mut gseen);
+                    grt
                 } else if isgenfn {
                     dump_generic_call(out, fid, cargs, exp, src, c, gb)
                 } else if fid == 37 {
@@ -1486,7 +1491,12 @@ fn dump_te_field(out: &mut Vec<u8>, ft: Expr, fdn: [u8], exp: i64, src: &[u8], c
                 } else {
                     0
                 };
-                subst_type(c, fty0, &fargs)
+                let fsub: i64 = subst_type(c, fty0, &fargs);
+                // ADR 0016 A3: and no generic instance the field's type holds may have a field
+                // the substitution does not build.
+                let mut fseen: Vec<i64> = vec_new();
+                tc_instance_fields(c, fsub, &mut fseen);
+                fsub
             } else {
                 fty0
             };

@@ -1,0 +1,21 @@
+// ADR 0016 A3: and for a field read whose type holds such an instance. `o.inner` is a
+// `P<?i64>`, whose field `?T` has no form at `T := ?i64`. Surfaces UninstantiableType at the
+// field.
+
+struct P<T> {
+    v: ?T,
+    w: i64,
+}
+
+struct O<T> {
+    inner: P<T>,
+}
+
+fn get(o: O<?i64>) -> i64 {
+    let i = o.inner;
+    0
+}
+
+fn main() -> i64 {
+    0
+}

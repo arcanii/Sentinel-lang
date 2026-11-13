@@ -545,6 +545,33 @@ fn pass_c17_generic_param_pushdown_instance() {
 }
 
 #[test]
+fn pass_c17_concrete_secret_array_calls() {
+    // ADR 0016 A3: a type that mentions no type parameter is complete under substitution, so a
+    // `[secret S]` over a struct is still returned, received and held in a generic struct's
+    // concrete field (the widen of a public `[S]` into it is pinned in sentinel-types' table,
+    // because the self-hosted typer omits it, register D191). 1 + 1 + 40 = 42.
+    assert_eq!(run_exit("c17_concrete_secret_array_calls.sentinel"), 42);
+}
+
+#[test]
+fn pass_c17_generic_args_bind_instance() {
+    // ADR 0016 A3: a generic caller's own `P<T>` or `&T` argument binds the callee's type
+    // parameter (the call was refused as ambiguous), a value already of the instance's nullable
+    // type fills a `?P<T>` or `?&T` parameter, and a `?&T` met before anything binds `T` is
+    // typed from its argument, as the oracle always typed it (the first commit of this
+    // amendment made the self-hosted typer abort on it). 1 + 1 + 20 + 19 + 1 = 42.
+    assert_eq!(run_exit("c17_generic_args_bind_instance.sentinel"), 42);
+}
+
+#[test]
+fn pass_c17_regular_recursion() {
+    // ADR 0016 A3: a generic struct that holds itself at its own type arguments has a finite
+    // expansion, so the instance walk ends and the struct is built, read and returned as
+    // before. 3 + 39 = 42.
+    assert_eq!(run_exit("c17_regular_recursion.sentinel"), 42);
+}
+
+#[test]
 fn pass_c17_generic_ref_param_infer() {
     // ADR 0017 D11 / register D37: a generic type param behind a REF (`&T`) or a
     // `Vec<T>`. `unify_one` had no arm for either, so `T` never bound and the unbound

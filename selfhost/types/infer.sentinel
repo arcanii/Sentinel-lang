@@ -245,6 +245,9 @@ fn dump_array_elems(out: &mut Vec<u8>, a: Args, src: &[u8], c: &mut TyCtx, gb: &
             push(&mut (*c).tc_arrs, et);
             dump_targs(out, rest, 0 - 3, 0, src, c, gb);
             let _ae: i64 = pop(&mut (*c).tc_arrs);
+            // (`types/tcheck.sentinel`, ADR 0016 A3) no array of arrays over a type parameter,
+            // checked after the elements, as the oracle checks it.
+            tc_nested_tparam(c, et);
             t0
         },
     }
@@ -332,9 +335,16 @@ fn subst_type(c: &mut TyCtx, h: i64, args: &Vec<i64>) -> i64 {
 // substitution leaves as written), and in a `?X`, `[X]` or `Vec<X>` whose element,
 // substituted, is not one its `to_nullable_inner`, `to_array_elem_subst` or
 // `to_vec_elem_subst` takes. An element this walk could not substitute (an unbound
-// argument, -1) is not answered here: the call's other refusals see to it.
+// argument, -1) is not answered here. The oracle refuses such a call as `ambiguous_type_arg`
+// before it substitutes; the checking modes make that refusal only for callees with a
+// `secret` over a type parameter (`tc_ambiguous`), which A3 makes unwritable, so such a call is
+// accepted here (`fn z<T>() -> ?T` called `let a = z();` is typed `??T`).
 fn subst_complete(c: &mut TyCtx, h: i64, args: &Vec<i64>) -> bool {
     if h < tbase() {
+        true
+    } else if tc_mentions_tparam(c, h) == false {
+        // Nothing to substitute: the oracle keeps such a type, and complete (a written
+        // `[secret S]` over a struct, which its substitution does not round-trip).
         true
     } else {
         let idx: i64 = h - tbase();
@@ -387,6 +397,129 @@ fn subst_complete(c: &mut TyCtx, h: i64, args: &Vec<i64>) -> bool {
             ok
         } else {
             true
+        }
+    }
+}
+
+// ADR 0016 A3: the oracle's `unbuilt_instance_field`. A generic instance `h` holds — itself, or
+// one reached through a nullable's, an array's, a `Vec`'s or a `secret`'s inner type, a
+// reference's target, an instance's arguments or another such field — whose field the
+// substitution does not build at that instance's arguments: refused (the first one met, as the
+// oracle meets them: an instance's arguments, then its fields in declaration order), in the
+// checking modes. Answers whether one was. A struct met again on the way down at other type
+// arguments (its expansion has no end) is refused at the field that leads there, as the oracle's
+// walk refuses it.
+fn tc_instance_fields(c: &mut TyCtx, h: i64, seen: &mut Vec<i64>) -> bool {
+    let mut path: Vec<i64> = vec_new();
+    tc_instance_walk(c, h, seen, &mut path, 0 - 1)
+}
+
+// Refuse field table entry `fi` (of its own struct) as one that cannot be instantiated.
+fn tc_unbuilt_field(c: &mut TyCtx, fi: i64) -> i64 {
+    let owner: i64 = (*c).fldo[fi];
+    let mut m: Vec<u8> = vec_new();
+    append_str(&mut m, "field `");
+    rf_put_snb(c, (*c).flds[fi], (*c).flde[fi], &mut m);
+    append_str(&mut m, "` of `");
+    rf_put_snb(c, (*c).sts[owner], (*c).ste[owner], &mut m);
+    push(&mut m, '`');
+    tc_uninstantiable(c, m)
+}
+
+// `vf`: the field table entry of the field that led here, -1 at the top.
+fn tc_instance_walk(c: &mut TyCtx, h: i64, seen: &mut Vec<i64>, path: &mut Vec<i64>, vf: i64) -> bool {
+    if h < tbase() || tc_on(c) == false {
+        false
+    } else {
+        let k: i64 = (*c).tk[h - tbase()];
+        let a: i64 = (*c).ta[h - tbase()];
+        let b: i64 = (*c).tb[h - tbase()];
+        if k == 10 {
+            let n: i64 = len(*seen);
+            let mut met: bool = false;
+            let mut i: i64 = 0;
+            while i < n {
+                if (*seen)[i] == h {
+                    met = true;
+                    0
+                } else {
+                    0
+                };
+                i = i + 1;
+            }
+            let pn: i64 = len(*path);
+            let mut onpath: bool = false;
+            let mut pj: i64 = 0;
+            while pj < pn {
+                if (*path)[pj] == a {
+                    onpath = true;
+                    0
+                } else {
+                    0
+                };
+                pj = pj + 1;
+            }
+            if met {
+                false
+            } else if onpath {
+                if vf >= 0 {
+                    tc_unbuilt_field(c, vf)
+                } else {
+                    let mut m0: Vec<u8> = vec_new();
+                    append_str(&mut m0, "field `` of `");
+                    rf_put_snb(c, (*c).sts[a], (*c).ste[a], &mut m0);
+                    push(&mut m0, '`');
+                    tc_uninstantiable(c, m0)
+                };
+                true
+            } else {
+                push(seen, h);
+                push(path, a);
+                let mut args: Vec<i64> = vec_new();
+                let gs: i64 = (*c).girs[b];
+                let ge: i64 = (*c).gire[b];
+                let mut gi: i64 = gs;
+                let mut hit: bool = false;
+                while gi < ge {
+                    let ga: i64 = (*c).gia[gi];
+                    push(&mut args, ga);
+                    if hit == false {
+                        hit = tc_instance_walk(c, ga, seen, path, vf);
+                        0
+                    } else {
+                        0
+                    };
+                    gi = gi + 1;
+                }
+                let nf: i64 = len((*c).fldo);
+                let mut fi: i64 = 0;
+                while fi < nf {
+                    if hit == false && (*c).fldo[fi] == a {
+                        let fty: i64 = (*c).fldty[fi];
+                        if subst_complete(c, fty, &args) == false {
+                            tc_unbuilt_field(c, fi);
+                            hit = true;
+                            0
+                        } else {
+                            let st: i64 = subst_type(c, fty, &args);
+                            hit = tc_instance_walk(c, st, seen, path, fi);
+                            0
+                        };
+                        0
+                    } else {
+                        0
+                    };
+                    fi = fi + 1;
+                }
+                let _pp: i64 = pop(path);
+                hit
+            }
+        } else if k == 1 || k == 3 || k == 4 || k == 11 {
+            tc_instance_walk(c, a, seen, path, vf)
+        } else if k == 2 {
+            tc_instance_walk(c, b, seen, path, vf)
+        } else {
+            false
         }
     }
 }
@@ -622,6 +755,14 @@ fn subst_fully(c: &mut TyCtx, h: i64, bi: &mut Vec<i64>, bt: &mut Vec<i64>) -> i
             } else {
                 0 - 1
             }
+        } else if k == 2 {
+            // ADR 0016 A3: a reference, concrete only if its target is fully bound (the
+            // oracle's `try_substitute` `Ref` arm). Returned unchanged, as that arm returns it.
+            if subst_fully(c, (*c).tb[idx], bi, bt) < 0 {
+                0 - 1
+            } else {
+                h
+            }
         } else {
             // Every other kind is either already concrete or one this walk deliberately
             // does not reshape. Answering `h` is safe because the ONLY consumer is
@@ -633,8 +774,9 @@ fn subst_fully(c: &mut TyCtx, h: i64, bi: &mut Vec<i64>, bt: &mut Vec<i64>) -> i
 
 // ADR 0016 A3: `h` substituted by the bindings built so far, as the oracle pushes a
 // parameter type down: rebuilt through a generic instance and a reference, where
-// `subst_fully` (the oracle's `try_substitute`) answers the written type. Read only for a
-// `h` whose type parameters `subst_fully` found all bound.
+// `subst_fully` (the oracle's `try_substitute`) answers the written type. Called where
+// `subst_fully` found `h`'s type parameters bound, and answers -1 (no pushdown) where one is not
+// (`subst_args_cover`), rather than index past the bindings.
 fn subst_bound(c: &mut TyCtx, h: i64, bi: &mut Vec<i64>, bt: &mut Vec<i64>) -> i64 {
     let n: i64 = len(*bi);
     let mut mx: i64 = 0 - 1;
@@ -655,7 +797,48 @@ fn subst_bound(c: &mut TyCtx, h: i64, bi: &mut Vec<i64>, bt: &mut Vec<i64>) -> i
         push(&mut args, bj);
         j = j + 1;
     }
-    subst_type(c, h, &args)
+    // Fail closed rather than trust the caller: a type parameter `h` mentions past the bound
+    // ones, or unbound among them, gives no pushdown.
+    if subst_args_cover(c, h, &args) {
+        subst_type(c, h, &args)
+    } else {
+        0 - 1
+    }
+}
+
+// Whether every type parameter `h` mentions has a bound (non-negative) entry in `args`.
+fn subst_args_cover(c: &mut TyCtx, h: i64, args: &Vec<i64>) -> bool {
+    if h < tbase() {
+        true
+    } else {
+        let k: i64 = (*c).tk[h - tbase()];
+        let a: i64 = (*c).ta[h - tbase()];
+        let b: i64 = (*c).tb[h - tbase()];
+        if k == 9 {
+            a < len(*args) && (*args)[a] >= 0
+        } else if k == 1 || k == 3 || k == 4 || k == 11 {
+            subst_args_cover(c, a, args)
+        } else if k == 2 {
+            subst_args_cover(c, b, args)
+        } else if k == 10 {
+            let gs: i64 = (*c).girs[b];
+            let ge: i64 = (*c).gire[b];
+            let mut ok: bool = true;
+            let mut gi: i64 = gs;
+            while gi < ge {
+                if ok {
+                    ok = subst_args_cover(c, (*c).gia[gi], args);
+                    0
+                } else {
+                    0
+                };
+                gi = gi + 1;
+            }
+            ok
+        } else {
+            true
+        }
+    }
 }
 
 // (register D45) The expected type to push down into argument `pi` of a generic call,
@@ -669,8 +852,9 @@ fn subst_bound(c: &mut TyCtx, h: i64, bi: &mut Vec<i64>, bt: &mut Vec<i64>) -> i
 // that are identical today; narrowing it re-opens D45. Do not restate it as "the
 // substituted type looks concrete enough".
 fn arg_expected(c: &mut TyCtx, pty: i64, bi: &mut Vec<i64>, bt: &mut Vec<i64>) -> i64 {
-    // (`types/tcheck.sentinel`) a `secret T` parameter: the oracle pushes it down unsubstituted,
-    // and nothing coerces to that, so the checking modes push nothing (`tc_gcallarg` refuses).
+    // (`types/tcheck.sentinel`) a `secret T` parameter: the oracle pushes nothing down to it (ADR
+    // 0016 A3, which also refuses such a parameter where it is written), so the checking modes
+    // push nothing (`tc_gcallarg` refuses).
     let psec_t: bool = if pty >= tbase() {
         if (*c).tk[pty - tbase()] == 3 {
             let pin: i64 = (*c).ta[pty - tbase()];
@@ -901,7 +1085,12 @@ fn dump_generic_call(out: &mut Vec<u8>, fid: i64, ca: Args, exp: i64, src: &[u8]
     } else {
         0
     };
-    subst_type(c, rh, &subst)
+    let rsub: i64 = subst_type(c, rh, &subst);
+    // ADR 0016 A3: nor may the call make a generic instance with a field the substitution does
+    // not build.
+    let mut rseen: Vec<i64> = vec_new();
+    tc_instance_fields(c, rsub, &mut rseen);
+    rsub
 }
 
 // The element type of an array type handle (kind 1), or i64 default.
@@ -1552,6 +1741,15 @@ fn dump_sfields(out: &mut Vec<u8>, f: Fields, sid: i64, gen: bool, gargs: &Vec<i
                 subst_type(c, ftype0, gargs)
             } else {
                 ftype0
+            };
+            // ADR 0016 A3: nor may the field's type hold a generic instance with a field the
+            // substitution does not build.
+            if gen {
+                let mut lseen: Vec<i64> = vec_new();
+                tc_instance_fields(c, ftype, &mut lseen);
+                0
+            } else {
+                0
             };
             sink_name(gb, fnm);
             push(out, ' ');

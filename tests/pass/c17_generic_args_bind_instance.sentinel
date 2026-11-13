@@ -1,0 +1,47 @@
+// ADR 0016 A3: an argument whose type is a generic caller's own instance or reference binds
+// the callee's type parameter (`count(q)` with `q: P<T>`, `seen(&x)`), where unification
+// accepted it without binding anything and the call was refused as ambiguous; a value already
+// of the instance's nullable type fills a `?P<T>` or `?&T` parameter, which the written type
+// refused; and a `?&T` met before anything binds `T` is typed from its argument, as the oracle
+// always typed it (the first commit of this amendment made the self-hosted typer abort on it).
+// 1 + 1 + 20 + 19 + 1 = 42.
+
+struct P<T> {
+    v: T,
+}
+
+fn count<T>(p: P<T>) -> i64 {
+    1
+}
+
+fn through<T>(q: P<T>) -> i64 {
+    count(q)
+}
+
+fn seen<T>(r: &T) -> i64 {
+    1
+}
+
+fn look<T>(x: T) -> i64 {
+    seen(&x)
+}
+
+fn pick<T>(a: T, b: ?P<T>) -> T {
+    a
+}
+
+fn pick_ref<T>(a: T, b: ?&T) -> T {
+    a
+}
+
+fn first_ref<T>(b: ?&T) -> i64 {
+    1
+}
+
+fn main() -> i64 {
+    let p: P<i64> = P { v: 1 };
+    let q: ?P<i64> = null;
+    let x: i64 = 3;
+    let r: ?&i64 = &x;
+    through(p) + look(true) + pick(20, q) + pick_ref(19, r) + first_ref(r)
+}

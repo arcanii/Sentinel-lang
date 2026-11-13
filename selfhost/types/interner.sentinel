@@ -1440,6 +1440,8 @@ fn type_of_typeexpr(c: &mut TyCtx, t: TypeE, gb: &mut Vec<u8>) -> i64 {
         },
         TypeE::TArray(inner) => {
             let ih: i64 = type_of_typeexpr(c, inner, gb);
+            // (`types/tcheck.sentinel`, ADR 0016 A3) no array of arrays over a type parameter.
+            tc_nested_tparam(c, ih);
             mk_array(c, ih)
         },
         TypeE::TRef(inner) => {
@@ -1455,6 +1457,8 @@ fn type_of_typeexpr(c: &mut TyCtx, t: TypeE, gb: &mut Vec<u8>) -> i64 {
             // (`types/tcheck.sentinel`) a `secret` over a type that cannot be one, and, for the
             // code generator, one over a type parameter.
             tc_secret_of(c, ih);
+            // (ADR 0016 A3) nor over a type that mentions a type parameter, in the checking modes.
+            tc_secret_tparam_written(c, ih);
             tc_secret_over_tparam(c, ih);
             mk_secret(c, ih)
         },
@@ -1660,8 +1664,10 @@ fn type_of_typeexpr(c: &mut TyCtx, t: TypeE, gb: &mut Vec<u8>) -> i64 {
                 tc_targ_count_first(c, &gnm, gnp, &mut gav, gav_rf, gav_rl);
                 mk_generic(c, gsid, &gav)
             } else {
-                dispose_tyargs(c, ga, gb);
+                // (ADR 0016 A3) the name before its arguments, as the oracle refuses it: an unknown
+                // name over a `secret T` or `[[T]]` argument is `unknown_type`.
                 tc_unknown_type(c, &gnm);
+                dispose_tyargs(c, ga, gb);
                 0
             }
         },

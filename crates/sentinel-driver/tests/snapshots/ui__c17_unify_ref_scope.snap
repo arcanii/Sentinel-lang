@@ -1,0 +1,15 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c17_unify_ref_scope.sentinel\")"
+---
+sentinel::types::type_arg_inference_conflict
+
+  × conflicting inference for `U` in call to `take`: bound to `i64` then to
+  │ `<T#0>`
+    ╭─[tests/ui/c17_unify_ref_scope.sentinel:10:13]
+  9 │ fn g<A>(x: A) -> i64 {
+ 10 │     take(0, &x)
+    ·             ─┬
+    ·              ╰── 
+ 11 │ }
+    ╰────

@@ -14,7 +14,43 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
-**Latest (2026-11-10) — a comparison takes scalar operands, and a type parameter stays opaque
+**Latest (2026-11-12) — a type parameter stays in its own declaration's types
+([ADR 0016](decisions/0016-concrete-c1-7-generics-syntax.md) amendment A3; register D188, D182
+and D183 closed, D189 to D192 filed, D45, D117, D145, D146 and D180 extended).** A type parameter
+is identified by its index, so a type that carries one out of the declaration that wrote it is
+read, in another generic fn, as that fn's own parameter. Three ways let one out:
+`Type::substitute` keeps the written type where it builds no instance (a `secret` over a type
+parameter; a `?T`, `[T]` or `Vec<T>` at an element it does not demote to; a nested array,
+interned as if concrete), and the type checker took that result as the type of a generic call,
+a generic struct literal's field and a field read, and let a call make an instance whose field
+the substitution keeps written, which the analyses that read an instance's fields read as
+written; a parameter type was pushed down to its argument as `try_substitute` answers it; and
+unification accepted an argument whose interned type is the parameter's own without binding
+anything. In a fn without type parameters `snc build` mostly stopped with an internal error
+(D183); inside another generic fn the expression was typed at the caller's type argument. Now,
+in both compilers: a `secret` over a type that mentions a type parameter and an array of arrays
+over one are refused where they are written or built (`sentinel::types::secret_over_type_param`,
+`sentinel::types::generic_nested_array`, as ADR 0019 D5 and ADR 0068 D6 intended); the three
+sites, and any instance a generic call, literal or field read makes whose field the substitution
+does not build, are refused (`sentinel::types::uninstantiable_type`), as is a struct that holds
+itself at other type arguments, whose instances have no end, where one is made or read; a
+parameter type is pushed down as the substitution makes it; and the unifier's identity shortcut
+applies only to a type that mentions no type parameter. A first commit of this work (`17005a4`)
+had the three sites and the pushdown; this one adds the rest and stops refusing a concrete
+`[secret S]` at ordinary calls, which that commit did (through those sites and through its
+pushdown, which pushed nothing down for such a parameter). Besides the refusals, a generic caller's
+own `P<T>` or `&T` argument now binds the callee's parameter (it was an ambiguous type
+argument), values filling a `?GenericInstance<T>` or `?&T` parameter are widened or taken as
+they are, and some shapes with a form are refused because the substitution does not build them
+(`[T]` and `Vec<T>` at a `secret S` or a secret generic instance, `[T]` at `[u8]`), among them
+programs that only passed such a value through and ran before. REVIEW_SENTENCE Pinned by
+`generic_types_are_instantiated_completely`, twenty-one `tests/ui` fixtures held by every
+self-hosted driver (and `c58`, now refused at its `secret T`) and four `tests/pass` programs.
+MUT_SENTENCE SWEEP_SENTENCE FC_SENTENCE The oracle refuses programs it accepted, accepts programs
+it refused and types some arguments differently, and no accepted program's emitted instructions
+move: at least a MINOR bump by ADR 0076 D2, covered by the 0.3.0 still owed.
+
+**Previously (2026-11-10) — a comparison takes scalar operands, and a type parameter stays opaque
 ([ADR 0016](decisions/0016-concrete-c1-7-generics-syntax.md) amendment A2; register D185 closed,
 D186 and D187 filed, D33, D117, D152, D179, D183 and D184 extended).** The oracle's comparison
 rule refused a struct or a nullable left operand and accepted every other type, though ADR 0016

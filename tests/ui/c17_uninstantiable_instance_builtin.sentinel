@@ -1,0 +1,13 @@
+// ADR 0016 A3: the same for a generic builtin. `vec_new()` at `Vec<P<?i64>>` makes a
+// `Vec` of `P<?i64>`, whose field `?T` has no form at `T := ?i64`. Surfaces
+// UninstantiableType at the call.
+
+struct P<T> {
+    v: ?T,
+    w: i64,
+}
+
+fn main() -> i64 {
+    let v: Vec<P<?i64>> = vec_new();
+    0
+}

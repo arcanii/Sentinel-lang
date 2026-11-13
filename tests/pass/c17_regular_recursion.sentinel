@@ -1,0 +1,21 @@
+// ADR 0016 A3: a generic struct that holds itself at its own type arguments has a finite
+// expansion and is built, read and returned as before. (A pair of structs that hold each other
+// at their own arguments is accepted too, by the oracle; the self-hosted typer aborts on any such
+// pair, register D192.) 3 + 39 = 42.
+
+struct Node<T> {
+    v: T,
+    next: ?Node<T>,
+}
+
+fn mkn<T>(x: T) -> Node<T> {
+    Node { v: x, next: null }
+}
+
+fn main() -> i64 {
+    let n: Node<i64> = Node { v: 39, next: null };
+    let k = n.next;
+    let m = mkn(3);
+    let j = m.next;
+    m.v + n.v
+}

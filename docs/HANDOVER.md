@@ -124,7 +124,11 @@ reference as you work through the milestones.
 > confirming nothing pre-existing is newly refused; oracle-vs-scg byte-equality on the new
 > fixture at types, mir and llvm; and the secret-taint check in both directions.
 
-### ▶ RESUME HERE (2026-11-10 — start here. `origin/main` was `3863fde` when this was written; the 2026-11-08 slices' `27ce9b3`, `661773b`, `8afd81a` and `b9a1aeb` and this slice's two commits sit on top of it, unpushed; read `git reflog show refs/remotes/origin/main` and `git log --oneline origin/main..HEAD` at the START and AGAIN before writing either down. **A comparison takes scalar operands, and a type parameter stays opaque** (`3e4d880` fix, then this docs commit), by [ADR 0016](decisions/0016-concrete-c1-7-generics-syntax.md) amendment **A2**, register **D185** DONE: the oracle's comparison rule refused only a struct or a nullable left operand, so a comparison of two `T` values type-checked as `bool` and each generic instance kept that type (invalid IR and a `snc build` internal error at a struct, a presence-flag-only comparison at a `?i64`, a result typed `bool` at a `secret` scalar), and arrays, `Vec`s, enums, classes, references, `ptr`, `Fn` values and handles got through as well. Now the left operand, once an outer `secret` is stripped, is an integer, `bool` or `f64` (`is_comparable_scalar`), else `sentinel::types::mismatch` at the left operand; `x == null` keeps its own rule; `scg`'s checking modes refuse the same (`tc_binary`). Pins: `comparison_operands_are_scalars`, sixteen `tests/ui` `c13_compare_*` fixtures held by every self-hosted driver, `tests/pass` `c13_generic_null_compare`, a codegen seed of two untyped operands; the D182 test's compared case now answers the oracle's mismatch, and the same calls uncompared still reach D182. Thirteen oracle mutations and ten `scg` mutations, all caught. Sweeps: nothing moves in the oracle over the tracked corpus outside `selfhost/` (types standalone and merged, `snc build`), and every self-hosted driver moves only the sixteen fixtures over 580 files. Two review rounds, each finding verified by constructing it (`wf_ef6604f9-9e8`, four lenses, nineteen confirmed; `wf_8b2c4ecb-1ab`, three lenses over the final texts, twenty-three confirmed, none a regression), those in this change fixed; **D140** closed with D185 (its array and enum half); filed **D186** (`scg` lowers a `null` on the left of a comparison to invalid IR) and **D187** (inkwell leaks a nullable struct's heap fields), extended D33, D117, D152, D179, D183 and D184; the rest went to the maintainer first. Four-check on Windows: **2,217 passed, exactly the 18 known Windows failures**, 6 ignored, doctests and clippy clean, both bootstrap fixed points green. Oracle-moving by refusals only: at least MINOR, covered by the owed 0.3.0.)
+### ▶ RESUME HERE (2026-11-12 — start here. `origin/main` was `17005a4` when this was written (the maintainer pushed the first, partial commit of this work); this slice's two commits sit on top of it, unpushed; read `git reflog show refs/remotes/origin/main` and `git log --oneline origin/main..HEAD` at the START and AGAIN before writing either down. **A type parameter stays in its own declaration's types** (FIXHASH fix, then this docs commit), by [ADR 0016](decisions/0016-concrete-c1-7-generics-syntax.md) amendment **A3**, register **D188** DONE with **D182** and **D183**: a type that carried a type parameter out of the declaration that wrote it was read in another generic fn as that fn's own parameter, by three routes (substitution keeping the written type where it builds no instance, including inside an instance a call made; the pushdown of a written parameter type; and unification's identity shortcut). Now, in the oracle and in `scg`'s checking modes, a `secret` over a type that mentions a type parameter and an array of arrays over one are refused where they are written or built (`secret_over_type_param`, `generic_nested_array`), a generic call's return type, a generic struct literal's field, a field read, and an instance a generic call, literal or field read makes are refused where the substitution does not build a field (`uninstantiable_type`), as is a struct that holds itself at other type arguments where one is made or read, a parameter type is pushed down as the substitution makes it, and the identity shortcut applies only to a type that mentions no type parameter. `17005a4` had the three sites and the pushdown, which three review rounds showed left the other routes open and refused a concrete `[secret S]` at ordinary calls; this commit adds the rest and fixes that. Newly accepted since 8fed194: values filling a `?GenericInstance<T>` or `?&T` parameter (already by `17005a4`) and, with this commit, a generic caller's own `P<T>` or `&T` argument binding the callee's parameter. Newly refused besides those routes: `[T]` and `Vec<T>` at a `secret S` or a secret generic instance and `[T]` at `[u8]`, including programs that only passed such a value through and ran before (the substitution does not build those instances; making it build them is the maintainer's call). Filed **D189** (a generic type with no form at its instance where A3 does not check: a generic body, a written instance), **D190** (an `impl` on a bare generic struct), **D191** (`scg` omits the widen of an array argument into a `[secret X]` parameter), **D192** (`scg` aborts on a pair of generic structs that hold each other); notes on D45, D117, D145, D146, D180. REVIEW_SENTENCE MUT_SENTENCE SWEEP_SENTENCE FC_SENTENCE Oracle-moving: at least MINOR, covered by the owed 0.3.0. The three code names (`uninstantiable_type`, `secret_over_type_param`, `generic_nested_array`) are mine: the maintainer to confirm.)
+
+> **NEXT:** first the follow-ups the maintainer was told of; then, in the order agreed on 2026-10-05, D36's option A with D146 (whose subject A3 now refuses) and the bump to 0.3.0 (ADR 0076 D2), which this slice also needs. D167 is the maintainer's call. Open: D172, D173, D174, D177, D178, D179, D180, D181, D184, D186, D187, D189, D190, D191, D192, D120's field half, and the rest of D154.
+
+### ▶ RESUME HERE (2026-11-10 — superseded by the block above. `origin/main` was `3863fde` when this was written; the 2026-11-08 slices' `27ce9b3`, `661773b`, `8afd81a` and `b9a1aeb` and this slice's two commits sit on top of it, unpushed; read `git reflog show refs/remotes/origin/main` and `git log --oneline origin/main..HEAD` at the START and AGAIN before writing either down. **A comparison takes scalar operands, and a type parameter stays opaque** (`3e4d880` fix, then this docs commit), by [ADR 0016](decisions/0016-concrete-c1-7-generics-syntax.md) amendment **A2**, register **D185** DONE: the oracle's comparison rule refused only a struct or a nullable left operand, so a comparison of two `T` values type-checked as `bool` and each generic instance kept that type (invalid IR and a `snc build` internal error at a struct, a presence-flag-only comparison at a `?i64`, a result typed `bool` at a `secret` scalar), and arrays, `Vec`s, enums, classes, references, `ptr`, `Fn` values and handles got through as well. Now the left operand, once an outer `secret` is stripped, is an integer, `bool` or `f64` (`is_comparable_scalar`), else `sentinel::types::mismatch` at the left operand; `x == null` keeps its own rule; `scg`'s checking modes refuse the same (`tc_binary`). Pins: `comparison_operands_are_scalars`, sixteen `tests/ui` `c13_compare_*` fixtures held by every self-hosted driver, `tests/pass` `c13_generic_null_compare`, a codegen seed of two untyped operands; the D182 test's compared case now answers the oracle's mismatch, and the same calls uncompared still reach D182. Thirteen oracle mutations and ten `scg` mutations, all caught. Sweeps: nothing moves in the oracle over the tracked corpus outside `selfhost/` (types standalone and merged, `snc build`), and every self-hosted driver moves only the sixteen fixtures over 580 files. Two review rounds, each finding verified by constructing it (`wf_ef6604f9-9e8`, four lenses, nineteen confirmed; `wf_8b2c4ecb-1ab`, three lenses over the final texts, twenty-three confirmed, none a regression), those in this change fixed; **D140** closed with D185 (its array and enum half); filed **D186** (`scg` lowers a `null` on the left of a comparison to invalid IR) and **D187** (inkwell leaks a nullable struct's heap fields), extended D33, D117, D152, D179, D183 and D184; the rest went to the maintainer first. Four-check on Windows: **2,217 passed, exactly the 18 known Windows failures**, 6 ignored, doctests and clippy clean, both bootstrap fixed points green. Oracle-moving by refusals only: at least MINOR, covered by the owed 0.3.0.)
 
 > **NEXT:** first the follow-ups the maintainer was told of; then, in the order agreed on 2026-10-05, D36's option A with D146 and the bump to 0.3.0 (ADR 0076 D2), which this slice also needs. D167 is the maintainer's call. Open: D172, D173, D174, D177, D178, D179, D180, D181, D182, D183, D184, D186, D187, D120's field half, and the rest of D154.
 
@@ -2273,6 +2277,12 @@ reference as you work through the milestones.
 >      compares a call's result for that reason). Measured on Windows (peak working set,
 >      inkwell, 800,000 calls): `fn present(x: ?P) -> i64 { if x == null { 0 } else { 1 } }`, `P`
 >      eight `i64` fields, peaks at 66.3 MB, against 4.9 MB when the body does not compare.
+>      Found 2026-11-12 during ADR 0016 A3, and pre-existing (8fed194 gives the same dumps): the
+>      same difference shows in the borrow dumps of a fn whose `?Struct` or `?GenericInstance`
+>      parameter is compared with `null`: for `fn present(b: ?S) -> i64 {
+>      if b == null { 0 } else { 1 } }` the oracle's `snc borrow` lists the parameter among the
+>      moved sources (`(fn #42 present #0)`) and `scg`'s does not (`(fn #42 present)`); with a
+>      `null` argument the two text back ends emit the same IR.
 >
 >      **D118 — `scg` gives an enum payload argument no expected type, so a `null` or a value
 >      that needs a `?T` widen, passed directly, is invalid IR.** Found
@@ -2833,6 +2843,16 @@ reference as you work through the milestones.
 >      f64; ... }` beside `extern "C" { fn llabs(x: secret i64) -> i64; }` is refused for the
 >      `secret f64` by `scg` and for the fence by the oracle; a class `init`'s parameters are
 >      resolved after the fence, as in the oracle.
+>      Since ADR 0016 A3 (2026-11-12) also the check that a generic struct literal's field can be
+>      instantiated, which `scg` makes with the values, in declaration order, after its
+>      whole-field-set check: `P { b: true, a: null }` at `P<?i64>` for `struct P<T> { a: ?T, b:
+>      i64 }` is refused by `scg` as `uninstantiable_type` (for `a`) and by the oracle as
+>      `mismatch` (for `b`), a program both refused as `mismatch` before; and `H { f: null, g: 1,
+>      z: 2 }` at `H<?i64>` for `struct H<T> { f: ?T, g: i64 }` by `scg` as `unknown_field` and
+>      by the oracle as `uninstantiable_type`. A3's declaration refusals follow the first order
+>      above too: `fn f<T>(a: secret T) -> i64` before a `struct S { x: secret f64 }` is refused
+>      by `scg` as `secret_over_type_param` and by the oracle, which resolves the struct first,
+>      as `secret_float`.
 >
 >      **D146 — `vec_to_array` over a generic instance whose field is `secret T`: the oracle
 >      refuses, `scg` accepts.** Found 2026-09-26 by D97's review. `struct Box<T> { s: secret
@@ -2849,6 +2869,9 @@ reference as you work through the milestones.
 >      substitutes, behind its checking pass. Which side should move is still the maintainer's
 >      call, and now concerns the oracle's rule alone: if it comes to accept the element,
 >      `scg`'s moves with it.
+>      Since ADR 0016 A3 (2026-11-12) both typers refuse a `secret` over a type parameter where
+>      it is written, so this element cannot be declared; the question returns only if a later
+>      amendment admits such a `secret`.
 >
 >      **D147 — `scg` refuses `vec_to_array` over a `Vec<T>` reached through a generic call's
 >      result or a generic instance's field, even when `T` is plain; the oracle accepts it.**
@@ -3732,6 +3755,17 @@ reference as you work through the milestones.
 >      `scg` at the call, as an ambiguous type argument (since A17), where the oracle refuses
 >      `mk`'s body; and `scg`'s code generator refuses both, a `secret` being written over a type
 >      parameter (D182).
+>      Since ADR 0016 A3 (2026-11-12) the type pushed down is the instance, so a seed can now
+>      make `scg` widen a value into a `?P<T>` that precedes `T`'s binder, which the oracle
+>      refuses: `maybep(p, 4)` for `fn maybep<T>(r: ?P<T>, d: T) -> T` and `p: P<i64>`, as
+>      `main`'s tail. And where A3's unification binds a callee's parameter to a caller's own type
+>      in a fn's tail, the seed binds it first: `take(mk(x), 0)` in `fn g<A>(x: A) -> i64` is a
+>      conflict "`<T#0>` then `i64`" in the oracle and "`i64` then `<T#0>`" in `scg`, and
+>      `take(mk(x))` for `take<U>(w: R<U>) -> U` is `return_type_mismatch` in the oracle and
+>      `type_arg_inference_conflict` in `scg`; `scg` also accepts a generic fn's tail `pop` into
+>      `?T` (`fn opt<T>(v: Vec<T>) -> ?T { let mut u = v; pop(&mut u) }`), which the oracle now
+>      refuses as a conflicting inference, as it already refused the same call with a written
+>      `?i64`.
 
 >      **D181 — `scg`'s code generator refuses an `export "C"` fn in a program of more than one
 >      file.** Filed 2026-11-08 with ADR 0041 A17; a fail-closed over-refusal of programs the
@@ -3749,7 +3783,7 @@ reference as you work through the milestones.
 >      does not write either, so the oracle half comes first (the parser's `is_export_kw` arm
 >      says so).
 
->      **D182 — `scg`'s code generator refuses a `secret` written over a type parameter.** Filed
+>      **D182 — DONE (2026-11-12, with D188). `scg`'s code generator refuses a `secret` written over a type parameter.** Filed
 >      2026-11-08 with ADR 0041 A17. The oracle's typer leaves such a `secret` unsubstituted at
 >      every instance (`fn g<T>(x: T) -> secret T` returns `secret T` wherever it is called, and
 >      `struct B<T> { v: secret T }`'s field is `secret T` at `B<i64>`) and accepts the program,
@@ -3769,8 +3803,13 @@ reference as you work through the milestones.
 >      refuses as not yet ported), is lowered by `scg`'s code generator, as are `?T` and `[T]` at
 >      a `Shared<i64>` or `?i64`. Matching needs a back end that lowers such types at all, the
 >      oracle's first.
+>      **CLOSED (2026-11-12, ADR 0016 A3):** both typers now refuse a `secret` over a type that
+>      mentions a type parameter where it is written (`sentinel::types::secret_over_type_param`),
+>      in a generic nothing calls and as a phantom type argument as well, so the code
+>      generator's refusal is a backstop nothing reaches; the related calls listed above are
+>      refused by both typers as `uninstantiable_type`.
 
->      **D183 — `snc build` stops with an internal error on a call of a generic fn returning
+>      **D183 — DONE (2026-11-12, with D188). `snc build` stops with an internal error on a call of a generic fn returning
 >      `secret T`.** Found 2026-11-08 by A17's reviews; pre-existing, and the oracle's. `fn g<T>(x:
 >      T) -> secret T { x }` with `let y = g(1);` passes `snc types`, `snc borrow` and `snc mir`;
 >      `snc build` panics in `crates/sentinel-codegen/src/lib.rs` ("`llvm_basic_type` called on
@@ -3780,6 +3819,9 @@ reference as you work through the milestones.
 >      instances (`g(1) != g(true)`), until ADR 0016 A2 refused a comparison over a type parameter
 >      (D185). Matching needs the typer to substitute through a `secret`
 >      (with D146's question), or a diagnostic in the back end.
+>      **CLOSED (2026-11-12, ADR 0016 A3):** a `secret T` is refused where it is written, so no
+>      such call exists; the question of substituting through a `secret` returns with D146's
+>      only if a later amendment admits one.
 
 >      **D184 — pre-existing aborts and acceptances A17's reviews found in `scg`.** Found
 >      2026-11-08, each constructed, none caused by A17 (HEAD answers the same). Aborts where the
@@ -3859,6 +3901,83 @@ reference as you work through the milestones.
 >      back ends differ on a nullable's drop; D137 and D138 are the class and enum-payload cases
 >      of a heap field left behind. The drop path is the maintainer's to
 >      change first; not changed here.
+>
+>      **D188 — DONE (2026-11-12). A type parameter could reach another declaration's types.**
+>      Found 2026-11-10 by ADR 0016 A2's review and widened by A3's two review rounds;
+>      pre-existing, in the oracle and in `scg`. A type parameter is identified by its index, so a
+>      type that carries one out of the declaration that wrote it is read, in another generic fn,
+>      as that fn's own parameter. Three ways let one out: `Type::substitute` keeps the written
+>      type where it builds no instance (a `secret` over a type parameter; a `?T`, `[T]` or
+>      `Vec<T>` at an element it does not demote to; a nested array, interned as if concrete),
+>      and the type checker took that result as the type of a generic call, a generic struct
+>      literal's field and a field read, and let a call make an instance holding a field it keeps
+>      written, which the analyses that read an instance's fields (the reference-in-field check
+>      among them) read as written; a parameter type was pushed down to its argument as
+>      `try_substitute` answers it; and `unify_one` accepted an argument whose interned type is
+>      the parameter's own without binding anything. [ADR
+>      0016](decisions/0016-concrete-c1-7-generics-syntax.md) A3: a `secret` over a type that
+>      mentions a type parameter and an array of arrays over one are refused where they are
+>      written or built (`secret_over_type_param`, `generic_nested_array`); the three sites, and
+>      any instance a generic call, a generic struct literal or a field read on a generic
+>      instance makes whose field the substitution does not build, are refused
+>      (`uninstantiable_type`), as is a struct that holds itself at other type arguments, whose
+>      instances have no end, where one is made or read; a parameter type is pushed down as the
+>      substitution makes it, and the unifier's identity shortcut applies only to a type that
+>      mentions no type parameter. `scg`'s checking modes make the same refusals with the same
+>      codes. Moved, besides the refusals: a generic caller's own `P<T>` or `&T` argument
+>      now binds the callee's parameter (it was an ambiguous type argument), a value filling a
+>      `?GenericInstance<T>` or `?&T` parameter is widened or taken as it is, and some shapes with
+>      a form are refused because the substitution does not build them (`[T]` and `Vec<T>` at a
+>      `secret S` or a secret generic instance, `[T]` at `[u8]`), among them programs that only
+>      passed such a value through and ran at HEAD. Corpus reach: `c58`, refused at its
+>      `secret T`. Pinned by `generic_types_are_instantiated_completely`, twenty-one `tests/ui`
+>      fixtures (`c17_uninstantiable_*`, `c17_secret_over_type_param_*`,
+>      `c17_generic_nested_array_*`, `c17_unify_*`) held by every self-hosted driver, and four
+>      `tests/pass` programs.
+>
+>      **D189 — a generic type with no form at its instance is accepted where A3 does not check,
+>      and `snc build` stops with an internal error on it.** Found 2026-11-12 by A3's reviews;
+>      pre-existing, and the oracle's. A3 checks the types a call, a literal or a field read
+>      makes or reads, and the instances those hold. Two places it does not: a generic fn's body,
+>      checked once as written (`fn wrap<T>(a: T) -> ?T { a }` with `fn g<T>(x: T) -> i64 { let
+>      n = wrap(x); 0 }` called as `g(m)` for an `m: ?i64`), and a generic instance written in a
+>      signature, an annotation or a container element whose field has no form at its arguments
+>      (`P<?i64>` for `struct P<T> { v: ?T, w: i64 }`, as `fn f(p: P<?i64>) -> i64 { p.w }`),
+>      where nothing makes or reads that field. Both pass `snc types`; `snc llvm` refuses them as
+>      not yet ported, and `snc build` panics in `crates/sentinel-codegen/src/lib.rs`
+>      ("`llvm_basic_type` called on `Type::TypeParam`"), where the project's rule is a
+>      diagnostic for anything a user program can reach. `scg`'s code generator lowers both.
+>      Matching needs each instance's types checked at its type arguments where it is formed, or
+>      a diagnostic in the back end.
+>
+>      **D190 — an `impl` on a generic struct written without type arguments types its field
+>      reads at the struct's own type parameter.** Found 2026-11-12 by A3's review; pre-existing,
+>      in both typers. `struct P<T> { v: T }` with `impl as Me for P { fn me(self: &Self) -> i64
+>      { let x = self.v; 1 } }` passes `snc types` with `x` typed `<T#0>`; `snc llvm` refuses it
+>      as not yet ported. A bare `P` is refused as a fn parameter, a class field, an enum
+>      payload and a trait method parameter ("`P` is generic; supply 1 type argument(s)"), and
+>      nothing found so far can make a receiver of type `P`, so the method looks uncallable.
+>      Since A3 a generic call in such a method can bind its parameter to that `<T#0>` through a
+>      reference (`seen(&self.v)`), which both typers then accept; `snc llvm` emits a call to an
+>      instance it does not define, `scg`'s code generator defines it (so the two IRs differ),
+>      and `snc build` refuses it with `generic_call_not_yet_supported` (or, for `let r =
+>      &self.v; seen(r)`, stops with an internal error). The fix is to refuse such an `impl` as
+>      those positions are refused, in both typers.
+>
+>      **D191 — `scg` types a public array argument into a non-generic `[secret X]` parameter
+>      without the widen the oracle records.** Found 2026-11-12 by A3's pass fixtures;
+>      pre-existing. For `fn keep(x: [secret S]) -> i64 { len(x) }` called `keep(p)` with `p: [S]`
+>      (and the same with `[secret i64]` and a `[i64]` argument), the oracle types the argument
+>      `(widen-secret (var #2 :[S]) :[secret S])` and `scg` types it `(var #2 :[S])`. The typed
+>      dumps and the MIR differ; the emitted IR is the same. No tracked program widens an array
+>      argument that way, which is why the differentials have not seen it.
+>
+>      **D192 — `scg` aborts on a pair of generic structs that hold each other.** Found
+>      2026-11-12 by ADR 0016 A3's third review; pre-existing. `struct A<T> { v: T, b: ?B<T> }`
+>      with `struct B<U> { w: U, a: ?A<U> }` and `fn main() -> i64 { 0 }`, which the oracle types,
+>      stops every self-hosted driver with `index out of bounds: idx=1, len=1` (HEAD's too). No
+>      tracked program declares such a pair. A3's unit table holds the oracle's acceptance of
+>      one; the `tests/pass` fixture of regular recursion uses a struct that holds only itself.
 >
 >      **D78 — stale corpus fixture counts in `llvm.rs` and `README.md`, at six sites, stale
 >      before this change.** Found by D74's reviews. `crates/sentinel-driver/tests/llvm.rs`
@@ -4711,6 +4830,12 @@ reference as you work through the milestones.
 >      expected RETURN type (the oracle does it before the argument walk), which this entry
 >      first held back as its own slice because it RENAMES emitted symbols for null-free
 >      programs (`let s: secret i64 = idg(7)` → `@idg__sec_i64`), landed with D4 and D43.
+>      Since ADR 0016 A3 (2026-11-12) the oracle pushes a parameter type down as the
+>      substitution makes it (`substitute_checked`), not as `try_substitute` answers it, and
+>      `arg_expected` pushes `subst_bound`'s rebuilt type, which fails closed where a type
+>      parameter is unbound; `subst_fully` still answers a generic instance's written handle,
+>      which the call-argument mismatch message reads, and its new reference arm answers -1 for
+>      a reference whose target is unbound, as `try_substitute` does.
 >
 >      **D46 — a `?&T`, `?Channel<T>` or `?Guard<T>` `null` constant is JOINT invalid IR:
 >      the oracle emits `ptr 0` and `scg` reproduces it byte-for-byte.** `store { i1, ptr }

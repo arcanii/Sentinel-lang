@@ -1193,13 +1193,16 @@ impl Type {
 
     /// ADR 0016 A3: substitute as [`Type::substitute`] does, and answer `None`
     /// when the result would still hold a type parameter of the declaration the
-    /// type was written in. That happens where the substituted form does not
-    /// exist and `substitute` keeps the written type instead: a `secret` over a
-    /// type parameter (which substitution leaves as written), and a `?T`, `[T]`
-    /// or `Vec<T>` whose element, substituted, is not one they can hold (`?T` at
-    /// `T := secret i64` or `T := ?i64`, `[T]` at `T := ?i64`). Such a type
-    /// parameter names nothing in the scope the result is used in, so the type
-    /// checker refuses the program where it would carry one there.
+    /// type was written in. That happens where the substitution builds no instance
+    /// and `substitute` keeps the written type instead: a `?T`, `[T]` or `Vec<T>`
+    /// whose element, substituted, is not one the round trip demotes to (`?T` at
+    /// `T := secret i64` or `T := ?i64`, `[T]` at `T := ?i64` or `T := [u8]`), and a
+    /// `secret` over a type parameter (left as written; the type checker refuses
+    /// one where it is written, so this arm is a backstop). A written type that
+    /// mentions no type parameter is complete even where it is kept. Such a type
+    /// parameter names nothing in the scope the result is used in, or another
+    /// generic fn's own, so the type checker refuses the program where it would
+    /// carry one there.
     pub fn substitute_checked(
         self,
         subst: &[Type],
@@ -1262,11 +1265,12 @@ impl Type {
                     Some(new_ni) => Type::Nullable(new_ni),
                     // No `?X` exists for this `X` (`?T` at `T := ?i64` or
                     // `T := secret i64`): keep the written type rather than
-                    // panicking, and say the substitution is incomplete (ADR 0016
-                    // A3). An unchanged inner always has a nullable form, so this
-                    // arm is reached only through a type parameter.
+                    // panicking, and say the substitution is incomplete where the
+                    // kept type mentions a type parameter (ADR 0016 A3).
                     None => {
-                        *complete = false;
+                        if contains_type_param(Type::Nullable(ni), instances, refs) {
+                            *complete = false;
+                        }
                         Type::Nullable(ni)
                     }
                 }
@@ -1285,9 +1289,14 @@ impl Type {
                 // `T := secret u8` yields `[secret u8]` (mirrors the Vec arm).
                 match new_inner.to_array_elem_subst() {
                     Some(new_ae) => Type::Array(new_ae),
-                    // ADR 0016 A3: no `[X]` for this `X`; the written type is kept.
+                    // ADR 0016 A3: the substitution builds no `[X]` for this `X`, and
+                    // the written type is kept: incomplete where it mentions a type
+                    // parameter. (A written `[secret S]` over a struct mentions none;
+                    // the round trip demotes only the four secret word scalars.)
                     None => {
-                        *complete = false;
+                        if contains_type_param(Type::Array(ae), instances, refs) {
+                            *complete = false;
+                        }
                         Type::Array(ae)
                     }
                 }
@@ -1304,9 +1313,11 @@ impl Type {
                 // `let`-annotation match fails).
                 match new_inner.to_vec_elem_subst() {
                     Some(new_ve) => Type::Vec(new_ve),
-                    // ADR 0016 A3: no `Vec<X>` for this `X`; the written type is kept.
+                    // ADR 0016 A3: as the `Array` arm.
                     None => {
-                        *complete = false;
+                        if contains_type_param(Type::Vec(ve), instances, refs) {
+                            *complete = false;
+                        }
                         Type::Vec(ve)
                     }
                 }
@@ -1341,9 +1352,10 @@ impl Type {
             }
             Type::Secret(sid) => {
                 // C3 / ADR 0019 D5: a `secret` passes through substitution
-                // unchanged, so a `secret T` keeps its type parameter: ADR 0016
-                // A3 says the substitution is incomplete when the inner type
-                // mentions one.
+                // unchanged, so a `secret T` would keep its type parameter: ADR
+                // 0016 A3 says the substitution is incomplete when the inner type
+                // mentions one. (A3 refuses such a `secret` where it is written,
+                // so none should reach here.)
                 if let Some(table) = secrets {
                     let mentions = match table.get(sid.0 as usize) {
                         Some(data) => contains_type_param(data.inner, instances, refs),
@@ -2390,6 +2402,14 @@ fn resolve_type_expr_with_scope(
             // `Type::Secret` inner doesn't match `Type::Array` here, and its
             // `to_array_elem_secret` demote rejects a non-scalar secret leaf.)
             if let Type::Array(inner_ae) = inner_ty {
+                // ADR 0016 A3: not over a type parameter. ADR 0068 D6 defers generic
+                // nested arrays; substitution and unification treat a nested element
+                // as concrete, so one that mentions a type parameter is refused here.
+                if mentions_type_param(inner_ty, instances, refs, secrets, arrays) {
+                    return Err(TypeError::GenericNestedArray {
+                        span: to_source_span(&te.span),
+                    });
+                }
                 let id = intern_array_elem(arrays, inner_ae);
                 return Ok(Type::Array(ArrayElem::Array(id)));
             }
@@ -2759,6 +2779,15 @@ fn resolve_type_expr_with_scope(
             if matches!(inner_ty, Type::Shared(_) | Type::Mutex(_)) {
                 return Err(TypeError::SecretHandle {
                     span: to_source_span(&inner.span),
+                });
+            }
+            // ADR 0016 A3: nor over a type that mentions a type parameter. ADR 0019 D5
+            // keeps secrets off type parameters at its minimum, and substitution
+            // leaves a `secret` as written, so an instance would keep the
+            // declaration's type parameter; refused where it is written.
+            if mentions_type_param(inner_ty, instances, refs, secrets, arrays) {
+                return Err(TypeError::SecretOverTypeParam {
+                    span: to_source_span(&te.span),
                 });
             }
             let id = intern_secret(secrets, inner_ty);
@@ -4550,17 +4579,41 @@ pub enum TypeError {
 
     /// ADR 0016 A3: a type written in a generic declaration — a generic fn's
     /// return type at a call, a generic struct's field at a literal or a field
-    /// read — has no form at the type arguments it is used at, so substituting
-    /// them would leave one of the declaration's type parameters in it (see
-    /// [`Type::substitute_checked`]).
+    /// read — is one the substitution does not build at the type arguments it is
+    /// used at, so substituting them would leave one of the declaration's type
+    /// parameters in it (see [`Type::substitute_checked`]).
     #[error("{what} cannot be instantiated at these type arguments")]
     #[diagnostic(
         code(sentinel::types::uninstantiable_type),
-        help("a `secret` over a type parameter is kept as written, and `?T`, `[T]` and `Vec<T>` hold only the element types they support")
+        help("substitution builds `?T`, `[T]` and `Vec<T>` only at the element types each one admits, which differ by container")
     )]
     UninstantiableType {
         what: String,
         #[label("instantiated here")]
+        span: miette::SourceSpan,
+    },
+
+    /// ADR 0016 A3 (ADR 0019 D5): a `secret` over a type that mentions a type
+    /// parameter, refused where it is written.
+    #[error("a `secret` over a type parameter is not supported")]
+    #[diagnostic(
+        code(sentinel::types::secret_over_type_param),
+        help("ADR 0019 D5 keeps `secret` off type parameters; write the `secret` on a concrete type")
+    )]
+    SecretOverTypeParam {
+        #[label("written here")]
+        span: miette::SourceSpan,
+    },
+
+    /// ADR 0016 A3 (ADR 0068 D6): an array whose element is an array that mentions a
+    /// type parameter, refused where it is written or built.
+    #[error("an array of arrays over a type parameter is not supported")]
+    #[diagnostic(
+        code(sentinel::types::generic_nested_array),
+        help("generic nested arrays are deferred (ADR 0068 D6)")
+    )]
+    GenericNestedArray {
+        #[label("formed here")]
         span: miette::SourceSpan,
     },
 
@@ -8560,9 +8613,73 @@ fn try_substitute(
     }
 }
 
+/// ADR 0016 A3: `true` iff `ty` mentions a [`Type::TypeParam`] anywhere, including
+/// inside a nested array's element (interned in `arrays`) and under a `secret`
+/// (interned in `secrets`), which [`contains_type_param`] does not look into. The
+/// type checker refuses both shapes where they are formed — a `secret` over a type
+/// that mentions a type parameter, and an array whose element is an array that
+/// mentions one — so that `contains_type_param`'s answer is the whole answer
+/// everywhere else. An id a table does not hold answers `true` (fail closed).
+fn mentions_type_param(
+    ty: Type,
+    instances: &[GenericInstanceData],
+    refs: &[RefData],
+    secrets: &[SecretData],
+    arrays: &[ArrayElem],
+) -> bool {
+    match ty {
+        Type::TypeParam(_) => true,
+        Type::Nullable(ni) => mentions_type_param(ni.to_type(), instances, refs, secrets, arrays),
+        Type::Array(ArrayElem::Array(id)) => match arrays.get(id.0 as usize) {
+            Some(inner) => mentions_type_param(Type::Array(*inner), instances, refs, secrets, arrays),
+            None => true,
+        },
+        Type::Array(ae) => mentions_type_param(ae.to_type(), instances, refs, secrets, arrays),
+        Type::Vec(ve) => mentions_type_param(ve.to_type(), instances, refs, secrets, arrays),
+        Type::GenericInstance(id) => match instances.get(id.0 as usize) {
+            Some(data) => data
+                .args
+                .iter()
+                .any(|a| mentions_type_param(*a, instances, refs, secrets, arrays)),
+            None => true,
+        },
+        Type::Ref(id) => match refs.get(id.0 as usize) {
+            Some(data) => mentions_type_param(data.inner, instances, refs, secrets, arrays),
+            None => true,
+        },
+        Type::Secret(id) => match secrets.get(id.0 as usize) {
+            Some(data) => mentions_type_param(data.inner, instances, refs, secrets, arrays),
+            None => true,
+        },
+        Type::I64
+        | Type::I32
+        | Type::U8
+        | Type::U128
+        | Type::F64
+        | Type::Ptr
+        | Type::Bool
+        | Type::Struct(_)
+        | Type::Class(_)
+        | Type::TraitSelf(_)
+        | Type::Enum(_)
+        | Type::Kont(_)
+        | Type::Task(_)
+        | Type::Channel(_)
+        | Type::Shared(_)
+        | Type::Mutex(_)
+        | Type::Guard(_)
+        | Type::Process
+        | Type::SealedChannel
+        | Type::Fn(_) => false,
+    }
+}
+
 /// `true` iff `ty` mentions at least one [`Type::TypeParam`],
 /// either directly or inside the args of a GenericInstance / the
-/// inner of a Ref.
+/// inner of a Ref. It looks into neither a nested array's element nor a
+/// `secret`'s inner type; ADR 0016 A3 refuses a type parameter in either where
+/// it is written or built, which is what makes this answer whole (see
+/// [`mentions_type_param`]).
 fn contains_type_param(
     ty: Type,
     instances: &[GenericInstanceData],
@@ -8572,8 +8689,9 @@ fn contains_type_param(
         Type::TypeParam(_) => true,
         Type::Nullable(ni) => contains_type_param(ni.to_type(), instances, refs),
         // ADR 0068: a nested-array element is interned/concrete (generic-nested
-        // `[[T]]` deferred, D6), so it carries no TypeParam — and `ae.to_type()`
-        // would panic on `Array`.
+        // `[[T]]` deferred, D6, and refused where written or built since ADR
+        // 0016 A3), so it carries no TypeParam — and `ae.to_type()` would panic
+        // on `Array`.
         Type::Array(ArrayElem::Array(_)) => false,
         Type::Array(ae) => contains_type_param(ae.to_type(), instances, refs),
         // Phase D.3 / ADR 0034: a Vec mentions a TypeParam iff its
@@ -8599,8 +8717,9 @@ fn contains_type_param(
             .any(|a| contains_type_param(*a, instances, refs)),
         Type::Ref(id) => contains_type_param(refs[id.0 as usize].inner, instances, refs),
         // C3 / ADR 0019 D5: secret-of-non-TypeParam at C3.1 — no
-        // recursion needed. Will revisit if `secret T<U>` style
-        // ever lands.
+        // recursion needed; ADR 0016 A3 refuses a `secret` over a type
+        // parameter where it is written. Will revisit if `secret T<U>`
+        // style ever lands.
         Type::Secret(_) => false,
         // C3.4 / ADR 0020 D5: konts don't carry TypeParams at C3.4
         // minimum.
@@ -8696,8 +8815,11 @@ fn unify_one(
             unify_one(p.to_type(), a.to_type(), subst, instances, refs)
         }
         (Type::GenericInstance(p_id), Type::GenericInstance(a_id)) => {
-            // Same instance id → trivially equal.
-            if p_id == a_id {
+            // Same instance id → trivially equal, where the parameter type mentions no
+            // type parameter. ADR 0016 A3: a type parameter's id is its index, so the
+            // callee's `P<T>` and a generic caller's own `P<T>` are the same instance;
+            // their arguments are unified below, which binds the callee's `T`.
+            if p_id == a_id && !contains_type_param(param, instances, refs) {
                 return Ok(());
             }
             let p_inst = &instances[p_id.0 as usize];
@@ -8716,7 +8838,9 @@ fn unify_one(
             // C2 / ADR 0017 D11: refs unify when their mutability
             // matches and their inner types unify. Recurse so
             // `fn f<T>(x: &T)` called with `&i64` binds T = i64.
-            if p_id == a_id {
+            // ADR 0016 A3: the same id is equal only where it mentions no type
+            // parameter (see the GenericInstance arm).
+            if p_id == a_id && !contains_type_param(param, instances, refs) {
                 return Ok(());
             }
             let p_data = &refs[p_id.0 as usize];
@@ -8729,6 +8853,125 @@ fn unify_one(
         (p, a) if p == a => Ok(()),
         (p, a) => Err(UnifyFailure::Mismatch(p, a)),
     }
+}
+
+/// ADR 0016 A3: the first field, as `(field, struct)`, of a generic instance `ty` holds —
+/// itself, or one reached through a nullable's, an array's, a `Vec`'s or a `secret`'s inner
+/// type, a reference's target, an instance's arguments or another such field — whose type
+/// the substitution does not build at that instance's arguments. A generic call's result
+/// and a field read on a generic instance are refused where there is one: an instance whose
+/// field keeps a type parameter would otherwise reach the analyses and the back ends that
+/// read its fields (the reference-in-field check below among them).
+///
+/// A struct met again, on the way down, at other type arguments (`struct N<T> { next: ?N<Box<T>> }`,
+/// or through another struct) has an expansion without end, so the field that leads there is
+/// answered as one the substitution does not build. That keeps the walk finite (each struct
+/// appears at most once on the way down, and an instance already walked is not walked again) and
+/// refuses such a struct where a call or field read makes one; a struct met again at the same
+/// arguments is the instance already walked.
+fn unbuilt_instance_field(
+    ty: Type,
+    structs: &[TypedStructDecl],
+    instances: &mut Vec<GenericInstanceData>,
+    refs: &mut Vec<RefData>,
+    secrets: &[SecretData],
+    arrays: &[ArrayElem],
+    seen: &mut Vec<GenericInstanceId>,
+) -> Option<(String, String)> {
+    instance_walk(ty, structs, instances, refs, secrets, arrays, seen, &mut Vec::new(), None)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn instance_walk(
+    ty: Type,
+    structs: &[TypedStructDecl],
+    instances: &mut Vec<GenericInstanceData>,
+    refs: &mut Vec<RefData>,
+    secrets: &[SecretData],
+    arrays: &[ArrayElem],
+    seen: &mut Vec<GenericInstanceId>,
+    path: &mut Vec<StructId>,
+    via: Option<&(String, String)>,
+) -> Option<(String, String)> {
+    let inner = match ty {
+        Type::GenericInstance(id) => {
+            if seen.contains(&id) {
+                return None;
+            }
+            let inst = instances[id.0 as usize].clone();
+            let decl = &structs[inst.struct_id.0 as usize];
+            if path.contains(&inst.struct_id) {
+                return Some(match via {
+                    Some(v) => v.clone(),
+                    None => (String::new(), decl.name.clone()),
+                });
+            }
+            seen.push(id);
+            path.push(inst.struct_id);
+            let fields: Vec<(String, Type)> =
+                decl.fields.iter().map(|f| (f.name.clone(), f.ty)).collect();
+            let struct_name = decl.name.clone();
+            let mut hit = None;
+            for a in &inst.args {
+                hit = instance_walk(*a, structs, instances, refs, secrets, arrays, seen, path, via);
+                if hit.is_some() {
+                    break;
+                }
+            }
+            if hit.is_none() {
+                for (field, fty) in fields {
+                    let here = (field, struct_name.clone());
+                    hit = match fty.substitute_checked(&inst.args, instances, refs, secrets) {
+                        None => Some(here),
+                        Some(t) => instance_walk(
+                            t,
+                            structs,
+                            instances,
+                            refs,
+                            secrets,
+                            arrays,
+                            seen,
+                            path,
+                            Some(&here),
+                        ),
+                    };
+                    if hit.is_some() {
+                        break;
+                    }
+                }
+            }
+            path.pop();
+            return hit;
+        }
+        Type::Nullable(ni) => ni.to_type(),
+        Type::Array(ArrayElem::Array(id)) => Type::Array(*arrays.get(id.0 as usize)?),
+        Type::Array(ae) => ae.to_type(),
+        Type::Vec(ve) => ve.to_type(),
+        Type::Ref(id) => refs[id.0 as usize].inner,
+        Type::Secret(id) => secrets[id.0 as usize].inner,
+        Type::I64
+        | Type::I32
+        | Type::U8
+        | Type::U128
+        | Type::F64
+        | Type::Ptr
+        | Type::Bool
+        | Type::Struct(_)
+        | Type::Class(_)
+        | Type::TraitSelf(_)
+        | Type::Enum(_)
+        | Type::TypeParam(_)
+        | Type::Kont(_)
+        | Type::Task(_)
+        | Type::Channel(_)
+        | Type::Shared(_)
+        | Type::Mutex(_)
+        | Type::Guard(_)
+        | Type::Process
+        | Type::SealedChannel
+        | Type::Fn(_) => return None,
+    };
+    instance_walk(inner, structs, instances, refs, secrets, arrays, seen, path, via)
 }
 
 /// ADR 0017 D7: if a value of type `ty` would hold a reference inside a
@@ -8771,7 +9014,12 @@ fn generic_field_ref_owner(
     let field_tys: Vec<Type> = decl.fields.iter().map(|f| f.ty).collect();
     let name = decl.name.clone();
     for fty in field_tys {
-        let sub = fty.substitute(&inst.args, instances, refs);
+        // ADR 0016 A3: a field the substitution does not build keeps a type parameter, which
+        // `carries_ref` cannot see through; such an instance is answered as holding one.
+        let sub = match fty.substitute_checked(&inst.args, instances, refs, secrets) {
+            Some(t) => t,
+            None => return Some(name),
+        };
         if sub.carries_ref(secrets) {
             return Some(name);
         }
@@ -9444,10 +9692,12 @@ fn check_call(
             // generic `Mismatch`) surfaces on shape errors.
             // ADR 0016 A3: push down the parameter type the substitution makes,
             // and none where it cannot make one: `try_substitute` answers the
-            // written type of a generic instance or a reference, and a `secret`
-            // as written, so an argument typed against it would carry the
-            // callee's own type parameters.
-            let concrete_param = if try_substitute(param, &subst, instances, refs).is_some() {
+            // written type of a generic instance or a reference, so an argument
+            // typed against it would carry the callee's own type parameters. A
+            // parameter type that mentions none is pushed down as written.
+            let concrete_param = if !contains_type_param(param, instances, refs) {
+                Some(param)
+            } else if try_substitute(param, &subst, instances, refs).is_some() {
                 let bound: Vec<Type> = subst
                     .iter()
                     .enumerate()
@@ -9585,6 +9835,18 @@ fn check_call(
             })
         }
     };
+    // ADR 0016 A3: nor may it make a generic instance whose field the substitution does
+    // not build at its arguments (`mk(n)` returning `P<?i64>` for `struct P<T> { v: ?T }`).
+    if n_type_params > 0 {
+        if let Some((field, owner)) =
+            unbuilt_instance_field(ret_ty, structs, instances, refs, secrets, arrays, &mut Vec::new())
+        {
+            return Err(TypeError::UninstantiableType {
+                what: format!("field `{field}` of `{owner}`"),
+                span: to_source_span(call_span),
+            });
+        }
+    }
     // ADR 0017 D7: a generic call can MINT an aggregate holding a reference in a
     // field — `mk(&x)` returning `Box<&i64>`, built by `Box { v: x }` inside the
     // abstract body, which the struct-literal check below never sees.
@@ -10545,6 +10807,24 @@ fn check_expr(
                         }
                     }
                 };
+                // ADR 0016 A3: nor may the field's type hold a generic instance with a field the
+                // substitution does not build.
+                if !type_args.is_empty() {
+                    if let Some((f2, owner)) = unbuilt_instance_field(
+                        expected_field_ty,
+                        structs,
+                        instances,
+                        refs,
+                        secrets,
+                        arrays,
+                        &mut Vec::new(),
+                    ) {
+                        return Err(TypeError::UninstantiableType {
+                            what: format!("field `{f2}` of `{owner}`"),
+                            span: to_source_span(&fi.name_span),
+                        });
+                    }
+                }
                 // ADR 0017 D7: a generic struct literal whose instance puts a
                 // reference in THIS field (`let b: Box<&i64> = Box { v: &x }`).
                 if !type_args.is_empty() && expected_field_ty.carries_ref(secrets) {
@@ -10642,6 +10922,14 @@ fn check_expr(
                         });
                     }
                 };
+                // ADR 0016 A3: no array of arrays over a type parameter (ADR 0068 D6).
+                if matches!(elem_ty, Type::Array(_))
+                    && mentions_type_param(elem_ty, instances, refs, secrets, arrays)
+                {
+                    return Err(TypeError::GenericNestedArray {
+                        span: to_source_span(&expr.span),
+                    });
+                }
                 let ae = array_elem_of(elem_ty, secrets, arrays).ok_or_else(|| {
                     TypeError::NestedArray {
                         span: to_source_span(&expr.span),
@@ -10690,6 +10978,14 @@ fn check_expr(
                         });
                     }
                     typed.push(t);
+                }
+                // ADR 0016 A3: no array of arrays over a type parameter (ADR 0068 D6).
+                if matches!(elem_ty, Type::Array(_))
+                    && mentions_type_param(elem_ty, instances, refs, secrets, arrays)
+                {
+                    return Err(TypeError::GenericNestedArray {
+                        span: to_source_span(&expr.span),
+                    });
                 }
                 let ae = array_elem_of(elem_ty, secrets, arrays).ok_or_else(|| {
                     TypeError::NestedArray {
@@ -10860,6 +11156,24 @@ fn check_expr(
                     }
                 }
             };
+            // ADR 0016 A3: and no generic instance the field's type holds may have a field the
+            // substitution does not build.
+            if !type_args.is_empty() {
+                if let Some((f2, owner)) = unbuilt_instance_field(
+                    field_ty,
+                    structs,
+                    instances,
+                    refs,
+                    secrets,
+                    arrays,
+                    &mut Vec::new(),
+                ) {
+                    return Err(TypeError::UninstantiableType {
+                        what: format!("field `{f2}` of `{owner}`"),
+                        span: to_source_span(field_span),
+                    });
+                }
+            }
             (
                 TypedExprKind::FieldAccess {
                     target: Box::new(target_t),
@@ -12781,6 +13095,16 @@ fn type_error_to_diagnostic(err: &TypeError) -> Diagnostic {
             format!("{what} cannot be instantiated at these type arguments"),
             span.offset()..(span.offset() + span.len()),
         ),
+        TypeError::SecretOverTypeParam { span } => (
+            "sentinel::types::secret_over_type_param",
+            "a `secret` over a type parameter is not supported".to_string(),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        TypeError::GenericNestedArray { span } => (
+            "sentinel::types::generic_nested_array",
+            "an array of arrays over a type parameter is not supported".to_string(),
+            span.offset()..(span.offset() + span.len()),
+        ),
         TypeError::TypeArgInferenceConflict {
             callee,
             type_param,
@@ -14477,7 +14801,6 @@ fn main() -> i64 { let p = P { x: 1, x: 2, y: 3 }; 0 }",
             ("", "secret u128", Some(true)),
             ("", "secret bool", Some(true)),
             ("<T>", "T", None),
-            ("<T>", "secret T", None),
             ("", "[i64]", None),
             ("", "[secret i64]", None),
             ("", "[[i64]]", None),
@@ -14547,6 +14870,9 @@ fn main() -> i64 { let p = P { x: 1, x: 2, y: 3 }; 0 }",
                 "{what}: got {err:?}"
             );
         }
+        // A `secret T` operand is refused before any comparison, where it is written (ADR 0016 A3).
+        let err = check_err("fn f<T>(a: secret T, b: secret T) -> bool { a == b }\nfn main() -> i64 { 0 }");
+        assert!(matches!(err, TypeError::SecretOverTypeParam { .. }), "got {err:?}");
         // `== null` / `!= null` on a nullable keeps its own rule, generic or not.
         check_ok("fn f<T>(a: ?T) -> bool { a == null }\nfn main() -> i64 { 0 }");
         check_ok("fn f(a: ?i64) -> bool { null != a }\nfn main() -> i64 { 0 }");
@@ -14571,6 +14897,11 @@ fn main() -> i64 { let p = P { x: 1, x: 2, y: 3 }; 0 }",
         let mut instances: Vec<GenericInstanceData> = Vec::new();
         let mut refs: Vec<RefData> = Vec::new();
         let mut secrets: Vec<SecretData> = Vec::new();
+        // The type checker pre-interns the four secret word scalars at their fixed ids, and
+        // the substitution reads an id below four as one of them (`secret_scalar_slot`).
+        for t in SECRET_SCALARS {
+            intern_secret(&mut secrets, t);
+        }
         let t0 = Type::TypeParam(TypeParamId(0));
         let s_i64 = Type::Secret(intern_secret(&mut secrets, Type::I64));
         let sec_t = Type::Secret(intern_secret(&mut secrets, t0));
@@ -14580,6 +14911,9 @@ fn main() -> i64 { let p = P { x: 1, x: 2, y: 3 }; 0 }",
         let arr_t = Type::Array(ArrayElem::TypeParam(TypeParamId(0)));
         let vec_t = Type::Vec(VecElem::TypeParam(TypeParamId(0)));
         let ref_q_t = Type::Ref(intern_ref(&mut refs, false, q_t));
+        let sec_struct = intern_secret(&mut secrets, Type::Struct(StructId(0)));
+        let arr_sec_s = Type::Array(ArrayElem::Secret(sec_struct));
+        let vec_sec_s = Type::Vec(VecElem::Secret(sec_struct));
         let gi_q_t =
             Type::GenericInstance(intern_generic_instance(&mut instances, StructId(0), vec![q_t]));
         let cases = [
@@ -14602,6 +14936,10 @@ fn main() -> i64 { let p = P { x: 1, x: 2, y: 3 }; 0 }",
             (ref_q_t, q_i64, false),
             (gi_q_t, Type::I64, true),
             (gi_q_t, q_i64, false),
+            // A type with no type parameter is complete, though the substitution does not
+            // round-trip a `secret` over a struct (it keeps the written type).
+            (arr_sec_s, Type::I64, true),
+            (vec_sec_s, Type::I64, true),
         ];
         for (ty, arg, complete) in cases {
             let got = ty.substitute_checked(&[arg], &mut instances, &mut refs, &secrets);
@@ -14614,17 +14952,30 @@ fn main() -> i64 { let p = P { x: 1, x: 2, y: 3 }; 0 }",
         }
 
         // The type checker refuses each site where the substitution would be incomplete.
-        const DECLS: &str = "struct P<T> { v: ?T }\nstruct B<T> { v: secret T }\nstruct Q<T> { n: i64 }\n";
+        const DECLS: &str = "struct P<T> { v: ?T }\nstruct Q<T> { n: i64 }\nstruct V<T> { v: Vec<T>, w: i64 }\n";
         let refused: &[(&str, &str)] = &[
             ("fn w<T>(a: T) -> ?T { a }\nfn main() -> i64 { let n: ?i64 = 4; let x = w(n); 0 }", "the return type of `w`"),
             ("fn w<T>(a: T) -> ?T { a }\nfn main() -> i64 { let s: secret i64 = 3; let x = w(s); 0 }", "the return type of `w`"),
             ("fn w<T>(a: T) -> [T] { [a] }\nfn main() -> i64 { let n: ?i64 = 4; let x = w(n); 0 }", "the return type of `w`"),
             ("fn w<T>(a: T) -> Vec<T> { vec_new() }\nfn main() -> i64 { let x = w([1]); 0 }", "the return type of `w`"),
-            ("fn w<T>(a: T) -> secret T { a }\nfn main() -> i64 { let x = w(1); 0 }", "the return type of `w`"),
             ("fn w<T>(a: T) -> Q<?T> { Q { n: 1 } }\nfn main() -> i64 { let n: ?i64 = 4; let x = w(n); 0 }", "the return type of `w`"),
             ("fn w<T>(a: T) -> ?T { a }\nfn g<T>(x: T) -> i64 { let n: ?i64 = 4; let y = w(n); 0 }\nfn main() -> i64 { g(0) }", "the return type of `w`"),
-            ("fn main() -> i64 { let b: B<i64> = B { v: 5 }; 0 }", "field `v` of `B`"),
+            ("fn main() -> i64 { let b: P<?i64> = P { v: null }; 0 }", "field `v` of `P`"),
             ("fn r(p: P<?i64>) -> i64 { let x = p.v; 0 }\nfn main() -> i64 { 0 }", "field `v` of `P`"),
+            // A generic instance a call makes, or a field read yields, with a field the
+            // substitution does not build: `P<?i64>`, and a `V<&i64>` whose `Vec<T>` field has
+            // no form at a reference (so the reference-in-field check never reads a kept type).
+            ("fn mk<T>(a: T) -> P<T> { P { v: null } }\nfn main() -> i64 { let n: ?i64 = 3; let p = mk(n); 0 }", "field `v` of `P`"),
+            ("fn mkv<T>(a: T) -> V<T> { V { v: vec_new(), w: 1 } }\nfn main() -> i64 { let o: i64 = 5; let b = mkv(&o); b.w }", "field `v` of `V`"),
+            ("struct O<T> { inner: P<T> }\nfn r(o: O<?i64>) -> i64 { let i = o.inner; 0 }\nfn main() -> i64 { 0 }", "field `v` of `P`"),
+            ("struct O<T> { inner: P<T> }\nfn mko<T>(a: T) -> O<T> { O { inner: P { v: null } } }\nfn main() -> i64 { let n: ?i64 = 3; let o = mko(n); 0 }", "field `v` of `P`"),
+            ("fn tag<T>(a: T) -> Q<P<T>> { Q { n: 1 } }\nfn main() -> i64 { let n: ?i64 = 3; let q = tag(n); 0 }", "field `v` of `P`"),
+            // A struct literal's field holding such an instance; and a struct met again on the
+            // way down at other arguments, whose expansion has no end (and, refused with it, one
+            // met again at its own arguments permuted).
+            ("struct W<T> { a: i64, p: ?P<T> }\nfn main() -> i64 { let w: W<?i64> = W { a: 1, p: null }; w.a }", "field `v` of `P`"),
+            ("struct Bx<T> { v: T }\nstruct N<T> { v: T, next: ?N<Bx<T>> }\nfn main() -> i64 { let n: N<i64> = N { v: 7, next: null }; n.v }", "field `next` of `N`"),
+            ("struct Pr<A, B> { a: A, b: B, left: ?Pr<B, A> }\nfn main() -> i64 { let p: Pr<i64, bool> = Pr { a: 1, b: true, left: null }; p.a }", "field `left` of `Pr`"),
         ];
         for (body, what) in refused {
             match check_err(&format!("{DECLS}{body}")) {
@@ -14682,12 +15033,70 @@ fn main() -> i64 { let p = P { x: 1, x: 2, y: 3 }; 0 }",
             }
             other => panic!("present: {other:?}"),
         }
-        // And nothing is pushed down where the substitution makes no type: a `null` filling a
-        // parameter with a `secret` over a type parameter has no type to take.
-        let err = check_err(
-            "struct P<T> { v: T }\nfn f<T>(a: T, b: ?P<secret T>) -> i64 { 0 }\nfn main() -> i64 { f(1, null) }",
+        // A parameter type that mentions no type parameter is pushed down as written: a public
+        // `[S]` is widened into a `[secret S]`, which the substitution does not round-trip, and
+        // a call returning one is typed with it.
+        check_ok(
+            "struct S { a: i64 }\nfn f(x: [secret S]) -> [secret S] { x }\n\
+             fn main() -> i64 { let p: [S] = [S { a: 1 }]; let q = f(p); len(q) }",
         );
-        assert!(matches!(err, TypeError::AmbiguousNull { .. }), "got {err:?}");
+        check_ok(
+            "struct S { a: i64 }\nstruct Bx<T> { tag: T, keys: [secret S] }\n\
+             fn main() -> i64 { let k: [secret S] = [S { a: 1 }]; let b: Bx<i64> = Bx { tag: 1, keys: k }; b.tag }",
+        );
+        check_ok(
+            "struct S { a: i64 }\nfn pass(v: Vec<secret S>) -> Vec<secret S> { v }\n\
+             fn outer(v: Vec<secret S>) -> i64 { let w = pass(v); 0 }\nfn main() -> i64 { 0 }",
+        );
+
+        // Two shapes are refused where they are written, so that no type keeps a type parameter
+        // where substitution and unification cannot see it: a `secret` over a type that mentions
+        // one (ADR 0019 D5), and an array of arrays over one (ADR 0068 D6), in a signature, a
+        // field, a type argument or an array literal.
+        for body in [
+            "fn w<T>(a: T) -> secret T { a }\nfn main() -> i64 { 0 }",
+            "struct B<T> { v: secret T }\nfn main() -> i64 { 0 }",
+            "fn f<T>(a: T, b: ?P<secret T>) -> i64 { 0 }\nfn main() -> i64 { 0 }",
+            "fn f<T>(a: [secret T]) -> i64 { 0 }\nfn main() -> i64 { 0 }",
+            "fn f<T>(a: secret [T]) -> i64 { 0 }\nfn main() -> i64 { 0 }",
+        ] {
+            let err = check_err(&format!("{DECLS}{body}"));
+            assert!(matches!(err, TypeError::SecretOverTypeParam { .. }), "{body}: got {err:?}");
+        }
+        for body in [
+            "fn f<T>(a: [[T]]) -> i64 { 0 }\nfn main() -> i64 { 0 }",
+            "struct N<T> { v: [[T]] }\nfn main() -> i64 { 0 }",
+            "fn f<T>(a: T) -> Q<[[T]]> { Q { n: 1 } }\nfn main() -> i64 { 0 }",
+            "fn g<T>(x: T) -> i64 { let w = [[x]]; 0 }\nfn main() -> i64 { 0 }",
+            "fn g<T>(x: [T]) -> i64 { let w = [x]; 0 }\nfn main() -> i64 { 0 }",
+        ] {
+            let err = check_err(&format!("{DECLS}{body}"));
+            assert!(matches!(err, TypeError::GenericNestedArray { .. }), "{body}: got {err:?}");
+        }
+        // A struct that holds itself at its own arguments, directly or through another, has a
+        // finite expansion and is accepted.
+        check_ok("struct Nd<T> { v: T, next: ?Nd<T> }\nfn mk<T>(x: T) -> Nd<T> { Nd { v: x, next: null } }\nfn main() -> i64 { let n = mk(4); let k = n.next; n.v }");
+        check_ok("struct A1<T> { v: T, b: ?B1<T> }\nstruct B1<U> { w: U, a: ?A1<U> }\nfn mk<T>(x: T) -> A1<T> { A1 { v: x, b: null } }\nfn main() -> i64 { let a = mk(3); let b = a.b; a.v }");
+        // Their concrete forms stay accepted.
+        check_ok("struct S { a: i64 }\nfn f(x: secret S) -> secret S { x }\nfn main() -> i64 { 0 }");
+        check_ok("fn main() -> i64 { let a: [i64] = [1, 2]; let x: [[i64]] = [a]; x[0][1] }");
+
+        // Unification binds a callee's type parameter where the argument's type is the same
+        // instance or reference as the parameter's, written in a generic caller: the two are
+        // one interned type, and the callee's `U` meets the caller's own type parameter.
+        for body in [
+            "struct R<T> { v: T }\nfn mk<T>(a: T) -> R<T> { R { v: a } }\nfn take<U>(a: U, w: R<U>) -> U { a }\n\
+             fn g<A>(x: A) -> i64 { take(0, mk(x)) }\nfn main() -> i64 { g(true) }",
+            "fn take<U>(a: U, w: &U) -> U { a }\nfn g<A>(x: A) -> i64 { take(0, &x) }\nfn main() -> i64 { g(true) }",
+        ] {
+            let err = check_err(body);
+            assert!(matches!(err, TypeError::TypeArgInferenceConflict { .. }), "{body}: got {err:?}");
+        }
+        // Where the caller's argument fits, it binds: `U := A`.
+        check_ok(
+            "struct R<T> { v: T }\nfn mk<T>(a: T) -> R<T> { R { v: a } }\nfn take<U>(a: U, w: R<U>) -> U { a }\n\
+             fn g<A>(x: A, y: A) -> A { take(y, mk(x)) }\nfn main() -> i64 { g(1, 2) }",
+        );
     }
 
     #[test]

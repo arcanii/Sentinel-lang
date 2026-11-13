@@ -1,0 +1,14 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c17_uninstantiable_instance_builtin.sentinel\")"
+---
+sentinel::types::uninstantiable_type
+
+  × field `v` of `P` cannot be instantiated at these type arguments
+    ╭─[tests/ui/c17_uninstantiable_instance_builtin.sentinel:11:27]
+ 10 │ fn main() -> i64 {
+ 11 │     let v: Vec<P<?i64>> = vec_new();
+    ·                           ────┬────
+    ·                               ╰── 
+ 12 │     0
+    ╰────

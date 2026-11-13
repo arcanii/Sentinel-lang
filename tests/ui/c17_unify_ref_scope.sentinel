@@ -1,0 +1,15 @@
+// ADR 0016 A3: the same for a reference. In `g`, `&x` is an `&A`, which is the same interned
+// reference as `take`'s `&U`; `take`'s `U`, bound to `i64` by `0`, then meets `A`. Surfaces
+// TypeArgInferenceConflict at the second argument.
+
+fn take<U>(a: U, w: &U) -> U {
+    a
+}
+
+fn g<A>(x: A) -> i64 {
+    take(0, &x)
+}
+
+fn main() -> i64 {
+    g(true)
+}

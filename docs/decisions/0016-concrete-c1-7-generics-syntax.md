@@ -1,6 +1,6 @@
 # ADR 0016: Concrete C1.7 surface syntax — generic fns, generic structs, monomorphization
 
-Status: ACCEPTED-WITH-AMENDMENTS (A1, A2; A3 PROPOSED) — all twelve D-decisions exercised
+Status: ACCEPTED-WITH-AMENDMENTS (A1, A2, A3) — all twelve D-decisions exercised
 across the C1.7 scaffolding commit (c1e5083, AST + parser + resolve), the
 C1.7.4a commit (d32a9fe, types crate + builtin re-route), the
 C1.7.5 commit (ad7e10d, codegen monomorphization for generic
@@ -18,13 +18,15 @@ true of the *syntax* decisions, but the deferred half of D7 did not.)
 **A2 (2026-11-10)** makes the comparison rule hold a type parameter opaque, as the Context
 says it is: a comparison takes scalar operands only (register item D185).
 
-**A3 (2026-11-12, PROPOSED)** keeps a type parameter in its own scope: a generic call's return type, a
-generic struct literal's field and a field read are refused where substituting the type
-arguments would keep a type parameter of the declaration (register items D188, D183).
+**A3 (2026-11-12)** keeps a type parameter in its own declaration's types: a `secret` over
+one and an array of arrays over one are refused where they are written, a generic call's return
+type, a generic struct literal's field and a field read are refused where the substitution keeps
+one, and unification binds a callee's type parameter where an argument has its own written type
+(register items D188, D182, D183).
 
 Date: 2026-05-26
-Last touched: 2026-11-12 (A3 — a generic type is used only where its instance has a
-form; register items D188 and D183 closed)
+Last touched: 2026-11-12 (A3 — a type parameter stays in its own declaration's types;
+register items D188, D182 and D183 closed)
 Related: 0011 (Phase C1 kickoff; D3 names generics as a C1 type-
 system deliverable, D6 schedules C1.7 last, D12 perf discipline
 becomes measurable here), 0015 (concrete C1.6 surface — D6
@@ -1135,82 +1137,156 @@ in a generic body, and a codegen seed holds `scg`'s acceptance of two untyped op
 least a MINOR bump by ADR 0076 D2, which the bump to 0.3.0 already owed covers. No accepted
 program's emitted IR moves.
 
-### A3 — a generic type is used only where its instance has a form (2026-11-12)
+### A3 — a type parameter stays in its own declaration's types (2026-11-12)
 
-**Status: PROPOSED (draft).** Under review: this text, and the register items it names (D188,
-D189, D190, and D183's closure), are settled when the amendment is accepted.
+**Status: ACCEPTED.** Register item **D188**; closes **D182** and **D183**.
 
-D6 makes a generic instance's types by substituting the type arguments into the types its
-declaration wrote (`Type::substitute`). Where no substituted form exists, substitution keeps
-the written type, type parameters and all: a `secret` over a type parameter passes through
-unchanged (ADR 0019 D5), and a `?T`, `[T]` or `Vec<T>` whose element, substituted, is not one
-it can hold keeps `?T`, `[T]` or `Vec<T>` — `?T` at `T := ?i64` or `T := secret i64`, `[T]` at
-`T := ?i64`, `Vec<T>` at `T := [i64]`, and the same inside a generic instance's arguments
-(`Q<?T>`) or behind a reference (`&?T`). The type checker took that result as the type of a
-generic call, of a generic struct literal's field and of a field read on a generic instance;
-and it pushed a parameter's type down to its argument in the form `try_substitute` answers,
-which is the written type for a generic instance, a reference and a `secret`. Each of those
-put a type parameter of one declaration into the types of another scope. In a fn with no type
-parameters it named nothing: `snc build` stopped with an internal error on most such programs
-(D183 is that error for a `secret T`), and lowered a `Vec<T>`, whose layout does not depend on
-its element. Inside another generic fn it was read as that fn's own type parameter of the same
-index, so the expression was typed at the caller's type argument instead of at a type of its
-own.
+A type parameter is identified by its index (`TypeParamId`), and interned types are values: a
+callee's `P<T>` and a generic caller's own `P<T>` are one interned instance. So a type that
+carries a type parameter out of the declaration it was written in is read, in another generic
+fn, as that fn's own parameter of the same index. Three ways let one out:
 
-**The rule.** `Type::substitute_checked` substitutes as `substitute` does and answers no type
-where `substitute` would keep a written type that mentions a type parameter. The type checker
-refuses with `sentinel::types::uninstantiable_type` ("… cannot be instantiated at these type
-arguments") a generic call whose return type it answers none for (at the call), a generic
-struct literal's field (at the field's name) and a field read on a generic instance (at the
-field). A parameter type is pushed down to its argument as the substitution makes it, and not
-at all where it makes none. Because substitution leaves a `secret` over a type parameter as
-written, a generic fn whose return type has one anywhere cannot be called — a phantom one too,
-`fn g<T>(y: T) -> P<secret T>` for a `struct P<T> { n: i64 }`, though no layout depends on it —
-and a generic struct with such a field cannot be built or have that field read. Whether a
-later amendment substitutes through `secret` instead is the question D146 and D183 recorded.
+- **Substitution keeps the written type where it builds no instance.** D6 makes an instance's
+  types by substituting the type arguments into what the declaration wrote
+  (`Type::substitute`). A `secret` over a type parameter passes through unchanged (ADR 0019
+  D5); a `?T`, `[T]` or `Vec<T>` whose substituted element is not one the substitution demotes
+  to keeps `?T`, `[T]` or `Vec<T>` (`?T` at `T := ?i64` or `T := secret i64`, `[T]` at
+  `T := ?i64`, `Vec<T>` at `T := [i64]`, also inside a generic instance's arguments or behind a
+  reference); and a nested array's element is interned as if it were concrete (ADR 0068), so
+  `[[T]]` is kept whole. The type checker took the result as the type of a generic call, a
+  generic struct literal's field and a field read on a generic instance; and an instance a call
+  made could hold a field the substitution keeps written (`mk(n)` returning a `P<?i64>` for
+  `struct P<T> { v: ?T }`), which the analyses that read an instance's fields read as written.
+- **The pushdown.** A parameter type was pushed down to its argument as `try_substitute`
+  answers it, which is the written type for a generic instance, a reference and a `secret`.
+- **Unification's identity shortcut.** `unify_one` accepted an argument whose interned type is
+  the parameter's own, for a generic instance, a reference and a nested array, without binding
+  anything, so a callee's `R<U>`, already bound to `i64` by another argument, accepted a
+  caller's `R<A>`.
 
-**What moves.** Refused now: each call, literal and field read above, and a `null` filling a
-parameter that holds a `secret` over a type parameter (`?P<secret T>`), which no type is
-pushed down to and which is therefore an ambiguous `null`. Accepted now: a value filling a
-`?GenericInstance<T>` or a `?&T` parameter is widened to the instance's nullable (`?P<i64>`,
-`?&i64`), as a `let` annotated with that type widens one, where the written type refused it;
-`snc build` runs both, and `snc llvm` lowers the reference one and defers the generic
-instance's heap box, as it defers the `let`'s. Typed otherwise: a `null` filling such a
-parameter takes the instance's type, not the written one; its emitted IR does not move (the
-pass fixture's two `null` calls lower to the same bytes as before). None of these is in the
-corpus. A matched sweep over the tracked `.sentinel` files outside `selfhost/` (`snc types`
-and `snc llvm` on each file, `snc types` on each program `snc merge` can merge, `snc build`
-on the rest) moved only `c58_secret_float_through_generic`, now refused one step earlier, at
-its field read, with the new code; all five self-hosted drivers, over every tracked
-`.sentinel` file and the new fixtures, moved only the new fixtures and `c58`.
+In a fn with no type parameters the leftover parameter named nothing, and `snc build` stopped
+with an internal error on most such programs (D183) and lowered those whose layout does not
+depend on it (a `Vec<T>`, a `[T]` passed through). Inside another generic fn the expression was
+typed at the caller's type argument instead of at a type of its own. Separately, a generic struct
+that holds itself at other type arguments (`struct N<T> { next: ?N<Box<T>> }`) has instances
+without end, which a walk that follows an instance's fields never finishes.
+
+**The rule.** Four parts, each fail-closed:
+
+1. A `secret` over a type that mentions a type parameter is refused where it is written
+   (`sentinel::types::secret_over_type_param`), as ADR 0019 D5's minimum intends, in a
+   signature, a field and a type argument alike.
+2. An array whose element is an array that mentions a type parameter is refused where it is
+   written and where an array literal builds one (`sentinel::types::generic_nested_array`),
+   as ADR 0068 D6 defers generic nested arrays. With 1 and 2, `contains_type_param`, which
+   looks into neither, is the whole answer everywhere else; `mentions_type_param` looks into
+   both, for these two checks.
+3. `Type::substitute_checked` substitutes as `substitute` does and answers no type where
+   `substitute` keeps a written type that mentions a type parameter. The type checker refuses
+   a generic call's return type, a generic struct literal's field and a field read on a generic
+   instance where it answers none; and a generic call's result (a user fn's or a builtin's), a
+   generic struct literal's field and such a field read whose type holds a generic instance, at
+   any depth, one of whose fields it answers none for at the instance's arguments
+   (`sentinel::types::uninstantiable_type`, "… cannot be instantiated at these type arguments").
+   That walk refuses a struct it meets again, on the way down, at other type arguments, at the
+   field that leads there: such a struct's instances have no end. (It refuses one met again at
+   its own arguments permuted too, `?Pair<B, A>` inside `Pair<A, B>`, whose instances end.) A type
+   that mentions no type parameter is complete, even where the substitution keeps it written (a
+   `[secret S]` over a struct).
+4. A parameter type is pushed down to its argument as the substitution makes it (as written,
+   where it mentions no type parameter), and not at all where the substitution makes none.
+   Unification takes the identity shortcut only for a type that mentions no type parameter, and
+   otherwise unifies the arguments, which binds the callee's parameter to the caller's.
+
+**What moves.** Refused now: each call, literal and field read above, including one that makes
+an instance whose field has no form (`mk(n)` above, `vec_new()` at `Vec<P<?i64>>`) and a literal
+or field read of a struct that holds itself at other type arguments (a few such programs built
+and ran before, where nothing walked the field); any declaration with a `secret` over a type parameter, including a generic
+nothing calls and a phantom type argument (`fn g<T>(y: T) -> P<secret T>` for
+`struct P<T> { n: i64 }`), though no layout depends on the latter; any generic nested array;
+and a call whose callee parameter, once bound, meets the caller's own type through an argument
+of the same written instance or reference (refused as a conflicting inference; so is a `pop`
+whose `?T` result a generic fn returns, `fn opt<T>(v: Vec<T>) -> ?T { let mut u = v; pop(&mut
+u) }`, as the same call with a written `?i64` already was). Some refusals reach shapes whose form
+the language has but the substitution does not build: `[T]` and `Vec<T>` at `T := secret S` for
+a struct `S` or at a secret generic instance (`secret P<i64>`), and `[T]` at an array type
+(`T := [u8]`, whose `[[u8]]` ADR 0068 has). The oracle typed these with
+the callee's written `[T]` or `Vec<T>`; where the generic body only passed the value through
+(`fn same<T>(xs: [T]) -> [T] { xs }` over a `[secret S]` or a `[[u8]]` of strings, a
+`Ring<secret S>`'s `[T]` field, `&[T]`), `snc llvm` lowered them and `snc build` ran them, and where it built or read an element
+`snc llvm` refused them as not yet ported; `scg` built them. They are refused now. Refused
+otherwise: `vec_new()` at an element the substitution does not build (`Vec<secret S>`) is
+`uninstantiable_type` where it was `mismatch`. Accepted now: a generic caller's own `P<T>` or
+`&T` argument binds the callee's parameter, where the call was refused as an ambiguous type
+argument; a value filling a `?GenericInstance<T>` or `?&T` parameter after `T` is bound is
+widened to the instance's nullable, and a value already of that nullable type fills it, where
+the written type refused both (`snc build` runs these; `snc llvm` lowers the reference one and
+defers a generic instance's heap box, as it defers the `let`'s). Typed otherwise: a `null`
+filling such a parameter takes the instance's type. Its emitted instructions do not move, but
+where the program first names another instance of the same struct after the call, the order of
+the named struct type definitions can (`%Bx_i64` before `%Bx_bool`); `scg` orders them the same
+way. A matched sweep over the `.sentinel` files outside `selfhost/`, tracked and new
+(`snc types` and `snc llvm` on each file, `snc types` on each program `snc merge` takes,
+`snc build` on the rest), moved only this amendment's fixtures and
+`c58_secret_float_through_generic`, now refused at its `secret T`; all five self-hosted drivers,
+over every `.sentinel` file in the tree, moved only the same files.
 
 **Not covered.** A generic fn's body is still checked once, as written: a type in it with no
 form at some instance (`let n = wrap(x);` inside `g<T>`, with `g` called at `T := ?i64`) is
-accepted, and `snc build` stops with an internal error on it (D189).
+accepted, and so is a generic instance written in a signature, an annotation or a container
+element whose field has no form at its arguments (`P<?i64>` for `struct P<T> { v: ?T }`),
+where no call, literal or field read makes or reads one; `snc build` stops with an internal
+error on both, and `scg`'s code generator lowers both (D189). The check that a generic struct
+does not hold a reference in a field (ADR 0017 D7) is not changed here. An `impl` on a generic struct
+written without type arguments types its field reads at the struct's own parameter (D190).
 
-**Mirror.** `scg`'s checking modes make the same refusal with the same code and message:
-`subst_complete` (`types/infer.sentinel`) answers what `substitute_checked` answers, from the
-oracle's three element lists (`tc_null_inner`, `tc_arr_elem`, `tc_vec_elem`) and its type
-parameter test (`tc_has_tparam`), at a generic call's return type, a generic struct literal's
-field and a field read. `arg_expected` pushes the substituted type (`subst_bound`) and pushes
-none for a parameter with a `secret` over a type parameter anywhere in it. `scg` checks a
-literal's fields in declaration order, as it types their values (D145), so a literal that
-writes its fields out of that order can be refused for another field than the oracle names.
-A `null` argument nothing is pushed down to is typed by `scg` at the parameter's written
-type rather than refused as the oracle's ambiguous `null` (not ported; D45).
+**Mirror.** `scg`'s checking modes make the same refusals with the same codes and messages:
+`tc_secret_tparam_written` and `tc_nested_tparam` where `type_of_typeexpr` resolves a written
+type and after an array literal's elements, `subst_complete` at a generic call's return type, a
+generic struct literal's field and a field read, `tc_instance_fields` at a generic call's and a
+generic builtin's result, a generic struct literal's field and a field read (with the oracle's
+refusal of a struct met again at other type arguments), the pushdown through `subst_bound` (which fails
+closed where a type parameter is unbound), and `tc_gunify`'s identity shortcut under the
+oracle's condition. An unknown type name over such an argument is refused for the name first, as
+the oracle refuses it. Where the two still differ, on programs both refuse unless said:
+- `scg` resolves declarations in source order and the oracle resolves types first, so a program
+  with another error can be refused for the other one (D145);
+- `scg` checks a struct literal's whole field set first and then each field in declaration
+  order, so a literal with an unknown, repeated or uninstantiable field can be refused for
+  another field, or with another code, than the oracle names (D145);
+- `scg` seeds a call's type arguments from an expected type where the oracle has none (D180),
+  so it can name the other order of a conflicting inference, or `type_arg_inference_conflict`
+  where the oracle answers `return_type_mismatch` or `uninstantiable_type`, and it accepts a
+  value widened into a `?P<T>` filled before `T`'s binder and a generic fn's tail `pop` into
+  `?T`, which the oracle refuses;
+- a `null` argument nothing is pushed down to is typed by `scg` with no type (`?T`) rather than
+  refused as the oracle's ambiguous `null` (not ported, D45);
+- the return-type check at a generic builtin call is not mirrored: `vec_new()` at
+  `Vec<secret S>` is refused by the oracle and typed by `scg`, as at HEAD, where the oracle
+  answered `mismatch`; and `scg` checks `vec_to_array`'s element for a plain one before the
+  instance walk, so an element that is both not plain and holds an instance with an unbuilt
+  field is `vec_to_array_element_not_plain` in `scg` and `uninstantiable_type` in the oracle.
 
 **Pins.** `generic_types_are_instantiated_completely` (sentinel-types) checks
 `substitute_checked` against `substitute` over each kind of type that can hold a type
-parameter, each refusing site, the same shapes accepted at type arguments that have a form,
-the two pushed-down `null`s, the widened `?P<T>` argument and the ambiguous `null`. Nine
-`tests/ui` fixtures (`c17_uninstantiable_*`: `?T` at a nullable and at a `secret`, `[T]` at a
-nullable, `Vec<T>` at an array, a `secret T` return, a generic instance's argument, a
-reference's target, a struct literal's field and a field read) and `c58` carry the ported
-code, so every self-hosted driver must refuse each as the oracle does; `tests/pass`
-`c17_generic_param_pushdown_instance` holds the two `null`s and the widened reference, through
-every self-hosted differential.
+parameter and over a `[secret S]` and a `Vec<secret S>` that mention none, each refusing site
+including the instances a call or field read makes, the declaration rules and their concrete
+forms, the unification cases, regular and other recursion, and the pushdowns. `tests/ui` holds
+fifteen `c17_uninstantiable_*` fixtures (`?T` at a nullable and at a `secret`, `[T]` at a
+nullable, `Vec<T>` at an array, a generic instance's argument, a reference's target, a literal's
+field, a field read, an instance a call, a builtin, a field read, a literal's field, another
+instance's field and another instance's type argument make, and a struct that holds itself at
+other type arguments), `c17_secret_over_type_param_return` and `_field`,
+`c17_generic_nested_array_param` and `_literal`, `c17_unify_instance_scope` and
+`c17_unify_ref_scope`, and `c58`, each with a ported code, so every self-hosted driver must
+refuse each as the oracle does. `tests/pass` holds `c17_generic_param_pushdown_instance` (a
+`null` typed at the instance, a widened reference), `c17_concrete_secret_array_calls` (a
+`[secret S]` returned, received and held in a generic struct) and
+`c17_generic_args_bind_instance` (the new binding, already-nullable arguments, and a `?&T` met
+before its binder, which the oracle has always typed and on which the first commit of this
+amendment made `scg`'s typer abort) and `c17_regular_recursion` (a struct that holds itself at its
+own arguments), through every self-hosted differential.
 
-**Versioning.** The oracle refuses programs it accepted, accepts two kinds of argument it
-refused and types some arguments differently, so this is oracle-moving: at least a MINOR bump
-by ADR 0076 D2, covered by the bump to 0.3.0 already owed. No accepted program's emitted IR
-moves.
+**Versioning.** The oracle refuses programs it accepted, accepts programs it refused and types
+some arguments differently, so this is oracle-moving: at least a MINOR bump by ADR 0076 D2,
+covered by the bump to 0.3.0 already owed. No accepted program's emitted instructions move.

@@ -1,0 +1,11 @@
+// ADR 0016 A3 (ADR 0068 D6): an array of arrays over a type parameter is refused where it is
+// written. Generic nested arrays are deferred, and substitution and unification treat a
+// nested element as concrete. Surfaces GenericNestedArray at the parameter's type.
+
+fn first<T>(w: [[T]]) -> i64 {
+    0
+}
+
+fn main() -> i64 {
+    0
+}

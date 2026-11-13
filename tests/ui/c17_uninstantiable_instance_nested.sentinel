@@ -1,0 +1,21 @@
+// ADR 0016 A3: the check reaches an instance a field holds. `mko(n)` returns an `O<?i64>`,
+// whose field `inner` is a `P<?i64>`, whose field `?T` has no form at `T := ?i64`. Surfaces
+// UninstantiableType at the call.
+
+struct P<T> {
+    v: ?T,
+}
+
+struct O<T> {
+    inner: P<T>,
+}
+
+fn mko<T>(a: T) -> O<T> {
+    O { inner: P { v: null } }
+}
+
+fn main() -> i64 {
+    let n: ?i64 = 3;
+    let o = mko(n);
+    0
+}

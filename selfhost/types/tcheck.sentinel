@@ -115,7 +115,9 @@ pub fn check_program(src: [u8], result: &mut Vec<u8>, xn: &Vec<u8>) -> i64 {
 // and refused once nothing else is (`check_program`). It is refused wherever it is written, in a
 // generic fn's signature, a generic struct's field or a type argument, including where the
 // oracle lowers it: in a generic nothing instantiates, and as a phantom type argument (register
-// D182).
+// D182). Since ADR 0016 A3 the checking modes refuse such a `secret` where it is written, with the
+// oracle's own code (`tc_secret_tparam_written`), and that refusal comes first: this one is a
+// backstop.
 fn tc_secret_over_tparam(c: &mut TyCtx, x: i64) -> i64 {
     if (*c).mode == 5 {
         if len((*c).tc_lowr) > 0 {
@@ -142,7 +144,8 @@ fn tc_secret_over_tparam(c: &mut TyCtx, x: i64) -> i64 {
 // `ambiguous_type_arg`. Ported for the callees whose signature holds a `secret` over a type
 // parameter, which binds nothing in the checking modes (a `secret` parameter type only fits an
 // argument of that very type); for other callees it is not (a `fn z<T>() -> i64` called `z()`
-// is still accepted).
+// is still accepted). Since ADR 0016 A3 such a signature is refused where it is written, so this
+// is a backstop.
 fn tc_ambiguous(c: &mut TyCtx, fid: i64, subst: &Vec<i64>) -> i64 {
     if tc_on(c) {
         let mut fam: bool = tc_secret_tparam(c, (*c).ufret[fid - 42], false);
@@ -276,7 +279,9 @@ fn tc_secret_tparam(c: &mut TyCtx, h: i64, under: bool) -> bool {
 // `subst_complete`), and a `secret` parameter type that binds no type parameter in unification, as
 // in the oracle's, with the oracle's refusal of a type parameter that is then left unbound
 // (`tc_ambiguous`). Since the code generator's walk does both otherwise, its checking pass
-// refuses any `secret` written over a type parameter (`tc_secret_over_tparam`).
+// refuses any `secret` written over a type parameter (`tc_secret_over_tparam`). Since ADR 0016
+// A3 every checking mode refuses one where it is written, as the oracle does
+// (`tc_secret_tparam_written`), so those A17 rules are backstops a program no longer reaches.
 fn tc_on(c: &mut TyCtx) -> bool {
     (*c).mode != 4
 }
@@ -371,6 +376,68 @@ fn tc_has_tparam(c: &mut TyCtx, h: i64) -> bool {
         } else {
             false
         }
+    }
+}
+
+// ADR 0016 A3: whether `h` mentions a type parameter anywhere, by the oracle's
+// `mentions_type_param`: through a nullable's, an array's (a nested array's too), a `Vec`'s and a
+// `secret`'s inner type, a reference's target and a generic instance's arguments.
+fn tc_mentions_tparam(c: &mut TyCtx, h: i64) -> bool {
+    if h < tbase() {
+        false
+    } else {
+        let k: i64 = (*c).tk[h - tbase()];
+        let a: i64 = (*c).ta[h - tbase()];
+        let b: i64 = (*c).tb[h - tbase()];
+        if k == 9 {
+            true
+        } else if k == 1 || k == 3 || k == 4 || k == 11 {
+            tc_mentions_tparam(c, a)
+        } else if k == 2 {
+            tc_mentions_tparam(c, b)
+        } else if k == 10 {
+            let gs: i64 = (*c).girs[b];
+            let ge: i64 = (*c).gire[b];
+            let mut any: bool = false;
+            let mut gi: i64 = gs;
+            while gi < ge {
+                if tc_mentions_tparam(c, (*c).gia[gi]) {
+                    any = true;
+                    0
+                } else {
+                    0
+                };
+                gi = gi + 1;
+            }
+            any
+        } else {
+            false
+        }
+    }
+}
+
+// ADR 0016 A3: the oracle refuses where it is written a `secret` over a type `ih` that mentions a
+// type parameter (`sentinel::types::secret_over_type_param`), in the checking modes.
+fn tc_secret_tparam_written(c: &mut TyCtx, ih: i64) -> i64 {
+    if tc_on(c) && tc_mentions_tparam(c, ih) {
+        refuse(c, "sentinel::types::secret_over_type_param", "a `secret` over a type parameter is not supported")
+    } else {
+        0
+    }
+}
+
+// ADR 0016 A3: the oracle refuses an array whose element `eh` is an array that mentions a type
+// parameter, written or built by a literal (`sentinel::types::generic_nested_array`, ADR 0068 D6).
+fn tc_nested_tparam(c: &mut TyCtx, eh: i64) -> i64 {
+    let nested: bool = if eh >= tbase() {
+        (*c).tk[eh - tbase()] == 1
+    } else {
+        false
+    };
+    if tc_on(c) && nested && tc_mentions_tparam(c, eh) {
+        refuse(c, "sentinel::types::generic_nested_array", "an array of arrays over a type parameter is not supported")
+    } else {
+        0
     }
 }
 
@@ -2352,7 +2419,11 @@ fn tc_gunify(c: &mut TyCtx, p: i64, a: i64, bi: &mut Vec<i64>, bt: &mut Vec<i64>
             (*c).tc_ug = a;
             2
         }
-    } else if p == a {
+    } else if p == a && tc_has_tparam(c, p) == false {
+        // ADR 0016 A3: the same type is equal only where it mentions no type parameter, as in
+        // the oracle's `unify_one`: a type parameter's handle is its index, so a callee's `P<T>`
+        // and a generic caller's own `P<T>` are one handle, and the walk below binds the
+        // callee's `T` to the caller's.
         0
     } else if p < tbase() {
         tc_gfail(c, p, a)
@@ -2490,10 +2561,11 @@ fn tc_gcallarg(c: &mut TyCtx, src: &[u8], gfid: i64, pi: i64, pty: i64, got: i64
         // that bind its parameter, so it is not refused here.
         0
     } else if psecret_t {
-        // A `secret T` parameter: nothing is pushed down to it (ADR 0016 A3), and only an
-        // argument of that very type unifies with it. Any other argument is the oracle's
-        // call-argument mismatch, which names the written `secret T`; a `null` (the oracle's
-        // ambiguous `null`, not ported) is refused as a mismatch.
+        // A `secret T` parameter, which ADR 0016 A3 refuses where it is written (so a backstop):
+        // nothing is pushed down to it, and only an argument of that very type unifies with it.
+        // Any other argument is the oracle's call-argument mismatch, which names the written
+        // `secret T`; a `null` (the oracle's ambiguous `null`, not ported) is refused as a
+        // mismatch.
         if got == pty {
             0
         } else if got < 0 {
