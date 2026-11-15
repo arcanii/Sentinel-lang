@@ -316,6 +316,37 @@ The right thing must be the easy thing. Defaults make signed,
 verified builds the path of least resistance, with bypasses
 deliberately visible.
 
+### 2.15 Graded Trust Levels
+
+**Maintainer-prioritized (2026-11-15).** Trust under ADR 0061 is binary per
+key: the consumer's manifest trusts a dependency's signing key (under
+`exact-key` or `trust-on-first-use`; `issuer` is a later add) or it does not,
+and a trusted key is bounded by the capability ceiling its `grants` and
+`forbids` declare (D6). The `require_signatures = off | warn | strict` gate
+(D7) is one setting for the whole project. So a dependency pinned to an exact
+key and one first seen yesterday under trust-on-first-use are equally
+"trusted". Graded levels of trust, or a trust confidence, would let a project
+flag code sources that are less trusted than others.
+
+Questions for the ADR, which belongs to the package security-model review
+(§10.5):
+
+  - What a level attaches to: the key, the source (a registry, git, a path,
+    vendored code), the policy, or a combination.
+  - Whether a module inherits the lowest level of anything it imports, so that
+    a well-trusted module that pulls in a poorly trusted one is flagged too.
+  - Whether a level maps onto D6's capability ceiling (a lower level, a
+    narrower default mask) or only onto diagnostics.
+  - Whether confidence decays with time (§2.11) or with a key's age.
+  - Where a level shows: `warn` diagnostics, the bill of materials (§2.9),
+    `snc`'s own output.
+
+A level may flag a source or narrow what it may do. It must never relax a
+compile-time check (`secret_leak`, the FFI secret fence, the borrow checker),
+or trust becomes an escape hatch from the guarantee. This is a different axis
+from `docs/TIERED_RELEASES.md`'s tiers, which grade a built artifact's
+maturity in order to elide runtime checks, not the trust of a code source.
+
 ---
 
 ## 3. Runtime Integrity
@@ -607,6 +638,19 @@ publication time. Packages declare effects in manifests; the registry
 refuses publication of packages whose declared effects exceed actual
 need (measured by the compiler). All published packages are signed.
 
+**Maintainer-prioritized (2026-11-15): a package system like Cargo's crates,
+after a security-model review.** The review comes before any package design,
+and asks whether and how packages fit the security model. It reads ADR 0061
+(signing and the consumer trust manifest), ADR 0063 (consuming prebuilt
+libraries), ADRs 0037 and 0067 (modules), ADR 0064 (the library layout) and §2
+above. Its questions: who may publish, and how a dependency is admitted (§2.1
+to §2.3, §2.14); which effects and capabilities a dependency may use (ADR 0061
+D6); how `secret` values, and code that handles them, cross a package
+boundary; graded trust (§2.15); and how packages meet the frozen `abi-v1`
+symbol names and the cross-unit mangling and deduplication of generic
+instances, which a package design must not change without the maintainer.
+Design goes through an issue and an ADR first.
+
 ### 10.6 Cross-Language FFI Generation
 
 Automated generation of safe bindings to Sentinel from C, C++, Rust,
@@ -743,6 +787,15 @@ ABI.
 A hygienic macro system, ideally procedural with access to the typed
 HIR rather than just the AST. Carefully designed to compose with
 effects, regions, and signatures.
+
+**Maintainer-prioritized (2026-11-15): macros similar to Rust's, to allow
+tighter code.** Needs an ADR first. Constraints known now: whatever stage
+expansion runs at, the checks that carry the guarantee (`secret_leak`, the
+borrow checker, the effect checker) must see the expanded program; a
+procedural macro runs code inside the compiler, which is a new trust boundary
+(§2); and whatever `snc` expands, `scg` must expand identically, or both
+bootstrap fixed points break. Oracle-moving, so at least a MINOR version bump
+(ADR 0076 D2).
 
 ### 13.3 Reflection
 
