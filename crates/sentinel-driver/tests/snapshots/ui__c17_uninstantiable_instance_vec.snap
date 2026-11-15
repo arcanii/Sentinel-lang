@@ -1,0 +1,14 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c17_uninstantiable_instance_vec.sentinel\")"
+---
+sentinel::types::uninstantiable_type
+
+  × field `v` of `V` cannot be instantiated at these type arguments
+    ╭─[tests/ui/c17_uninstantiable_instance_vec.sentinel:15:13]
+ 14 │ fn main() -> i64 {
+ 15 │     let v = mkv([1, 2]);
+    ·             ─────┬─────
+    ·                  ╰── 
+ 16 │     0
+    ╰────

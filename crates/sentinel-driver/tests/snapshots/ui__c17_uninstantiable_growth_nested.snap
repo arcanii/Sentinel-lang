@@ -1,0 +1,14 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c17_uninstantiable_growth_nested.sentinel\")"
+---
+sentinel::types::uninstantiable_type
+
+  × field `f` of `C` cannot be instantiated at these type arguments
+    ╭─[tests/ui/c17_uninstantiable_growth_nested.sentinel:20:13]
+ 19 │ fn main() -> i64 {
+ 20 │     let c = mk(1);
+    ·             ──┬──
+    ·               ╰── 
+ 21 │     0
+    ╰────

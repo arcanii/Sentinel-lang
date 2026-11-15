@@ -21,7 +21,7 @@
 //! `#[salsa::tracked]` wrapper that chains on
 //! `sentinel_resolve::resolve_query`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use salsa::Accumulator;
 use sentinel_ast::{BinOp, CmpOp, LogicOp, Span, Spanned, TypeExpr, TypeExprKind, UnaryOp};
@@ -8858,97 +8858,79 @@ fn unify_one(
 /// ADR 0016 A3: the first field, as `(field, struct)`, of a generic instance `ty` holds —
 /// itself, or one reached through a nullable's, an array's, a `Vec`'s or a `secret`'s inner
 /// type, a reference's target, an instance's arguments or another such field — whose type
-/// the substitution does not build at that instance's arguments. A generic call's result
-/// and a field read on a generic instance are refused where there is one: an instance whose
-/// field keeps a type parameter would otherwise reach the analyses and the back ends that
-/// read its fields (the reference-in-field check below among them).
+/// the substitution does not build at that instance's arguments. A generic call's result,
+/// a generic struct literal's fields and a field read on a generic instance are refused where
+/// there is one: an instance whose field keeps a type parameter would otherwise reach the
+/// analyses and the back ends that read its fields (the reference-in-field check below among
+/// them).
 ///
-/// A struct met again, on the way down, at other type arguments (`struct N<T> { next: ?N<Box<T>> }`,
-/// or through another struct) has an expansion without end, so the field that leads there is
-/// answered as one the substitution does not build. That keeps the walk finite (each struct
-/// appears at most once on the way down, and an instance already walked is not walked again) and
-/// refuses such a struct where a call or field read makes one; a struct met again at the same
-/// arguments is the instance already walked.
+/// The walk does not build the instances it meets. Whether the substitution builds a field
+/// depends only on the shapes of the instance's arguments ([`subst_shape`]), so it walks
+/// each struct once per tuple of argument shapes: at most `8^n` times for a struct with `n`
+/// type parameters, and it interns nothing. It keeps its own stack, so the thread's call
+/// stack does not bound how deep it can go. A struct whose instances have no end (a type
+/// argument grows around a cycle, [`growing_cycle`]) is refused at the field where it grows.
 fn unbuilt_instance_field(
     ty: Type,
     structs: &[TypedStructDecl],
-    instances: &mut Vec<GenericInstanceData>,
-    refs: &mut Vec<RefData>,
+    instances: &[GenericInstanceData],
+    refs: &[RefData],
     secrets: &[SecretData],
     arrays: &[ArrayElem],
-    seen: &mut Vec<GenericInstanceId>,
 ) -> Option<(String, String)> {
-    instance_walk(ty, structs, instances, refs, secrets, arrays, seen, &mut Vec::new(), None)
+    ShapeWalk::new(structs, instances, refs, secrets, arrays).walk_type(ty)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn instance_walk(
-    ty: Type,
-    structs: &[TypedStructDecl],
-    instances: &mut Vec<GenericInstanceData>,
-    refs: &mut Vec<RefData>,
+/// ADR 0016 A3: what the substitution reads of a type it puts in a `?X`, a `[X]` or a
+/// `Vec<X>`: bit 0 is set iff it builds a `?X` at it ([`Type::to_nullable_inner`]), bit 1
+/// iff a `[X]` (`to_array_elem_subst`), bit 2 iff a `Vec<X>` (`to_vec_elem_subst`). Those
+/// read only the type's outermost form, and for a `secret` which one it is, which the
+/// substitution keeps wherever the type is not a type parameter.
+fn subst_shape(t: Type) -> u8 {
+    u8::from(t.to_nullable_inner().is_some())
+        | (u8::from(t.to_array_elem_subst().is_some()) << 1)
+        | (u8::from(t.to_vec_elem_subst().is_some()) << 2)
+}
+
+/// The shape of the written type `f` once substituted at arguments of shapes `s` (`None`: no
+/// substitution, `f` is the type itself). A type parameter the instance gives no argument for
+/// has the shape nothing builds (fail closed).
+fn shape_at(f: Type, s: Option<&[u8]>) -> u8 {
+    match (f, s) {
+        (Type::TypeParam(id), Some(s)) => s.get(id.0 as usize).copied().unwrap_or(0),
+        _ => subst_shape(f),
+    }
+}
+
+/// Whether [`Type::substitute_checked`] builds the written type `f` at arguments of shapes
+/// `s`: its `complete`, arm for arm. A `?X`, `[X]` or `Vec<X>` that mentions a type parameter
+/// is built only where its element's shape has the container's bit; a `secret` only where its
+/// inner type mentions none.
+fn built_at(
+    f: Type,
+    s: &[u8],
+    instances: &[GenericInstanceData],
+    refs: &[RefData],
     secrets: &[SecretData],
-    arrays: &[ArrayElem],
-    seen: &mut Vec<GenericInstanceId>,
-    path: &mut Vec<StructId>,
-    via: Option<&(String, String)>,
-) -> Option<(String, String)> {
-    let inner = match ty {
+) -> bool {
+    let (inner, bit) = match f {
+        Type::Nullable(ni) => (ni.to_type(), 1),
+        Type::Array(ArrayElem::Array(_)) => return true,
+        Type::Array(ae) => (ae.to_type(), 2),
+        Type::Vec(ve) => (ve.to_type(), 4),
         Type::GenericInstance(id) => {
-            if seen.contains(&id) {
-                return None;
-            }
-            let inst = instances[id.0 as usize].clone();
-            let decl = &structs[inst.struct_id.0 as usize];
-            if path.contains(&inst.struct_id) {
-                return Some(match via {
-                    Some(v) => v.clone(),
-                    None => (String::new(), decl.name.clone()),
-                });
-            }
-            seen.push(id);
-            path.push(inst.struct_id);
-            let fields: Vec<(String, Type)> =
-                decl.fields.iter().map(|f| (f.name.clone(), f.ty)).collect();
-            let struct_name = decl.name.clone();
-            let mut hit = None;
-            for a in &inst.args {
-                hit = instance_walk(*a, structs, instances, refs, secrets, arrays, seen, path, via);
-                if hit.is_some() {
-                    break;
-                }
-            }
-            if hit.is_none() {
-                for (field, fty) in fields {
-                    let here = (field, struct_name.clone());
-                    hit = match fty.substitute_checked(&inst.args, instances, refs, secrets) {
-                        None => Some(here),
-                        Some(t) => instance_walk(
-                            t,
-                            structs,
-                            instances,
-                            refs,
-                            secrets,
-                            arrays,
-                            seen,
-                            path,
-                            Some(&here),
-                        ),
-                    };
-                    if hit.is_some() {
-                        break;
-                    }
-                }
-            }
-            path.pop();
-            return hit;
+            return instances[id.0 as usize]
+                .args
+                .iter()
+                .all(|a| built_at(*a, s, instances, refs, secrets))
         }
-        Type::Nullable(ni) => ni.to_type(),
-        Type::Array(ArrayElem::Array(id)) => Type::Array(*arrays.get(id.0 as usize)?),
-        Type::Array(ae) => ae.to_type(),
-        Type::Vec(ve) => ve.to_type(),
-        Type::Ref(id) => refs[id.0 as usize].inner,
-        Type::Secret(id) => secrets[id.0 as usize].inner,
+        Type::Ref(id) => return built_at(refs[id.0 as usize].inner, s, instances, refs, secrets),
+        Type::Secret(sid) => {
+            return match secrets.get(sid.0 as usize) {
+                Some(d) => !contains_type_param(d.inner, instances, refs),
+                None => false,
+            }
+        }
         Type::I64
         | Type::I32
         | Type::U8
@@ -8969,9 +8951,398 @@ fn instance_walk(
         | Type::Guard(_)
         | Type::Process
         | Type::SealedChannel
-        | Type::Fn(_) => return None,
+        | Type::Fn(_) => return true,
     };
-    instance_walk(inner, structs, instances, refs, secrets, arrays, seen, path, via)
+    built_at(inner, s, instances, refs, secrets)
+        && (shape_at(inner, Some(s)) & bit != 0 || !contains_type_param(f, instances, refs))
+}
+
+/// A node of [`growing_cycle`]'s graph: a struct's type parameter, by index.
+type ParamNode = (StructId, u32);
+
+/// The state of [`unbuilt_instance_field`]'s walk: the structs it has entered, each at a
+/// tuple of argument shapes, which of them have instances without end, which nodes of
+/// [`growing_cycle`]'s graph reach which, and which reach no growing cycle.
+struct ShapeWalk<'a> {
+    structs: &'a [TypedStructDecl],
+    instances: &'a [GenericInstanceData],
+    refs: &'a [RefData],
+    secrets: &'a [SecretData],
+    arrays: &'a [ArrayElem],
+    seen: HashSet<(StructId, Vec<u8>)>,
+    grows: HashMap<StructId, Option<(String, String)>>,
+    reaches: HashMap<(ParamNode, ParamNode), bool>,
+    clean: HashSet<ParamNode>,
+}
+
+/// A struct the walk has entered and not finished: its argument shapes, the next field to
+/// check, and the instances the field being walked holds, with the next one to enter.
+struct ShapeFrame {
+    sid: StructId,
+    shapes: Vec<u8>,
+    field: usize,
+    pending: Vec<(StructId, Vec<u8>)>,
+    next: usize,
+}
+
+impl<'a> ShapeWalk<'a> {
+    fn new(
+        structs: &'a [TypedStructDecl],
+        instances: &'a [GenericInstanceData],
+        refs: &'a [RefData],
+        secrets: &'a [SecretData],
+        arrays: &'a [ArrayElem],
+    ) -> Self {
+        ShapeWalk {
+            structs,
+            instances,
+            refs,
+            secrets,
+            arrays,
+            seen: HashSet::new(),
+            grows: HashMap::new(),
+            reaches: HashMap::new(),
+            clean: HashSet::new(),
+        }
+    }
+
+    /// Walk the instances the type `ty` holds, depth first: each instance's arguments
+    /// before it, then its fields in declaration order, each field's instances before the
+    /// next field. The stack of entered structs is kept here, not in the call stack.
+    fn walk_type(&mut self, ty: Type) -> Option<(String, String)> {
+        let structs = self.structs;
+        let mut top = Vec::new();
+        instances_in(ty, None, self.instances, self.refs, self.secrets, self.arrays, &mut top);
+        let mut stack: Vec<ShapeFrame> = Vec::new();
+        for (sid, shapes) in top {
+            if let Some(hit) = self.enter(sid, shapes, &mut stack) {
+                return Some(hit);
+            }
+            while let Some(frame) = stack.last_mut() {
+                if frame.next < frame.pending.len() {
+                    let (q, sh) = frame.pending[frame.next].clone();
+                    frame.next += 1;
+                    if let Some(hit) = self.enter(q, sh, &mut stack) {
+                        return Some(hit);
+                    }
+                    continue;
+                }
+                let decl = &structs[frame.sid.0 as usize];
+                let Some(f) = decl.fields.get(frame.field) else {
+                    stack.pop();
+                    continue;
+                };
+                frame.field += 1;
+                if !built_at(f.ty, &frame.shapes, self.instances, self.refs, self.secrets) {
+                    return Some((f.name.clone(), decl.name.clone()));
+                }
+                frame.pending.clear();
+                frame.next = 0;
+                instances_in(
+                    f.ty,
+                    Some(&frame.shapes),
+                    self.instances,
+                    self.refs,
+                    self.secrets,
+                    self.arrays,
+                    &mut frame.pending,
+                );
+            }
+        }
+        None
+    }
+
+    /// Enter struct `sid` at arguments of shapes `shapes`, once: refuse it if its instances
+    /// have no end, else push it to be walked.
+    fn enter(
+        &mut self,
+        sid: StructId,
+        shapes: Vec<u8>,
+        stack: &mut Vec<ShapeFrame>,
+    ) -> Option<(String, String)> {
+        if !self.seen.insert((sid, shapes.clone())) {
+            return None;
+        }
+        if let Some(hit) = self.grows(sid) {
+            return Some(hit);
+        }
+        stack.push(ShapeFrame { sid, shapes, field: 0, pending: Vec::new(), next: 0 });
+        None
+    }
+
+    fn grows(&mut self, sid: StructId) -> Option<(String, String)> {
+        if let Some(known) = self.grows.get(&sid) {
+            return known.clone();
+        }
+        let hit = growing_cycle(
+            sid,
+            self.structs,
+            self.instances,
+            self.refs,
+            self.secrets,
+            &mut self.reaches,
+            &mut self.clean,
+        );
+        self.grows.insert(sid, hit.clone());
+        hit
+    }
+}
+
+/// The instances the type `f` holds, in the order the walk enters them (an instance's
+/// arguments' instances before it), each as its struct and its arguments' shapes; `s` are
+/// the shapes `f`'s type parameters stand for (`None`: `f` is a type, not a field's written
+/// type). Recurses only as deep as `f` is written.
+fn instances_in(
+    f: Type,
+    s: Option<&[u8]>,
+    instances: &[GenericInstanceData],
+    refs: &[RefData],
+    secrets: &[SecretData],
+    arrays: &[ArrayElem],
+    out: &mut Vec<(StructId, Vec<u8>)>,
+) {
+    let inner = match f {
+        Type::GenericInstance(id) => {
+            let data = &instances[id.0 as usize];
+            for a in &data.args {
+                instances_in(*a, s, instances, refs, secrets, arrays, out);
+            }
+            out.push((data.struct_id, data.args.iter().map(|a| shape_at(*a, s)).collect()));
+            return;
+        }
+        Type::Nullable(ni) => ni.to_type(),
+        Type::Array(ArrayElem::Array(id)) => Type::Array(arrays[id.0 as usize]),
+        Type::Array(ae) => ae.to_type(),
+        Type::Vec(ve) => ve.to_type(),
+        Type::Ref(id) => refs[id.0 as usize].inner,
+        Type::Secret(id) => secrets[id.0 as usize].inner,
+        // A type parameter of the instance being walked: the instances its argument holds
+        // were walked with that instance's arguments.
+        Type::TypeParam(_)
+        | Type::I64
+        | Type::I32
+        | Type::U8
+        | Type::U128
+        | Type::F64
+        | Type::Ptr
+        | Type::Bool
+        | Type::Struct(_)
+        | Type::Class(_)
+        | Type::TraitSelf(_)
+        | Type::Enum(_)
+        | Type::Kont(_)
+        | Type::Task(_)
+        | Type::Channel(_)
+        | Type::Shared(_)
+        | Type::Mutex(_)
+        | Type::Guard(_)
+        | Type::Process
+        | Type::SealedChannel
+        | Type::Fn(_) => return,
+    };
+    instances_in(inner, s, instances, refs, secrets, arrays, out)
+}
+
+/// ADR 0016 A3: whether the instances of generic struct `sid` lead, through its type
+/// parameters, to instances without end, answered as the field, `(field, struct)`, where a
+/// type argument grows. The graph's nodes are type parameters, `(struct, index)`; an edge runs
+/// from `(S, i)` to `(R, j)` where a field of `S` holds an `R<..>` whose `j`th argument
+/// mentions `S`'s `i`th parameter, and the edge grows where that argument is not the parameter
+/// itself. Instances without end follow iff a growing edge reachable from one of `sid`'s
+/// parameters lies on a cycle, its target leading back to its source (`struct N<T> { next:
+/// ?N<Box<T>> }`: `N<i64>` holds an `N<Box<i64>>`, which holds an `N<Box<Box<i64>>>`, ...). A
+/// growing edge whose target does not lead back grows the argument once (`?S<i64, Bx<A>>` in
+/// `S<A, B>`), and a cycle with no growing edge brings each parameter back as a parameter it
+/// started with, or as a type fixed in a field, so both end. A field that names a struct at
+/// fixed arguments (`?N<i64>`) is not an edge: the walk answers that struct where it enters it.
+fn growing_cycle(
+    sid: StructId,
+    structs: &[TypedStructDecl],
+    instances: &[GenericInstanceData],
+    refs: &[RefData],
+    secrets: &[SecretData],
+    reaches: &mut HashMap<(ParamNode, ParamNode), bool>,
+    clean: &mut HashSet<ParamNode>,
+) -> Option<(String, String)> {
+    // A node in `clean` reaches no growing edge on a cycle (an earlier answer found none from a
+    // node that reaches it), and neither does any node it reaches, so it is not walked again:
+    // no path to a node that is not clean passes through one that is, so skipping them leaves
+    // the order the other nodes and edges are met in as it was.
+    let n = structs[sid.0 as usize].type_params.len() as u32;
+    let mut order: Vec<ParamNode> =
+        (0..n).map(|i| (sid, i)).filter(|v| !clean.contains(v)).collect();
+    let mut known: HashSet<ParamNode> = order.iter().copied().collect();
+    let mut growing: Vec<(ParamNode, ParamNode, String)> = Vec::new();
+    let mut k = 0;
+    while k < order.len() {
+        let (q, i) = order[k];
+        k += 1;
+        for f in &structs[q.0 as usize].fields {
+            let mut out = Vec::new();
+            param_edges(f.ty, i, instances, refs, secrets, &mut out);
+            for (to, grows) in out {
+                if clean.contains(&to) {
+                    continue;
+                }
+                if grows {
+                    growing.push(((q, i), to, f.name.clone()));
+                }
+                if known.insert(to) {
+                    order.push(to);
+                }
+            }
+        }
+    }
+    for (from, to, field) in growing {
+        let back = *reaches
+            .entry((to, from))
+            .or_insert_with(|| param_reaches(to, from, structs, instances, refs, secrets));
+        if back {
+            return Some((field, structs[from.0 .0 as usize].name.clone()));
+        }
+    }
+    clean.extend(order);
+    None
+}
+
+/// Whether node `from` of [`growing_cycle`]'s graph reaches node `target` (itself included).
+fn param_reaches(
+    from: ParamNode,
+    target: ParamNode,
+    structs: &[TypedStructDecl],
+    instances: &[GenericInstanceData],
+    refs: &[RefData],
+    secrets: &[SecretData],
+) -> bool {
+    let mut order = vec![from];
+    let mut known: HashSet<ParamNode> = HashSet::new();
+    known.insert(from);
+    let mut k = 0;
+    while k < order.len() {
+        let (q, i) = order[k];
+        k += 1;
+        if (q, i) == target {
+            return true;
+        }
+        for f in &structs[q.0 as usize].fields {
+            let mut out = Vec::new();
+            param_edges(f.ty, i, instances, refs, secrets, &mut out);
+            for (to, _) in out {
+                if known.insert(to) {
+                    order.push(to);
+                }
+            }
+        }
+    }
+    false
+}
+
+/// The edges of [`growing_cycle`]'s graph from type parameter `i` of the struct whose field
+/// type is `ty`, as `((struct, index), grows)`, in the order the type is written.
+fn param_edges(
+    ty: Type,
+    i: u32,
+    instances: &[GenericInstanceData],
+    refs: &[RefData],
+    secrets: &[SecretData],
+    out: &mut Vec<((StructId, u32), bool)>,
+) {
+    let inner = match ty {
+        Type::GenericInstance(id) => {
+            let data = &instances[id.0 as usize];
+            for (j, a) in data.args.iter().enumerate() {
+                if mentions_param(*a, i, instances, refs, secrets) {
+                    out.push(((data.struct_id, j as u32), *a != Type::TypeParam(TypeParamId(i))));
+                }
+                param_edges(*a, i, instances, refs, secrets, out);
+            }
+            return;
+        }
+        Type::Nullable(ni) => ni.to_type(),
+        // A nested array's element is concrete (ADR 0068 D6; refused over a type parameter
+        // where it is written or built).
+        Type::Array(ArrayElem::Array(_)) => return,
+        Type::Array(ae) => ae.to_type(),
+        Type::Vec(ve) => ve.to_type(),
+        Type::Ref(id) => refs[id.0 as usize].inner,
+        Type::Secret(sid) => match secrets.get(sid.0 as usize) {
+            Some(d) => d.inner,
+            None => return,
+        },
+        Type::TypeParam(_)
+        | Type::I64
+        | Type::I32
+        | Type::U8
+        | Type::U128
+        | Type::F64
+        | Type::Ptr
+        | Type::Bool
+        | Type::Struct(_)
+        | Type::Class(_)
+        | Type::TraitSelf(_)
+        | Type::Enum(_)
+        | Type::Kont(_)
+        | Type::Task(_)
+        | Type::Channel(_)
+        | Type::Shared(_)
+        | Type::Mutex(_)
+        | Type::Guard(_)
+        | Type::Process
+        | Type::SealedChannel
+        | Type::Fn(_) => return,
+    };
+    param_edges(inner, i, instances, refs, secrets, out);
+}
+
+/// Whether the written type `ty` mentions type parameter `i`, through the forms
+/// [`param_edges`] looks through.
+fn mentions_param(
+    ty: Type,
+    i: u32,
+    instances: &[GenericInstanceData],
+    refs: &[RefData],
+    secrets: &[SecretData],
+) -> bool {
+    let inner = match ty {
+        Type::TypeParam(id) => return id.0 == i,
+        Type::GenericInstance(id) => {
+            return instances[id.0 as usize]
+                .args
+                .iter()
+                .any(|a| mentions_param(*a, i, instances, refs, secrets))
+        }
+        Type::Nullable(ni) => ni.to_type(),
+        Type::Array(ArrayElem::Array(_)) => return false,
+        Type::Array(ae) => ae.to_type(),
+        Type::Vec(ve) => ve.to_type(),
+        Type::Ref(id) => refs[id.0 as usize].inner,
+        // An id the table does not hold answers `true` (fail closed: one edge more).
+        Type::Secret(sid) => match secrets.get(sid.0 as usize) {
+            Some(d) => d.inner,
+            None => return true,
+        },
+        Type::I64
+        | Type::I32
+        | Type::U8
+        | Type::U128
+        | Type::F64
+        | Type::Ptr
+        | Type::Bool
+        | Type::Struct(_)
+        | Type::Class(_)
+        | Type::TraitSelf(_)
+        | Type::Enum(_)
+        | Type::Kont(_)
+        | Type::Task(_)
+        | Type::Channel(_)
+        | Type::Shared(_)
+        | Type::Mutex(_)
+        | Type::Guard(_)
+        | Type::Process
+        | Type::SealedChannel
+        | Type::Fn(_) => return false,
+    };
+    mentions_param(inner, i, instances, refs, secrets)
 }
 
 /// ADR 0017 D7: if a value of type `ty` would hold a reference inside a
@@ -9839,7 +10210,7 @@ fn check_call(
     // not build at its arguments (`mk(n)` returning `P<?i64>` for `struct P<T> { v: ?T }`).
     if n_type_params > 0 {
         if let Some((field, owner)) =
-            unbuilt_instance_field(ret_ty, structs, instances, refs, secrets, arrays, &mut Vec::new())
+            unbuilt_instance_field(ret_ty, structs, instances, refs, secrets, arrays)
         {
             return Err(TypeError::UninstantiableType {
                 what: format!("field `{field}` of `{owner}`"),
@@ -10817,7 +11188,6 @@ fn check_expr(
                         refs,
                         secrets,
                         arrays,
-                        &mut Vec::new(),
                     ) {
                         return Err(TypeError::UninstantiableType {
                             what: format!("field `{f2}` of `{owner}`"),
@@ -11166,7 +11536,6 @@ fn check_expr(
                     refs,
                     secrets,
                     arrays,
-                    &mut Vec::new(),
                 ) {
                     return Err(TypeError::UninstantiableType {
                         what: format!("field `{f2}` of `{owner}`"),
@@ -14887,6 +15256,77 @@ fn main() -> i64 { let p = P { x: 1, x: 2, y: 3 }; 0 }",
         );
     }
 
+    /// ADR 0016 A3: the instance walk enters each struct once per tuple of argument shapes,
+    /// and builds no instance. A chain whose instances double at each level (`S1<i64>` holds a
+    /// `?S2<Ba<i64>>` and a `?S2<Bb<i64>>`, each of which holds two `S3`s, ...) is walked once
+    /// per struct; walking each instance took time exponential in the depth.
+    #[test]
+    fn the_instance_walk_enters_each_struct_once_per_shape() {
+        let depth = 24;
+        let mut src = String::from("struct Ba<T> { v: T }\nstruct Bb<T> { v: T }\n");
+        src += &format!("struct S{depth}<T> {{ v: T }}\n");
+        for i in (1..depth).rev() {
+            src += &format!("struct S{i}<T> {{ x: ?S{n}<Ba<T>>, y: ?S{n}<Bb<T>> }}\n", n = i + 1);
+        }
+        src += "fn main() -> i64 { let s: S1<i64> = S1 { x: null, y: null }; 0 }\n";
+        let p = check_ok(&src);
+        let s1 = p.structs.iter().find(|d| d.name == "S1").expect("S1").id;
+        let gi = p
+            .generic_instances
+            .iter()
+            .position(|d| d.struct_id == s1 && d.args == vec![Type::I64])
+            .expect("S1<i64>");
+        let before = p.generic_instances.len();
+        let mut walk =
+            ShapeWalk::new(&p.structs, &p.generic_instances, &p.refs, &p.secrets, &p.arrays);
+        assert_eq!(walk.walk_type(Type::GenericInstance(GenericInstanceId(gi as u32))), None);
+        // `S1` to `S24` once each, at the one shape their argument has, and `Ba` and `Bb`.
+        assert_eq!(walk.seen.len(), depth + 2);
+        assert_eq!(p.generic_instances.len(), before);
+    }
+
+    /// ADR 0016 A3: the walk keeps its own stack. A struct of eleven type parameters whose
+    /// fields hold it again with each argument made an array or an `i64` in turn is entered at
+    /// all 2,048 tuples of those two shapes, each found from the one before, and a chain of
+    /// 3,000 structs is walked to its end; walking them by recursion overflowed the stack.
+    #[test]
+    fn the_instance_walk_does_not_recurse_per_state() {
+        let n = 11;
+        let params: Vec<String> = (0..n).map(|i| format!("A{i}")).collect();
+        let mut fields = String::new();
+        for i in 0..n {
+            for (k, at) in ["[i64]", "i64"].iter().enumerate() {
+                let mut args = params.clone();
+                args[i] = at.to_string();
+                fields += &format!("x{i}_{k}: ?S<{}>, ", args.join(", "));
+            }
+        }
+        let src = format!(
+            "struct S<{}> {{ {fields}w: i64 }}\nfn rd(s: S<{}>) -> i64 {{ let x = s.x0_0; 0 }}\nfn main() -> i64 {{ 0 }}\n",
+            params.join(", "),
+            vec!["i64"; n].join(", ")
+        );
+        let p = check_ok(&src);
+        let s = p.structs.iter().find(|d| d.name == "S").expect("S").id;
+        let gi = p
+            .generic_instances
+            .iter()
+            .position(|d| d.struct_id == s && d.args == vec![Type::I64; n])
+            .expect("S<i64, ..>");
+        let mut walk =
+            ShapeWalk::new(&p.structs, &p.generic_instances, &p.refs, &p.secrets, &p.arrays);
+        assert_eq!(walk.walk_type(Type::GenericInstance(GenericInstanceId(gi as u32))), None);
+        assert_eq!(walk.seen.len(), 1 << n);
+
+        let depth = 3000;
+        let mut src = format!("struct C{depth}<T> {{ v: T }}\n");
+        for i in (1..depth).rev() {
+            src += &format!("struct C{i}<T> {{ v: i64, x: ?C{n}<T> }}\n", n = i + 1);
+        }
+        src += "fn main() -> i64 { let c: C1<i64> = C1 { v: 1, x: null }; c.v }\n";
+        check_ok(&src);
+    }
+
     /// ADR 0016 A3: a type written in a generic declaration is used at a call, a struct
     /// literal or a field read only where substituting the type arguments replaces every
     /// type parameter it mentions.
@@ -14970,12 +15410,14 @@ fn main() -> i64 { let p = P { x: 1, x: 2, y: 3 }; 0 }",
             ("struct O<T> { inner: P<T> }\nfn r(o: O<?i64>) -> i64 { let i = o.inner; 0 }\nfn main() -> i64 { 0 }", "field `v` of `P`"),
             ("struct O<T> { inner: P<T> }\nfn mko<T>(a: T) -> O<T> { O { inner: P { v: null } } }\nfn main() -> i64 { let n: ?i64 = 3; let o = mko(n); 0 }", "field `v` of `P`"),
             ("fn tag<T>(a: T) -> Q<P<T>> { Q { n: 1 } }\nfn main() -> i64 { let n: ?i64 = 3; let q = tag(n); 0 }", "field `v` of `P`"),
-            // A struct literal's field holding such an instance; and a struct met again on the
-            // way down at other arguments, whose expansion has no end (and, refused with it, one
-            // met again at its own arguments permuted).
+            // A struct literal's field holding such an instance; and a struct whose instances
+            // have no end, a type argument growing around a cycle through its own fields or
+            // another struct's, refused at the field where it grows.
             ("struct W<T> { a: i64, p: ?P<T> }\nfn main() -> i64 { let w: W<?i64> = W { a: 1, p: null }; w.a }", "field `v` of `P`"),
             ("struct Bx<T> { v: T }\nstruct N<T> { v: T, next: ?N<Bx<T>> }\nfn main() -> i64 { let n: N<i64> = N { v: 7, next: null }; n.v }", "field `next` of `N`"),
-            ("struct Pr<A, B> { a: A, b: B, left: ?Pr<B, A> }\nfn main() -> i64 { let p: Pr<i64, bool> = Pr { a: 1, b: true, left: null }; p.a }", "field `left` of `Pr`"),
+            ("struct Bx<T> { v: T }\nstruct B<T> { a: ?A<Bx<T>> }\nstruct A<T> { b: ?B<T> }\nfn main() -> i64 { let x: A<i64> = A { b: null }; 0 }", "field `a` of `B`"),
+            ("struct Bx<T> { v: T }\nstruct C<T> { f: ?Bx<C<Bx<T>>> }\nfn mk<T>(a: T) -> C<T> { C { f: null } }\nfn main() -> i64 { let c = mk(1); 0 }", "field `f` of `C`"),
+            ("struct Bx<T> { v: T }\nstruct S<A, B> { a: A, b: B, f: ?S<B, Bx<A>> }\nfn main() -> i64 { let s: S<i64, bool> = S { a: 1, b: true, f: null }; s.a }", "field `f` of `S`"),
         ];
         for (body, what) in refused {
             match check_err(&format!("{DECLS}{body}")) {
@@ -14990,6 +15432,16 @@ fn main() -> i64 { let p = P { x: 1, x: 2, y: 3 }; 0 }",
             "fn w<T>(a: T) -> Q<?T> { Q { n: 1 } }\nfn main() -> i64 { let x = w(4); 0 }",
             "fn w<T>(a: T) -> ?T { a }\nfn g<T>(x: T) -> i64 { let y = w(x); 0 }\nfn main() -> i64 { g(0) }",
             "fn r(p: P<i64>) -> i64 { let x = p.v; 0 }\nfn main() -> i64 { 0 }",
+            // A struct met again on the way down whose instances end: through its own type
+            // arguments (`Bx<Bx<i64>>`), at its own arguments permuted, at fixed arguments, and
+            // at its own arguments through two other instances.
+            "struct Bx<T> { v: T }\nfn mk<T>(a: T) -> Bx<T> { Bx { v: a } }\nfn main() -> i64 { let b = mk(mk(1)); let v: Vec<Bx<Bx<i64>>> = vec_new(); 0 }",
+            "struct Pr<A, B> { a: A, b: B, left: ?Pr<B, A> }\nfn main() -> i64 { let p: Pr<i64, bool> = Pr { a: 1, b: true, left: null }; p.a }",
+            "struct L<T> { x: T, inner: ?L<i64> }\nfn mkl<T>(a: T) -> L<T> { L { x: a, inner: null } }\nfn main() -> i64 { let l = mkl(true); 0 }",
+            "struct Bx<T> { v: T }\nstruct N<T> { v: i64, next: ?Bx<Bx<N<T>>> }\nfn mkn<T>(a: T) -> N<T> { N { v: 1, next: null } }\nfn main() -> i64 { let n = mkn(1); let m = n.next; n.v }",
+            // A type argument that grows once, into a parameter that does not lead back.
+            "struct Bx<T> { v: T }\nstruct S<A, B> { a: A, b: B, f: ?S<i64, Bx<A>> }\nfn main() -> i64 { let s: S<i64, bool> = S { a: 5, b: true, f: null }; s.a }",
+            "struct E<K, V> { k: K, v: V, idx: ?E<K, Vec<K>> }\nfn mke<K, V>(k: K, v: V) -> E<K, V> { E { k: k, v: v, idx: null } }\nfn main() -> i64 { let e = mke(3, true); e.k }",
         ] {
             check_ok(&format!("{DECLS}{body}"));
         }

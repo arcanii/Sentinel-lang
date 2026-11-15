@@ -1,0 +1,22 @@
+// ADR 0016 A3: checking a generic struct literal's fields builds no instance those fields'
+// instances hold, so the emitted IR declares the types the program makes and no others:
+// `Outer<i64>` and its field's `Mid<i64>`, not the `Inner<i64>` that `Mid<i64>`'s field names.
+// The corpus differential compares the IR with the self-hosted back end's. Exit 42.
+
+struct Inner<T> {
+    v: T,
+}
+
+struct Mid<T> {
+    i: ?Inner<T>,
+}
+
+struct Outer<T> {
+    m: ?Mid<T>,
+}
+
+fn main() -> i64 {
+    let o: Outer<i64> = Outer { m: null };
+    let om = o.m;
+    42
+}

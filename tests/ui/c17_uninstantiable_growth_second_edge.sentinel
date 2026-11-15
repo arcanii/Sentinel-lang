@@ -1,0 +1,21 @@
+// ADR 0016 A3: each growing field is checked for a cycle of its own. `T<A, B>`'s `f` grows `A`
+// into `B`'s place, which does not lead back to `A`, so it ends; its `g` grows `B` in `B`'s own
+// place, so `T<i64, bool>`'s `g` holds a `T<i64, Bx<bool>>`, whose `g` holds a
+// `T<i64, Bx<Bx<bool>>>`, and so on. Both fields grow into the same place, so an answer kept
+// for the first must not stand for the second. Surfaces UninstantiableType at the literal's
+// field.
+
+struct Bx<T> {
+    v: T,
+}
+
+struct T<A, B> {
+    a: A,
+    f: ?T<i64, Bx<A>>,
+    g: ?T<i64, Bx<B>>,
+}
+
+fn main() -> i64 {
+    let t: T<i64, bool> = T { a: 1, f: null, g: null };
+    t.a
+}

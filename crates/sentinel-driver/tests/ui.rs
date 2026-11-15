@@ -548,6 +548,38 @@ ui_snapshot!(
 );
 ui_snapshot!(c17_uninstantiable_nonregular, "c17_uninstantiable_nonregular.sentinel");
 ui_snapshot!(
+    c17_uninstantiable_growth_nested,
+    "c17_uninstantiable_growth_nested.sentinel"
+);
+ui_snapshot!(
+    c17_uninstantiable_growth_permuted,
+    "c17_uninstantiable_growth_permuted.sentinel"
+);
+ui_snapshot!(
+    c17_uninstantiable_growth_second_edge,
+    "c17_uninstantiable_growth_second_edge.sentinel"
+);
+ui_snapshot!(
+    c17_uninstantiable_instance_array,
+    "c17_uninstantiable_instance_array.sentinel"
+);
+ui_snapshot!(
+    c17_uninstantiable_instance_vec,
+    "c17_uninstantiable_instance_vec.sentinel"
+);
+ui_snapshot!(
+    c17_uninstantiable_instance_arg_field,
+    "c17_uninstantiable_instance_arg_field.sentinel"
+);
+ui_snapshot!(
+    c17_uninstantiable_instance_ref,
+    "c17_uninstantiable_instance_ref.sentinel"
+);
+ui_snapshot!(
+    c17_uninstantiable_instance_second_shape,
+    "c17_uninstantiable_instance_second_shape.sentinel"
+);
+ui_snapshot!(
     c17_uninstantiable_literal_instance,
     "c17_uninstantiable_literal_instance.sentinel"
 );

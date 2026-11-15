@@ -1,0 +1,129 @@
+// ADR 0016 A3: a generic struct met again on the way down whose instances end is built, read
+// and returned as before: through its own type arguments (`Bx<Bx<i64>>`, a `Vec<Bx<Bx<i64>>>`,
+// `Pair<Pair<i64, bool>, i64>`, `Stack<Stack<i64>>`), in either order of a call's arguments, at
+// its own arguments permuted (`Pr`), at fixed arguments (`L`), and at its own arguments through
+// two other instances (`N`); and an instance a call makes keeps a concrete nested-array field
+// (`G`). A literal whose fields hold instances nothing else makes (`Outer`) adds only
+// `Outer<i64>` and its field's `Mid<i64>` to the emitted IR, not the `Inner<i64>` that
+// `Mid<i64>`'s field names: the corpus differential compares it with the self-hosted back end.
+// 1 + 2 + 3 + 4 + 5 + 6 + 7 + 8 + 6 = 42 (the empty `Vec`'s length and `G`'s tag add nothing).
+
+struct Bx<T> {
+    v: T,
+}
+
+struct Pair<A, B> {
+    a: A,
+    b: B,
+}
+
+struct Stack<T> {
+    items: Vec<T>,
+    n: i64,
+}
+
+struct Pr<A, B> {
+    a: A,
+    b: B,
+    left: ?Pr<B, A>,
+}
+
+struct L<T> {
+    x: T,
+    inner: ?L<i64>,
+}
+
+struct N<T> {
+    v: i64,
+    next: ?Bx<Bx<N<T>>>,
+}
+
+struct W<T> {
+    b: Bx<Bx<T>>,
+}
+
+struct Inner<T> {
+    v: T,
+}
+
+struct Mid<T> {
+    i: ?Inner<T>,
+}
+
+struct Outer<T> {
+    m: ?Mid<T>,
+}
+
+struct G<T> {
+    t: T,
+    rows: [[u8]],
+}
+
+fn mk<T>(x: T) -> Bx<T> {
+    Bx { v: x }
+}
+
+fn mkp<A, B>(x: A, y: B) -> Pair<A, B> {
+    Pair { a: x, b: y }
+}
+
+fn new_stack<T>() -> Stack<T> {
+    Stack { items: vec_new(), n: 4 }
+}
+
+fn mkl<T>(x: T) -> L<T> {
+    L { x: x, inner: null }
+}
+
+fn mkn<T>(x: T) -> N<T> {
+    N { v: 6, next: null }
+}
+
+fn mkg<T>(t: T, r: [[u8]]) -> G<T> {
+    G { t: t, rows: r }
+}
+
+fn main() -> i64 {
+    // Each inner call is bound first: a call nested in another's arguments has the two back ends
+    // define their instances in different orders (register D166).
+    let b0 = mk(1);
+    let bb = mk(b0);
+    let b1 = bb.v;
+    let one = b1.v;
+    let v: Vec<Bx<Bx<i64>>> = vec_new();
+    let p0 = mkp(1, true);
+    let pp = mkp(p0, 2);
+    let two = pp.b;
+    let x3 = mk(3);
+    let b4 = mk(4);
+    let x4 = mk(b4);
+    let o1 = mkp(x3, x4);
+    let o1a = o1.a;
+    let three = o1a.v;
+    let b5 = mk(5);
+    let x5 = mk(b5);
+    let x6 = mk(6);
+    let o2 = mkp(x5, x6);
+    let o2b = o2.b;
+    let six = o2b.v;
+    let s: Stack<Stack<i64>> = new_stack();
+    let four = s.n;
+    let p: Pr<i64, bool> = Pr { a: 5, b: true, left: null };
+    let five = p.a;
+    let l = mkl(true);
+    let li = l.inner;
+    let l2: L<i64> = L { x: 8, inner: null };
+    let eight = l2.x;
+    let n = mkn(1);
+    let nn = n.next;
+    let w: W<i64> = W { b: Bx { v: Bx { v: 7 } } };
+    let wb = w.b;
+    let wbv = wb.v;
+    let seven = wbv.v;
+    let o: Outer<i64> = Outer { m: null };
+    let om = o.m;
+    let r: [[u8]] = ["ab", "c"];
+    let g = mkg(0, r);
+    let zero = g.t;
+    one + two + three + four + five + n.v + seven + eight + six + len(v) + zero
+}

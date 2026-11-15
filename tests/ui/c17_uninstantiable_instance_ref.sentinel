@@ -1,0 +1,21 @@
+// ADR 0016 A3: a call's result is walked through a reference's target: `get(q)` returns a
+// `&P<?i64>`, whose `P<?i64>` has a field `v` the substitution does not build (`??i64`).
+// Surfaces UninstantiableType at the call.
+
+struct P<T> {
+    v: ?T,
+    w: i64,
+}
+
+fn get<T>(p: &T) -> &T {
+    p
+}
+
+fn f(q: &P<?i64>) -> i64 {
+    let r = get(q);
+    0
+}
+
+fn main() -> i64 {
+    0
+}

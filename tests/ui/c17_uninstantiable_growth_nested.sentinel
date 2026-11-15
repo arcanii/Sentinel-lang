@@ -1,0 +1,22 @@
+// ADR 0016 A3: a type argument that grows inside another instance's argument still grows:
+// `C<i64>`'s `f` holds a `Bx<C<Bx<i64>>>`, whose `C<Bx<i64>>` holds a `Bx<C<Bx<Bx<i64>>>>`, and
+// so on without end. A call that makes one is refused at the field where the argument grows.
+// Surfaces UninstantiableType at the call.
+
+struct Bx<T> {
+    v: T,
+}
+
+struct C<T> {
+    n: i64,
+    f: ?Bx<C<Bx<T>>>,
+}
+
+fn mk<T>(a: T) -> ?C<T> {
+    null
+}
+
+fn main() -> i64 {
+    let c = mk(1);
+    0
+}

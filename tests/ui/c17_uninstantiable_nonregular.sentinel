@@ -1,4 +1,4 @@
-// ADR 0016 A3: a generic struct that holds itself at other type arguments has an instance
+// ADR 0016 A3: a generic struct whose type argument grows around a cycle of fields has an instance
 // expansion without end: `N<i64>`'s `next` is a `?N<Box<i64>>`, whose `next` is a
 // `?N<Box<Box<i64>>>`, and so on. A literal or field read that makes one is refused at the field
 // that leads there. Surfaces UninstantiableType at the literal's field.

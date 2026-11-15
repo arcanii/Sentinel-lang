@@ -1,0 +1,24 @@
+// ADR 0016 A3: a type argument that grows once, into a type parameter that does not lead back
+// to the one it grew from, ends: `S<i64, bool>`'s `f` holds an `S<i64, Bx<i64>>`, whose `f` holds
+// that same `S<i64, Bx<i64>>`. Both are built and read as before. (A `Vec<K>` grown the same way,
+// `struct E<K, V> { idx: ?E<K, Vec<K>> }`, is pinned in sentinel-types' table: the oracle's IR
+// declares the `E<i64, Vec<i64>>` its field names and the self-hosted back end's does not,
+// register D193.) 5 + 1 + 36 = 42.
+
+struct Bx<T> {
+    v: T,
+}
+
+struct S<A, B> {
+    a: A,
+    b: B,
+    f: ?S<i64, Bx<A>>,
+}
+
+fn main() -> i64 {
+    let s: S<i64, bool> = S { a: 5, b: true, f: null };
+    let sf = s.f;
+    let inner: S<i64, Bx<i64>> = S { a: 1, b: Bx { v: 9 }, f: null };
+    let innerf = inner.f;
+    s.a + inner.a + 36
+}

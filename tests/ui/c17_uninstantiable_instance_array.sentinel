@@ -1,0 +1,18 @@
+// ADR 0016 A3: an instance a call makes may not hold a `[T]` field whose element the substitution
+// does not build: `A<?i64>`'s `v` would be a `[?i64]`, which has no form. Surfaces
+// UninstantiableType at the call.
+
+struct A<T> {
+    v: [T],
+    n: i64,
+}
+
+fn mk<T>(x: T) -> A<T> {
+    A { v: [x], n: 1 }
+}
+
+fn main() -> i64 {
+    let m: ?i64 = 4;
+    let a = mk(m);
+    0
+}

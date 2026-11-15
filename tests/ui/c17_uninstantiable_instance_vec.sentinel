@@ -1,0 +1,17 @@
+// ADR 0016 A3: an instance a call makes may not hold a `Vec<T>` field whose element the
+// substitution does not build: `V<[i64]>`'s `v` would be a `Vec<[i64]>`, which has no form.
+// Surfaces UninstantiableType at the call.
+
+struct V<T> {
+    v: Vec<T>,
+    n: i64,
+}
+
+fn mkv<T>(x: T) -> V<T> {
+    V { v: vec_new(), n: 1 }
+}
+
+fn main() -> i64 {
+    let v = mkv([1, 2]);
+    0
+}

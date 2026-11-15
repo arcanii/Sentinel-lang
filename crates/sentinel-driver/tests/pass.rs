@@ -548,8 +548,9 @@ fn pass_c17_generic_param_pushdown_instance() {
 fn pass_c17_concrete_secret_array_calls() {
     // ADR 0016 A3: a type that mentions no type parameter is complete under substitution, so a
     // `[secret S]` over a struct is still returned, received and held in a generic struct's
-    // concrete field (the widen of a public `[S]` into it is pinned in sentinel-types' table,
-    // because the self-hosted typer omits it, register D191). 1 + 1 + 40 = 42.
+    // concrete field, also in an instance a generic call makes (the widen of a public `[S]` into
+    // it is pinned in sentinel-types' table, because the self-hosted typer omits it, register
+    // D191). 1 + 1 + 39 + 1 + 0 = 42.
     assert_eq!(run_exit("c17_concrete_secret_array_calls.sentinel"), 42);
 }
 
@@ -566,9 +567,36 @@ fn pass_c17_generic_args_bind_instance() {
 #[test]
 fn pass_c17_regular_recursion() {
     // ADR 0016 A3: a generic struct that holds itself at its own type arguments has a finite
-    // expansion, so the instance walk ends and the struct is built, read and returned as
-    // before. 3 + 39 = 42.
+    // expansion (no type argument grows around the cycle), so the struct is built, read and
+    // returned as before. 3 + 39 = 42.
     assert_eq!(run_exit("c17_regular_recursion.sentinel"), 42);
+}
+
+#[test]
+fn pass_c17_nested_instances() {
+    // ADR 0016 A3: a generic struct met again on the way down whose instances end, through
+    // its own type arguments (`Bx<Bx<i64>>`, `Stack<Stack<i64>>`), in either order of a
+    // call's arguments, permuted, at fixed arguments or through two other instances, is built,
+    // read and returned as before (this amendment's second commit refused the program), and an
+    // instance a call makes keeps a concrete nested-array field. 1 + 2 + 3 + 4 + 5 + 6 + 7 + 8 +
+    // 6 = 42.
+    assert_eq!(run_exit("c17_nested_instances.sentinel"), 42);
+}
+
+#[test]
+fn pass_c17_growth_without_cycle() {
+    // ADR 0016 A3: a type argument that grows once, into a type parameter that does not lead
+    // back to the one it grew from, ends, so the struct is built and read as before (the fifth
+    // review of this amendment found the growth check refusing it). 5 + 1 + 36 = 42.
+    assert_eq!(run_exit("c17_growth_without_cycle.sentinel"), 42);
+}
+
+#[test]
+fn pass_c17_literal_declares_its_types() {
+    // ADR 0016 A3: checking a generic struct literal's fields builds no instance, so the IR
+    // declares only the types the program makes (the corpus differential compares it with
+    // the self-hosted back end's). 42.
+    assert_eq!(run_exit("c17_literal_declares_its_types.sentinel"), 42);
 }
 
 #[test]

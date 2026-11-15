@@ -1,0 +1,19 @@
+// ADR 0016 A3: a type argument that grows into another parameter, which leads back to the one it
+// grew from, grows without end: `S<i64, bool>`'s `f` holds an `S<bool, Bx<i64>>`, whose `f` holds
+// an `S<Bx<i64>, Bx<bool>>`, and so on. A literal that makes one is refused at the field where the
+// argument grows. Surfaces UninstantiableType at the literal's field.
+
+struct Bx<T> {
+    v: T,
+}
+
+struct S<A, B> {
+    a: A,
+    b: B,
+    f: ?S<B, Bx<A>>,
+}
+
+fn main() -> i64 {
+    let s: S<i64, bool> = S { a: 1, b: true, f: null };
+    s.a
+}

@@ -1,0 +1,21 @@
+// ADR 0016 A3: an instance a call makes may not hold a field whose type is another instance at an
+// argument the substitution does not build: `O<?i64>`'s `q` would be a `Q<??i64>`. Surfaces
+// UninstantiableType at the call.
+
+struct Q<T> {
+    n: i64,
+}
+
+struct O<T> {
+    q: Q<?T>,
+}
+
+fn mko<T>(x: T) -> O<T> {
+    O { q: Q { n: 1 } }
+}
+
+fn main() -> i64 {
+    let m: ?i64 = 4;
+    let o = mko(m);
+    0
+}

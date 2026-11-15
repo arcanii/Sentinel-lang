@@ -1,0 +1,14 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c17_uninstantiable_instance_arg_field.sentinel\")"
+---
+sentinel::types::uninstantiable_type
+
+  × field `q` of `O` cannot be instantiated at these type arguments
+    ╭─[tests/ui/c17_uninstantiable_instance_arg_field.sentinel:19:13]
+ 18 │     let m: ?i64 = 4;
+ 19 │     let o = mko(m);
+    ·             ───┬──
+    ·                ╰── 
+ 20 │     0
+    ╰────

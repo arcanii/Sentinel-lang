@@ -406,12 +406,197 @@ fn subst_complete(c: &mut TyCtx, h: i64, args: &Vec<i64>) -> bool {
 // reference's target, an instance's arguments or another such field — whose field the
 // substitution does not build at that instance's arguments: refused (the first one met, as the
 // oracle meets them: an instance's arguments, then its fields in declaration order), in the
-// checking modes. Answers whether one was. A struct met again on the way down at other type
-// arguments (its expansion has no end) is refused at the field that leads there, as the oracle's
-// walk refuses it.
+// checking modes. Answers whether one was. As the oracle's walk, this one builds no instance:
+// it enters each struct once per tuple of argument shapes (`tc_subst_shape`), refuses a struct
+// whose instances have no end (`tc_growing_cycle`) at the field where a type argument grows,
+// and keeps its own stack of entered structs, so the thread's call stack does not bound how
+// deep it can go. State: `seen` holds the entered tuples, each as the struct, the count of
+// shapes, then the shapes; `fr` each struct's range of the field table (its first field and
+// one past its last); `cls`, `clp` the nodes of `tc_growing_cycle`'s graph that reach no
+// growing cycle; `em` the answers `tc_param_reaches` has given. A frame of the stack is a struct
+// (`ks`), where its shapes start in `sh` and how many (`kb`, `kn`), its next field and the end of
+// its fields (`kf`, `ke`), and where its pending instances start in `pd` and the next one
+// (`kp`, `kx`); the top frame's pending instances run to the end of `pd`, each recorded as the
+// struct, the count of shapes, then the shapes.
 fn tc_instance_fields(c: &mut TyCtx, h: i64, seen: &mut Vec<i64>) -> bool {
-    let mut path: Vec<i64> = vec_new();
-    tc_instance_walk(c, h, seen, &mut path, 0 - 1)
+    if h < tbase() || tc_on(c) == false {
+        false
+    } else {
+        // The field table holds each struct's fields together, in StructId order; where it
+        // does not, every range is the whole table (the loops check each entry's owner).
+        let ns: i64 = len((*c).sts);
+        let nf: i64 = len((*c).fldo);
+        let mut fr0: Vec<i64> = vec_new();
+        let mut fi0: i64 = 0;
+        let mut q0: i64 = 0;
+        while q0 < ns {
+            let st: i64 = fi0;
+            while fi0 < nf && (*c).fldo[fi0] == q0 {
+                fi0 = fi0 + 1;
+            }
+            push(&mut fr0, st);
+            push(&mut fr0, fi0);
+            q0 = q0 + 1;
+        }
+        let fr: Vec<i64> = if fi0 == nf {
+            fr0
+        } else {
+            let mut whole: Vec<i64> = vec_new();
+            let mut q2: i64 = 0;
+            while q2 < ns {
+                push(&mut whole, 0);
+                push(&mut whole, nf);
+                q2 = q2 + 1;
+            }
+            whole
+        };
+        let mut grows: Vec<i64> = vec_new();
+        let mut cls: Vec<i64> = vec_new();
+        let mut clp: Vec<i64> = vec_new();
+        let mut em: Vec<i64> = vec_new();
+        let none: Vec<i64> = vec_new();
+        let mut tops: Vec<i64> = vec_new();
+        tc_instances_in(c, h, &none, true, &mut tops);
+        let mut sh: Vec<i64> = vec_new();
+        let mut pd: Vec<i64> = vec_new();
+        let mut ks: Vec<i64> = vec_new();
+        let mut kb: Vec<i64> = vec_new();
+        let mut kn: Vec<i64> = vec_new();
+        let mut kf: Vec<i64> = vec_new();
+        let mut ke: Vec<i64> = vec_new();
+        let mut kp: Vec<i64> = vec_new();
+        let mut kx: Vec<i64> = vec_new();
+        let mut hit: bool = false;
+        let ntop: i64 = len(tops);
+        let mut ti: i64 = 0;
+        // Each step either enters an instance (pushing a frame), checks a frame's next field,
+        // or pops a finished frame. `want` is the instance to enter, if any: -1 for none.
+        while hit == false && (ti < ntop || len(ks) > 0) {
+            let mut want: Vec<i64> = vec_new();
+            if len(ks) == 0 {
+                let mt: i64 = tops[ti + 1];
+                let mut jt: i64 = 0;
+                while jt < mt + 2 {
+                    push(&mut want, tops[ti + jt]);
+                    jt = jt + 1;
+                }
+                ti = ti + 2 + mt;
+                0
+            } else {
+                let t: i64 = len(ks) - 1;
+                let nx: i64 = kx[t];
+                if nx < len(pd) {
+                    let mp: i64 = pd[nx + 1];
+                    let mut jp: i64 = 0;
+                    while jp < mp + 2 {
+                        push(&mut want, pd[nx + jp]);
+                        jp = jp + 1;
+                    }
+                    let _o: i64 = pop(&mut kx);
+                    push(&mut kx, nx + 2 + mp);
+                    0
+                } else {
+                    let fi: i64 = kf[t];
+                    if fi < ke[t] {
+                        let _o2: i64 = pop(&mut kf);
+                        push(&mut kf, fi + 1);
+                        if (*c).fldo[fi] == ks[t] {
+                            let mut fshapes: Vec<i64> = vec_new();
+                            let fb: i64 = kb[t];
+                            let mut jf: i64 = 0;
+                            while jf < kn[t] {
+                                push(&mut fshapes, sh[fb + jf]);
+                                jf = jf + 1;
+                            }
+                            let fty: i64 = (*c).fldty[fi];
+                            if tc_built_at(c, fty, &fshapes) == false {
+                                tc_unbuilt_field(c, fi);
+                                hit = true;
+                                0
+                            } else {
+                                let pbase: i64 = kp[t];
+                                while len(pd) > pbase {
+                                    let _o3: i64 = pop(&mut pd);
+                                }
+                                let _o4: i64 = pop(&mut kx);
+                                push(&mut kx, pbase);
+                                tc_instances_in(c, fty, &fshapes, false, &mut pd);
+                                0
+                            };
+                            0
+                        } else {
+                            0
+                        };
+                        0
+                    } else {
+                        // The frame is finished: drop its pending instances, shapes and itself.
+                        let dbase: i64 = kp[t];
+                        while len(pd) > dbase {
+                            let _o5: i64 = pop(&mut pd);
+                        }
+                        let sb: i64 = kb[t];
+                        while len(sh) > sb {
+                            let _o6: i64 = pop(&mut sh);
+                        }
+                        let _a: i64 = pop(&mut ks);
+                        let _b: i64 = pop(&mut kb);
+                        let _c: i64 = pop(&mut kn);
+                        let _d: i64 = pop(&mut kf);
+                        let _e: i64 = pop(&mut ke);
+                        let _f: i64 = pop(&mut kp);
+                        let _g: i64 = pop(&mut kx);
+                        0
+                    }
+                }
+            };
+            if len(want) > 0 {
+                let q: i64 = want[0];
+                let mw: i64 = want[1];
+                let mut wshapes: Vec<i64> = vec_new();
+                let mut jw: i64 = 0;
+                while jw < mw {
+                    push(&mut wshapes, want[2 + jw]);
+                    jw = jw + 1;
+                }
+                if tc_seen_has(seen, q, &wshapes) == false {
+                    push(seen, q);
+                    push(seen, mw);
+                    let mut j2: i64 = 0;
+                    while j2 < mw {
+                        push(seen, wshapes[j2]);
+                        j2 = j2 + 1;
+                    }
+                    let gf: i64 = tc_grows(c, q, &mut grows, &fr, &mut cls, &mut clp, &mut em);
+                    if gf >= 0 {
+                        tc_unbuilt_field(c, gf);
+                        hit = true;
+                        0
+                    } else {
+                        push(&mut ks, q);
+                        push(&mut kb, len(sh));
+                        push(&mut kn, mw);
+                        let mut j3: i64 = 0;
+                        while j3 < mw {
+                            push(&mut sh, wshapes[j3]);
+                            j3 = j3 + 1;
+                        }
+                        push(&mut kf, fr[2 * q]);
+                        push(&mut ke, fr[2 * q + 1]);
+                        push(&mut kp, len(pd));
+                        push(&mut kx, len(pd));
+                        0
+                    };
+                    0
+                } else {
+                    0
+                };
+                0
+            } else {
+                0
+            };
+        }
+        hit
+    }
 }
 
 // Refuse field table entry `fi` (of its own struct) as one that cannot be instantiated.
@@ -426,98 +611,506 @@ fn tc_unbuilt_field(c: &mut TyCtx, fi: i64) -> i64 {
     tc_uninstantiable(c, m)
 }
 
-// `vf`: the field table entry of the field that led here, -1 at the top.
-fn tc_instance_walk(c: &mut TyCtx, h: i64, seen: &mut Vec<i64>, path: &mut Vec<i64>, vf: i64) -> bool {
-    if h < tbase() || tc_on(c) == false {
+// The oracle's `subst_shape`: what the substitution reads of a type it puts in a `?X`, a `[X]`
+// or a `Vec<X>`, as the sum of 1 (a `?X` is built at it, `tc_null_inner`), 2 (a `[X]`,
+// `tc_arr_elem`) and 4 (a `Vec<X>`, `tc_vec_elem`). An argument this walk could not substitute
+// (unbound, -1) takes every shape, as `subst_complete` answers it complete.
+fn tc_subst_shape(c: &mut TyCtx, h: i64) -> i64 {
+    if h < 0 {
+        7
+    } else {
+        let n: i64 = if tc_null_inner(c, h) { 1 } else { 0 };
+        let a: i64 = if tc_arr_elem(c, h) { 2 } else { 0 };
+        let v: i64 = if tc_vec_elem(c, h) { 4 } else { 0 };
+        n + a + v
+    }
+}
+
+// Whether shape `s` has the part `b` (1, 2 or 4) of `tc_subst_shape`.
+fn tc_shape_has(s: i64, b: i64) -> bool {
+    if b == 1 {
+        s == 1 || s == 3 || s == 5 || s == 7
+    } else if b == 2 {
+        s == 2 || s == 3 || s == 6 || s == 7
+    } else {
+        s >= 4
+    }
+}
+
+// The oracle's `shape_at`: the shape of the written type `f` once substituted at arguments of
+// shapes `s` (`top`: no substitution, `f` is the type itself). A type parameter the instance
+// gives no argument for has the shape nothing builds.
+fn tc_shape_at(c: &mut TyCtx, f: i64, s: &Vec<i64>, top: bool) -> i64 {
+    let tp: bool = if f >= tbase() {
+        (*c).tk[f - tbase()] == 9
+    } else {
         false
+    };
+    if tp && top == false {
+        let pi: i64 = (*c).ta[f - tbase()];
+        if pi >= 0 && pi < len(*s) {
+            (*s)[pi]
+        } else {
+            0
+        }
+    } else {
+        tc_subst_shape(c, f)
+    }
+}
+
+// The oracle's `built_at`: whether the substitution builds the written type `f` at arguments of
+// shapes `s`, arm for arm. A `?X`, `[X]` or `Vec<X>` that mentions a type parameter is built
+// only where its element's shape has the container's part; a `secret` only where its inner type
+// mentions none.
+fn tc_built_at(c: &mut TyCtx, f: i64, s: &Vec<i64>) -> bool {
+    if f < tbase() {
+        true
+    } else {
+        let k: i64 = (*c).tk[f - tbase()];
+        let a: i64 = (*c).ta[f - tbase()];
+        let b: i64 = (*c).tb[f - tbase()];
+        let nested: bool = if k == 1 && a >= tbase() {
+            (*c).tk[a - tbase()] == 1
+        } else {
+            false
+        };
+        if nested {
+            true
+        } else if k == 4 || k == 1 || k == 11 {
+            let cpart: i64 = if k == 4 {
+                1
+            } else if k == 1 {
+                2
+            } else {
+                4
+            };
+            if tc_built_at(c, a, s) {
+                tc_shape_has(tc_shape_at(c, a, s, false), cpart) || tc_has_tparam(c, f) == false
+            } else {
+                false
+            }
+        } else if k == 10 {
+            let gs: i64 = (*c).girs[b];
+            let ge: i64 = (*c).gire[b];
+            let mut ok: bool = true;
+            let mut gi: i64 = gs;
+            while gi < ge {
+                if ok {
+                    ok = tc_built_at(c, (*c).gia[gi], s);
+                    0
+                } else {
+                    0
+                };
+                gi = gi + 1;
+            }
+            ok
+        } else if k == 2 {
+            tc_built_at(c, b, s)
+        } else if k == 3 {
+            tc_has_tparam(c, a) == false
+        } else {
+            true
+        }
+    }
+}
+
+// The oracle's `instances_in`: append to `out` the instances the type `h` holds, in the order
+// the walk enters them (an instance's arguments' instances before it), each as its struct, the
+// count of its arguments, then their shapes; `s` are the shapes `h`'s type parameters stand for
+// (`top`: none, `h` is a type, not a field's written type). Recurses only as deep as `h` is
+// written.
+fn tc_instances_in(c: &mut TyCtx, h: i64, s: &Vec<i64>, top: bool, out: &mut Vec<i64>) -> i64 {
+    if h < tbase() {
+        0
     } else {
         let k: i64 = (*c).tk[h - tbase()];
         let a: i64 = (*c).ta[h - tbase()];
         let b: i64 = (*c).tb[h - tbase()];
         if k == 10 {
-            let n: i64 = len(*seen);
-            let mut met: bool = false;
-            let mut i: i64 = 0;
-            while i < n {
-                if (*seen)[i] == h {
-                    met = true;
-                    0
-                } else {
-                    0
-                };
-                i = i + 1;
+            let gs: i64 = (*c).girs[b];
+            let ge: i64 = (*c).gire[b];
+            let mut gi: i64 = gs;
+            while gi < ge {
+                tc_instances_in(c, (*c).gia[gi], s, top, out);
+                gi = gi + 1;
             }
-            let pn: i64 = len(*path);
-            let mut onpath: bool = false;
-            let mut pj: i64 = 0;
-            while pj < pn {
-                if (*path)[pj] == a {
-                    onpath = true;
-                    0
-                } else {
-                    0
-                };
-                pj = pj + 1;
+            push(out, a);
+            push(out, ge - gs);
+            let mut gj: i64 = gs;
+            while gj < ge {
+                let sh: i64 = tc_shape_at(c, (*c).gia[gj], s, top);
+                push(out, sh);
+                gj = gj + 1;
             }
-            if met {
-                false
-            } else if onpath {
-                if vf >= 0 {
-                    tc_unbuilt_field(c, vf)
+            0
+        } else if k == 1 || k == 3 || k == 4 || k == 11 {
+            tc_instances_in(c, a, s, top, out)
+        } else if k == 2 {
+            tc_instances_in(c, b, s, top, out)
+        } else {
+            // A type parameter of the instance being walked: the instances its argument holds
+            // were walked with that instance's arguments.
+            0
+        }
+    }
+}
+
+// Whether `seen` holds struct `sid` at argument shapes `shapes`.
+fn tc_seen_has(seen: &mut Vec<i64>, sid: i64, shapes: &Vec<i64>) -> bool {
+    let n: i64 = len(*seen);
+    let m: i64 = len(*shapes);
+    let mut met: bool = false;
+    let mut i: i64 = 0;
+    while i < n {
+        let rn: i64 = (*seen)[i + 1];
+        if met == false && (*seen)[i] == sid && rn == m {
+            let mut same: bool = true;
+            let mut j: i64 = 0;
+            while j < m {
+                if (*seen)[i + 2 + j] != (*shapes)[j] {
+                    same = false;
+                    0
                 } else {
-                    let mut m0: Vec<u8> = vec_new();
-                    append_str(&mut m0, "field `` of `");
-                    rf_put_snb(c, (*c).sts[a], (*c).ste[a], &mut m0);
-                    push(&mut m0, '`');
-                    tc_uninstantiable(c, m0)
+                    0
                 };
-                true
-            } else {
-                push(seen, h);
-                push(path, a);
-                let mut args: Vec<i64> = vec_new();
-                let gs: i64 = (*c).girs[b];
-                let ge: i64 = (*c).gire[b];
-                let mut gi: i64 = gs;
-                let mut hit: bool = false;
-                while gi < ge {
-                    let ga: i64 = (*c).gia[gi];
-                    push(&mut args, ga);
-                    if hit == false {
-                        hit = tc_instance_walk(c, ga, seen, path, vf);
-                        0
-                    } else {
-                        0
-                    };
-                    gi = gi + 1;
-                }
-                let nf: i64 = len((*c).fldo);
-                let mut fi: i64 = 0;
-                while fi < nf {
-                    if hit == false && (*c).fldo[fi] == a {
-                        let fty: i64 = (*c).fldty[fi];
-                        if subst_complete(c, fty, &args) == false {
-                            tc_unbuilt_field(c, fi);
-                            hit = true;
+                j = j + 1;
+            }
+            met = same;
+            0
+        } else {
+            0
+        };
+        i = i + 2 + rn;
+    }
+    met
+}
+
+// `tc_growing_cycle` for `sid`, remembered in `grows` as pairs of struct and answer.
+fn tc_grows(c: &mut TyCtx, sid: i64, grows: &mut Vec<i64>, fr: &Vec<i64>, cls: &mut Vec<i64>, clp: &mut Vec<i64>, em: &mut Vec<i64>) -> i64 {
+    let n: i64 = len(*grows);
+    let mut got: i64 = 0 - 2;
+    let mut i: i64 = 0;
+    while i < n {
+        if (*grows)[i] == sid {
+            got = (*grows)[i + 1];
+            0
+        } else {
+            0
+        };
+        i = i + 2;
+    }
+    if got > 0 - 2 {
+        got
+    } else {
+        let r: i64 = tc_growing_cycle(c, sid, fr, cls, clp, em);
+        push(grows, sid);
+        push(grows, r);
+        r
+    }
+}
+
+// The oracle's `growing_cycle`: whether the instances of generic struct `sid` lead, through its
+// type parameters, to instances without end, answered as the field table entry where a type
+// argument grows, or -1. The graph's nodes are type parameters, a struct and an index (kept in
+// two lists side by side); an edge runs from `(S, i)` to `(R, j)` where a field of `S` holds an
+// `R<..>` whose `j`th argument mentions `S`'s `i`th parameter, and grows where that argument is
+// not the parameter itself. Instances without end follow iff a growing edge reachable from one
+// of `sid`'s parameters lies on a cycle, its target leading back to its source. A field that
+// names a struct at fixed arguments is not an edge: the walk answers that struct where it enters
+// it. Nodes in `cls`, `clp` reach no growing cycle and are not walked again, as in the oracle.
+fn tc_growing_cycle(c: &mut TyCtx, sid: i64, fr: &Vec<i64>, cls: &mut Vec<i64>, clp: &mut Vec<i64>, em: &mut Vec<i64>) -> i64 {
+    let np: i64 = (*c).sttp[sid];
+    let mut os: Vec<i64> = vec_new();
+    let mut op: Vec<i64> = vec_new();
+    let mut i0: i64 = 0;
+    while i0 < np {
+        if tc_node_in_m(cls, clp, sid, i0) == false {
+            push(&mut os, sid);
+            push(&mut op, i0);
+            0
+        } else {
+            0
+        };
+        i0 = i0 + 1;
+    }
+    let mut gq: Vec<i64> = vec_new();
+    let mut gqi: Vec<i64> = vec_new();
+    let mut gs: Vec<i64> = vec_new();
+    let mut gp: Vec<i64> = vec_new();
+    let mut gf: Vec<i64> = vec_new();
+    let mut k: i64 = 0;
+    while k < len(os) {
+        let q: i64 = os[k];
+        let qi: i64 = op[k];
+        let mut fi: i64 = (*fr)[2 * q];
+        let fe: i64 = (*fr)[2 * q + 1];
+        while fi < fe {
+            if (*c).fldo[fi] == q {
+                let mut es: Vec<i64> = vec_new();
+                let mut ep: Vec<i64> = vec_new();
+                let mut eg: Vec<i64> = vec_new();
+                tc_param_edges(c, (*c).fldty[fi], qi, &mut es, &mut ep, &mut eg);
+                let ne: i64 = len(es);
+                let mut e: i64 = 0;
+                while e < ne {
+                    if tc_node_in_m(cls, clp, es[e], ep[e]) == false {
+                        if eg[e] == 1 {
+                            push(&mut gq, q);
+                            push(&mut gqi, qi);
+                            push(&mut gs, es[e]);
+                            push(&mut gp, ep[e]);
+                            push(&mut gf, fi);
                             0
                         } else {
-                            let st: i64 = subst_type(c, fty, &args);
-                            hit = tc_instance_walk(c, st, seen, path, fi);
+                            0
+                        };
+                        if tc_node_in(&os, &op, es[e], ep[e]) == false {
+                            push(&mut os, es[e]);
+                            push(&mut op, ep[e]);
+                            0
+                        } else {
                             0
                         };
                         0
                     } else {
                         0
                     };
-                    fi = fi + 1;
+                    e = e + 1;
                 }
-                let _pp: i64 = pop(path);
-                hit
+                0
+            } else {
+                0
+            };
+            fi = fi + 1;
+        }
+        k = k + 1;
+    }
+    let ng: i64 = len(gs);
+    let mut ans: i64 = 0 - 1;
+    let mut g: i64 = 0;
+    while g < ng {
+        if ans < 0 && tc_reaches_memo(c, gs[g], gp[g], gq[g], gqi[g], fr, em) {
+            ans = gf[g];
+            0
+        } else {
+            0
+        };
+        g = g + 1;
+    }
+    if ans < 0 {
+        let no: i64 = len(os);
+        let mut x: i64 = 0;
+        while x < no {
+            push(cls, os[x]);
+            push(clp, op[x]);
+            x = x + 1;
+        }
+        0
+    } else {
+        0
+    };
+    ans
+}
+
+// `tc_param_reaches` from `(s, p)` to `(ts, tp)`, remembered in `em` as five entries each.
+fn tc_reaches_memo(c: &mut TyCtx, s: i64, p: i64, ts: i64, tp: i64, fr: &Vec<i64>, em: &mut Vec<i64>) -> bool {
+    let n: i64 = len(*em);
+    let mut got: i64 = 0 - 1;
+    let mut i: i64 = 0;
+    while i < n {
+        if (*em)[i] == s && (*em)[i + 1] == p && (*em)[i + 2] == ts && (*em)[i + 3] == tp {
+            got = (*em)[i + 4];
+            0
+        } else {
+            0
+        };
+        i = i + 5;
+    }
+    if got >= 0 {
+        got == 1
+    } else {
+        let r: bool = tc_param_reaches(c, s, p, ts, tp, fr);
+        push(em, s);
+        push(em, p);
+        push(em, ts);
+        push(em, tp);
+        let rv: i64 = if r { 1 } else { 0 };
+        push(em, rv);
+        r
+    }
+}
+
+// Whether node `(s, p)` is in the lists `ns`, `np`.
+fn tc_node_in(ns: &Vec<i64>, np: &Vec<i64>, s: i64, p: i64) -> bool {
+    let n: i64 = len(*ns);
+    let mut met: bool = false;
+    let mut i: i64 = 0;
+    while i < n {
+        if (*ns)[i] == s && (*np)[i] == p {
+            met = true;
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    met
+}
+
+// `tc_node_in` over lists held through a mutable reference.
+fn tc_node_in_m(ns: &mut Vec<i64>, np: &mut Vec<i64>, s: i64, p: i64) -> bool {
+    let n: i64 = len(*ns);
+    let mut met: bool = false;
+    let mut i: i64 = 0;
+    while i < n {
+        if (*ns)[i] == s && (*np)[i] == p {
+            met = true;
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    met
+}
+
+// Whether node `(s, p)` of `tc_growing_cycle`'s graph reaches node `(ts, tp)` (itself included).
+fn tc_param_reaches(c: &mut TyCtx, s: i64, p: i64, ts: i64, tp: i64, fr: &Vec<i64>) -> bool {
+    let mut os: Vec<i64> = vec_new();
+    let mut op: Vec<i64> = vec_new();
+    push(&mut os, s);
+    push(&mut op, p);
+    let mut met: bool = false;
+    let mut k: i64 = 0;
+    while met == false && k < len(os) {
+        let q: i64 = os[k];
+        let qi: i64 = op[k];
+        if q == ts && qi == tp {
+            met = true;
+            0
+        } else {
+            let mut fi: i64 = (*fr)[2 * q];
+            let fe: i64 = (*fr)[2 * q + 1];
+            while fi < fe {
+                if (*c).fldo[fi] == q {
+                    let mut es: Vec<i64> = vec_new();
+                    let mut ep: Vec<i64> = vec_new();
+                    let mut eg: Vec<i64> = vec_new();
+                    tc_param_edges(c, (*c).fldty[fi], qi, &mut es, &mut ep, &mut eg);
+                    let ne: i64 = len(es);
+                    let mut e: i64 = 0;
+                    while e < ne {
+                        if tc_node_in(&os, &op, es[e], ep[e]) == false {
+                            push(&mut os, es[e]);
+                            push(&mut op, ep[e]);
+                            0
+                        } else {
+                            0
+                        };
+                        e = e + 1;
+                    }
+                    0
+                } else {
+                    0
+                };
+                fi = fi + 1;
             }
+            0
+        };
+        k = k + 1;
+    }
+    met
+}
+
+// The edges of `tc_growing_cycle`'s graph from type parameter `pi` of the struct whose field type
+// is `h`, appended to `es`, `ep` (the node) and `eg` (1 where it grows), in the order the type
+// is written.
+fn tc_param_edges(c: &mut TyCtx, h: i64, pi: i64, es: &mut Vec<i64>, ep: &mut Vec<i64>, eg: &mut Vec<i64>) -> i64 {
+    if h < tbase() {
+        0
+    } else {
+        let k: i64 = (*c).tk[h - tbase()];
+        let a: i64 = (*c).ta[h - tbase()];
+        let b: i64 = (*c).tb[h - tbase()];
+        let nested: bool = if k == 1 && a >= tbase() {
+            (*c).tk[a - tbase()] == 1
+        } else {
+            false
+        };
+        if k == 10 {
+            let gs: i64 = (*c).girs[b];
+            let ge: i64 = (*c).gire[b];
+            let mut gi: i64 = gs;
+            while gi < ge {
+                let ga: i64 = (*c).gia[gi];
+                if tc_mentions_param(c, ga, pi) {
+                    let same: bool = if ga >= tbase() {
+                        (*c).tk[ga - tbase()] == 9 && (*c).ta[ga - tbase()] == pi
+                    } else {
+                        false
+                    };
+                    let gv: i64 = if same { 0 } else { 1 };
+                    push(es, a);
+                    push(ep, gi - gs);
+                    push(eg, gv);
+                    0
+                } else {
+                    0
+                };
+                tc_param_edges(c, ga, pi, es, ep, eg);
+                gi = gi + 1;
+            }
+            0
+        } else if nested {
+            // A nested array's element is concrete (ADR 0068 D6).
+            0
         } else if k == 1 || k == 3 || k == 4 || k == 11 {
-            tc_instance_walk(c, a, seen, path, vf)
+            tc_param_edges(c, a, pi, es, ep, eg)
         } else if k == 2 {
-            tc_instance_walk(c, b, seen, path, vf)
+            tc_param_edges(c, b, pi, es, ep, eg)
+        } else {
+            0
+        }
+    }
+}
+
+// Whether the written type `h` mentions type parameter `pi`, through the forms `tc_param_edges`
+// looks through.
+fn tc_mentions_param(c: &mut TyCtx, h: i64, pi: i64) -> bool {
+    if h < tbase() {
+        false
+    } else {
+        let k: i64 = (*c).tk[h - tbase()];
+        let a: i64 = (*c).ta[h - tbase()];
+        let b: i64 = (*c).tb[h - tbase()];
+        let nested: bool = if k == 1 && a >= tbase() {
+            (*c).tk[a - tbase()] == 1
+        } else {
+            false
+        };
+        if k == 9 {
+            a == pi
+        } else if k == 10 {
+            let gs: i64 = (*c).girs[b];
+            let ge: i64 = (*c).gire[b];
+            let mut any: bool = false;
+            let mut gi: i64 = gs;
+            while gi < ge {
+                if any == false {
+                    any = tc_mentions_param(c, (*c).gia[gi], pi);
+                    0
+                } else {
+                    0
+                };
+                gi = gi + 1;
+            }
+            any
+        } else if nested {
+            false
+        } else if k == 1 || k == 3 || k == 4 || k == 11 {
+            tc_mentions_param(c, a, pi)
+        } else if k == 2 {
+            tc_mentions_param(c, b, pi)
         } else {
             false
         }

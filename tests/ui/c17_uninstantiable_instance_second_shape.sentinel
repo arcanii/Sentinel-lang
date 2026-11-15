@@ -1,0 +1,23 @@
+// ADR 0016 A3: the instance walk enters a struct once for each tuple of argument shapes, not
+// once: `Two<i64, ?i64>` holds a `P<i64>`, whose field is built, and a `P<?i64>`, whose `v`
+// would be a `??i64`. Surfaces UninstantiableType at the call.
+
+struct P<T> {
+    v: ?T,
+    w: i64,
+}
+
+struct Two<A, B> {
+    a: ?P<A>,
+    b: ?P<B>,
+}
+
+fn mk2<A, B>(x: A, y: B) -> Two<A, B> {
+    Two { a: null, b: null }
+}
+
+fn main() -> i64 {
+    let m: ?i64 = 4;
+    let t = mk2(1, m);
+    0
+}
