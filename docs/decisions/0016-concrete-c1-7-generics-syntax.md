@@ -1168,8 +1168,9 @@ In a fn with no type parameters the leftover parameter named nothing, and `snc b
 with an internal error on most such programs (D183) and lowered those whose layout does not
 depend on it (a `Vec<T>`, a `[T]` passed through). Inside another generic fn the expression was
 typed at the caller's type argument instead of at a type of its own. Separately, a generic struct
-that holds itself at other type arguments (`struct N<T> { next: ?N<Box<T>> }`) has instances
-without end, which a walk that follows an instance's fields never finishes.
+whose type argument grows around a cycle of fields (`struct N<T> { next: ?N<Box<T>> }`) has
+instances without end: a walk that follows each instance's fields never finishes, and `snc types`
+overflowed its stack on some programs that make one.
 
 **The rule.** Four parts, each fail-closed:
 
@@ -1188,10 +1189,21 @@ without end, which a walk that follows an instance's fields never finishes.
    generic struct literal's field and such a field read whose type holds a generic instance, at
    any depth, one of whose fields it answers none for at the instance's arguments
    (`sentinel::types::uninstantiable_type`, "… cannot be instantiated at these type arguments").
-   That walk refuses a struct it meets again, on the way down, at other type arguments, at the
-   field that leads there: such a struct's instances have no end. (It refuses one met again at
-   its own arguments permuted too, `?Pair<B, A>` inside `Pair<A, B>`, whose instances end.) A type
-   that mentions no type parameter is complete, even where the substitution keeps it written (a
+   That walk builds no instance. Whether the substitution builds a field depends only on the
+   shape of each type argument, whether a `?X`, a `[X]` and a `Vec<X>` are built at it
+   (`subst_shape`), so the walk enters each struct once per tuple of argument shapes, at most
+   `8^n` times for a struct with `n` type parameters, and interns nothing; it keeps its own
+   stack, so the thread's call stack does not bound how deep it goes. A struct whose instances
+   have no end is refused at the field where a type argument grows: a field that holds an
+   instance whose argument is built from a type parameter without being it, where that
+   argument's place leads back to the parameter it grew from, through fields each holding an
+   instance whose argument mentions the place before, grown or not (`?N<Box<T>>` in `N<T>`,
+   `?S<B, Bx<A>>` in `S<A, B>`, or `?A<Bx<T>>` in a `B<T>` that a field of `A<T>` holds;
+   `growing_cycle`). A struct met again at its own arguments, at them permuted
+   (`?Pair<B, A>` in `Pair<A, B>`), at fixed ones (`?L<i64>` in `L<T>`), through its own type
+   arguments (`Bx<Bx<i64>>`) or with an argument grown once into a place that does not lead back
+   (`?S<i64, Bx<A>>` in `S<A, B>`) has instances that end, and is walked as any other. A type that
+   mentions no type parameter is complete, even where the substitution keeps it written (a
    `[secret S]` over a struct).
 4. A parameter type is pushed down to its argument as the substitution makes it (as written,
    where it mentions no type parameter), and not at all where the substitution makes none.
@@ -1199,9 +1211,10 @@ without end, which a walk that follows an instance's fields never finishes.
    otherwise unifies the arguments, which binds the callee's parameter to the caller's.
 
 **What moves.** Refused now: each call, literal and field read above, including one that makes
-an instance whose field has no form (`mk(n)` above, `vec_new()` at `Vec<P<?i64>>`) and a literal
-or field read of a struct that holds itself at other type arguments (a few such programs built
-and ran before, where nothing walked the field); any declaration with a `secret` over a type parameter, including a generic
+an instance whose field has no form (`mk(n)` above, `vec_new()` at `Vec<P<?i64>>`) and one that
+makes or reads a struct whose type argument grows around a cycle of fields (some such
+programs built and ran before,
+where nothing walked the field, and on others `snc types` overflowed its stack); any declaration with a `secret` over a type parameter, including a generic
 nothing calls and a phantom type argument (`fn g<T>(y: T) -> P<secret T>` for
 `struct P<T> { n: i64 }`), though no layout depends on the latter; any generic nested array;
 and a call whose callee parameter, once bound, meets the caller's own type through an argument
@@ -1211,10 +1224,18 @@ u) }`, as the same call with a written `?i64` already was). Some refusals reach 
 the language has but the substitution does not build: `[T]` and `Vec<T>` at `T := secret S` for
 a struct `S` or at a secret generic instance (`secret P<i64>`), and `[T]` at an array type
 (`T := [u8]`, whose `[[u8]]` ADR 0068 has). The oracle typed these with
-the callee's written `[T]` or `Vec<T>`; where the generic body only passed the value through
-(`fn same<T>(xs: [T]) -> [T] { xs }` over a `[secret S]` or a `[[u8]]` of strings, a
-`Ring<secret S>`'s `[T]` field, `&[T]`), `snc llvm` lowered them and `snc build` ran them, and where it built or read an element
-`snc llvm` refused them as not yet ported; `scg` built them. They are refused now. Refused
+the callee's written `[T]` or `Vec<T>`. Where the generic body only passed a secret one through
+(`fn same<T>(xs: [T]) -> [T] { xs }` over a `[secret S]`, a `Ring<secret S>`'s `[T]` field,
+`&[T]`), `snc llvm` lowered them and `snc build` ran them; where it built or read an element,
+`snc llvm` refused them as not yet ported, and `scg` built them. No `[[u8]]` argument binds a
+`[T]` parameter (unification refuses it, before and after); `T := [u8]` was reached, among
+other ways, where the body built the `[T]` (`fn single<T>(x: T) -> [T] { [x] }`), which `snc llvm`
+refused as not yet ported, `snc build` stopped on with an internal error and `scg` built; where
+an instance a call made held it in a field (`fn mk<T>(x: T) -> ?R<T>` for
+`struct R<T> { n: i64, xs: [T] }`, called `mk("ab")`); and where a type argument written `[u8]`
+reached such a field (`let w: W<[u8]> = W { x: "ab", q: null }` for
+`struct W<T> { x: T, q: ?Q<[T]> }`). `snc llvm` lowered the last two, `snc build` ran them and
+`scg` built them. They are refused now. Refused
 otherwise: `vec_new()` at an element the substitution does not build (`Vec<secret S>`) is
 `uninstantiable_type` where it was `mismatch`. Accepted now: a generic caller's own `P<T>` or
 `&T` argument binds the callee's parameter, where the call was refused as an ambiguous type
@@ -1233,10 +1254,13 @@ over every `.sentinel` file in the tree, moved only the same files.
 
 **Not covered.** A generic fn's body is still checked once, as written: a type in it with no
 form at some instance (`let n = wrap(x);` inside `g<T>`, with `g` called at `T := ?i64`) is
-accepted, and so is a generic instance written in a signature, an annotation or a container
-element whose field has no form at its arguments (`P<?i64>` for `struct P<T> { v: ?T }`),
-where no call, literal or field read makes or reads one; `snc build` stops with an internal
-error on both, and `scg`'s code generator lowers both (D189). The check that a generic struct
+accepted, and so is a generic instance written anywhere else (a signature, an annotation and
+a container element among them) whose field has no form at its arguments (`P<?i64>` for
+`struct P<T> { v: ?T }`), where no generic call's result, generic struct literal or field read
+on a generic instance makes or reads one; so is a generic call's parameter type pushed down to
+an argument that takes it, a `null` (`fn mk<T>(p: ?P<T>, a: T)` called `mk(null, m)` with
+`m: ?i64` types the `null` `?P<?i64>`). `snc build` stops with an internal error on all three,
+and `scg`'s code generator lowers all three (D189; `scg` types that `null` `?T`, D45). The check that a generic struct
 does not hold a reference in a field (ADR 0017 D7) is not changed here. An `impl` on a generic struct
 written without type arguments types its field reads at the struct's own parameter (D190).
 
@@ -1244,8 +1268,8 @@ written without type arguments types its field reads at the struct's own paramet
 `tc_secret_tparam_written` and `tc_nested_tparam` where `type_of_typeexpr` resolves a written
 type and after an array literal's elements, `subst_complete` at a generic call's return type, a
 generic struct literal's field and a field read, `tc_instance_fields` at a generic call's and a
-generic builtin's result, a generic struct literal's field and a field read (with the oracle's
-refusal of a struct met again at other type arguments), the pushdown through `subst_bound` (which fails
+generic builtin's result, a generic struct literal's field and a field read (by shapes, with
+`tc_growing_cycle` for the growth check, as the oracle walks), the pushdown through `subst_bound` (which fails
 closed where a type parameter is unbound), and `tc_gunify`'s identity shortcut under the
 oracle's condition. An unknown type name over such an argument is refused for the name first, as
 the oracle refuses it. Where the two still differ, on programs both refuse unless said:
@@ -1260,7 +1284,19 @@ the oracle refuses it. Where the two still differ, on programs both refuse unles
   value widened into a `?P<T>` filled before `T`'s binder and a generic fn's tail `pop` into
   `?T`, which the oracle refuses;
 - a `null` argument nothing is pushed down to is typed by `scg` with no type (`?T`) rather than
-  refused as the oracle's ambiguous `null` (not ported, D45);
+  refused as the oracle's ambiguous `null` (not ported, D45), unless the next item applies;
+- where the oracle refuses first with a check `scg` does not make (a `Vec` element type it does
+  not support, as a `Vec<?N<i64>>` a `pop` reads; a call left with an unbound type argument, or
+  an ambiguous `null`; a field read through a reference), `scg` can reach the instance walk and
+  refuse there, as `uninstantiable_type`, an instance whose field has no form at its arguments
+  (`P<??T>` from `fn mk<T>() -> ?Q<P<?T>>` called `mk()`, or a `Vec<?P<?i64>>`) or a struct whose
+  type argument grows around a cycle of fields; the walk takes an unbound argument as one at
+  which every shape is built, so where neither applies `scg` accepts such a call, as at HEAD (`ambiguous_type_arg` is ported
+  only for callees with a `secret` over a type parameter, ADR 0041 A17);
+- `scg`'s walk keeps the tuples it has entered in a list, so a walk that enters thousands of them
+  takes far longer than the oracle's, and its growth check searches with lists where the oracle's
+  uses hash sets, so a walk down a chain of hundreds of structs whose argument grows at each takes
+  several times the oracle's time, more the longer the chain (D194);
 - the return-type check at a generic builtin call is not mirrored: `vec_new()` at
   `Vec<secret S>` is refused by the oracle and typed by `scg`, as at HEAD, where the oracle
   answered `mismatch`; and `scg` checks `vec_to_array`'s element for a plain one before the
@@ -1271,12 +1307,25 @@ the oracle refuses it. Where the two still differ, on programs both refuse unles
 `substitute_checked` against `substitute` over each kind of type that can hold a type
 parameter and over a `[secret S]` and a `Vec<secret S>` that mention none, each refusing site
 including the instances a call or field read makes, the declaration rules and their concrete
-forms, the unification cases, regular and other recursion, and the pushdowns. `tests/ui` holds
-fifteen `c17_uninstantiable_*` fixtures (`?T` at a nullable and at a `secret`, `[T]` at a
-nullable, `Vec<T>` at an array, a generic instance's argument, a reference's target, a literal's
-field, a field read, an instance a call, a builtin, a field read, a literal's field, another
-instance's field and another instance's type argument make, and a struct that holds itself at
-other type arguments), `c17_secret_over_type_param_return` and `_field`,
+forms, the unification cases, a type argument that grows around a cycle through a struct's own
+field, through another struct and inside another instance's argument, the repeats whose instances
+end (`Bx<Bx<i64>>`, permuted and fixed arguments, a struct reached again through two instances,
+an argument grown once into a place that does not lead back), and
+the pushdowns; `the_instance_walk_enters_each_struct_once_per_shape` walks a chain whose
+instances double at each level once per struct, and checks that it builds no instance, and
+`the_instance_walk_does_not_recurse_per_state` walks 2,048 tuples each found from the one before
+and a chain of 3,000 structs.
+`tests/ui` holds twenty-three `c17_uninstantiable_*` fixtures (`?T` at a nullable and at a
+`secret`, `[T]` at a nullable, `Vec<T>` at an array, a generic instance's argument, a reference's
+target, a literal's field, a field read, an instance a call, a builtin, a field read, a literal's
+field, another instance's field and another instance's type argument make, an instance a call
+makes whose `[T]` field, `Vec<T>` field or field of another instance has no form, one reached
+through a reference a call returns, one the walk meets at a second tuple of shapes, a struct whose
+type argument grows around a cycle through its own field, one whose argument grows around a
+cycle inside another instance's argument, one whose argument grows into another parameter that
+leads back, and one with two fields growing into the
+same place, only the second of which leads back),
+`c17_secret_over_type_param_return` and `_field`,
 `c17_generic_nested_array_param` and `_literal`, `c17_unify_instance_scope` and
 `c17_unify_ref_scope`, and `c58`, each with a ported code, so every self-hosted driver must
 refuse each as the oracle does. `tests/pass` holds `c17_generic_param_pushdown_instance` (a
@@ -1284,8 +1333,12 @@ refuse each as the oracle does. `tests/pass` holds `c17_generic_param_pushdown_i
 `[secret S]` returned, received and held in a generic struct) and
 `c17_generic_args_bind_instance` (the new binding, already-nullable arguments, and a `?&T` met
 before its binder, which the oracle has always typed and on which the first commit of this
-amendment made `scg`'s typer abort) and `c17_regular_recursion` (a struct that holds itself at its
-own arguments), through every self-hosted differential.
+amendment made `scg`'s typer abort), `c17_regular_recursion` (a struct that holds itself at its
+own arguments), `c17_nested_instances` (the repeats whose instances end; this amendment's
+second commit refused the program), `c17_literal_declares_its_types` (checking a literal
+declares no type, which the corpus differential compares with `scg`'s) and
+`c17_growth_without_cycle` (an argument grown once into a place that does not lead back), through
+every self-hosted differential.
 
 **Versioning.** The oracle refuses programs it accepted, accepts programs it refused and types
 some arguments differently, so this is oracle-moving: at least a MINOR bump by ADR 0076 D2,
