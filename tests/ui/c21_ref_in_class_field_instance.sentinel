@@ -1,0 +1,15 @@
+// ADR 0017 A4: the class twin of c21_ref_in_struct_field_instance: `C`'s `p` holds a
+// `Box<&i64>`, whose `v` is a reference. Surfaces RefInClassField at the field's type.
+
+struct Box<T> {
+    v: T,
+}
+
+class C {
+    let p: ?Box<&i64>;
+    pub init() { self.p = null; 0 }
+}
+
+fn main() -> i64 {
+    0
+}

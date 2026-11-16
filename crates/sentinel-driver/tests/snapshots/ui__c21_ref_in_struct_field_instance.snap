@@ -1,0 +1,14 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c21_ref_in_struct_field_instance.sentinel\")"
+---
+sentinel::types::ref_in_struct_field
+
+  × references in struct fields are not allowed at C2
+    ╭─[tests/ui/c21_ref_in_struct_field_instance.sentinel:10:8]
+  9 │ struct S {
+ 10 │     p: ?Box<&i64>,
+    ·        ─────┬────
+    ·             ╰── 
+ 11 │ }
+    ╰────

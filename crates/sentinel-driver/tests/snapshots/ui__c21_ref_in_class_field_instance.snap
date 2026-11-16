@@ -1,0 +1,14 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c21_ref_in_class_field_instance.sentinel\")"
+---
+sentinel::types::ref_in_class_field
+
+  × references in class fields are not allowed at C2
+    ╭─[tests/ui/c21_ref_in_class_field_instance.sentinel:9:12]
+  8 │ class C {
+  9 │     let p: ?Box<&i64>;
+    ·            ─────┬────
+    ·                 ╰── 
+ 10 │     pub init() { self.p = null; 0 }
+    ╰────

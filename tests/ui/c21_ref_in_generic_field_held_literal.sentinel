@@ -1,0 +1,16 @@
+// ADR 0017 A4: the reference-in-field rule reaches a field of an instance another field holds.
+// `W<&i64>`'s `p` is a `?Box<&i64>`, and `Box<&i64>`'s `v` is a reference, so a literal that
+// makes a `W<&i64>` is refused, even with `p` null. Surfaces RefInGenericField at the field.
+
+struct Box<T> {
+    v: T,
+}
+
+struct W<T> {
+    p: ?Box<T>,
+}
+
+fn main() -> i64 {
+    let w: W<&i64> = W { p: null };
+    0
+}

@@ -1,0 +1,15 @@
+// ADR 0017 A4: the enum twin of c21_ref_in_struct_field_instance: `A`'s payload holds a
+// `Box<&i64>`, whose `v` is a reference. Surfaces RefInEnumPayload at the payload's type.
+
+struct Box<T> {
+    v: T,
+}
+
+enum E {
+    A(?Box<&i64>),
+    B,
+}
+
+fn main() -> i64 {
+    0
+}

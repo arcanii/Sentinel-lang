@@ -5687,6 +5687,55 @@ pub fn check_module(
         });
     }
 
+    // ADR 0017 A4 (register D195): nor may a struct field's or an enum payload's type hold an
+    // instance that would store a reference in one of its own fields (`p: ?Box<&i64>` for
+    // `struct Box<T> { v: T }`). Checked here, once every struct's fields are typed; the
+    // payloads were typed before the structs (Pass 0.5). Every root here is a type with no
+    // argument known, so a struct found to hold none is not walked again.
+    let mut walked: HashSet<(StructId, Vec<u8>)> = HashSet::new();
+    for (sd, td) in program.structs.iter().zip(&typed_structs) {
+        for (f, tf) in sd.fields.iter().zip(&td.fields) {
+            let held = ref_field_owner(
+                &[tf.ty],
+                None,
+                false,
+                &mut walked,
+                &typed_structs,
+                &generic_instances,
+                &refs,
+                &secrets,
+                &arrays,
+            );
+            if held.is_some() {
+                return Err(TypeError::RefInStructField {
+                    span: to_source_span(&f.ty.span),
+                });
+            }
+        }
+    }
+    for (ed, te) in program.enums.iter().zip(&typed_enums) {
+        for (v, tv) in ed.variants.iter().zip(&te.variants) {
+            for (p, pty) in v.payloads.iter().zip(&tv.payloads) {
+                let held = ref_field_owner(
+                    &[*pty],
+                    None,
+                    false,
+                    &mut walked,
+                    &typed_structs,
+                    &generic_instances,
+                    &refs,
+                    &secrets,
+                    &arrays,
+                );
+                if held.is_some() {
+                    return Err(TypeError::RefInEnumPayload {
+                        span: to_source_span(&p.span),
+                    });
+                }
+            }
+        }
+    }
+
     // Pass 2: cycle detection.
     detect_struct_cycle(&typed_structs)?;
 
@@ -6591,8 +6640,23 @@ pub fn check_module(
                 &struct_type_param_counts,
             )?;
             // ADR 0017 D7: the class twin of the struct-field rule. `delegate`
-            // fields land in this same list, so they are covered here.
-            if ty.carries_ref(&secrets) {
+            // fields land in this same list, so they are covered here. A4 (register
+            // D195): so is an instance that would store a reference in a field, with the
+            // struct fields' and payloads' record.
+            if ty.carries_ref(&secrets)
+                || ref_field_owner(
+                    &[ty],
+                    None,
+                    false,
+                    &mut walked,
+                    &typed_structs,
+                    &generic_instances,
+                    &refs,
+                    &secrets,
+                    &arrays,
+                )
+                .is_some()
+            {
                 return Err(TypeError::RefInClassField {
                     span: to_source_span(&f.ty.span),
                 });
@@ -9401,6 +9465,248 @@ fn generic_field_ref_owner(
     None
 }
 
+/// ADR 0017 A4 (register D195): whether a value of type `t` holds a reference outside the
+/// generic instances it holds: `t` is a reference, or a nullable, an array, a `Vec` or a
+/// `secret` over a type that does, or a type parameter whose argument does (`s` holds an answer
+/// per type parameter; `None`: nothing is known of them, so none does). What an instance's own
+/// fields hold is [`ref_field_owner`]'s question.
+fn holds_ref_outside_instances(
+    t: Type,
+    s: Option<&[u8]>,
+    secrets: &[SecretData],
+    arrays: &[ArrayElem],
+) -> bool {
+    let inner = match t {
+        Type::TypeParam(id) => {
+            return s.and_then(|s| s.get(id.0 as usize)).is_some_and(|b| *b != 0);
+        }
+        Type::Ref(_) => return true,
+        Type::Nullable(ni) => ni.to_type(),
+        Type::Array(ArrayElem::Array(id)) => Type::Array(arrays[id.0 as usize]),
+        Type::Array(ae) => ae.to_type(),
+        Type::Vec(ve) => ve.to_type(),
+        // An unknown `secret` fails closed.
+        Type::Secret(sid) => match secrets.get(sid.0 as usize) {
+            Some(d) => d.inner,
+            None => return true,
+        },
+        Type::GenericInstance(_)
+        | Type::I64
+        | Type::I32
+        | Type::U8
+        | Type::U128
+        | Type::F64
+        | Type::Ptr
+        | Type::Bool
+        | Type::Struct(_)
+        | Type::Class(_)
+        | Type::TraitSelf(_)
+        | Type::Enum(_)
+        | Type::Kont(_)
+        | Type::Task(_)
+        | Type::Channel(_)
+        | Type::Shared(_)
+        | Type::Mutex(_)
+        | Type::Guard(_)
+        | Type::Process
+        | Type::SealedChannel
+        | Type::Fn(_) => return false,
+    };
+    holds_ref_outside_instances(inner, s, secrets, arrays)
+}
+
+/// The instances the type `f` is written with, as [`instances_in`] finds them (an instance's
+/// arguments' instances before it), each as its struct and, per argument,
+/// [`holds_ref_outside_instances`]'s answer for it. `s` is that answer per type parameter `f`
+/// is written with (`None`: nothing is known of them, so none is taken to hold a reference, as
+/// at a declaration). With `generic_only`, an instance whose arguments mention no type
+/// parameter is left out.
+#[allow(clippy::too_many_arguments)]
+fn ref_instances_in(
+    f: Type,
+    s: Option<&[u8]>,
+    generic_only: bool,
+    instances: &[GenericInstanceData],
+    refs: &[RefData],
+    secrets: &[SecretData],
+    arrays: &[ArrayElem],
+    out: &mut Vec<(StructId, Vec<u8>)>,
+) {
+    let inner = match f {
+        Type::GenericInstance(id) => {
+            let data = &instances[id.0 as usize];
+            for a in &data.args {
+                ref_instances_in(*a, s, generic_only, instances, refs, secrets, arrays, out);
+            }
+            if !generic_only || contains_type_param(f, instances, refs) {
+                let held = data
+                    .args
+                    .iter()
+                    .map(|a| u8::from(holds_ref_outside_instances(*a, s, secrets, arrays)))
+                    .collect();
+                out.push((data.struct_id, held));
+            }
+            return;
+        }
+        Type::Nullable(ni) => ni.to_type(),
+        Type::Array(ArrayElem::Array(id)) => Type::Array(arrays[id.0 as usize]),
+        Type::Array(ae) => ae.to_type(),
+        Type::Vec(ve) => ve.to_type(),
+        Type::Ref(id) => refs[id.0 as usize].inner,
+        Type::Secret(id) => secrets[id.0 as usize].inner,
+        Type::TypeParam(_)
+        | Type::I64
+        | Type::I32
+        | Type::U8
+        | Type::U128
+        | Type::F64
+        | Type::Ptr
+        | Type::Bool
+        | Type::Struct(_)
+        | Type::Class(_)
+        | Type::TraitSelf(_)
+        | Type::Enum(_)
+        | Type::Kont(_)
+        | Type::Task(_)
+        | Type::Channel(_)
+        | Type::Shared(_)
+        | Type::Mutex(_)
+        | Type::Guard(_)
+        | Type::Process
+        | Type::SealedChannel
+        | Type::Fn(_) => return,
+    };
+    ref_instances_in(inner, s, generic_only, instances, refs, secrets, arrays, out)
+}
+
+/// ADR 0017 A4: the places a value of type `t` lets its holder write into: the target of each
+/// `&mut` it is, or holds through a nullable, an array, a `Vec` or a `secret`. A shared
+/// reference's target is not one, and a reference held in a field cannot be (D7).
+fn mut_ref_targets(
+    t: Type,
+    refs: &[RefData],
+    secrets: &[SecretData],
+    arrays: &[ArrayElem],
+    out: &mut Vec<Type>,
+) {
+    let inner = match t {
+        Type::Ref(id) => {
+            let data = &refs[id.0 as usize];
+            if data.mutable {
+                out.push(data.inner);
+            }
+            return;
+        }
+        Type::Nullable(ni) => ni.to_type(),
+        Type::Array(ArrayElem::Array(id)) => Type::Array(arrays[id.0 as usize]),
+        Type::Array(ae) => ae.to_type(),
+        Type::Vec(ve) => ve.to_type(),
+        Type::Secret(id) => match secrets.get(id.0 as usize) {
+            Some(d) => d.inner,
+            None => return,
+        },
+        Type::GenericInstance(_)
+        | Type::TypeParam(_)
+        | Type::I64
+        | Type::I32
+        | Type::U8
+        | Type::U128
+        | Type::F64
+        | Type::Ptr
+        | Type::Bool
+        | Type::Struct(_)
+        | Type::Class(_)
+        | Type::TraitSelf(_)
+        | Type::Enum(_)
+        | Type::Kont(_)
+        | Type::Task(_)
+        | Type::Channel(_)
+        | Type::Shared(_)
+        | Type::Mutex(_)
+        | Type::Guard(_)
+        | Type::Process
+        | Type::SealedChannel
+        | Type::Fn(_) => return,
+    };
+    mut_ref_targets(inner, refs, secrets, arrays, out)
+}
+
+/// ADR 0017 A4 (register D195): the generic struct, by name, one of whose fields would hold a
+/// reference outside the instances it holds ([`holds_ref_outside_instances`]), among the
+/// instances the types `roots` are written with and, field by field, the instances those
+/// structs' fields hold. `s` is what the roots' type parameters stand for, as there; with
+/// `generic_only`, a root's instances whose arguments mention no type parameter are left out
+/// ([`ref_instances_in`]), though not the instances the walk meets in fields.
+///
+/// D7's rule asked this only of the type at hand; this reaches a field of an instance held in
+/// a field (`W { p: null }` at `W<&i64>` for `struct W<T> { p: ?Box<T> }`). Like ADR 0016 A3's
+/// walk, it builds no instance: a struct is entered once per tuple of its arguments' answers,
+/// at most `2^n` times for `n` type parameters, across the calls that share `seen`, and the walk
+/// keeps its own stack. It enters every instance a type is written with, a phantom argument's
+/// included. A struct found to hold none stays in `seen`, so a caller whose roots all have the
+/// same `s` may share it across calls.
+#[allow(clippy::too_many_arguments)]
+fn ref_field_owner(
+    roots: &[Type],
+    s: Option<&[u8]>,
+    generic_only: bool,
+    seen: &mut HashSet<(StructId, Vec<u8>)>,
+    structs: &[TypedStructDecl],
+    instances: &[GenericInstanceData],
+    refs: &[RefData],
+    secrets: &[SecretData],
+    arrays: &[ArrayElem],
+) -> Option<String> {
+    let mut stack: Vec<ShapeFrame> = Vec::new();
+    for root in roots {
+        let mut top = Vec::new();
+        ref_instances_in(*root, s, generic_only, instances, refs, secrets, arrays, &mut top);
+        for (sid, held) in top {
+            if seen.insert((sid, held.clone())) {
+                stack.push(ShapeFrame { sid, shapes: held, field: 0, pending: Vec::new(), next: 0 });
+            }
+            while let Some(frame) = stack.last_mut() {
+                if frame.next < frame.pending.len() {
+                    let (q, held) = frame.pending[frame.next].clone();
+                    frame.next += 1;
+                    if seen.insert((q, held.clone())) {
+                        stack.push(ShapeFrame {
+                            sid: q,
+                            shapes: held,
+                            field: 0,
+                            pending: Vec::new(),
+                            next: 0,
+                        });
+                    }
+                    continue;
+                }
+                let decl = &structs[frame.sid.0 as usize];
+                let Some(f) = decl.fields.get(frame.field) else {
+                    stack.pop();
+                    continue;
+                };
+                frame.field += 1;
+                if holds_ref_outside_instances(f.ty, Some(&frame.shapes), secrets, arrays) {
+                    return Some(decl.name.clone());
+                }
+                frame.pending.clear();
+                frame.next = 0;
+                ref_instances_in(
+                    f.ty,
+                    Some(&frame.shapes),
+                    false,
+                    instances,
+                    refs,
+                    secrets,
+                    arrays,
+                    &mut frame.pending,
+                );
+            }
+        }
+    }
+    None
+}
+
 /// ADR 0034 C1 (register D125): may `vec_to_array` copy an element of type `ty`? It copies
 /// the Vec's buffer byte for byte and leaves the Vec holding its elements, so the copy is
 /// sound only for a value that owns nothing: scalars (`u128` and `secret` ones included),
@@ -10225,6 +10531,39 @@ fn check_call(
         if let Some(struct_name) =
             generic_field_ref_owner(ret_ty, structs, instances, refs, secrets, &mut Vec::new())
         {
+            return Err(TypeError::RefInGenericField {
+                struct_name,
+                span: to_source_span(call_span),
+            });
+        }
+    }
+    // ADR 0017 A4 (register D195): nor may it hand the body a place where a value it builds
+    // can go: the target of a `&mut` parameter whose instances that mention a type parameter
+    // would store a reference in a field at these arguments (`put(&mut n, &x)` for
+    // `fn put<T>(b: &mut ?Box<T>, a: T)`, whose body can write a `Box<T>` into `n`). A
+    // parameter that holds no `&mut` (by value or shared) is not written back, and an
+    // instance a parameter names at fixed arguments, or one inside a type argument, is the
+    // caller's, checked where its values are made.
+    if n_type_params > 0 {
+        let held: Vec<u8> = concrete_type_args
+            .iter()
+            .map(|a| u8::from(holds_ref_outside_instances(*a, None, secrets, arrays)))
+            .collect();
+        let mut places = Vec::new();
+        for p in &signature.param_types {
+            mut_ref_targets(*p, refs, secrets, arrays, &mut places);
+        }
+        if let Some(struct_name) = ref_field_owner(
+            &places,
+            Some(&held),
+            true,
+            &mut HashSet::new(),
+            structs,
+            instances,
+            refs,
+            secrets,
+            arrays,
+        ) {
             return Err(TypeError::RefInGenericField {
                 struct_name,
                 span: to_source_span(call_span),
@@ -11196,12 +11535,31 @@ fn check_expr(
                     }
                 }
                 // ADR 0017 D7: a generic struct literal whose instance puts a
-                // reference in THIS field (`let b: Box<&i64> = Box { v: &x }`).
-                if !type_args.is_empty() && expected_field_ty.carries_ref(secrets) {
-                    return Err(TypeError::RefInGenericField {
-                        struct_name: decl.name.clone(),
-                        span: to_source_span(&fi.value.span),
-                    });
+                // reference in THIS field (`let b: Box<&i64> = Box { v: &x }`), or (A4,
+                // register D195) in a field of an instance this field's type holds
+                // (`W { p: null }` at `W<&i64>` for `struct W<T> { p: ?Box<T> }`).
+                if !type_args.is_empty() {
+                    let owner = if expected_field_ty.carries_ref(secrets) {
+                        Some(decl.name.clone())
+                    } else {
+                        ref_field_owner(
+                            &[expected_field_ty],
+                            None,
+                            false,
+                            &mut HashSet::new(),
+                            structs,
+                            instances,
+                            refs,
+                            secrets,
+                            arrays,
+                        )
+                    };
+                    if let Some(struct_name) = owner {
+                        return Err(TypeError::RefInGenericField {
+                            struct_name,
+                            span: to_source_span(&fi.value.span),
+                        });
+                    }
                 }
                 // ADR 0014 D5: push the field's expected type down so
                 // `null` / widening work inside struct literals.
@@ -14646,6 +15004,107 @@ fn main() -> i64 {
             "struct Box<T> { v: T }\nfn mk<T>(x: T) -> Box<T> { Box { v: x } }\nfn main() -> i64 { let x: i64 = 5; let b = mk(&x); 0 }",
         );
         assert!(matches!(err, TypeError::RefInGenericField { .. }), "got {err:?}");
+    }
+
+    /// ADR 0017 A4 (register D195): the rule reaches a field of an instance a field holds, at
+    /// each place a value of such a type is made or a place for one is declared or handed to a
+    /// generic body; a phantom argument no field uses stays legal at any depth.
+    #[test]
+    fn ref_in_a_held_instance_field_rejected() {
+        const BOX: &str = "struct Box<T> { v: T }\nfn mkbox<T>(a: T) -> Box<T> { Box { v: a } }\n";
+        let refused: &[(&str, &str)] = &[
+            // A generic struct literal whose field's type holds the instance.
+            ("struct W<T> { p: ?Box<T> }\nfn main() -> i64 { let w: W<&i64> = W { p: null }; 0 }", "generic"),
+            ("struct W<T> { p: ?Box<T> }\nstruct W2<T> { w: ?W<T> }\nfn main() -> i64 { let w: W2<?&i64> = W2 { w: null }; 0 }", "generic"),
+            ("struct W<T> { p: Vec<Box<T>> }\nfn main() -> i64 { let w: W<&i64> = W { p: vec_new() }; 0 }", "generic"),
+            // A generic call handing the body a place where a `Box<&i64>` can go.
+            ("fn put<T>(b: &mut ?Box<T>, a: T) -> i64 { *b = mkbox(a); 0 }\nfn main() -> i64 { let mut n: ?Box<&i64> = null; let x: i64 = 5; put(&mut n, &x) }", "generic"),
+            ("struct W<T> { p: ?Box<T> }\nfn put<T>(w: &mut ?W<T>, a: T) -> i64 { 0 }\nfn main() -> i64 { let mut n: ?W<&i64> = null; let x: i64 = 5; put(&mut n, &x) }", "generic"),
+            // At an argument that holds a reference through a nullable, and through a `Vec`
+            // field the body can push into.
+            ("fn put<T>(b: &mut ?Box<T>, a: T) -> i64 { 0 }\nfn main() -> i64 { let mut n: ?Box<?&i64> = null; let y: ?&i64 = null; put(&mut n, y) }", "generic"),
+            ("struct V<T> { xs: Vec<T> }\nfn put<T>(v: &mut ?V<T>, a: T) -> i64 { 0 }\nfn main() -> i64 { let mut n: ?V<&i64> = null; let x: i64 = 5; put(&mut n, &x) }", "V"),
+            // Through a nullable `&mut` parameter.
+            ("fn put<T>(b: ?&mut ?Box<T>, a: T) -> i64 { 0 }\nfn main() -> i64 { let mut n: ?Box<&i64> = null; let x: i64 = 5; let r: ?&mut ?Box<&i64> = &mut n; put(r, &x) }", "generic"),
+            // Declarations: a struct field (also through a `Vec` and as an instance's
+            // argument), a generic struct's field written with a reference argument, a class
+            // field and an enum payload.
+            ("struct S { p: ?Box<&i64> }\nfn main() -> i64 { 0 }", "struct"),
+            ("struct S { p: Vec<Box<&i64>> }\nfn main() -> i64 { 0 }", "struct"),
+            ("struct Pair<A, B> { a: A, b: B }\nstruct S { p: ?Pair<i64, Box<&i64>> }\nfn main() -> i64 { 0 }", "struct"),
+            ("struct G<T> { p: ?Box<&T> }\nfn main() -> i64 { 0 }", "struct"),
+            ("class C {\n    let p: ?Box<&i64>;\n    pub init() { self.p = null; 0 }\n}\nfn main() -> i64 { 0 }", "class"),
+            ("enum E { A(?Box<&i64>), B }\nfn main() -> i64 { 0 }", "enum"),
+            // Through a `Vec`'s, an array's and a `secret`'s inner type, and in the second of
+            // two fields that hold instances.
+            ("struct V<T> { xs: Vec<T> }
+struct S { p: ?V<&i64> }
+fn main() -> i64 { 0 }", "struct"),
+            ("struct A<T> { xs: [T] }
+struct S { p: ?A<&i64> }
+fn main() -> i64 { 0 }", "struct"),
+            ("struct S { p: ?Box<secret &i64> }
+fn main() -> i64 { 0 }", "struct"),
+            ("struct W<T> { n: ?Box<i64>, p: ?Box<T> }
+fn main() -> i64 { let w: W<&i64> = W { n: null, p: null }; 0 }", "generic"),
+            ("struct W<T> { n: ?Box<i64>, p: ?Box<T> }
+struct S { w: ?W<&i64> }
+fn main() -> i64 { 0 }", "struct"),
+            // A phantom argument that is itself an instance holding a reference is entered
+            // too: refused, fail closed.
+            ("struct Tagged<A, B> { v: A }\nstruct S { p: Tagged<i64, Box<&i64>> }\nfn main() -> i64 { 0 }", "struct"),
+            // ... and so is one behind a reference in that position.
+            ("struct Tagged<A, B> { v: A }\nstruct S { p: Tagged<i64, &Box<&i64>> }\nfn main() -> i64 { 0 }", "struct"),
+        ];
+        for (body, kind) in refused {
+            let src = format!("{BOX}{body}");
+            let err = check_err(&src);
+            let ok = match *kind {
+                "generic" => matches!(err, TypeError::RefInGenericField { ref struct_name, .. } if struct_name == "Box"),
+                "V" => matches!(err, TypeError::RefInGenericField { ref struct_name, .. } if struct_name == "V"),
+                "struct" => matches!(err, TypeError::RefInStructField { .. }),
+                "class" => matches!(err, TypeError::RefInClassField { .. }),
+                "enum" => matches!(err, TypeError::RefInEnumPayload { .. }),
+                _ => unreachable!(),
+            };
+            assert!(ok, "{src}: got {err:?}");
+        }
+        let accepted: &[&str] = &[
+            "struct Tagged<A, B> { v: A }\nstruct S { p: Tagged<i64, &i64> }\nfn tag<A, B>(a: A, b: B) -> Tagged<A, B> { Tagged { v: a } }\nfn main() -> i64 { let x: i64 = 5; let t = tag(1, &x); let u: Tagged<i64, &mut i64> = Tagged { v: 2 }; let s = S { p: Tagged { v: 3 } }; t.v + u.v }",
+            "struct W<T> { p: ?Box<T>, n: i64 }\nfn put<T>(w: &mut W<T>, a: T) -> i64 { 0 }\nfn main() -> i64 { let mut w: W<i64> = W { p: null, n: 3 }; put(&mut w, 4) }",
+            "fn get<T>(b: &Box<T>) -> i64 { 7 }\nfn main() -> i64 { let b: Box<i64> = Box { v: 1 }; get(&b) }",
+            // A generic call's parameters that hold no `&mut` are not written back, and an
+            // instance a parameter names at fixed arguments is the caller's.
+            "fn peek<T>(b: &?Box<T>) -> i64 { 0 }\nfn main() -> i64 { let n: ?Box<&i64> = null; peek(&n) }",
+            "fn byval<T>(b: ?Box<T>) -> i64 { 0 }\nfn main() -> i64 { let n: ?Box<&i64> = null; byval(n) }",
+            "fn f<T>(a: T, t: &mut ?Box<&i64>) -> i64 { 0 }\nfn main() -> i64 { let mut n: ?Box<&i64> = null; f(1, &mut n) }",
+        ];
+        for body in accepted {
+            check_ok(&format!("{BOX}{body}"));
+        }
+    }
+
+    /// ADR 0017 A4: the walk keeps its own stack. A literal of the last of a chain of 2,000
+    /// generic structs, each holding a nullable instance of the one before, is walked down to
+    /// the first, whose field holds the type argument: accepted at `i64`, refused at `&i64`.
+    #[test]
+    fn the_reference_walk_does_not_recurse_per_instance() {
+        let depth = 2000;
+        let mut src = String::from("struct C0<T> { v: T }\n");
+        for i in 1..depth {
+            src.push_str(&format!("struct C{i}<T> {{ v: i64, x: ?C{}<T> }}\n", i - 1));
+        }
+        let last = depth - 1;
+        check_ok(&format!(
+            "{src}fn main() -> i64 {{ let c: C{last}<i64> = C{last} {{ v: 1, x: null }}; c.v }}"
+        ));
+        let err = check_err(&format!(
+            "{src}fn main() -> i64 {{ let c: C{last}<&i64> = C{last} {{ v: 1, x: null }}; c.v }}"
+        ));
+        assert!(
+            matches!(err, TypeError::RefInGenericField { ref struct_name, .. } if struct_name == "C0"),
+            "got {err:?}"
+        );
     }
 
     // ----- ADR 0073 D1 (the effect-op signature fence): an operation's parameters

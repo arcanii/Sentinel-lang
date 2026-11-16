@@ -363,6 +363,12 @@ ui_snapshot!(c21_ref_in_class_field_delegate, "c21_ref_in_class_field_delegate.s
 ui_snapshot!(c21_ref_in_enum_payload, "c21_ref_in_enum_payload.sentinel");
 ui_snapshot!(c21_ref_in_generic_field_call, "c21_ref_in_generic_field_call.sentinel");
 ui_snapshot!(c21_ref_in_generic_field_literal, "c21_ref_in_generic_field_literal.sentinel");
+ui_snapshot!(c21_ref_in_generic_field_held_literal, "c21_ref_in_generic_field_held_literal.sentinel");
+ui_snapshot!(c21_ref_in_generic_field_param, "c21_ref_in_generic_field_param.sentinel");
+ui_snapshot!(c21_ref_in_struct_field_instance, "c21_ref_in_struct_field_instance.sentinel");
+ui_snapshot!(c21_ref_in_struct_field_instance_arg, "c21_ref_in_struct_field_instance_arg.sentinel");
+ui_snapshot!(c21_ref_in_class_field_instance, "c21_ref_in_class_field_instance.sentinel");
+ui_snapshot!(c21_ref_in_enum_payload_instance, "c21_ref_in_enum_payload_instance.sentinel");
 
 // ---- ADR 0017 D7 (ref-escape), borrow layer. A reference may not outlive the
 // storage it points at. Each family below pins one POSITION where a dead source

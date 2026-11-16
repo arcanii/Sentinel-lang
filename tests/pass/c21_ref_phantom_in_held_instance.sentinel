@@ -1,0 +1,41 @@
+// ADR 0017 A4: what the reference-in-field rule still accepts once it reaches the instances a
+// field holds. A phantom reference argument no field uses stays legal in a literal, in a call's
+// result and in a field's instance (`Tagged<i64, &i64>`), and a generic body is handed a place
+// for an instance at type arguments that hold no reference (`put(&mut w, 4)`).
+// 1 + 2 + 3 + 0 + 36 = 42.
+
+struct Tagged<A, B> {
+    v: A,
+}
+
+struct Box<T> {
+    v: T,
+}
+
+struct W<T> {
+    p: ?Box<T>,
+    n: i64,
+}
+
+struct S {
+    t: Tagged<i64, &i64>,
+}
+
+fn tag<A, B>(a: A, b: B) -> Tagged<A, B> {
+    Tagged { v: a }
+}
+
+fn put<T>(w: &mut W<T>, a: T) -> i64 {
+    0
+}
+
+fn main() -> i64 {
+    let x: i64 = 5;
+    let t = tag(1, &x);
+    let u: Tagged<i64, &mut i64> = Tagged { v: 2 };
+    let mut w: W<i64> = W { p: null, n: 3 };
+    let k = put(&mut w, 4);
+    let s = S { t: Tagged { v: 36 } };
+    let st = s.t;
+    t.v + u.v + w.n + k + st.v
+}

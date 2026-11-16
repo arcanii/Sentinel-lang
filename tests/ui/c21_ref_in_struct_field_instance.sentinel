@@ -1,0 +1,15 @@
+// ADR 0017 A4: a struct field whose type holds an instance that would store a reference in a
+// field of its own is refused, as a reference in the field itself is: `S`'s `p` holds a
+// `Box<&i64>`, whose `v` is a reference. Surfaces RefInStructField at the field's type.
+
+struct Box<T> {
+    v: T,
+}
+
+struct S {
+    p: ?Box<&i64>,
+}
+
+fn main() -> i64 {
+    0
+}

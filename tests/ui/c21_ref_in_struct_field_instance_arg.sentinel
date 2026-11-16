@@ -1,0 +1,15 @@
+// ADR 0017 A4: in a generic struct, a field's instance written with a reference argument is
+// refused at the declaration: whatever `T` is, `G<T>`'s `p` holds a `Box<&T>`, whose `v` is a
+// reference. Surfaces RefInStructField at the field's type.
+
+struct Box<T> {
+    v: T,
+}
+
+struct G<T> {
+    p: ?Box<&T>,
+}
+
+fn main() -> i64 {
+    0
+}

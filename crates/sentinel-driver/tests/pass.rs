@@ -685,6 +685,14 @@ fn pass_c21_pass_through_ref() {
 }
 
 #[test]
+fn pass_c21_ref_phantom_in_held_instance() {
+    // ADR 0017 A4: a phantom reference argument stays legal at any depth, and a generic body is
+    // handed a place for an instance at type arguments that hold no reference.
+    // 1 + 2 + 3 + 0 + 36 = 42.
+    assert_eq!(run_exit("c21_ref_phantom_in_held_instance.sentinel"), 42);
+}
+
+#[test]
 fn pass_c21_reborrow() {
     // `& *r` reborrow shape — source propagates through deref.
     // The result ref's source is Incoming (caller's), so escapable

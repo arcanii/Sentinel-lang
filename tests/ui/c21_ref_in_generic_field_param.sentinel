@@ -1,0 +1,23 @@
+// ADR 0017 A4: a generic call is refused where the target of a `&mut` parameter holds, at the
+// call's type arguments, an instance that would store a reference in a field. `put`'s `b`
+// points to a `?Box<&i64>` here, and its body can write a `Box<&i64>` there. Surfaces
+// RefInGenericField at the call.
+
+struct Box<T> {
+    v: T,
+}
+
+fn mkbox<T>(a: T) -> Box<T> {
+    Box { v: a }
+}
+
+fn put<T>(b: &mut ?Box<T>, a: T) -> i64 {
+    *b = mkbox(a);
+    0
+}
+
+fn main() -> i64 {
+    let mut n: ?Box<&i64> = null;
+    let x: i64 = 5;
+    put(&mut n, &x)
+}
