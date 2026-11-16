@@ -14,7 +14,35 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
-**Latest (2026-11-13, updated 2026-11-15) — a type parameter stays in its own declaration's types
+**Latest (2026-11-16) — the reference-in-field rule reaches the instances a type holds
+([ADR 0017](decisions/0017-phase-c2-kickoff-and-region-plan.md) amendment A4; register D195
+closed, D196 and D197 filed).** ADR 0017 D7 keeps references out of storage, where one could outlive what it points
+to. Its checks on a struct field, a class field, an enum payload and a generic struct
+literal's field asked only of the type at hand, and a generic call was checked on its result
+alone, so a field whose type is an
+instance holding a reference in its own field (`p: ?Box<&i64>` for `struct Box<T> { v: T }`), a
+literal whose field's type is one (`W { p: null }` at `W<&i64>` for `struct W<T> { p: ?Box<T> }`)
+and a generic call handing its body a place at one (`put(&mut n, &x)` for
+`fn put<T>(b: &mut ?Box<T>, a: T)`) passed the type, borrow and MIR checks, and `snc build`
+built them, as did a generic call handing its body a place at a `Vec<T>` field (A3 refuses
+one only where a literal, a call's result or a field read makes it). Each of those positions
+is refused now where its type holds, at any depth, an instance with a reference in a field, and
+so is a generic call where the target of a `&mut` its parameter is or holds does, through the instances written there that mention a type parameter, one answer per type argument; a parameter that holds no `&mut`, and an instance the target names at fixed arguments or one inside a type argument, are not asked, since the caller made those values and their making was checked. The walk that answers it (`ref_field_owner`) builds no instance: it
+needs one answer per type argument, whether the argument holds a reference outside the instances
+it holds, so a walk enters each struct once per tuple of answers, the declaration pass keeps one
+record for its struct fields, enum payloads and class fields, and the walk keeps its own stack;
+each literal and each call walks afresh (register D197, filed). A phantom reference argument no field uses stays legal; an
+instance written as a phantom argument that holds one in a field is refused in a declaration or
+a literal's field type, fail closed (a value of that type made elsewhere is accepted, as
+before), and so is a declaration of such a field that nothing builds a value of, which compiled
+before. Rejection-only and oracle-only, as the rest of the family: no emitted IR moves and
+`scg`, which ports none of these rules, is unchanged. Pinned by
+`ref_in_a_held_instance_field_rejected` and `the_reference_walk_does_not_recurse_per_instance`,
+six `tests/ui` fixtures and `tests/pass/c21_ref_phantom_in_held_instance`. Mutations, each against an unmutated baseline that passes: 23 of the 27 mutants of the walk and the five sites are caught by a test that reads them; the other four cannot change a verdict (an unknown `secret` id, which the interner never hands out; a nested array's inner type, since an array of arrays over a reference or over a type parameter is refused where it is written; a fresh record for each field of the declaration pass, which only costs time; and a `secret &mut` parameter, since a `secret` over a type that mentions a type parameter is refused where it is written, so what such a parameter points to mentions none). Sweeps, the compiler at `8f68166` against this one: `snc types` and `snc llvm` over the 590 `.sentinel` files outside `selfhost/`, tracked and new, move only the six new `tests/ui` fixtures; `snc types` and `snc llvm` over the 213 programs `snc merge` takes, and `snc build` over the 92 only it reaches, move none.
+Two review rounds (`wf_b8532050-d1b` and `wf_420de021-b12`), each finding verified by constructing it; neither found a route the rule misses. The first found the call check over-broad (it asked every parameter, so a by-value or shared one and one naming such an instance at fixed arguments were refused), the declaration pass's cost quadratic in a chain's length, and statements in the texts that were false or over-broad, among them that A3 had closed the `Vec<T>` route, which a generic body handed `&mut ?V<&i64>` still took, built and ran; all fixed, and it led to D196. The second found the class fields walking apart from the declaration pass's record, now shared, the call check's cost at many calls (D197), and statements about the call check that were imprecise, now fixed. Four-check: 2,265 passed with the 18 known failures (6 ignored), doctests and clippy clean, both bootstrap fixed points green. Refuses programs that compiled before: at least a MINOR bump by ADR 0076 D2,
+covered by the 0.3.0 still owed.
+
+**Previously (2026-11-13, updated 2026-11-15) — a type parameter stays in its own declaration's types
 ([ADR 0016](decisions/0016-concrete-c1-7-generics-syntax.md) amendment A3; register D188, D182
 and D183 closed, D189 to D194 filed, D45, D117, D145, D146 and D180 extended).** A type parameter
 is identified by its index, so a type that carries one out of the declaration that wrote it is

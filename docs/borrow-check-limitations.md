@@ -236,6 +236,20 @@ old `is_ref()` saw only a bare `&T`: `ref_in_class_field`,
 in a field — a *phantom* ref type argument no field uses stays legal), and
 the widened `ref_in_struct_field` / `nested_ref` gates.
 
+Since [ADR 0017](decisions/0017-phase-c2-kickoff-and-region-plan.md) A4
+(2026-11-16) the field rules (`ref_in_struct_field`, `ref_in_class_field`,
+`ref_in_enum_payload`) and `ref_in_generic_field` also look inside the
+generic instances a type holds: a struct, class or enum field and a generic
+struct literal's field are refused where their type holds, at any depth, an
+instance one of whose fields would hold a reference (`p: ?Box<&i64>` for
+`struct Box<T> { v: T }`), and a generic call where the target of a `&mut`
+parameter holds, at the call's type arguments, such an instance written with
+one of the callee's type parameters.
+Before, the field and literal rules asked only of the type at hand, and a
+generic call was checked on its result alone, so such a field passed, and a
+generic body handed a `&mut ?Box<T>` at `T := &i64` could store a
+`Box<&i64>` there.
+
 `secret &T` remains a legal type (ADR 0019 D5) — it is a secret value
 behind a public reference, and `carries_ref` reaching through `Secret` does
 not ban it. `tests/pass/c21_nullable_secret_ref_passthrough.sentinel` pins

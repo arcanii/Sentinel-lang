@@ -6,7 +6,9 @@ the "Amendments at C2.5 close" section: a recursive-field-drop
 implementation gap closed at C2.5(a); a known
 soundness gap (partial move through field projection + drop ⇒
 double-free) documented for closure in a follow-on sub-phase;
-the Polonius migration plan landed as separate ADR 0018.
+the Polonius migration plan landed as separate ADR 0018. A4
+(2026-11-16, below) extends D7's storage checks to the instances a
+type holds (register D195).
 
 D-decision progress: **D1-D14 all exercised.** C2.0.1 (d7b18c2)
 + C2.0.2 (9516ebb) + C2.1 (64edf3d) + C2.2 (4a0ca92) + C2.3
@@ -803,6 +805,103 @@ per-(VarId, FieldPath) move-state. This is genuine post-C2
 work that the ADR did not originally call out; flagged here
 for visibility. Until it lands, programs that pass Move-typed
 struct fields by value to drop-eligible consumers are unsound.
+
+## Amendment A4 (2026-11-16)
+
+**A4 (2026-11-16). The second-class rule's storage checks reach the instances a type holds
+(register D195).** Status: **ACCEPTED.** D7 keeps references out of storage, where one could
+outlive what it points to: `RefInStructField`, `RefInClassField` and `RefInEnumPayload` refuse
+a reference in a struct field, a class field or an enum payload, and `RefInGenericField` (since
+2026-09-19) one a generic struct literal or a generic call's result puts in a field once the
+type arguments are substituted. The struct, class, enum and literal checks asked only of the
+type at hand, and the call check only of the call's result:
+
+- the struct, class and enum rules asked whether the field's or the payload's own type held a
+  reference, so a field whose type is an instance holding one in a field of its own passed
+  (`p: ?Box<&i64>` for `struct Box<T> { v: T }`);
+- the literal rule asked the same of each field's substituted type, so a literal whose field's
+  type is such an instance passed (`W { p: null }` at `W<&i64>` for `struct W<T> { p: ?Box<T> }`);
+- the call rule walked the instances the result's type holds, and no parameter's, so a generic
+  body handed a place at such an instance (`put(&mut n, &x)` for `fn put<T>(b: &mut ?Box<T>,
+  a: T)` with `n: ?Box<&i64>`) could store a `Box<&i64>` there.
+
+Each passed the type, borrow and MIR checks, and `snc build` built and ran the six programs
+pinned below. A `Vec<T>` field at `T := &i64`, the other route the same reviews found, has been
+refused since ADR 0016 A3 where a literal, a generic call's result or a field read makes one;
+a generic call handing its body a place at one passed, and built and ran (`put(&mut n, &x, &y)`
+for `fn put<T>(v: &mut ?V<T>, a: T, b: T)`, whose body pushes `b` into the `Vec` of
+`struct V<T> { xs: Vec<T> }`, with `n: ?V<&i64>`).
+
+**Rule.** A type *holds a reference in a field* where an instance it is written with (itself,
+one inside a nullable, an array, a `Vec`, a `secret` or a reference's target, or one of an
+instance's arguments), or an instance one of that instance's fields holds, at any depth, has a
+field whose type at that instance's arguments holds a reference outside the instances it holds
+(the field is a reference, or a nullable, an array, a `Vec` or a `secret` over one, or a type
+parameter whose argument is). Refused where it does:
+
+- a struct field's, class field's or enum payload's type (`ref_in_struct_field`,
+  `ref_in_class_field`, `ref_in_enum_payload`), checked once every struct's fields are typed;
+- a generic struct literal field's type at the literal's arguments (`ref_in_generic_field`,
+  naming the struct whose field would hold the reference: the literal's own where the field's
+  type is a reference, a nullable one or a `secret` over either, else the instance's the walk
+  reaches, `Box` for `W { p: null }`);
+- at a generic call, the target of each `&mut` a parameter is or holds (through a nullable, an
+  array, a `Vec` or a `secret`), through the instances written there that mention a type
+  parameter, at one answer per type argument (`ref_in_generic_field`); the result was already
+  checked. A parameter that holds no `&mut` (by value or shared) has no target that is written
+  back, and an instance the target names at fixed arguments, or one inside a type argument, is
+  not entered: the body can fill it only with a value the caller made, whose making was
+  checked.
+
+`ref_field_owner` answers it without building an instance: per argument it needs one answer,
+whether the argument holds a reference outside the instances it holds, so a walk enters each
+struct once per tuple of those answers (at most `2^n` times for a struct with `n` type
+parameters) and keeps its own stack, as A3's walk in ADR 0016 does. The declaration pass keeps
+one record for every struct field, enum payload and class field, so there each struct is entered
+at most that often for the whole program; each literal and each call walks afresh, so a
+program's cost grows with how many it has (register D197).
+
+**Still accepted.** A phantom reference argument no field uses, at any depth
+(`Tagged<i64, &i64>` as a field's type, `Tagged<i64, &mut i64>` in a literal, `tag(1, &x)`
+for `fn tag<A, B>(a: A, b: B) -> Tagged<A, B>`). As far as the parameter check goes (a call's
+result is checked as before): a generic call at type arguments none of which holds a reference
+outside the instances it holds (`put(&mut w, 4)`; at `?&i64` it is refused as at `&i64`), also
+where one holds such an instance only inside an instance (`put(&mut n)` for
+`fn put<T>(b: &mut ?Box<T>)` with `n: ?Box<Box<&i64>>`); and one whose parameter holds no `&mut`,
+or whose target names such an instance at fixed arguments (`peek(&n)` for
+`fn peek<T>(b: &?Box<T>)` with `n: ?Box<&i64>`).
+
+**Newly refused besides those routes, fail closed.** An instance written as a phantom argument
+whose own field would hold a reference, in a struct, class or enum declaration or as a generic
+literal's field type (`Tagged<i64, Box<&i64>>` as a field's type: the walk enters every instance
+a type is written with), though a value of that type made elsewhere is accepted, as before
+(`let t: Tagged<i64, Box<&i64>> = Tagged { v: 1 }`); a generic struct whose field's instance is
+written with a reference argument (`p: ?Box<&T>`), at its declaration, whatever `T` is; and a
+non-generic struct, class or enum declaring such a field, even where nothing builds a value of
+it (`struct S { p: ?Box<&i64> }` in a program that never makes an `S`, which compiled before).
+
+**Not changed.** The result check at a generic call (`generic_field_ref_owner`, which builds
+the instances it meets, register D193); ADR 0073 D1's effect-signature rule and the
+nested-reference rule (`&?&T`), which ask of the type at hand; and the borrow layer.
+
+**Mirror.** None. The reference-in-field rules are not ported to `scg` (the 2026-09-19 slice
+was rejection-only, and their codes are not in the self-hosted refusal differential), so `scg`
+accepts the programs refused here, as it accepts the rest of the family. No emitted IR moves.
+
+**Pins.** `ref_in_a_held_instance_field_rejected` (sentinel-types) refuses each route and
+position, through a nullable, an array, a `Vec`, a `secret` and a reference's target, in the
+second of two fields and in an instance's argument, at a call through a nullable argument, a
+`Vec` field and a nullable `&mut` parameter, and the phantom-instance case (also behind a
+reference), and accepts the phantom references and the by-value, shared and fixed-argument
+parameters; `the_reference_walk_does_not_recurse_per_instance` walks a
+chain of 2,000 structs, accepted at `i64` and refused at `&i64`. `tests/ui` holds
+`c21_ref_in_generic_field_held_literal`, `c21_ref_in_generic_field_param`,
+`c21_ref_in_struct_field_instance`, `c21_ref_in_struct_field_instance_arg`,
+`c21_ref_in_class_field_instance` and `c21_ref_in_enum_payload_instance`; `tests/pass` holds
+`c21_ref_phantom_in_held_instance`. Mutations, each against an unmutated baseline that passes: 23 of the 27 mutants of the walk and the five sites are caught by a test that reads them; the other four cannot change a verdict (an unknown `secret` id, which the interner never hands out; a nested array's inner type, since an array of arrays over a reference or over a type parameter is refused where it is written; a fresh record for each field of the declaration pass, which only costs time; and a `secret &mut` parameter, since a `secret` over a type that mentions a type parameter is refused where it is written, so what such a parameter points to mentions none). Sweeps, the compiler at `8f68166` against this one: `snc types` and `snc llvm` over the 590 `.sentinel` files outside `selfhost/`, tracked and new, move only the six new `tests/ui` fixtures; `snc types` and `snc llvm` over the 213 programs `snc merge` takes, and `snc build` over the 92 only it reaches, move none.
+
+**Version.** It refuses programs that compiled before, so at least a MINOR bump (ADR 0076 D2),
+covered by the 0.3.0 still owed.
 
 ## Retrospective at C2.5 close
 
