@@ -1355,6 +1355,9 @@ fn dump_te_call(out: &mut Vec<u8>, cn: [u8], ca: Args, exp: i64, src: &[u8], c: 
 
 fn dump_te_field(out: &mut Vec<u8>, ft: Expr, fdn: [u8], exp: i64, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
             append_str(out, "(field ");
+            // (register D36) whether this read's value goes to a new owner: the node's owning
+            // context, read before anything else is walked, as the block and `if` arms do.
+            let fown: bool = (*c).cg_tailown;
             // (6/N) a field-access receiver is a READ (non-consuming) — `p.x` does not
             // move `p`.
             let svc: bool = (*c).consuming;
@@ -1507,7 +1510,20 @@ fn dump_te_field(out: &mut Vec<u8>, ft: Expr, fdn: [u8], exp: i64, src: &[u8], c
             // non-consuming receiver read (no record). `fty` is the SUBSTITUTED field type
             // (= the oracle's `expr.ty`), so `p.first` where `p: Pair<A,B>` sees the
             // type-param `A` (Move). Mirrors the consuming-walk FieldAccess arm.
-            let fmoved: bool = svc && base_vid >= 0 && is_move_type(c, fty);
+            // (register D36, option A) in an instance's re-walk, a `Shared` / `Mutex` field the
+            // generic body types as a type parameter is Move, as the oracle's drop plan (made on
+            // the written body) has it, so a consuming read moves it here too, and its owner does
+            // not clone it (`cg_mvoutn`, the oracle's `moved_out`). Known only for a base that is
+            // a parameter whose written type is the instance itself (`cg_abs_field_tparam`). Only
+            // where the value goes to an owner (`fown`): where a discarded tail throws it away
+            // (`{ b.v };`) the oracle's move leaves the unit held (register D117), and `scg` keeps
+            // releasing the field with the parameter instead, which balances but emits other IR.
+            let fabs: bool = if fown && svc && base_vid >= 0 && fd_gd >= 0 && cg_on(c) && (*c).cg_mono_on {
+                (cg_is_shared(c, fty) || cg_is_mutex(c, fty)) && cg_abs_field_tparam(c, base_vid, fty0)
+            } else {
+                false
+            };
+            let fmoved: bool = (svc && base_vid >= 0 && is_move_type(c, fty)) || fabs;
             if fmoved {
                 record_field_move(c, base_vid, fidx);
                 0
@@ -1648,6 +1664,7 @@ fn dump_te_field(out: &mut Vec<u8>, ft: Expr, fdn: [u8], exp: i64, src: &[u8], c
             // (ADR 0071 D2 amendment A1) a field path reads out of a place iff its target
             // does (the oracle's `is_place_read`).
             (*c).cg_placen = fd_tpl;
+            (*c).cg_mvoutn = fabs;
             fty
 }
 

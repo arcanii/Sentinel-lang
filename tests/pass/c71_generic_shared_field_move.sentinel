@@ -1,0 +1,143 @@
+// Register D36, option A: a `Shared` / `Mutex` field a generic body types as a type parameter
+// is Move there, so in the body's instance at a `Shared` / `Mutex` a read of a parameter's such
+// field whose value goes to an owner moves the field (its flag set, the parameter's drop of it
+// skipped) and is not cloned, in the oracle, inkwell and the self-hosted code generator alike:
+// read in a tail (`fr`), returned (`fr2`), moved into a literal on one path while the whole
+// parameter moves on the other (`fw`), passed to a call on one path (`f1`), two such fields
+// swapped (`sw`), and read on both paths of an `if` (`twice`), each at a `Shared` and at a
+// `Mutex`. Where the field is not typed as a type parameter, a read into a new owner clones as
+// before: a parameter written at concrete arguments (`h`) and a field a generic struct declares
+// as a `Shared` (`gs`), and, as controls, a non-generic struct (`ng`); a borrow of the field
+// (`bv`) or of the parameter (`rd`) moves nothing. The corpus differential compares this
+// program's IR with the self-hosted back end's.
+// 5 + 5 + 5 + 0 + 6 + 5 + 0 + 5 + 5 + 0 + 5 + 1 = 42.
+
+struct Bx<U> {
+    v: U,
+    n: i64,
+}
+
+struct Pair<A, B> {
+    a: A,
+    b: B,
+}
+
+struct BS {
+    v: Shared<i64>,
+    n: i64,
+}
+
+struct GS<U> {
+    v: Shared<i64>,
+    u: U,
+}
+
+fn take<T>(x: T) -> i64 {
+    0
+}
+
+fn fr<U>(b: Bx<U>) -> U {
+    b.v
+}
+
+fn fr2<U>(b: Bx<U>) -> U {
+    return b.v
+}
+
+fn fw<U>(b: Bx<U>, c: bool) -> Bx<U> {
+    if c { Bx { v: b.v, n: 0 } } else { b }
+}
+
+fn f1<U>(b: Bx<U>, c: bool) -> i64 {
+    if c { take(b.v) } else { 0 }
+}
+
+fn sw<A, B>(p: Pair<A, B>) -> Pair<B, A> {
+    Pair { a: p.b, b: p.a }
+}
+
+fn twice<U>(b: Bx<U>, c: bool) -> U {
+    if c { b.v } else { b.v }
+}
+
+fn h<U>(b: Bx<Shared<i64>>, u: U) -> Shared<i64> {
+    b.v
+}
+
+fn ng(b: BS) -> Shared<i64> {
+    b.v
+}
+
+fn rd<U>(b: Bx<U>) -> i64 {
+    let r = &b;
+    0
+}
+
+fn bv<U>(b: Bx<U>) -> i64 {
+    let r = &b.v;
+    0
+}
+
+fn gs<U>(b: GS<U>) -> Shared<i64> {
+    b.v
+}
+
+fn main() -> i64 {
+    let s1 = shared_new(5);
+    let b1: Bx<Shared<i64>> = Bx { v: s1, n: 1 };
+    let q1 = fr(b1);
+    let s2 = shared_new(5);
+    let b2: Bx<Shared<i64>> = Bx { v: s2, n: 1 };
+    let q2 = fr2(b2);
+    let s3 = shared_new(5);
+    let b3: Bx<Shared<i64>> = Bx { v: s3, n: 1 };
+    let r3 = fw(b3, true);
+    let q3 = r3.v;
+    let s4 = shared_new(5);
+    let b4: Bx<Shared<i64>> = Bx { v: s4, n: 1 };
+    let k4 = f1(b4, true);
+    let s5 = shared_new(5);
+    let s6 = shared_new(6);
+    let p: Pair<Shared<i64>, Shared<i64>> = Pair { a: s5, b: s6 };
+    let p2 = sw(p);
+    let q6 = p2.a;
+    let s7 = shared_new(5);
+    let b7: Bx<Shared<i64>> = Bx { v: s7, n: 1 };
+    let q7 = twice(b7, false);
+    let m = mutex_new(5);
+    let bm: Bx<Mutex<i64>> = Bx { v: m, n: 1 };
+    let qm = fr(bm);
+    let m2 = mutex_new(5);
+    let bm2: Bx<Mutex<i64>> = Bx { v: m2, n: 1 };
+    let qm2 = fr2(bm2);
+    let m3 = mutex_new(5);
+    let bm3: Bx<Mutex<i64>> = Bx { v: m3, n: 1 };
+    let rm3 = fw(bm3, true);
+    let m4 = mutex_new(5);
+    let bm4: Bx<Mutex<i64>> = Bx { v: m4, n: 1 };
+    let km4 = f1(bm4, true);
+    let m5 = mutex_new(5);
+    let m6 = mutex_new(6);
+    let pm: Pair<Mutex<i64>, Mutex<i64>> = Pair { a: m5, b: m6 };
+    let pm2 = sw(pm);
+    let m7 = mutex_new(5);
+    let bm7: Bx<Mutex<i64>> = Bx { v: m7, n: 1 };
+    let qm7 = twice(bm7, false);
+    let s8 = shared_new(5);
+    let b8: Bx<Shared<i64>> = Bx { v: s8, n: 1 };
+    let q8 = h(b8, 1);
+    let s9 = shared_new(5);
+    let b9 = BS { v: s9, n: 1 };
+    let q9 = ng(b9);
+    let s10 = shared_new(6);
+    let b10: Bx<Shared<i64>> = Bx { v: s10, n: 1 };
+    let k10 = rd(b10);
+    let s11 = shared_new(7);
+    let b11: Bx<Shared<i64>> = Bx { v: s11, n: 1 };
+    let k11 = bv(b11);
+    let s12 = shared_new(5);
+    let b12: GS<i64> = GS { v: s12, u: 1 };
+    let q12 = gs(b12);
+    shared_get(q1) + shared_get(q2) + shared_get(q3) + k4 + shared_get(q6) + shared_get(q7) + k10
+        + shared_get(q8) + shared_get(q9) + k11 + shared_get(q12) + 1
+}

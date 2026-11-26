@@ -304,6 +304,15 @@ struct TyCtx {
     // `dump_texpr_node` moves it here; an arm that never sets it leaves `false`.
     cg_place: bool,
     cg_placen: bool,
+    // (register D36, option A) during an instance's re-walk, the parameters' types as the
+    // generic body writes them, their type parameters unresolved (`cg_absv[i]` the VarId,
+    // `cg_abst[i]` the type); and whether the field read just walked moves a `Shared` /
+    // `Mutex` field the written body types as a type parameter, so it is not cloned (the
+    // oracle's `moved_out`; the field arm sets `cg_mvoutn` as its last act and
+    // `dump_texpr_node` reads and clears it).
+    cg_absv: Vec<i64>,
+    cg_abst: Vec<i64>,
+    cg_mvoutn: bool,
     // (ADR 0071 D2 amendments A1, A6) `dump_cargs` walks the arguments of a class init, a
     // method and a qualified call (whose callees drop their parameters, so each argument
     // goes to a new owner), of an enum construct (whose payload owns them, A6), and of a

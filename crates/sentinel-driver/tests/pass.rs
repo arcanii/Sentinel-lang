@@ -2709,6 +2709,15 @@ fn pass_c71_guard_outlives_its_owner() {
     // callee, so a missed unlock there times out. Seven cases, 1 each; 42 = all held.
     assert_eq!(run_exit("c71_guard_outlives_its_owner.sentinel"), 42);
 }
+#[test]
+fn pass_c71_generic_shared_field_move() {
+    // Register D36, option A: a parameter's `Shared` / `Mutex` field a generic body types as a
+    // type parameter is moved, not cloned, by a read into an owner in the body's instance at a
+    // handle, in all three back ends; where the field is not so typed, the read clones as
+    // before. The corpus differential compares the IR with the self-hosted back end's.
+    // 5 + 5 + 5 + 0 + 6 + 5 + 0 + 5 + 5 + 0 + 5 + 1 = 42.
+    assert_eq!(run_exit("c71_generic_shared_field_move.sentinel"), 42);
+}
 
 #[test]
 fn pass_c16_transitive_mono_order() {

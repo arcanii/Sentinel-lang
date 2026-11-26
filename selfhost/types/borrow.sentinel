@@ -226,11 +226,15 @@ fn dump_texpr_node(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut Ty
     (*c).tc_nulln = false;
     (*c).cg_place = (*c).cg_placen;
     (*c).cg_placen = false;
+    let mvout: bool = (*c).cg_mvoutn;
+    (*c).cg_mvoutn = false;
     // A `Shared` / `Mutex` read out of a place into a new owner is cloned right after it
-    // is read (the oracle's `lower_expr` wrapper). The oracle's `moved_out` exception has no
-    // counterpart here on purpose: it fires only in a generic body, where `scg` clones the
-    // moved parameter and releases it at exit instead (register D36).
-    if own && (*c).cg_place {
+    // is read (the oracle's `lower_expr` wrapper), unless the read moves the place (the
+    // oracle's `moved_out`). That exception fires only in a generic body instantiated at a
+    // `Shared` / `Mutex`. Its field half is mirrored for a parameter's field read into an
+    // owner (`cg_mvoutn`, register D36's option A); for a whole binding `scg` still clones the
+    // moved parameter and releases it at exit instead, which balances but emits other IR.
+    if own && (*c).cg_place && !mvout {
         cg_clone_handle(c, t)
     } else {
         0

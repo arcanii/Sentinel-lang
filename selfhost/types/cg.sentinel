@@ -2417,6 +2417,45 @@ fn cg_drop_range(c: &mut TyCtx, floor: i64) -> i64 {
     0
 }
 
+// (register D36, option A) whether the field the struct declares as `fty0` is the struct's
+// own type parameter `T#j` and binding `vid` is a parameter whose type, as the generic body
+// writes it (`cg_abst`, kept during an instance's re-walk), is that struct's instance with a
+// type parameter at `j`: then the written body types the field as a type parameter, which is
+// Move. A base whose written type is a reference, or is not a parameter's, answers false.
+fn cg_abs_field_tparam(c: &mut TyCtx, vid: i64, fty0: i64) -> bool {
+    let n: i64 = len((*c).cg_absv);
+    let mut at: i64 = 0 - 1;
+    let mut i: i64 = 0;
+    while i < n {
+        if (*c).cg_absv[i] == vid {
+            at = (*c).cg_abst[i];
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    if at < tbase() || fty0 < tbase() {
+        false
+    } else if (*c).tk[fty0 - tbase()] != 9 || (*c).tk[at - tbase()] != 10 {
+        false
+    } else {
+        let j: i64 = (*c).ta[fty0 - tbase()];
+        let as0: i64 = gi_argstart(c, at);
+        let ae0: i64 = gi_argend(c, at);
+        if j < 0 || as0 + j >= ae0 {
+            false
+        } else {
+            let a: i64 = (*c).gia[as0 + j];
+            if a < tbase() {
+                false
+            } else {
+                (*c).tk[a - tbase()] == 9
+            }
+        }
+    }
+}
+
 // (ADR 0071 D2 and its amendment A1) rc++ a `Shared` / `Mutex` read out of a place into a
 // new owner: emit `sentinel_shared_clone` / `sentinel_mutex_clone` on the current operand
 // and RE-THREAD the operand (`cg_reg`) to the clone register — the selfhost env is

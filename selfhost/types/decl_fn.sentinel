@@ -32,11 +32,33 @@ fn emit_tparams(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src
         let ne: i64 = (*e)[*cur];
         *cur = *cur + 1;
         *cur = *cur + 1;
+        let ptok: i64 = *cur;
         let pte: TypeE = parse_type(k, s, e, src, cur);
         let pty: i64 = type_of_typeexpr(c, pte, gb);
+        // (register D36, option A) during an instance's re-walk, also the parameter's type as
+        // the generic body writes it: the same type expression, its type parameters left
+        // unresolved. The interner is structural and the body's own walk resolved it so
+        // already, so nothing new is interned.
+        let apty: i64 = if cg_on(c) && (*c).cg_mono_on {
+            let mut acur: i64 = ptok;
+            let apte: TypeE = parse_type(k, s, e, src, &mut acur);
+            (*c).cg_mono_on = false;
+            let at: i64 = type_of_typeexpr(c, apte, gb);
+            (*c).cg_mono_on = true;
+            at
+        } else {
+            0 - 1
+        };
         let vid: i64 = (*c).nextvid;
         (*c).nextvid = (*c).nextvid + 1;
         bind_src(c, src, ns, ne, vid, pty);
+        if apty >= 0 {
+            push(&mut (*c).cg_absv, vid);
+            push(&mut (*c).cg_abst, apty);
+            0
+        } else {
+            0
+        };
         // (ADR 0075 A3) a `mut` parameter is one no replayed arm remainder may capture.
         if pm { push(&mut (*c).cg_unst, vid); 0 } else { 0 };
         // (7/N) MIR: the param is an SSA param of the entry block; bind var_defs.
@@ -146,6 +168,8 @@ fn type_fn(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u
     // capture set (the effecting fn's params, the only in-scope vars its pure tail can
     // reference besides the let-bound var).
     let cg_pv0: i64 = (*c).nextvid;
+    clear_i64(&mut (*c).cg_absv);
+    clear_i64(&mut (*c).cg_abst);
     emit_tparams(out, k, s, e, src, cur, c, gb, true);
     let cg_pvn: i64 = (*c).nextvid;
     append_str(out, ") ");

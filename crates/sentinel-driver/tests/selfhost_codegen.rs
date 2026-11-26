@@ -2707,6 +2707,70 @@ fn sentinel_codegen_refuses_a_secret_over_a_type_parameter() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
+/// Register D36, option A: in a generic body's instance at a `Shared` / `Mutex`, a consuming read
+/// of a field the written body types as a type parameter moves the field where its value goes to
+/// an owner (its flag set, no clone), as the oracle's drop plan has it; the corpus differential
+/// holds that byte for byte (`tests/pass/c71_generic_shared_field_move`). Where a discarded tail
+/// throws the value away (`{ b.v };`, `if c { b.v } else { b.v };`, a `match` whose arms are such
+/// reads), the oracle's move leaves the
+/// unit held (register D117), and the code generator keeps releasing the field with the parameter
+/// instead: no flag, no clone, the release unconditional. The differential cannot hold that half,
+/// since there the two emit other IR, so it is held here.
+#[test]
+fn sentinel_codegen_moves_a_generic_field_only_into_an_owner() {
+    let tmp = std::env::temp_dir()
+        .join(format!("snc_selfhost_codegen_d36_owner_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).expect("create temp dir");
+    let driver = build_sentinel_codegen(&tmp);
+    let work = tmp.join("work");
+    std::fs::create_dir_all(&work).expect("create work dir");
+    let input = work.join("input.sentinel");
+    let define = |ir: &str, name: &str| -> String {
+        let head = format!("@{name}(");
+        let start = ir
+            .lines()
+            .position(|l| l.starts_with("define ") && l.contains(&head))
+            .unwrap_or_else(|| panic!("no define of {name} in:\n{ir}"));
+        ir.lines().skip(start).take_while(|l| *l != "}").collect::<Vec<_>>().join("\n")
+    };
+    let bx = "struct Bx<U> { v: U, n: i64 }\nenum K { A, B }\n";
+    for (handle, mk, sym) in [
+        ("Shared<i64>", "shared_new(5)", "shared_i64"),
+        ("Mutex<i64>", "mutex_new(5)", "mutex_i64"),
+    ] {
+        let kind = if handle.starts_with("Shared") { "shared" } else { "mutex" };
+        let main = format!("let s = {mk}; let b: Bx<{handle}> = Bx {{ v: s, n: 1 }};");
+        for body in [
+            "{ b.v }; 0",
+            "if c { b.v } else { b.v }; 0",
+            "match k { K::A => b.v, K::B => b.v }; 0",
+        ] {
+            let prog = format!(
+                "{bx}fn f<U>(b: Bx<U>, c: bool, k: K) -> i64 {{ {body} }}\nfn main() -> i64 {{ {main} f(b, true, K::A) }}\n"
+            );
+            std::fs::write(&input, &prog).expect("stage program");
+            let out = Command::new(&driver).current_dir(&work).output().expect("run the code generator");
+            assert!(out.status.success(), "the code generator refused {prog:?}");
+            let f = define(&String::from_utf8_lossy(&out.stdout), &format!("f__{sym}"));
+            assert!(
+                !f.contains("%mf") && !f.contains("_clone(") && f.contains(&format!("call void @sentinel_{kind}_release(")),
+                "a discarded tail moved the field in {prog:?}:\n{f}"
+            );
+        }
+        let prog = format!("{bx}fn fr<U>(b: Bx<U>) -> U {{ b.v }}\nfn main() -> i64 {{ {main} let q = fr(b); 0 }}\n");
+        std::fs::write(&input, &prog).expect("stage program");
+        let out = Command::new(&driver).current_dir(&work).output().expect("run the code generator");
+        assert!(out.status.success(), "the code generator refused {prog:?}");
+        let fr = define(&String::from_utf8_lossy(&out.stdout), &format!("fr__{sym}"));
+        assert!(
+            fr.contains("store i1 true, ptr %mf0") && !fr.contains("_clone("),
+            "a read into an owner did not move the field in {prog:?}:\n{fr}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
 /// Register D20, ADR 0041 A17: `scg` does not model `u128`, so the code generator refuses `u128`
 /// as an unknown type, written as a type and as a cast's target, before it generates code;
 /// `snc llvm` refuses both programs here as not yet ported.
