@@ -6,14 +6,23 @@ page. It is **not** an ADR — nothing here is ratified. When a row is chosen th
 becomes an ordinary slice; the section is then marked DECIDED and kept only while the
 remaining rows are still live, and deleted once none are.
 
-**Status:** D36 is open. D47's option A was chosen and has landed; its B and C rows are
-still live.
+**Status:** D36's and D47's option A were each chosen and have landed; their B and C rows
+are still live.
 
 Register entries: [`HANDOVER.md`](HANDOVER.md) menu item 4 (D36, D47).
 
 ---
 
-## D36 — a generic fn that RETURNS its container param over-releases in `scg`
+## D36 — a generic body's container parameter: the oracle and `scg` lower it differently
+
+> **▶ DECIDED 2026-10-05: option A was chosen, and LANDED 2026-11-26** (`abed2ee`), for a
+> read into an owner only. Since ADR 0071 D2's amendment A1 (2026-09-25) and ADR 0077
+> (2026-10-05) every shape measured here balances in all three back ends, so this is a
+> question of parity, not of a use-after-free: the paragraph under this note, the line
+> "D36 is the first direction" and the gate table (where `scg` is net −1) describe the
+> state before them. In the instance of a generic body that `scg` lowers at a `Shared` or a `Mutex`, a read of a parameter's field that the written body types as a type parameter (`b.v` for `b: Bx<U>`, `struct Bx<U> { v: U }`), whose value goes to an owner (a tail, `return`, a literal, a call's argument, a `let`), now moves the field, as the oracle's drop plan (made on the written body) has it: its flag is set, the parameter's drop skips it, and the read is not cloned (the field half of the oracle's `moved_out`). Before, `scg` saw only the instance's `Shared<i64>`, cloned the field and released the parameter: balanced since ADR 0077, but other IR. Where a discarded tail throws the value away (`{ b.v };`, `if c { b.v } else { b.v };`, a `match` whose arms are such reads), the oracle's move leaves one unit held per call (register D117's leak, which inkwell shares), so `scg` keeps its balanced lowering there, and the two emit other IR; `selfhost_codegen`'s `sentinel_codegen_moves_a_generic_field_only_into_an_owner` holds that half, which the corpus differential cannot. The tail, `return`, a literal on one path, a call on one path, two fields swapped and both paths of an `if`, each at a `Shared` and at a `Mutex`, now emit the oracle's IR byte for byte, pinned by `tests/pass/c71_generic_shared_field_move.sentinel` in the corpus differential, whose negative shapes pin the gate's two type tests (arguments written concretely, `h`; a field a generic struct declares as `Shared`, `gs`); a borrowed field (`bv`), a borrowed parameter (`rd`) and a non-generic struct (`ng`) are controls, and the owner condition is held by the `selfhost_codegen` test.
+> **Still open (options B and C):** Still differing, and balanced: every consuming use of a whole type-parameter binding (returned as the tail or by `return`, `let`-bound, moved into a struct literal, or passed to a call on one path or on every path), which `scg` still clones and releases; and a field of a `let`-bound copy of a parameter (`let c = b; c.v`), whose written type `scg` does not recover. (A field of a call's result or of a field, `id(b).v` or `p.a.v`, already emitted the oracle's IR.) And once the oracle drops a discarded
+> value (D117), the owners-only condition can go.
 
 `fn ident<T>(x: T) -> T { x }` at `Shared<i64>`: the oracle omits the scope-exit release
 in the monomorphised body (correct — ownership moves out with the return value), `scg`

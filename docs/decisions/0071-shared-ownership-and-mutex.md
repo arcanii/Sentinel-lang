@@ -882,7 +882,14 @@ the others (D93, as before A1), and `scg` did too when a field of it is read on 
 (`if c { Bx { v: b.v, n: 0 } } else { b }`). Since ADR 0077 (2026-10-05) each releases it on
 the paths that do not move it, so all three balance there too: 8.3–8.4 MB over 2,000,000
 alternating calls of either shape, against 39.2 before. The IR differs, so the corpus carries
-no such program. An assignment still does not release the value it overwrites (register D120, a
+no such program. (Since register D36's option A, 2026-11-26, `scg` moves such a field as the
+oracle's drop plan does where its value goes to an owner — a read of a parameter's
+`Shared` / `Mutex` field the written body types as a type parameter sets its flag and is not
+cloned — so the field shape emits the oracle's IR, and
+`tests/pass/c71_generic_shared_field_move.sentinel` carries it in the corpus. Where a
+discarded tail throws the value away, `scg` still releases it with the parameter, which the
+oracle does not (register D117), and a whole type-parameter binding is still cloned and
+released, as above.) An assignment still does not release the value it overwrites (register D120, a
 leak), so `v = s` now leaves one unit held rather than releasing one too many. (Since ADR 0077's
 D6 amendment A2, 2026-10-28, an assignment into a binding an open scope frame holds releases the
 value it overwrites as that frame's exit would (inkwell's method and init parameter frames still
