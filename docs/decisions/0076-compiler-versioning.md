@@ -289,7 +289,10 @@ exactly the kind of thing a later agent adds helpfully.
 
 1. Root `Cargo.toml` — `version = "0.1.0"`. All 16 member crates inherit it. (The first
    bump, to 0.2.0, came on 2026-10-05 in its own commit after ADR 0077 landed. It covers
-   every oracle-moving change since 0.1.0, the first of them ADR 0075 A1.)
+   every oracle-moving change since 0.1.0, the first of them ADR 0075 A1. The second, to
+   0.3.0, came on 2026-11-26 in its own commit after register D36's option A. It covers every
+   oracle-moving change since 0.2.0, the first of them ADR 0077 A1 (register D139) and the
+   latest ADR 0017 A4.)
 2. `crates/sentinel-driver/src/main.rs` — a `build_id()` behind a `OnceLock`, so the `stat`
    happens once and `--version` and the fingerprint cannot disagree.
 3. `main.rs` arg match — a `--version` / `-V` arm beside the `-h | --help | help` arm;
